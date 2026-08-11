@@ -1,0 +1,29 @@
+{
+  "name": "oh-my-pi-slim",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Preset-driven main-session orchestration for Pi, powered by @tintinweb/pi-subagents.",
+  "type": "module",
+  "license": "MIT",
+  "author": "YanzuoLu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YanzuoLu/oh-my-pi-slim.git"
+  },
+  "homepage": "https://github.com/YanzuoLu/oh-my-pi-slim#readme",
+  "bugs": {
+    "url": "https://github.com/YanzuoLu/oh-my-pi-slim/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "orchestration",
+    "subagents"
+  ],
+  "scripts": {
+    "install:user": "node scripts/install.mjs --install-dependency --install-web-search --install-ask-user",
+    "uninstall:user": "node scripts/uninstall.mjs",
+    "uninstall:all": "node scripts/uninstall.mjs --remove-dependencies",
+    "validate": "node scripts/validate.mjs"
+  }
+}
