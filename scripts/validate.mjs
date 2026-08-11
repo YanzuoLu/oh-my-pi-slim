@@ -83,7 +83,9 @@ check(
 check(orchestrator.includes("<orchestration-preset>"), "orchestrator must use the injected preset contract");
 
 const extensionPath = join(ROOT, "extensions", "oh-my-pi-slim", "index.ts");
+const bootstrapPath = join(ROOT, "extensions", "oh-my-pi-slim", "bootstrap.ts");
 const extension = read(extensionPath);
+const bootstrap = read(bootstrapPath);
 for (const role of AGENTS) check(extension.includes(`\"${role}\"`), `extension allowlist missing ${role}`);
 check(extension.includes('pi.registerFlag("omps-preset"'), "extension must register --omps-preset");
 check(extension.includes("CONFIG_DIR_NAME"), "extension must use Pi's project config directory constant");
@@ -106,6 +108,27 @@ check(
   "recommended install must include rpiv-ask-user-question",
 );
 check(extension.includes("CHILD_AGENT_TAG"), "extension must avoid injecting orchestrator into child sessions");
+check(extension.includes("ensurePackageAssets(PACKAGE_ROOT)"), "package extension must bootstrap undeclarable agent assets");
+check(bootstrap.includes("AGENT_NAMES"), "bootstrap must install the five agent definitions");
+check(bootstrap.includes("removePackageAssets"), "bootstrap must support reversible package cleanup");
+
+const packageJson = JSON.parse(read(join(ROOT, "package.json")));
+check(packageJson.version === "0.2.0", "direct-install package release must be version 0.2.0");
+for (const dependency of [
+  "@tintinweb/pi-subagents",
+  "pi-web-search",
+  "@juicesharp/rpiv-ask-user-question",
+]) {
+  check(packageJson.dependencies?.[dependency], `package dependency missing: ${dependency}`);
+}
+for (const resource of [
+  "./extensions/oh-my-pi-slim/index.ts",
+  "./node_modules/@tintinweb/pi-subagents/src/index.ts",
+  "./node_modules/pi-web-search/src/index.ts",
+  "./node_modules/@juicesharp/rpiv-ask-user-question/index.ts",
+]) {
+  check(packageJson.pi?.extensions?.includes(resource), `Pi package extension missing: ${resource}`);
+}
 
 const subagentsConfig = JSON.parse(read(join(ROOT, "config", "subagents.json")));
 check(subagentsConfig.disableDefaultAgents === true, "config must disable default agents");
@@ -116,7 +139,11 @@ check(subagentsConfig.maxSubagentDepth === 1, "config must disable nested delega
 const loadExtension = spawnSync(
   "pi",
   ["-p", "--no-extensions", "--extension", extensionPath, "--no-session"],
-  { cwd: ROOT, env: { ...process.env, PI_OFFLINE: "1" }, encoding: "utf8" },
+  {
+    cwd: ROOT,
+    env: { ...process.env, PI_OFFLINE: "1", OMPS_SKIP_BOOTSTRAP: "1" },
+    encoding: "utf8",
+  },
 );
 check(
   loadExtension.status === 0,

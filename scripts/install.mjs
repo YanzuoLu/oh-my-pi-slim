@@ -87,6 +87,10 @@ const sourceFiles = [
     target: join(extensionDir, "index.ts"),
   },
   {
+    source: join(ROOT, "extensions", "oh-my-pi-slim", "bootstrap.ts"),
+    target: join(extensionDir, "bootstrap.ts"),
+  },
+  {
     source: join(ROOT, "extensions", "oh-my-pi-slim", "orchestrator.md"),
     target: join(extensionDir, "orchestrator.md"),
   },

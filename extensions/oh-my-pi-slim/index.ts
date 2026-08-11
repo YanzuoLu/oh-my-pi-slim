@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CONFIG_DIR_NAME,
@@ -9,8 +9,10 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { ensurePackageAssets, removePackageAssets } from "./bootstrap.js";
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
+const PACKAGE_ROOT = resolve(EXTENSION_DIR, "../..");
 const ORCHESTRATOR_PROMPT = readFileSync(join(EXTENSION_DIR, "orchestrator.md"), "utf8").trim();
 const CONFIG_FILE = "oh-my-pi-slim.json";
 
@@ -222,6 +224,8 @@ A resumed Agent session retains its existing model and thinking. For Agent calls
 }
 
 export default function ohMyPiSlim(pi: ExtensionAPI): void {
+  ensurePackageAssets(PACKAGE_ROOT);
+
   let active = false;
   let childSession = false;
   let nudgeSentThisUserTurn = false;
@@ -396,10 +400,23 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("omps", {
-    description: "Manage orchestration: /omps [on [preset]|off|status|presets|preset <name>]",
+    description: "Manage orchestration: /omps [on [preset]|off|status|presets|preset <name>|uninstall]",
     handler: async (args, ctx) => {
       const parts = args.trim().split(/\s+/).filter(Boolean);
       const action = (parts[0] ?? "on").toLowerCase();
+
+      if (action === "uninstall") {
+        if (active) await deactivate(ctx);
+        const cleanup = removePackageAssets();
+        const summary = [
+          `${cleanup.removed.length} package-created file(s) removed.`,
+          `${cleanup.preserved.length} pre-existing file(s) preserved.`,
+          ...cleanup.warnings,
+          "Exit Pi, then run: pi remove git:github.com/YanzuoLu/oh-my-pi-slim",
+        ].join("\n");
+        report(ctx, summary, cleanup.warnings.length > 0 ? "warning" : "info");
+        return;
+      }
 
       if (action === "status") {
         report(
@@ -438,7 +455,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
         return;
       }
       if (action !== "on" && action !== "preset") {
-        report(ctx, "Usage: /omps [on [preset]|off|status|presets|preset <name>]", "warning");
+        report(ctx, "Usage: /omps [on [preset]|off|status|presets|preset <name>|uninstall]", "warning");
         return;
       }
 

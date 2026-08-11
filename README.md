@@ -31,137 +31,50 @@ Background completions use pi-subagents' automatic follow-up notifications. The 
 ## Requirements
 
 - Pi `>= 0.80.0`; this repository was validated with Pi `0.84.1`
-- Node.js available to run the installation scripts
+- Node.js `>= 22`, required by the bundled questionnaire extension
 - Authentication configured for every provider/model used by the selected preset
-- A clean specialist namespace:
-  - project `.pi/agents/`
-  - project `.agents/agents/`
-  - global `$PI_CODING_AGENT_DIR/agents/`, normally `~/.pi/agent/agents/`
+- No conflicting files named `explorer.md`, `librarian.md`, `oracle.md`, `designer.md`, or `fixer.md` in the global Pi agent directory
 
-The installer refuses unrelated global Markdown agent definitions by default. The orchestration extension also blocks every `Agent` type except the five names above.
+The orchestration extension blocks every `Agent` type except the five names above.
 
 ## Installation
 
-### Recommended installation
-
-Clone and install:
+Install directly from GitHub—no manual clone or dependency setup:
 
 ```bash
-git clone https://github.com/YanzuoLu/oh-my-pi-slim.git
-cd oh-my-pi-slim
-npm run validate
-npm run install:user
+pi install git:github.com/YanzuoLu/oh-my-pi-slim
 ```
 
-`npm run install:user` does all of the following:
-
-1. Installs `npm:@tintinweb/pi-subagents` through Pi.
-2. Installs the optional `npm:pi-web-search` package used by Librarian.
-3. Installs `npm:@juicesharp/rpiv-ask-user-question` for main-session clarification questions.
-4. Copies exactly five definitions from this repository's `agents/` directory to:
-
-   ```text
-   $PI_CODING_AGENT_DIR/agents/
-   ```
-
-   or, when `PI_CODING_AGENT_DIR` is unset:
-
-   ```text
-   ~/.pi/agent/agents/
-   ```
-
-5. Installs the main-session extension at:
-
-   ```text
-   ~/.pi/agent/extensions/oh-my-pi-slim/
-   ```
-
-6. Installs a global preset configuration at `~/.pi/agent/oh-my-pi-slim.json` if that file does not already exist.
-7. Safely merges these values into `~/.pi/agent/subagents.json`:
-
-   ```json
-   {
-     "disableDefaultAgents": true,
-     "fallbackSubagent": "none",
-     "maxSubagentDepth": 1,
-     "defaultJoinMode": "smart"
-   }
-   ```
-
-8. Writes `~/.pi/agent/.oh-my-pi-slim-install.json`, recording installed hashes, backups, and prior settings for reversible uninstallation.
-
-Existing files with the five managed agent names or extension paths are backed up before replacement. An existing global `oh-my-pi-slim.json` is treated as user configuration and is preserved rather than overwritten.
-
-### Manual installation
-
-Set the Pi agent directory and install dependencies:
+To pin the current release instead of tracking `main`:
 
 ```bash
-export PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-pi install npm:@tintinweb/pi-subagents
-pi install npm:pi-web-search
-pi install npm:@juicesharp/rpiv-ask-user-question
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.2.0
 ```
 
-Copy the five agent definitions explicitly:
+On the next Pi startup, the package automatically:
+
+1. Loads the main orchestration extension.
+2. Loads its bundled `pi-subagents`, `pi-web-search`, and `rpiv-ask-user-question` extensions.
+3. Materializes exactly five pi-subagents definitions in `$PI_CODING_AGENT_DIR/agents/` (normally `~/.pi/agent/agents/`).
+4. Installs a default global preset only when one does not already exist.
+5. Merges the strict pi-subagents settings without replacing unrelated settings.
+6. Records package-created assets in `$PI_CODING_AGENT_DIR/.oh-my-pi-slim-package-assets.json` for reversible cleanup.
+
+Then launch with the default preset:
 
 ```bash
-mkdir -p "$PI_AGENT_DIR/agents"
-cp agents/explorer.md "$PI_AGENT_DIR/agents/explorer.md"
-cp agents/librarian.md "$PI_AGENT_DIR/agents/librarian.md"
-cp agents/oracle.md "$PI_AGENT_DIR/agents/oracle.md"
-cp agents/designer.md "$PI_AGENT_DIR/agents/designer.md"
-cp agents/fixer.md "$PI_AGENT_DIR/agents/fixer.md"
+pi --omps
 ```
 
-Install the orchestration extension:
+Or select one explicitly:
 
 ```bash
-mkdir -p "$PI_AGENT_DIR/extensions/oh-my-pi-slim"
-cp extensions/oh-my-pi-slim/index.ts \
-  "$PI_AGENT_DIR/extensions/oh-my-pi-slim/index.ts"
-cp extensions/oh-my-pi-slim/orchestrator.md \
-  "$PI_AGENT_DIR/extensions/oh-my-pi-slim/orchestrator.md"
+pi --omps-preset openai
 ```
 
-Install the default global presets if you do not already have a global preset file:
+If one of the five agent filenames already exists with different contents, startup fails closed rather than overwriting it. Move the conflicting file aside and restart Pi.
 
-```bash
-if [ ! -e "$PI_AGENT_DIR/oh-my-pi-slim.json" ]; then
-  cp .pi/oh-my-pi-slim.json "$PI_AGENT_DIR/oh-my-pi-slim.json"
-fi
-```
-
-Before changing `subagents.json`, record whether it exists and back it up:
-
-```bash
-if [ -e "$PI_AGENT_DIR/subagents.json" ]; then
-  cp -p "$PI_AGENT_DIR/subagents.json" \
-    "$PI_AGENT_DIR/subagents.json.oh-my-pi-slim.manual-backup"
-else
-  : > "$PI_AGENT_DIR/.oh-my-pi-slim-subagents-was-absent"
-fi
-```
-
-If `subagents.json` does not exist, copy the strict configuration:
-
-```bash
-cp config/subagents.json "$PI_AGENT_DIR/subagents.json"
-```
-
-If it already exists, merge the four fields instead of replacing unrelated settings:
-
-```bash
-node - "$PI_AGENT_DIR/subagents.json" config/subagents.json <<'NODE'
-const fs = require("node:fs");
-const [target, source] = process.argv.slice(2);
-const current = fs.existsSync(target) ? JSON.parse(fs.readFileSync(target, "utf8")) : {};
-const required = JSON.parse(fs.readFileSync(source, "utf8"));
-fs.writeFileSync(target, JSON.stringify({ ...current, ...required }, null, 2) + "\n");
-NODE
-```
-
-The recommended installer is safer because it records backups and prior values for uninstallation.
+The repository still contains `scripts/install.mjs` for source-checkout development and migration from the earlier standalone layout, but normal users do not need it.
 
 ## Presets: configure all six roles independently
 
@@ -367,115 +280,47 @@ It provides:
 
 The selected Librarian preset model must support the extension's provider-native search API. If web search is unavailable, Librarian must state the limitation instead of pretending that broad external research was performed.
 
-If you do not want web research, omit the package installation:
-
-```bash
-pi install npm:@tintinweb/pi-subagents
-pi install npm:@juicesharp/rpiv-ask-user-question
-node scripts/install.mjs
-```
-
-Librarian will still be able to inspect already-present documentation and external repository checkouts, but it will have no network retrieval tool and its external-research capability will be degraded.
+If you do not want web research, use `pi config` to disable this package's `pi-web-search` extension resource. Librarian can still inspect already-present documentation and external repository checkouts, but its network research capability will be degraded.
 
 ## Updating
 
-Because installation records exact managed files, update by uninstalling managed files, updating the clone, and reinstalling:
+For an unpinned GitHub install:
 
 ```bash
-cd /path/to/oh-my-pi-slim
-npm run uninstall:user
-git pull --ff-only
-npm run validate
-npm run install:user
+pi update git:github.com/YanzuoLu/oh-my-pi-slim
 ```
 
-The normal uninstall leaves shared Pi packages installed, so updating does not repeatedly remove and reinstall them.
+Or update all installed Pi packages:
 
-Keep long-lived custom presets in a project `.pi/oh-my-pi-slim.json` or in an existing global preset file. The installer preserves an existing global preset file.
+```bash
+pi update --extensions
+```
+
+Pinned refs do not move automatically. Install the new release ref explicitly:
+
+```bash
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.2.0
+```
+
+On the next startup, the package bootstrap updates unchanged managed agent files and preserves user-edited preset configuration.
 
 ## Uninstallation
 
-### Remove managed files but keep shared Pi packages
+First remove the package-created agent files and restore the prior `subagents.json` values:
 
 ```bash
-cd /path/to/oh-my-pi-slim
-npm run uninstall:user
+pi -p '/omps uninstall'
 ```
 
-This uses the installation manifest to:
-
-- remove files whose contents still match the installed versions
-- restore files that existed before installation
-- restore only the `subagents.json` fields changed by the installer
-- preserve unrelated settings
-- leave user-modified installed files in place and report them
-- retain backups when a conflict requires manual review
-
-It intentionally leaves `@tintinweb/pi-subagents`, `pi-web-search`, and `@juicesharp/rpiv-ask-user-question` installed because other Pi workflows may share them.
-
-### Remove managed files and all three Pi packages
-
-Only use this when none of the packages is needed elsewhere:
+Then remove the Pi package itself:
 
 ```bash
-npm run uninstall:all
+pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 ```
 
-Equivalent commands:
+The cleanup command removes only files whose hashes still match the package-installed versions. It preserves pre-existing files, keeps user-modified files, and reports conflicts instead of deleting them.
 
-```bash
-node scripts/uninstall.mjs --remove-dependencies
-```
-
-Individual package-removal flags are also available:
-
-```bash
-node scripts/uninstall.mjs --remove-dependency
-node scripts/uninstall.mjs --remove-web-search
-node scripts/uninstall.mjs --remove-ask-user
-```
-
-### Uninstall a manual installation
-
-If you used the manual installation steps, no installation manifest exists. Remove only the five named definitions and this extension:
-
-```bash
-export PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-rm -f "$PI_AGENT_DIR/agents/explorer.md"
-rm -f "$PI_AGENT_DIR/agents/librarian.md"
-rm -f "$PI_AGENT_DIR/agents/oracle.md"
-rm -f "$PI_AGENT_DIR/agents/designer.md"
-rm -f "$PI_AGENT_DIR/agents/fixer.md"
-rm -rf "$PI_AGENT_DIR/extensions/oh-my-pi-slim"
-```
-
-Restore the settings backup created by the manual installation instructions:
-
-```bash
-if [ -e "$PI_AGENT_DIR/subagents.json.oh-my-pi-slim.manual-backup" ]; then
-  mv "$PI_AGENT_DIR/subagents.json.oh-my-pi-slim.manual-backup" \
-    "$PI_AGENT_DIR/subagents.json"
-elif [ -e "$PI_AGENT_DIR/.oh-my-pi-slim-subagents-was-absent" ]; then
-  rm -f "$PI_AGENT_DIR/subagents.json"
-fi
-rm -f "$PI_AGENT_DIR/.oh-my-pi-slim-subagents-was-absent"
-```
-
-The global `oh-my-pi-slim.json` is user-editable configuration. Leave it in place by default; remove it only if you created it solely for this project and no longer need its presets:
-
-```bash
-rm -f "$PI_AGENT_DIR/oh-my-pi-slim.json"
-```
-
-Optionally remove packages when they are not shared:
-
-```bash
-pi remove npm:@tintinweb/pi-subagents
-pi remove npm:pi-web-search
-pi remove npm:@juicesharp/rpiv-ask-user-question
-```
-
-Do not delete the whole `~/.pi/agent/agents`, `extensions`, or settings directories: they may contain unrelated user resources.
+If the package was installed from a source checkout with the legacy script, use that checkout's `npm run uninstall:user` command instead.
 
 ## Validation
 
@@ -498,7 +343,9 @@ Validation checks:
 - preset model/thinking enforcement exists
 - strict pi-subagents settings are present
 - Pi can load the TypeScript extension
-- installation and uninstallation restore prior files and settings in an isolated temporary Pi directory
+- the Pi package manifest includes all bundled extension dependencies
+- package bootstrap and reversible asset cleanup are present
+- legacy installation and uninstallation restore prior files and settings in an isolated temporary Pi directory
 
 ## Repository layout
 
@@ -507,7 +354,9 @@ Validation checks:
 agents/                                Five pi-subagents Markdown definitions
 config/subagents.json                  Strict pi-subagents settings
 extensions/oh-my-pi-slim/index.ts      Main-session extension and policy gates
+extensions/oh-my-pi-slim/bootstrap.ts  Direct-package asset bootstrap and cleanup
 extensions/oh-my-pi-slim/orchestrator.md
+package-lock.json                      Reproducible bundled extension dependencies
 scripts/install.mjs
 scripts/uninstall.mjs
 scripts/validate.mjs
