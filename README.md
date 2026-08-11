@@ -31,15 +31,30 @@ Background completions use pi-subagents' automatic follow-up notifications. The 
 ## Requirements
 
 - Pi `>= 0.80.0`; this repository was validated with Pi `0.84.1`
-- Node.js `>= 22`, required by the bundled questionnaire extension
+- [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents), installed separately by the user
+- [`@juicesharp/rpiv-ask-user-question`](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question) for main-session clarification questions, installed separately by the user
+- Node.js `>= 22` when using the questionnaire package
 - Authentication configured for every provider/model used by the selected preset
 - No conflicting files named `explorer.md`, `librarian.md`, `oracle.md`, `designer.md`, or `fixer.md` in the global Pi agent directory
 
-The orchestration extension blocks every `Agent` type except the five names above.
+`pi-web-search` is optional and remains a separate user choice. The orchestration extension blocks every `Agent` type except the five names above.
 
 ## Installation
 
-Install directly from GitHub—no manual clone or dependency setup:
+Install the required third-party packages explicitly:
+
+```bash
+pi install npm:@tintinweb/pi-subagents
+pi install npm:@juicesharp/rpiv-ask-user-question
+```
+
+Optionally install web research support:
+
+```bash
+pi install npm:pi-web-search
+```
+
+Then install `oh-my-pi-slim` itself:
 
 ```bash
 pi install git:github.com/YanzuoLu/oh-my-pi-slim
@@ -48,17 +63,18 @@ pi install git:github.com/YanzuoLu/oh-my-pi-slim
 To pin the current release instead of tracking `main`:
 
 ```bash
-pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.2.0
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.3.0
 ```
 
-On the next Pi startup, the package automatically:
+`oh-my-pi-slim` does **not** declare, install, bundle, enable, update, or remove third-party Pi packages. Every dependency remains independently visible and user-managed through `pi list`, `pi install`, `pi update`, and `pi remove`.
 
-1. Loads the main orchestration extension.
-2. Loads its bundled `pi-subagents`, `pi-web-search`, and `rpiv-ask-user-question` extensions.
-3. Materializes exactly five pi-subagents definitions in `$PI_CODING_AGENT_DIR/agents/` (normally `~/.pi/agent/agents/`).
-4. Installs a default global preset only when one does not already exist.
-5. Merges the strict pi-subagents settings without replacing unrelated settings.
-6. Records package-created assets in `$PI_CODING_AGENT_DIR/.oh-my-pi-slim-package-assets.json` for reversible cleanup.
+On the next Pi startup, this package only:
+
+1. Loads the `oh-my-pi-slim` main-session orchestration extension.
+2. Materializes exactly five pi-subagents definitions in `$PI_CODING_AGENT_DIR/agents/` (normally `~/.pi/agent/agents/`).
+3. Installs a default global preset only when one does not already exist.
+4. Merges the strict pi-subagents settings without replacing unrelated settings.
+5. Records package-created assets in `$PI_CODING_AGENT_DIR/.oh-my-pi-slim-package-assets.json` for reversible cleanup.
 
 Then launch with the default preset:
 
@@ -74,7 +90,7 @@ pi --omps-preset openai
 
 If one of the five agent filenames already exists with different contents, startup fails closed rather than overwriting it. Move the conflicting file aside and restart Pi.
 
-The repository still contains `scripts/install.mjs` for source-checkout development and migration from the earlier standalone layout, but normal users do not need it.
+The repository still contains `scripts/install.mjs` for source-checkout development and migration from the earlier standalone layout, but it no longer installs third-party packages unless the user supplies explicit dependency flags.
 
 ## Presets: configure all six roles independently
 
@@ -280,7 +296,7 @@ It provides:
 
 The selected Librarian preset model must support the extension's provider-native search API. If web search is unavailable, Librarian must state the limitation instead of pretending that broad external research was performed.
 
-If you do not want web research, use `pi config` to disable this package's `pi-web-search` extension resource. Librarian can still inspect already-present documentation and external repository checkouts, but its network research capability will be degraded.
+If you do not want web research, do not install `pi-web-search`, or disable/remove that standalone package yourself. Librarian can still inspect already-present documentation and external repository checkouts, but its network research capability will be degraded.
 
 ## Updating
 
@@ -299,7 +315,7 @@ pi update --extensions
 Pinned refs do not move automatically. Install the new release ref explicitly:
 
 ```bash
-pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.2.0
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.3.0
 ```
 
 On the next startup, the package bootstrap updates unchanged managed agent files and preserves user-edited preset configuration.
@@ -319,6 +335,14 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 ```
 
 The cleanup command removes only files whose hashes still match the package-installed versions. It preserves pre-existing files, keeps user-modified files, and reports conflicts instead of deleting them.
+
+Third-party packages are deliberately unaffected. Remove any of them separately only when you choose to:
+
+```bash
+pi remove npm:@tintinweb/pi-subagents
+pi remove npm:@juicesharp/rpiv-ask-user-question
+pi remove npm:pi-web-search
+```
 
 If the package was installed from a source checkout with the legacy script, use that checkout's `npm run uninstall:user` command instead.
 
@@ -343,7 +367,7 @@ Validation checks:
 - preset model/thinking enforcement exists
 - strict pi-subagents settings are present
 - Pi can load the TypeScript extension
-- the Pi package manifest includes all bundled extension dependencies
+- the Pi package has no third-party runtime dependencies and loads only its own extension
 - package bootstrap and reversible asset cleanup are present
 - legacy installation and uninstallation restore prior files and settings in an isolated temporary Pi directory
 
@@ -356,7 +380,7 @@ config/subagents.json                  Strict pi-subagents settings
 extensions/oh-my-pi-slim/index.ts      Main-session extension and policy gates
 extensions/oh-my-pi-slim/bootstrap.ts  Direct-package asset bootstrap and cleanup
 extensions/oh-my-pi-slim/orchestrator.md
-package-lock.json                      Reproducible bundled extension dependencies
+package-lock.json                      Dependency-free package lock
 scripts/install.mjs
 scripts/uninstall.mjs
 scripts/validate.mjs

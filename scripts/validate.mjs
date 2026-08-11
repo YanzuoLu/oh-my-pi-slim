@@ -104,8 +104,12 @@ check(!extension.includes("ctx.ui.select"), "extension must use the installed qu
 check(!extension.includes("ctx.ui.input"), "extension must use the installed question package");
 check(extension.includes("subagents:rpc:stop"), "stop_subagent must use pi-subagents RPC");
 check(
-  read(join(ROOT, "package.json")).includes("--install-ask-user"),
-  "recommended install must include rpiv-ask-user-question",
+  read(join(ROOT, "README.md")).includes("pi install npm:@juicesharp/rpiv-ask-user-question"),
+  "README must tell users to install rpiv-ask-user-question explicitly",
+);
+check(
+  !read(join(ROOT, "package.json")).includes("--install-ask-user"),
+  "package scripts must not install rpiv-ask-user-question automatically",
 );
 check(extension.includes("CHILD_AGENT_TAG"), "extension must avoid injecting orchestrator into child sessions");
 check(extension.includes("ensurePackageAssets(PACKAGE_ROOT)"), "package extension must bootstrap undeclarable agent assets");
@@ -113,22 +117,16 @@ check(bootstrap.includes("AGENT_NAMES"), "bootstrap must install the five agent 
 check(bootstrap.includes("removePackageAssets"), "bootstrap must support reversible package cleanup");
 
 const packageJson = JSON.parse(read(join(ROOT, "package.json")));
-check(packageJson.version === "0.2.0", "direct-install package release must be version 0.2.0");
-for (const dependency of [
-  "@tintinweb/pi-subagents",
-  "pi-web-search",
-  "@juicesharp/rpiv-ask-user-question",
-]) {
-  check(packageJson.dependencies?.[dependency], `package dependency missing: ${dependency}`);
-}
-for (const resource of [
-  "./extensions/oh-my-pi-slim/index.ts",
-  "./node_modules/@tintinweb/pi-subagents/src/index.ts",
-  "./node_modules/pi-web-search/src/index.ts",
-  "./node_modules/@juicesharp/rpiv-ask-user-question/index.ts",
-]) {
-  check(packageJson.pi?.extensions?.includes(resource), `Pi package extension missing: ${resource}`);
-}
+check(packageJson.version === "0.3.0", "independent-package release must be version 0.3.0");
+check(
+  !packageJson.dependencies || Object.keys(packageJson.dependencies).length === 0,
+  "oh-my-pi-slim must not install third-party Pi packages as dependencies",
+);
+check(
+  JSON.stringify(packageJson.pi?.extensions) ===
+    JSON.stringify(["./extensions/oh-my-pi-slim/index.ts"]),
+  "Pi package must load only the oh-my-pi-slim extension",
+);
 
 const subagentsConfig = JSON.parse(read(join(ROOT, "config", "subagents.json")));
 check(subagentsConfig.disableDefaultAgents === true, "config must disable default agents");

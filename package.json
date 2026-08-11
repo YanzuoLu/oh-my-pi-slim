@@ -1,6 +1,6 @@
 {
   "name": "oh-my-pi-slim",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Preset-driven main-session orchestration for Pi, powered by @tintinweb/pi-subagents.",
   "type": "module",
@@ -20,11 +20,6 @@
     "orchestration",
     "subagents"
   ],
-  "dependencies": {
-    "@juicesharp/rpiv-ask-user-question": "2.4.0",
-    "@tintinweb/pi-subagents": "0.15.0",
-    "pi-web-search": "1.3.1"
-  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
@@ -33,16 +28,12 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/oh-my-pi-slim/index.ts",
-      "./node_modules/@tintinweb/pi-subagents/src/index.ts",
-      "./node_modules/pi-web-search/src/index.ts",
-      "./node_modules/@juicesharp/rpiv-ask-user-question/index.ts"
+      "./extensions/oh-my-pi-slim/index.ts"
     ]
   },
   "scripts": {
-    "install:user": "node scripts/install.mjs --install-dependency --install-web-search --install-ask-user",
+    "install:user": "node scripts/install.mjs",
     "uninstall:user": "node scripts/uninstall.mjs",
-    "uninstall:all": "node scripts/uninstall.mjs --remove-dependencies",
     "validate": "node scripts/validate.mjs"
   }
 }
