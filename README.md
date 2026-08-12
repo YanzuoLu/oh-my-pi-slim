@@ -52,10 +52,17 @@ pi install npm:@tintinweb/pi-subagents
 pi install npm:@juicesharp/rpiv-ask-user-question
 ```
 
-Optionally install web research support:
+Optionally install additional workflow support:
 
 ```bash
+# Web research
 pi install npm:pi-web-search
+
+# Long-running process management
+pi install npm:@aliou/pi-processes
+
+# Main-session task tracking
+pi install npm:@juicesharp/rpiv-todo
 ```
 
 Then install `oh-my-pi-slim` itself:
