@@ -10,6 +10,13 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { ensurePackageAssets, removePackageAssets } from "./bootstrap.js";
+import {
+  cancelledResumeOutcome,
+  resumeCompletedRecord,
+  type ResumeOutcome,
+  type SubagentRegistry,
+} from "./auto-resume.js";
+import { AgentOperationClaims } from "./operation-claims.js";
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(EXTENSION_DIR, "../..");
@@ -41,6 +48,8 @@ const TRUE_VALUES = /^(1|true|yes|on)$/i;
 const SAFE_PRESET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_MODEL_PART = /^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$/;
 const STOP_TOOL = "stop_subagent";
+const STEER_TOOL = "steer_subagent";
+const SUBAGENT_MANAGER_KEY = Symbol.for("pi-subagents:manager");
 
 const PHASE_REMINDER = `<orchestration-reminder>
 Scheduler workflow: understand the request; map lanes and dependencies; dispatch independent specialists in the background; track agent IDs and write ownership; do not poll running agents; reconcile automatic completion notifications; inspect the real changes; verify the result.
@@ -66,6 +75,30 @@ interface PresetConfig {
 type RpcReply<T = void> =
   | { success: true; data?: T }
   | { success: false; error: string };
+
+function combinedResumeResult(outcome: ResumeOutcome): string {
+  const previous = outcome.previousResult.trim() || "(no previous output)";
+  const resumed = outcome.newResult.trim() || "(no new output)";
+  const action = outcome.failure
+    ? "oh-my-pi-slim could not automatically resume the same session."
+    : "oh-my-pi-slim automatically resumed the same session with the steering message.";
+  const failure = outcome.failure ? `\n\nAutomatic resume failed: ${outcome.failure}` : "";
+  return `Agent ${outcome.agentId} had already ${outcome.previousStatus}. ${action}\n\n` +
+    `Previous result:\n${previous}\n\nResumed result:\n${resumed}${failure}`;
+}
+
+function toolResultText(content: Array<{ type?: string; text?: string }>): string {
+  return content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text ?? "")
+    .join("\n");
+}
+
+function isCompletedSteerRejection(text: string, agentId: string): boolean {
+  return text.includes(`Agent "${agentId}" is not running`) &&
+    /\(status: (completed|steered)\)/.test(text) &&
+    text.includes("Cannot steer a non-running agent.");
+}
 
 function envEnabled(): boolean {
   return TRUE_VALUES.test(String(process.env.OMPS_ENABLE ?? "").trim());
@@ -234,6 +267,8 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   let activePreset: Preset | undefined;
   let originalModel: ExtensionContext["model"];
   let originalThinking: ThinkingLevel | undefined;
+  const resumeLocks = new Map<string, Promise<void>>();
+  const operationClaims = new AgentOperationClaims();
 
   pi.registerFlag("omps", {
     description: "Run the main Pi session as the oh-my-pi-slim orchestrator",
@@ -259,6 +294,28 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       "oh-my-pi-slim",
       text ? ctx.ui.theme.fg("accent", text) : undefined,
     );
+  }
+
+  function subagentRegistry(): SubagentRegistry | undefined {
+    const value = (globalThis as Record<PropertyKey, unknown>)[SUBAGENT_MANAGER_KEY];
+    if (!value || typeof value !== "object") return undefined;
+    const registry = value as Partial<SubagentRegistry>;
+    return typeof registry.getRecord === "function" ? registry as SubagentRegistry : undefined;
+  }
+
+  async function withResumeLock<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = resumeLocks.get(agentId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.catch(() => {}).then(() => current);
+    resumeLocks.set(agentId, queued);
+    await previous.catch(() => {});
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (resumeLocks.get(agentId) === queued) resumeLocks.delete(agentId);
+    }
   }
 
   function requestStop(agentId: string): Promise<void> {
@@ -520,8 +577,29 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("tool_call", (event) => {
-    if (!active || childSession || event.toolName !== "Agent") return;
+    if (!active || childSession) return;
 
+    if (event.toolName === STEER_TOOL) {
+      const input = event.input as { agent_id?: unknown };
+      if (typeof input.agent_id !== "string" || !input.agent_id.trim()) return;
+      const agentId = input.agent_id.trim();
+      let status: unknown;
+      try {
+        status = (subagentRegistry()?.getRecord(agentId) as { status?: unknown } | undefined)?.status;
+      } catch {
+        status = undefined;
+      }
+      const claim = operationClaims.claimSteer(agentId, event.toolCallId, status);
+      if (!claim.allowed) {
+        return {
+          block: true,
+          reason: `oh-my-pi-slim: agent ${agentId} already has an in-flight ${claim.conflict?.kind} operation. The first operation wins; wait for its tool result.`,
+        };
+      }
+      return;
+    }
+
+    if (event.toolName !== "Agent") return;
     const input = event.input as {
       subagent_type?: unknown;
       model?: unknown;
@@ -539,7 +617,17 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
 
     // pi-subagents resumes the existing in-memory session and ignores model and
     // thinking overrides. Every original spawn was preset-gated, so resume is safe.
-    if (typeof input.resume === "string" && input.resume.trim()) return;
+    if (typeof input.resume === "string" && input.resume.trim()) {
+      const resumeId = input.resume.trim();
+      const claim = operationClaims.claimExplicitResume(resumeId, event.toolCallId);
+      if (!claim.allowed) {
+        return {
+          block: true,
+          reason: `oh-my-pi-slim: agent ${resumeId} already has an in-flight ${claim.conflict?.kind} operation. The first operation wins; wait for its tool result.`,
+        };
+      }
+      return;
+    }
 
     if (!activePreset || !activePresetName) {
       return { block: true, reason: "oh-my-pi-slim: no active preset is available." };
@@ -566,7 +654,60 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     }
   });
 
+  pi.on("tool_result", async (event, ctx) => {
+    if (!active || childSession || event.toolName !== STEER_TOOL || event.isError) return;
+    const input = event.input as { agent_id?: unknown; message?: unknown };
+    if (typeof input.agent_id !== "string" || typeof input.message !== "string") return;
+    if (!isCompletedSteerRejection(toolResultText(event.content), input.agent_id)) return;
+
+    const rejectedStatus = toolResultText(event.content).includes("(status: steered)")
+      ? "steered"
+      : "completed";
+    const registry = subagentRegistry();
+    let outcome: ResumeOutcome;
+    try {
+      outcome = await withResumeLock(input.agent_id, async () => {
+        if (ctx.signal?.aborted) {
+          return cancelledResumeOutcome(registry, input.agent_id as string, rejectedStatus);
+        }
+        return resumeCompletedRecord(
+          registry,
+          input.agent_id as string,
+          input.message as string,
+          rejectedStatus,
+          {
+            emit: (name, data) => pi.events.emit(name, data),
+            append: (data) => pi.appendEntry("subagents:record", data),
+          },
+          ctx.signal,
+        );
+      });
+    } catch (error) {
+      outcome = {
+        ...cancelledResumeOutcome(registry, input.agent_id, rejectedStatus),
+        status: ctx.signal?.aborted ? "aborted" : "error",
+        failure: ctx.signal?.aborted
+          ? "Automatic resume was cancelled before completion."
+          : `Automatic resume failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    return {
+      content: [{ type: "text", text: combinedResumeResult(outcome) }],
+      details: {
+        ...(event.details && typeof event.details === "object" ? event.details : {}),
+        agentId: outcome.agentId,
+        previousStatus: outcome.previousStatus,
+        status: outcome.status,
+        autoResumeAttempted: true,
+        autoResumed: outcome.status === "completed",
+      },
+      isError: outcome.status !== "completed",
+    };
+  });
+
   pi.on("tool_execution_end", (event) => {
+    operationClaims.releaseToolCall(event.toolCallId);
     if (!active || childSession || nudgeSentThisUserTurn || !FILE_TOOLS.has(event.toolName)) return;
 
     nudgeSentThisUserTurn = true;
@@ -581,6 +722,9 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    operationClaims.clear();
+    resumeLocks.clear();
+
     // pi.setModel()/setThinkingLevel() update Pi's defaults as well as the live
     // session. Restore the pre-preset state so a startup preset remains scoped
     // to this orchestration session.

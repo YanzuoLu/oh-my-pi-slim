@@ -77,6 +77,11 @@ for (const claudeOnly of [
 }
 check(orchestrator.includes("resume: agent_id"), "orchestrator prompt must document Pi resume semantics");
 check(
+  orchestrator.includes("automatically preserves its prior result") &&
+    orchestrator.includes("Do not follow it with `get_subagent_result` or a manual `Agent` resume"),
+  "orchestrator prompt must document completed steer auto-resume semantics",
+);
+check(
   orchestrator.includes("Background completions arrive automatically"),
   "orchestrator prompt must document automatic completion notifications",
 );
@@ -103,6 +108,17 @@ check(!extension.includes("ASK_USER_TOOL"), "extension must not reimplement ask_
 check(!extension.includes("ctx.ui.select"), "extension must use the installed question package");
 check(!extension.includes("ctx.ui.input"), "extension must use the installed question package");
 check(extension.includes("subagents:rpc:stop"), "stop_subagent must use pi-subagents RPC");
+check(extension.includes('pi.on("tool_result", async'), "completed steer fallback must run in async tool_result");
+check(extension.includes('event.toolName !== STEER_TOOL'), "completed steer fallback must target steer_subagent");
+check(extension.includes('Symbol.for("pi-subagents:manager")'), "completed steer fallback must use the cross-package global manager registry");
+check(extension.includes("resumeCompletedRecord"), "completed steer fallback must resume the same session with the steer message");
+check(extension.includes("isCompletedSteerRejection"), "completed steer fallback must only intercept upstream completed/steered rejections");
+check(extension.includes("withResumeLock"), "completed steer fallback must serialize resumes per agent");
+check(extension.includes("AgentOperationClaims"), "Agent resume and completed steer must share operation claims");
+check(extension.includes("operationClaims.claimSteer"), "steer_subagent must claim completed/steered agent IDs before execution");
+check(extension.includes("operationClaims.claimExplicitResume"), "Agent resume must claim agent IDs before execution");
+check(extension.includes("operationClaims.releaseToolCall(event.toolCallId)"), "tool execution end must release operation claims by toolCallId");
+check(!extension.includes("record.session.steer ="), "completed steer fallback must not replace session.steer");
 check(
   read(join(ROOT, "README.md")).includes("pi install npm:@juicesharp/rpiv-ask-user-question"),
   "README must tell users to install rpiv-ask-user-question explicitly",
@@ -116,8 +132,18 @@ check(extension.includes("ensurePackageAssets(PACKAGE_ROOT)"), "package extensio
 check(bootstrap.includes("AGENT_NAMES"), "bootstrap must install the five agent definitions");
 check(bootstrap.includes("removePackageAssets"), "bootstrap must support reversible package cleanup");
 
+const readme = read(join(ROOT, "README.md"));
+check(!readme.includes("non-blocking `tool_result`"), "README must not describe waited auto-resume as non-blocking");
+check(
+  readme.includes("validated against pi-subagents 0.15.0/current cross-package registry shape") &&
+    readme.includes("about 10 minutes") &&
+    readme.includes("session replacement/switch") &&
+    readme.includes("not a stable public resume API"),
+  "README must document the validated compatibility range and live-session cleanup limits",
+);
+
 const packageJson = JSON.parse(read(join(ROOT, "package.json")));
-check(packageJson.version === "0.3.0", "independent-package release must be version 0.3.0");
+check(packageJson.version === "0.4.0", "independent-package release must be version 0.4.0");
 check(
   !packageJson.dependencies || Object.keys(packageJson.dependencies).length === 0,
   "oh-my-pi-slim must not install third-party Pi packages as dependencies",
@@ -132,6 +158,246 @@ const subagentsConfig = JSON.parse(read(join(ROOT, "config", "subagents.json")))
 check(subagentsConfig.disableDefaultAgents === true, "config must disable default agents");
 check(subagentsConfig.fallbackSubagent === "none", "config must disable fallback agents");
 check(subagentsConfig.maxSubagentDepth === 1, "config must disable nested delegation at depth 1");
+
+// Exercise the completed-steer compatibility logic with controllable live-session mocks.
+const { cancelledResumeOutcome, resumeCompletedRecord } = await import(
+  new URL("../extensions/oh-my-pi-slim/auto-resume.ts", import.meta.url)
+);
+const { AgentOperationClaims } = await import(
+  new URL("../extensions/oh-my-pi-slim/operation-claims.ts", import.meta.url)
+);
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+};
+const createResumeHarness = ({ status = "completed", result = "old output", prompt, isStreaming = false } = {}) => {
+  const lifecycle = [];
+  const messages = [{ role: "assistant", content: "old output", stopReason: "stop" }];
+  let listener = () => {};
+  let aborts = 0;
+  let promptCalls = 0;
+  let promptOptions;
+  const session = {
+    messages,
+    isStreaming,
+    abort() { aborts++; },
+    subscribe(next) { listener = next; return () => { listener = () => {}; }; },
+    async prompt(message, options) {
+      promptCalls++;
+      promptOptions = options;
+      await (prompt ?? (async () => {
+        const assistant = { role: "assistant", content: `new: ${message}`, stopReason: "stop" };
+        listener({ type: "message_start", message: assistant });
+        listener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: assistant.content } });
+        messages.push(assistant);
+        listener({ type: "message_end", message: assistant });
+      }))(message, options, { messages, emit: (event) => listener(event) });
+    },
+  };
+  const record = {
+    id: "agent-1",
+    type: "fixer",
+    description: "mock agent",
+    isBackground: true,
+    status,
+    result,
+    toolUses: 0,
+    startedAt: 1,
+    completedAt: 2,
+    session,
+    lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+    compactionCount: 0,
+    resultConsumed: false,
+  };
+  return {
+    record,
+    session,
+    registry: { getRecord: () => record },
+    lifecycle: {
+      emit(name, data) { lifecycle.push({ name, data }); },
+      append(data) { lifecycle.push({ name: "subagents:record", data }); },
+    },
+    lifecycleEvents: lifecycle,
+    get aborts() { return aborts; },
+    get promptCalls() { return promptCalls; },
+    get promptOptions() { return promptOptions; },
+  };
+};
+
+{
+  const harness = createResumeHarness();
+  const outcome = await resumeCompletedRecord(
+    harness.registry, "agent-1", "/literal command", "completed", harness.lifecycle,
+  );
+  check(outcome.status === "completed" && outcome.previousResult === "old output" && outcome.newResult === "new: /literal command", "auto-resume happy path must preserve old output and return the new assistant output");
+  check(harness.promptOptions?.expandPromptTemplates === false, "auto-resume prompt must disable prompt template expansion");
+  check(harness.record.resultConsumed === true, "auto-resume must leave inline results consumed");
+  check(harness.record.promise instanceof Promise, "auto-resume must publish record.promise");
+  check(await harness.record.promise === outcome.newResult, "settled record.promise must resolve to the new result");
+  check(harness.lifecycleEvents.map((event) => event.name).join(",") === "subagents:started,subagents:completed,subagents:record", "successful auto-resume must emit and persist lifecycle events");
+}
+
+{
+  const gate = deferred();
+  const harness = createResumeHarness({
+    prompt: async (_message, _options, context) => {
+      await gate.promise;
+      const assistant = { role: "assistant", content: "delayed", stopReason: "stop" };
+      context.emit({ type: "message_start", message: assistant });
+      context.emit({ type: "message_end", message: assistant });
+    },
+  });
+  const running = resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  check(harness.record.status === "running" && harness.record.promise instanceof Promise, "record.promise must be pending while the resumed turn runs");
+  let settled = false;
+  harness.record.promise.then(() => { settled = true; });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  check(!settled, "record.promise must not settle before the resumed prompt");
+  gate.resolve();
+  await running;
+  await harness.record.promise;
+  check(settled, "record.promise must settle with the resumed prompt");
+}
+
+{
+  const runningRecord = createResumeHarness({ status: "running" });
+  const outcome = await resumeCompletedRecord(runningRecord.registry, "agent-1", "continue", "completed", runningRecord.lifecycle);
+  check(outcome.status === "error" && runningRecord.promptCalls === 0, "running records must remain a no-op and must not start an auto-resume prompt");
+}
+
+{
+  const streamingRecord = createResumeHarness({ isStreaming: true });
+  const outcome = await resumeCompletedRecord(streamingRecord.registry, "agent-1", "continue", "completed", streamingRecord.lifecycle);
+  check(outcome.status === "error" && streamingRecord.promptCalls === 0, "terminal records with a streaming session must not start an auto-resume prompt");
+}
+
+{
+  const harness = createResumeHarness();
+  const controller = new AbortController();
+  controller.abort();
+  const outcome = await resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle, controller.signal);
+  check(outcome.status === "aborted" && harness.promptCalls === 0, "already-aborted callers must not start an auto-resume prompt");
+  check(harness.record.result === "old output" && harness.record.resultConsumed === true, "already-aborted auto-resume must preserve and consume the old result");
+}
+
+{
+  const gate = deferred();
+  const harness = createResumeHarness({
+    prompt: async (_message, _options, context) => {
+      await gate.promise;
+      const assistant = { role: "assistant", content: "partial", stopReason: "aborted" };
+      context.emit({ type: "message_start", message: assistant });
+      context.emit({ type: "message_end", message: assistant });
+    },
+  });
+  const controller = new AbortController();
+  const running = resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle, controller.signal);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  controller.abort();
+  gate.resolve();
+  const outcome = await running;
+  check(outcome.status === "aborted" && harness.aborts === 1 && harness.record.status === "aborted", "mid-prompt caller abort must abort the session and settle as aborted");
+}
+
+{
+  const gate = deferred();
+  const harness = createResumeHarness({ prompt: async () => { await gate.promise; } });
+  const running = resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  harness.record.status = "stopped";
+  harness.record.abortController.abort();
+  gate.resolve();
+  const outcome = await running;
+  check(outcome.status === "stopped" && harness.record.status === "stopped", "manager stop must not be overwritten when the resumed turn settles");
+}
+
+{
+  const harness = createResumeHarness({ prompt: async () => {} });
+  const outcome = await resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
+  check(outcome.status === "error" && outcome.failure?.includes("no new assistant message"), "auto-resume without a message_end assistant must fail");
+  check(harness.record.resultConsumed === true, "failed inline auto-resume must remain consumed");
+}
+
+{
+  const harness = createResumeHarness({
+    prompt: async (_message, _options, context) => {
+      const assistant = { role: "assistant", content: "compaction-safe result", stopReason: "stop" };
+      context.emit({ type: "message_start", message: assistant });
+      context.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: assistant.content } });
+      context.emit({ type: "message_end", message: assistant });
+      harness.session.messages = [{ role: "assistant", content: "compacted history", stopReason: "stop" }];
+    },
+  });
+  const outcome = await resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
+  check(outcome.status === "completed" && outcome.newResult === "compaction-safe result", "auto-resume must use the subscribed final assistant when compaction replaces session.messages");
+}
+
+for (const stopReason of ["aborted", "error"]) {
+  const harness = createResumeHarness({
+    prompt: async (_message, _options, context) => {
+      const partial = { role: "assistant", content: "earlier partial", stopReason: "stop" };
+      context.emit({ type: "message_start", message: partial });
+      context.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: partial.content } });
+      context.emit({ type: "message_end", message: partial });
+      const final = { role: "assistant", content: "", stopReason, errorMessage: stopReason === "error" ? "provider failed" : undefined };
+      context.emit({ type: "message_start", message: final });
+      context.emit({ type: "message_end", message: final });
+    },
+  });
+  const outcome = await resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
+  check(outcome.status === stopReason && outcome.newResult === "", `final empty ${stopReason} assistant must control status and must not reuse an earlier partial assistant`);
+}
+
+{
+  const harness = createResumeHarness({
+    prompt: async (_message, _options, context) => {
+      const assistant = { role: "assistant", content: "", stopReason: "length" };
+      context.emit({ type: "message_start", message: assistant });
+      context.emit({ type: "message_end", message: assistant });
+    },
+  });
+  const outcome = await resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
+  check(outcome.status === "error" && outcome.failure?.includes("output token limit"), "final empty length assistant must fail rather than complete");
+}
+
+{
+  const harness = createResumeHarness({
+    prompt: async (_message, _options, context) => {
+      const assistant = { role: "assistant", content: "provider partial", stopReason: "error", errorMessage: "provider failed" };
+      context.emit({ type: "message_start", message: assistant });
+      context.emit({ type: "message_end", message: assistant });
+    },
+  });
+  const outcome = await resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
+  check(outcome.status === "error" && outcome.failure === "provider failed" && outcome.newResult === "provider partial", "provider error turns must fail while preserving the final assistant's partial output");
+}
+
+{
+  const claims = new AgentOperationClaims();
+  check(claims.claimExplicitResume("agent-1", "agent-call").allowed, "first explicit Agent resume claim must be allowed");
+  const steerSecond = claims.claimSteer("agent-1", "steer-call", "completed");
+  check(!steerSecond.allowed && steerSecond.conflict?.kind === "explicit-resume", "Agent-first/steer-second must block the completed steer claim");
+  const runningSteerSecond = claims.claimSteer("agent-1", "running-steer-call", "running");
+  check(!runningSteerSecond.allowed && runningSteerSecond.conflict?.kind === "explicit-resume", "an in-flight explicit resume must also block a same-ID steer whose record is now running");
+  claims.releaseToolCall("agent-call");
+  check(claims.claimSteer("agent-1", "steer-call", "completed").allowed, "first completed steer claim must be allowed after cleanup");
+  const agentSecond = claims.claimExplicitResume("agent-1", "agent-call-2");
+  check(!agentSecond.allowed && agentSecond.conflict?.kind === "auto-steer", "steer-first/Agent-second must block the explicit resume claim");
+  check(claims.claimExplicitResume("agent-2", "agent-call-2").allowed, "different agent IDs must be claimable concurrently");
+  const runningSteer = claims.claimSteer("agent-3", "running-steer", "running");
+  check(runningSteer.allowed && !runningSteer.claimed && !claims.get("agent-3"), "running steer must remain unclaimed");
+  claims.releaseToolCall("steer-call");
+  claims.releaseToolCall("agent-call-2");
+  check(!claims.get("agent-1") && !claims.get("agent-2"), "toolCallId cleanup must release all associated claims");
+}
+
+{
+  const harness = createResumeHarness();
+  const outcome = cancelledResumeOutcome(harness.registry, "agent-1", "completed");
+  check(outcome.status === "aborted" && harness.record.resultConsumed === true, "lock-wait cancellation must preserve the old inline result as consumed");
+}
 
 // Exercise Pi's TypeScript extension loader without invoking a model.
 const loadExtension = spawnSync(

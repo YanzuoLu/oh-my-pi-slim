@@ -20,13 +20,17 @@ This repository uses Pi and pi-subagents semantics rather than retaining Claude 
 |---|---|
 | Launch a specialist | `Agent({ subagent_type, ... })` |
 | Retrieve a background result | `get_subagent_result({ agent_id })` |
-| Redirect a running specialist | `steer_subagent({ agent_id, message })` |
-| Continue a completed specialist session | `Agent({ resume: agent_id, ... })` |
+| Redirect or reuse a specialist | `steer_subagent({ agent_id, message })`; running sessions steer normally, while completed/steered sessions auto-resume and return the old and new results in the same call |
+| Explicitly continue a completed specialist session | `Agent({ resume: agent_id, ... })`, still available as Pi's general-purpose resume operation |
 | Stop a running specialist | `stop_subagent({ agent_id })`, implemented over pi-subagents' `subagents:rpc:stop` RPC |
 | Ask a blocking clarification | `ask_user_question({ questions })`, supplied by `@juicesharp/rpiv-ask-user-question` |
 | Custom agent type | Bare Markdown filename such as `explorer`, not a namespaced type |
 
 Background completions use pi-subagents' automatic follow-up notifications. The orchestrator is instructed not to poll running agents.
+
+When orchestration is active, oh-my-pi-slim adds a `tool_result` compatibility layer around pi-subagents `steer_subagent`, validated against pi-subagents 0.15.0/current cross-package registry shape. A normal running-agent steer is left untouched. If upstream reports that the target is already `completed` or `steered`, the layer uses the cross-package manager registry, preserves the old result, prompts the same idle session with the original steering message as literal text, waits for that resumed turn, updates the shared record, and replaces the same tool result with the completion status plus the old and new outputs. This tool result is therefore blocking for the resumed turn. A completed steer and an explicit `Agent({ resume })` targeting the same ID use first-wins conflict handling, so the second concurrent operation is blocked. The main orchestrator should not make a follow-up `get_subagent_result` or `Agent({ resume })` call for this fallback.
+
+This compatibility path is not a stable public resume API. It requires the original live record and session: pi-subagents normally cleans terminal records after about 10 minutes, and a session replacement/switch can make them unavailable sooner. In those cases the same steer result preserves the old output when available and reports that no resume occurred; it never creates a fresh agent. The configured `maxSubagentDepth=1` means resumed specialists cannot create nested agents, so no additional nested-child cleanup is needed under this repository's supported configuration.
 
 ## Requirements
 
@@ -63,7 +67,7 @@ pi install git:github.com/YanzuoLu/oh-my-pi-slim
 To pin the current release instead of tracking `main`:
 
 ```bash
-pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.3.0
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.4.0
 ```
 
 `oh-my-pi-slim` does **not** declare, install, bundle, enable, update, or remove third-party Pi packages. Every dependency remains independently visible and user-managed through `pi list`, `pi install`, `pi update`, and `pi remove`.
@@ -233,6 +237,7 @@ When a preset is active:
 - Every fresh or scheduled `Agent` call must include the exact configured `provider/modelId` and thinking value for the selected specialist.
 - The extension blocks missing or mismatched specialist model settings and tells the orchestrator the exact required values.
 - Resume calls omit model and thinking because pi-subagents resumes the existing in-memory session and ignores those overrides.
+- `steer_subagent` automatically falls back from an upstream completed/steered rejection to resuming that same in-memory session. The one steer call waits and returns both the preserved prior result and the new result; running steers remain unchanged.
 
 This makes the six role assignments configurable without generating or mutating shared agent definition files at startup, so concurrent Pi sessions can safely use different presets.
 
@@ -315,7 +320,7 @@ pi update --extensions
 Pinned refs do not move automatically. Install the new release ref explicitly:
 
 ```bash
-pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.3.0
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.4.0
 ```
 
 On the next startup, the package bootstrap updates unchanged managed agent files and preserves user-edited preset configuration.
@@ -363,7 +368,7 @@ Validation checks:
 - no hard-coded specialist model or thinking values
 - complete six-role preset definitions
 - Claude Code-only orchestration names are absent
-- Pi resume, steering, stop RPC, and user-question mappings are present
+- Pi explicit resume, automatic completed-steer resume fallback, normal running steering, stop RPC, and user-question mappings are present
 - preset model/thinking enforcement exists
 - strict pi-subagents settings are present
 - Pi can load the TypeScript extension

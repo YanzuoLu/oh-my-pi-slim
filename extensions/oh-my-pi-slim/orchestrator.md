@@ -134,8 +134,9 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 - When too much unrelated, and really needed, start a fresh session with the specialist
 - If multiple remembered sessions fit, prefer the most recently used matching session.
 - Prefer re-uses over creating new sessions all the time
-- To redirect a running specialist session, you MUST call `steer_subagent({ agent_id, message })`. Saying "reuse" in prose is not enough.
-- To continue a completed specialist session, call `Agent` with `resume: agent_id`, the original `subagent_type`, a new prompt, and a new description.
+- To redirect or continue a remembered specialist session, call `steer_subagent({ agent_id, message })`. Saying "reuse" in prose is not enough.
+- `steer_subagent` normally steers a running session. Under oh-my-pi-slim, if that session has already completed or is marked steered, the same tool call automatically preserves its prior result, resumes the same session with the steering message, waits for the new turn, and returns both results together. Do not follow it with `get_subagent_result` or a manual `Agent` resume.
+- Explicit `Agent({ resume: agent_id, ... })` remains available when you intentionally want the general Pi resume operation rather than steering/reusing through the automatic fallback. Use the original `subagent_type`, a new prompt, and a new description; omit model and thinking.
 - Calling `Agent` without `resume` always creates a fresh specialist session with no memory of the prior run.
 
 ## 5. Verify
