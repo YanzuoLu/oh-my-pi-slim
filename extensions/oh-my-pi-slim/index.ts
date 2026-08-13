@@ -4,8 +4,11 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CONFIG_DIR_NAME,
+  formatSkillsForPrompt,
   getAgentDir,
   loadProjectContextFiles,
+  loadSkillsFromDir,
+  type BuildSystemPromptOptions,
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -19,9 +22,11 @@ import {
 } from "./auto-resume.js";
 import { AgentOperationClaims } from "./operation-claims.js";
 import {
+  injectPiDocumentationSkill,
   injectSharedProjectContext,
   injectToolGuidance,
   removeChildPiIdentity,
+  removeMainPiDocumentation,
   removeMainPiIdentity,
   renderProjectContext,
   renderToolGuidance,
@@ -30,6 +35,7 @@ import {
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(EXTENSION_DIR, "../..");
 const ORCHESTRATOR_PROMPT = readFileSync(join(EXTENSION_DIR, "orchestrator.md"), "utf8").trim();
+const PI_DOCUMENTATION_SKILL_DIR = join(EXTENSION_DIR, "skills", "pi-documentation");
 const CONFIG_FILE = "oh-my-pi-slim.json";
 
 const SPECIALIST_NAMES = [
@@ -291,6 +297,29 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   let originalThinking: ThinkingLevel | undefined;
   const resumeLocks = new Map<string, Promise<void>>();
   const operationClaims = new AgentOperationClaims();
+  const loadedPiDocumentationSkill = loadSkillsFromDir({
+    dir: PI_DOCUMENTATION_SKILL_DIR,
+    source: "extension:oh-my-pi-slim",
+  }).skills.find((skill) => skill.name === "pi-documentation");
+  if (!loadedPiDocumentationSkill) {
+    throw new Error(`Missing OMPS skill: ${join(PI_DOCUMENTATION_SKILL_DIR, "SKILL.md")}`);
+  }
+  const canReadSkills = (options: BuildSystemPromptOptions): boolean =>
+    (options.selectedTools ?? ["read", "bash", "edit", "write"]).includes("read");
+  const injectDocumentationSkill = (
+    prompt: string,
+    options: BuildSystemPromptOptions,
+  ): string => {
+    const currentSkills = options.skills ?? [];
+    if (currentSkills.some((skill) => skill.filePath === loadedPiDocumentationSkill.filePath)) {
+      return prompt;
+    }
+    return injectPiDocumentationSkill(
+      prompt,
+      formatSkillsForPrompt(currentSkills),
+      formatSkillsForPrompt([...currentSkills, loadedPiDocumentationSkill]),
+    );
+  };
 
   pi.registerFlag("omps", {
     description: "Run the main Pi session as the oh-my-pi-slim orchestrator",
@@ -661,13 +690,19 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       const toolGuidance = renderToolGuidance(event.systemPromptOptions);
       let systemPrompt = injectToolGuidance(event.systemPrompt, toolGuidance);
       systemPrompt = injectSharedProjectContext(systemPrompt, childProjectContext);
+      if (canReadSkills(event.systemPromptOptions)) {
+        systemPrompt = injectDocumentationSkill(systemPrompt, event.systemPromptOptions);
+      }
       if (isAnthropicOAuth(ctx)) systemPrompt = removeChildPiIdentity(systemPrompt);
       return { systemPrompt };
     }
 
     if (!active || !activePreset || !activePresetName) return;
 
-    let systemPrompt = event.systemPrompt;
+    let systemPrompt = removeMainPiDocumentation(event.systemPrompt);
+    if (canReadSkills(event.systemPromptOptions)) {
+      systemPrompt = injectDocumentationSkill(systemPrompt, event.systemPromptOptions);
+    }
     if (isAnthropicOAuth(ctx)) systemPrompt = removeMainPiIdentity(systemPrompt);
     return {
       systemPrompt: `${systemPrompt}\n\n${ORCHESTRATOR_PROMPT}\n\n${buildPresetPrompt(activePresetName, activePreset)}`,

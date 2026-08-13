@@ -2,6 +2,9 @@ export const TOOL_GUIDANCE_MARKER = "<omps-tool-guidance/>";
 export const SHARED_CONTEXT_MARKER = "<omps-shared-context/>";
 export const MAIN_PI_IDENTITY = "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
 export const CHILD_PI_IDENTITY_LINE = "You are a pi coding agent sub-agent.\n";
+export const PI_DOCUMENTATION_START = "\n\nPi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):";
+export const PI_DOCUMENTATION_END = "- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)";
+const CURRENT_WORKING_DIRECTORY = "\nCurrent working directory: ";
 const TOOL_GUIDANCE_OPEN = "<omps-tool-guidance>";
 const TOOL_GUIDANCE_CLOSE = "</omps-tool-guidance>";
 const CHILD_PROMPT_PREFIX = /^(<active_agent\s+name="[^"]+"\s*\/>\n\n)You are a pi coding agent sub-agent\.\n/;
@@ -87,6 +90,43 @@ export function injectSharedProjectContext(prompt: string, context: string): str
   }
   if (!context || prompt.includes(context)) return prompt;
   return `${prompt}${context}`;
+}
+
+export function removeMainPiDocumentation(prompt: string): string {
+  const start = prompt.indexOf(PI_DOCUMENTATION_START);
+  if (start < 0) return prompt;
+
+  const end = prompt.indexOf(
+    PI_DOCUMENTATION_END,
+    start + PI_DOCUMENTATION_START.length,
+  );
+  if (end < 0) return prompt;
+
+  return prompt.slice(0, start) + prompt.slice(end + PI_DOCUMENTATION_END.length);
+}
+
+export function injectPiDocumentationSkill(
+  prompt: string,
+  currentSkillsBlock: string,
+  nextSkillsBlock: string,
+): string {
+  if (!nextSkillsBlock || currentSkillsBlock === nextSkillsBlock) return prompt;
+
+  if (currentSkillsBlock) {
+    const cwdStart = prompt.lastIndexOf(CURRENT_WORKING_DIRECTORY);
+    const searchEnd = cwdStart >= 0 ? cwdStart : prompt.length;
+    const currentStart = prompt.lastIndexOf(currentSkillsBlock, searchEnd);
+    if (currentStart >= 0) {
+      return prompt.slice(0, currentStart) + nextSkillsBlock +
+        prompt.slice(currentStart + currentSkillsBlock.length);
+    }
+  }
+
+  const cwdStart = prompt.lastIndexOf(CURRENT_WORKING_DIRECTORY);
+  if (cwdStart >= 0) {
+    return prompt.slice(0, cwdStart) + nextSkillsBlock + prompt.slice(cwdStart);
+  }
+  return `${prompt}${nextSkillsBlock}`;
 }
 
 export function removeMainPiIdentity(prompt: string): string {

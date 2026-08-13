@@ -99,6 +99,10 @@ const sourceFiles = [
     target: join(extensionDir, "orchestrator.md"),
   },
   {
+    source: join(ROOT, "extensions", "oh-my-pi-slim", "skills", "pi-documentation", "SKILL.md"),
+    target: join(extensionDir, "skills", "pi-documentation", "SKILL.md"),
+  },
+  {
     source: join(ROOT, ".pi", "oh-my-pi-slim.json"),
     target: join(agentDir, "oh-my-pi-slim.json"),
     preserveExisting: true,

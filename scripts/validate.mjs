@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const AGENTS = ["explorer", "librarian", "oracle", "designer", "fixer"];
@@ -96,9 +96,18 @@ check(orchestrator.includes("<orchestration-preset>"), "orchestrator must use th
 const extensionPath = join(ROOT, "extensions", "oh-my-pi-slim", "index.ts");
 const bootstrapPath = join(ROOT, "extensions", "oh-my-pi-slim", "bootstrap.ts");
 const promptContextPath = join(ROOT, "extensions", "oh-my-pi-slim", "prompt-context.ts");
+const piDocumentationSkillPath = join(
+  ROOT,
+  "extensions",
+  "oh-my-pi-slim",
+  "skills",
+  "pi-documentation",
+  "SKILL.md",
+);
 const extension = read(extensionPath);
 const bootstrap = read(bootstrapPath);
 const promptContext = read(promptContextPath);
+const piDocumentationSkill = read(piDocumentationSkillPath);
 for (const role of AGENTS) check(extension.includes(`\"${role}\"`), `extension allowlist missing ${role}`);
 check(extension.includes('pi.registerFlag("omps-preset"'), "extension must register --omps-preset");
 check(extension.includes('pi.registerCommand("preset"'), "extension must register the standalone /preset command");
@@ -230,11 +239,55 @@ check(!/access[_-]?token|id[_-]?token|refresh[_-]?token/i.test(extension), "exte
 check(extension.includes("ensurePackageAssets(PACKAGE_ROOT)"), "package extension must bootstrap undeclarable agent assets");
 check(bootstrap.includes("AGENT_NAMES"), "bootstrap must install the five agent definitions");
 check(bootstrap.includes("removePackageAssets"), "bootstrap must support reversible package cleanup");
-check(promptContext.includes("prompt.startsWith(MAIN_PI_IDENTITY)"), "main identity removal must be prefix-only");
+check(promptContext.includes("prompt.startsWith(MAIN_PI_IDENTITY)"), "main identity removal must remain prefix-only");
+check(promptContext.includes("PI_DOCUMENTATION_START"), "main prompt trimming must use the exact Pi documentation start anchor");
+check(promptContext.includes("PI_DOCUMENTATION_END"), "main prompt trimming must use the exact Pi documentation end anchor");
 check(promptContext.includes("CHILD_PROMPT_PREFIX"), "child identity removal must use the narrow child prompt prefix");
+const childBranchStart = beforeAgentStart.indexOf('if (sessionRole === "child") {');
+const childBranchEnd = beforeAgentStart.indexOf('if (!active || !activePreset || !activePresetName) return;');
+const childBranch = beforeAgentStart.slice(childBranchStart, childBranchEnd);
+const mainBranch = beforeAgentStart.slice(childBranchEnd);
 check(
-  read(join(ROOT, "scripts", "install.mjs")).includes('target: join(extensionDir, "prompt-context.ts")'),
+  mainBranch.includes("removeMainPiDocumentation(event.systemPrompt)") &&
+    mainBranch.indexOf("removeMainPiDocumentation(event.systemPrompt)") <
+      mainBranch.indexOf("injectDocumentationSkill(systemPrompt, event.systemPromptOptions)") &&
+    mainBranch.indexOf("injectDocumentationSkill(systemPrompt, event.systemPromptOptions)") <
+      mainBranch.indexOf("removeMainPiIdentity(systemPrompt)"),
+  "active main sessions must remove built-in Pi documentation, inject the conditional skill, then trim OAuth identity",
+);
+check(
+  mainBranch.startsWith('if (!active || !activePreset || !activePresetName) return;') &&
+    mainBranch.indexOf('if (!active || !activePreset || !activePresetName) return;') <
+      mainBranch.indexOf("injectDocumentationSkill(systemPrompt, event.systemPromptOptions)"),
+  "inactive main sessions must return before the Pi documentation skill is injected",
+);
+check(
+  childBranch.includes("injectDocumentationSkill(systemPrompt, event.systemPromptOptions)") &&
+    childBranch.indexOf("injectDocumentationSkill(systemPrompt, event.systemPromptOptions)") <
+      childBranch.indexOf('if (isAnthropicOAuth(ctx)) systemPrompt = removeChildPiIdentity(systemPrompt);'),
+  "managed child sessions must receive the Pi documentation skill through their normal prompt path",
+);
+check(
+  extension.includes("formatSkillsForPrompt(currentSkills)") &&
+    extension.includes("formatSkillsForPrompt([...currentSkills, loadedPiDocumentationSkill])") &&
+    extension.includes("loadSkillsFromDir({") &&
+    extension.includes('source: "extension:oh-my-pi-slim"'),
+  "OMPS must load and render its private skill with Pi's official skill APIs",
+);
+check(
+  extension.includes("canReadSkills(event.systemPromptOptions)") &&
+    extension.includes('.includes("read")'),
+  "OMPS must expose its conditional skill only when the session can read SKILL.md",
+);
+const legacyInstaller = read(join(ROOT, "scripts", "install.mjs"));
+check(
+  legacyInstaller.includes('target: join(extensionDir, "prompt-context.ts")'),
   "legacy install must copy the prompt-context helper",
+);
+check(
+  legacyInstaller.includes('source: join(ROOT, "extensions", "oh-my-pi-slim", "skills", "pi-documentation", "SKILL.md")') &&
+    legacyInstaller.includes('target: join(extensionDir, "skills", "pi-documentation", "SKILL.md")'),
+  "legacy install must keep the conditional Pi documentation skill private to the OMPS extension",
 );
 
 const readme = read(join(ROOT, "README.md"));
@@ -258,7 +311,7 @@ check(
 );
 
 const packageJson = JSON.parse(read(join(ROOT, "package.json")));
-check(packageJson.version === "0.5.1", "independent-package release must be version 0.5.1");
+check(packageJson.version === "0.5.2", "independent-package release must be version 0.5.2");
 check(
   !packageJson.dependencies || Object.keys(packageJson.dependencies).length === 0,
   "oh-my-pi-slim must not install third-party Pi packages as dependencies",
@@ -268,6 +321,54 @@ check(
     JSON.stringify(["./extensions/oh-my-pi-slim/index.ts"]),
   "Pi package must load only the oh-my-pi-slim extension",
 );
+check(
+  packageJson.pi?.skills === undefined && !existsSync(join(ROOT, "skills")),
+  "Pi package must not expose an OMPS-only skill through its manifest or conventional root skills directory",
+);
+const skillFrontmatterEnd = piDocumentationSkill.indexOf("\n---\n", 4);
+const skillFrontmatter = piDocumentationSkill.slice(4, skillFrontmatterEnd);
+const skillDescription = /^description:\s*["']?(.+?)["']?$/m.exec(skillFrontmatter)?.[1] ?? "";
+check(
+  piDocumentationSkill.startsWith("---\nname: pi-documentation\n") &&
+    skillFrontmatterEnd > 0 &&
+    skillDescription.length > 0 &&
+    skillDescription.length <= 1024 &&
+    !skillFrontmatter.includes("\ncompatibility:") &&
+    piDocumentationSkill.includes("Use this skill only when the task concerns Pi itself") &&
+    piDocumentationSkill.includes("PI_PACKAGE_DIR") &&
+    piDocumentationSkill.includes("docs/extensions.md") &&
+    piDocumentationSkill.includes("docs/packages.md"),
+  "Pi documentation skill must have standard frontmatter and verified installed-documentation guidance",
+);
+check(
+  !bootstrap.includes("pi-documentation"),
+  "package bootstrap must not expose the OMPS-only skill through the global skill directory",
+);
+const piExecutable = spawnSync("sh", ["-lc", "command -v pi"], { encoding: "utf8" });
+let installedPiRoot;
+if (piExecutable.status === 0 && piExecutable.stdout.trim()) {
+  const entrypoint = realpathSync(piExecutable.stdout.trim());
+  const candidates = [
+    process.env.PI_PACKAGE_DIR,
+    dirname(entrypoint),
+    dirname(dirname(entrypoint)),
+  ].filter((candidate) => typeof candidate === "string" && candidate.length > 0);
+  installedPiRoot = candidates.find((candidate) =>
+    existsSync(join(candidate, "README.md")) && existsSync(join(candidate, "dist", "core", "system-prompt.js"))
+  );
+  if (installedPiRoot) {
+    const installedSystemPrompt = read(join(installedPiRoot, "dist", "core", "system-prompt.js"));
+    check(
+      installedSystemPrompt.includes(
+        "Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):",
+      ) && installedSystemPrompt.includes(
+        "- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)",
+      ),
+      "installed Pi system prompt changed the documentation anchors used by OMPS",
+    );
+  }
+}
+check(typeof installedPiRoot === "string", "validation must locate the installed Pi package root");
 
 const subagentsConfig = JSON.parse(read(join(ROOT, "config", "subagents.json")));
 check(subagentsConfig.disableDefaultAgents === true, "config must disable default agents");
@@ -277,11 +378,15 @@ check(subagentsConfig.maxSubagentDepth === 1, "config must disable nested delega
 const {
   CHILD_PI_IDENTITY_LINE,
   MAIN_PI_IDENTITY,
+  PI_DOCUMENTATION_END,
+  PI_DOCUMENTATION_START,
   SHARED_CONTEXT_MARKER,
   TOOL_GUIDANCE_MARKER,
+  injectPiDocumentationSkill,
   injectSharedProjectContext,
   injectToolGuidance,
   removeChildPiIdentity,
+  removeMainPiDocumentation,
   removeMainPiIdentity,
   renderProjectContext,
   renderToolGuidance,
@@ -407,6 +512,82 @@ const {
   check(injectSharedProjectContext(`prefix\n${SHARED_CONTEXT_MARKER}\nspecialist`, "") === "prefix\n\nspecialist", "empty context must remove the marker without creating a section");
   check(injectSharedProjectContext("prompt without marker", context) === `prompt without marker${context}`, "missing marker must safely append context");
   check(injectSharedProjectContext("prompt without marker", "") === "prompt without marker", "empty context without a marker must leave the prompt unchanged");
+  const documentationBlock = `${PI_DOCUMENTATION_START}\n` +
+    "- Main documentation: /installed/pi/README.md\n" +
+    "- Additional docs: /installed/pi/docs\n" +
+    `${PI_DOCUMENTATION_END}`;
+  const afterDocumentation = "\n\nAPPEND SYSTEM\n\n<project_context>project rules</project_context>\n" +
+    "<available_skills><skill>skill summary</skill></available_skills>\n" +
+    "Current working directory: /project";
+  const mainPromptWithDocumentation = `${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read` +
+    `${documentationBlock}${afterDocumentation}`;
+  check(
+    removeMainPiDocumentation(mainPromptWithDocumentation) ===
+      `${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read${afterDocumentation}`,
+    "main documentation removal must preserve tools, append system, project context, skills, and cwd",
+  );
+  check(
+    removeMainPiDocumentation(`${mainPromptWithDocumentation}${documentationBlock}`) ===
+      `${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read${afterDocumentation}${documentationBlock}`,
+    "main documentation removal must affect only the first exact block",
+  );
+  check(
+    removeMainPiDocumentation(`custom prompt${documentationBlock}`) === "custom prompt",
+    "main documentation removal must survive earlier extension changes to the Pi identity prefix",
+  );
+  check(
+    removeMainPiDocumentation(`${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read`) ===
+      `${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read`,
+    "main documentation removal must be unchanged without the start anchor",
+  );
+  check(
+    removeMainPiDocumentation(`${MAIN_PI_IDENTITY}${PI_DOCUMENTATION_START}\nchanged ending`) ===
+      `${MAIN_PI_IDENTITY}${PI_DOCUMENTATION_START}\nchanged ending`,
+    "main documentation removal must fail safe when Pi changes the end anchor",
+  );
+  const renderedPiSkill = "\n\nThe following skills provide specialized instructions for specific tasks.\n" +
+    "Use the read tool to load a skill's file when the task matches its description.\n" +
+    "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n" +
+    "<available_skills>\n  <skill>\n    <name>pi-documentation</name>\n" +
+    "    <description>Use for work about Pi itself.</description>\n" +
+    "    <location>/package/skills/pi-documentation/SKILL.md</location>\n" +
+    "  </skill>\n</available_skills>";
+  const existingSkills = renderedPiSkill
+    .replace("pi-documentation", "other-skill")
+    .replace("Use for work about Pi itself.", "Other skill")
+    .replace("/package/skills/pi-documentation/SKILL.md", "/skills/other/SKILL.md");
+  const nextSkills = existingSkills.replace(
+    "</available_skills>",
+    renderedPiSkill.slice(
+      renderedPiSkill.indexOf("  <skill>"),
+      renderedPiSkill.indexOf("</available_skills>"),
+    ) + "</available_skills>",
+  );
+  const promptWithSkills = `role${existingSkills}\nCurrent working directory: /project`;
+  const mergedSkills = injectPiDocumentationSkill(promptWithSkills, existingSkills, nextSkills);
+  check(
+    mergedSkills.includes("<name>other-skill</name>") &&
+      mergedSkills.includes("<name>pi-documentation</name>") &&
+      mergedSkills.indexOf("<name>pi-documentation</name>") < mergedSkills.indexOf("</available_skills>") &&
+      mergedSkills.endsWith("Current working directory: /project"),
+    "conditional skill injection must merge into Pi's existing available_skills block before cwd",
+  );
+  const promptWithoutSkills = "role\nCurrent working directory: /project";
+  check(
+    injectPiDocumentationSkill(promptWithoutSkills, "", renderedPiSkill) ===
+      `role${renderedPiSkill}\nCurrent working directory: /project`,
+    "conditional skill injection must create Pi's standard skills block before cwd",
+  );
+  const misleadingSkillsText = "role <available_skills>documentation example</available_skills>\nCurrent working directory: /project";
+  check(
+    injectPiDocumentationSkill(misleadingSkillsText, "", renderedPiSkill) ===
+      `role <available_skills>documentation example</available_skills>${renderedPiSkill}\nCurrent working directory: /project`,
+    "conditional skill injection must not merge into unrelated available_skills text",
+  );
+  check(
+    injectPiDocumentationSkill(mergedSkills, nextSkills, nextSkills) === mergedSkills,
+    "conditional skill injection must be idempotent",
+  );
   const mainPrompt = `${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read`;
   check(removeMainPiIdentity(mainPrompt) === "\n\nAvailable tools:\n- read", "main identity removal must preserve Available tools and later content");
   check(removeMainPiIdentity(`${MAIN_PI_IDENTITY}\n${MAIN_PI_IDENTITY}`).endsWith(MAIN_PI_IDENTITY), "main identity removal must affect only the first exact prefix");
@@ -685,13 +866,23 @@ const tempAgentDir = mkdtempSync(join(tmpdir(), "oh-my-pi-slim-validate-"));
 try {
   const oldExplorer = join(tempAgentDir, "agents", "explorer.md");
   const oldPreset = join(tempAgentDir, "oh-my-pi-slim.json");
+  const oldPiDocumentationSkill = join(
+    tempAgentDir,
+    "extensions",
+    "oh-my-pi-slim",
+    "skills",
+    "pi-documentation",
+    "SKILL.md",
+  );
   const customPresetText = `${JSON.stringify({
     defaultPreset: "custom",
     presets: { custom: presetConfig.presets[presetConfig.defaultPreset] },
   }, null, 2)}\n`;
   mkdirSync(dirname(oldExplorer), { recursive: true });
+  mkdirSync(dirname(oldPiDocumentationSkill), { recursive: true });
   writeFileSync(oldExplorer, "previous explorer\n", "utf8");
   writeFileSync(oldPreset, customPresetText, "utf8");
+  writeFileSync(oldPiDocumentationSkill, "previous Pi documentation skill\n", "utf8");
   writeFileSync(
     join(tempAgentDir, "subagents.json"),
     `${JSON.stringify({ maxConcurrent: 9, disableDefaultAgents: false }, null, 2)}\n`,
@@ -719,6 +910,27 @@ try {
     read(join(tempAgentDir, "extensions", "oh-my-pi-slim", "prompt-context.ts")) === promptContext,
     "legacy install must copy the prompt-context helper",
   );
+  check(
+    read(oldPiDocumentationSkill) === piDocumentationSkill,
+    "legacy install must copy the Pi documentation skill",
+  );
+  const loadLegacySkill = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `import { loadSkillsFromDir } from ${JSON.stringify(
+        installedPiRoot
+          ? pathToFileURL(join(installedPiRoot, "dist", "core", "skills.js")).href
+          : "",
+      )}; const result = loadSkillsFromDir({ dir: ${JSON.stringify(dirname(oldPiDocumentationSkill))}, source: "extension:oh-my-pi-slim" }); if (result.skills.length !== 1 || result.skills[0].name !== "pi-documentation" || result.diagnostics.length > 0) { console.error(JSON.stringify(result)); process.exit(1); }`,
+    ],
+    { cwd: ROOT, encoding: "utf8" },
+  );
+  check(
+    loadLegacySkill.status === 0,
+    `Pi failed to load the legacy copied private skill: ${loadLegacySkill.stderr || loadLegacySkill.stdout}`,
+  );
 
   const uninstall = spawnSync(process.execPath, [join(ROOT, "scripts", "uninstall.mjs")], {
     cwd: ROOT,
@@ -728,6 +940,10 @@ try {
   check(uninstall.status === 0, `isolated uninstall failed: ${uninstall.stderr || uninstall.stdout}`);
   check(read(oldExplorer) === "previous explorer\n", "uninstall must restore an overwritten role file");
   check(read(oldPreset) === customPresetText, "uninstall must preserve an existing preset config");
+  check(
+    read(oldPiDocumentationSkill) === "previous Pi documentation skill\n",
+    "uninstall must restore an overwritten Pi documentation skill",
+  );
 
   const restoredSettings = JSON.parse(read(join(tempAgentDir, "subagents.json")));
   check(restoredSettings.maxConcurrent === 9, "uninstall must preserve unrelated settings");
@@ -738,6 +954,7 @@ try {
   );
 
   rmSync(oldPreset, { force: true });
+  rmSync(oldPiDocumentationSkill, { force: true });
   const freshInstall = spawnSync(process.execPath, [join(ROOT, "scripts", "install.mjs")], {
     cwd: ROOT,
     env: { ...process.env, PI_CODING_AGENT_DIR: tempAgentDir },
@@ -759,6 +976,10 @@ try {
     `fresh preset uninstall failed: ${freshUninstall.stderr || freshUninstall.stdout}`,
   );
   check(!existsSync(oldPreset), "uninstall must remove the default preset it created");
+  check(
+    !existsSync(oldPiDocumentationSkill),
+    "uninstall must remove the Pi documentation skill it created",
+  );
 } finally {
   rmSync(tempAgentDir, { recursive: true, force: true });
 }

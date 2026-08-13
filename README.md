@@ -74,7 +74,7 @@ pi install git:github.com/YanzuoLu/oh-my-pi-slim
 To pin the current release instead of tracking `main`:
 
 ```bash
-pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.1
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.2
 ```
 
 `oh-my-pi-slim` does **not** declare, install, bundle, enable, update, or remove third-party Pi packages. Every dependency remains independently visible and user-managed through `pi list`, `pi install`, `pi update`, and `pi remove`.
@@ -82,10 +82,13 @@ pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.1
 On the next Pi startup, this package only:
 
 1. Loads the `oh-my-pi-slim` main-session orchestration extension.
-2. Materializes exactly five pi-subagents definitions in `$PI_CODING_AGENT_DIR/agents/` (normally `~/.pi/agent/agents/`).
-3. Installs a default global preset only when one does not already exist.
-4. Merges the strict pi-subagents settings without replacing unrelated settings.
-5. Records package-created assets in `$PI_CODING_AGENT_DIR/.oh-my-pi-slim-package-assets.json` for reversible cleanup.
+2. Keeps the bundled `pi-documentation` skill private until OMPS is active or the session is a managed specialist child.
+3. Materializes exactly five pi-subagents definitions in `$PI_CODING_AGENT_DIR/agents/` (normally `~/.pi/agent/agents/`).
+4. Installs a default global preset only when one does not already exist.
+5. Merges the strict pi-subagents settings without replacing unrelated settings.
+6. Records package-created assets in `$PI_CODING_AGENT_DIR/.oh-my-pi-slim-package-assets.json` for reversible cleanup.
+
+`pi-documentation` is intentionally absent from the package's global `pi.skills` manifest and from the package root's conventional `skills/` directory, and it is not copied into the global skills directory. It lives under `extensions/oh-my-pi-slim/skills/`, where Pi cannot auto-discover it as a package skill. The extension loads that private `SKILL.md` with Pi's skill APIs and merges the standard skill entry into the normal `<available_skills>` block only for active main orchestrators and pi-subagents child sessions managed by the OMPS extension.
 
 Then launch with the default preset:
 
@@ -302,6 +305,8 @@ Each child dynamically renders Pi-style `Available tools` and `Guidelines` from 
 
 For active main orchestrator and specialist child sessions using Anthropic Messages models with OAuth, the provider's official Claude Code identity is authoritative: OMPS removes only the exact conflicting Pi identity text while preserving tools and the rest of the prompt. Inactive main sessions and other providers retain Pi's identity text.
 
+For every active main orchestrator, OMPS also removes Pi's built-in documentation index from the always-on system prompt. The same navigation instructions are provided through the bundled `pi-documentation` skill instead. OMPS uses Pi's official skill loader and formatter, then merges only the skill's standard name, description, and `SKILL.md` location into the existing `<available_skills>` block; it creates that standard block before the working directory when no other skills are visible. Managed child sessions receive the same conditional skill entry. Inactive main sessions do not see it, and `/omps off` removes it from subsequent turns. Agents read the full skill on demand when a task concerns Pi extensions, themes, skills, prompts, TUI, keybindings, SDK, providers, models, packages, or environment variables. The exact documentation-removal boundary preserves append-system content, project context, other skills, and the working directory.
+
 No specialist defines a `tools:` allowlist. Their only explicit tool denylist is:
 
 ```yaml
@@ -340,10 +345,10 @@ pi update --extensions
 Pinned refs do not move automatically. Install the new release ref explicitly:
 
 ```bash
-pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.1
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.2
 ```
 
-On the next startup, the package bootstrap updates unchanged managed agent files and preserves user-edited preset configuration.
+On the next startup, the package bootstrap updates unchanged managed agent files and preserves user-edited preset configuration. The extension reads the updated private `pi-documentation` skill from the package checkout when OMPS is active.
 
 ## Uninstallation
 
@@ -369,7 +374,7 @@ pi remove npm:@juicesharp/rpiv-ask-user-question
 pi remove npm:pi-web-search
 ```
 
-If the package was installed from a source checkout with the legacy script, use that checkout's `npm run uninstall:user` command instead.
+If the package was installed from a source checkout with the legacy script, the installer keeps `pi-documentation` under `$PI_CODING_AGENT_DIR/extensions/oh-my-pi-slim/skills/pi-documentation/SKILL.md`, so it is still invisible outside OMPS; use that checkout's `npm run uninstall:user` command to remove it or restore the prior file.
 
 ## Validation
 
@@ -392,9 +397,11 @@ Validation checks:
 - preset model/thinking enforcement exists
 - strict pi-subagents settings are present
 - Pi can load the TypeScript extension
-- the Pi package has no third-party runtime dependencies and loads only its own extension
+- the Pi package has no third-party runtime dependencies and globally loads only its own extension
+- `pi-documentation` is absent while OMPS is inactive and merges through Pi's standard skills block for active main and managed child sessions
+- active main prompt trimming removes only Pi's built-in documentation index while preserving later append-system, context, skills, and cwd content
 - package bootstrap and reversible asset cleanup are present
-- legacy installation and uninstallation restore prior files and settings in an isolated temporary Pi directory
+- legacy installation and uninstallation restore prior private extension files, the documentation skill, and settings in an isolated temporary Pi directory
 
 ## Repository layout
 
@@ -404,8 +411,9 @@ agents/                                Five pi-subagents Markdown definitions
 config/subagents.json                  Strict pi-subagents settings
 extensions/oh-my-pi-slim/index.ts      Main-session extension and policy gates
 extensions/oh-my-pi-slim/bootstrap.ts  Direct-package asset bootstrap and cleanup
-extensions/oh-my-pi-slim/prompt-context.ts  Shared project-context and identity helpers
+extensions/oh-my-pi-slim/prompt-context.ts  Shared context and precise Pi prompt trimming helpers
 extensions/oh-my-pi-slim/orchestrator.md
+extensions/oh-my-pi-slim/skills/pi-documentation/SKILL.md  OMPS-private Pi docs navigation
 package-lock.json                      Dependency-free package lock
 scripts/install.mjs
 scripts/uninstall.mjs
