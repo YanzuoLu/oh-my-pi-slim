@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   CONFIG_DIR_NAME,
   getAgentDir,
+  loadProjectContextFiles,
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -17,6 +18,14 @@ import {
   type SubagentRegistry,
 } from "./auto-resume.js";
 import { AgentOperationClaims } from "./operation-claims.js";
+import {
+  injectSharedProjectContext,
+  injectToolGuidance,
+  removeChildPiIdentity,
+  removeMainPiIdentity,
+  renderProjectContext,
+  renderToolGuidance,
+} from "./prompt-context.js";
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(EXTENSION_DIR, "../..");
@@ -43,7 +52,7 @@ const THINKING_LEVELS = new Set([
 ]);
 
 const FILE_TOOLS = new Set(["read", "edit", "write"]);
-const CHILD_AGENT_TAG = /<active_agent\s+name="[^"]+"\s*\/>/;
+const CHILD_AGENT_TAG = /^<active_agent\s+name="[^"]+"\s*\/>/;
 const TRUE_VALUES = /^(1|true|yes|on)$/i;
 const SAFE_PRESET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_MODEL_PART = /^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$/;
@@ -58,6 +67,7 @@ Scheduler workflow: understand the request; map lanes and dependencies; dispatch
 type RoleName = (typeof ROLE_NAMES)[number];
 type SpecialistName = (typeof SPECIALIST_NAMES)[number];
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+type SessionRole = "unknown" | "main" | "child";
 
 interface RolePreset {
   provider: string;
@@ -239,6 +249,12 @@ function fullModelName(role: RolePreset): string {
   return `${role.provider}/${role.model}`;
 }
 
+function isAnthropicOAuth(ctx: ExtensionContext): boolean {
+  return ctx.model?.provider === "anthropic" &&
+    ctx.model?.api === "anthropic-messages" &&
+    ctx.modelRegistry.isUsingOAuth(ctx.model);
+}
+
 function buildPresetPrompt(name: string, preset: Preset): string {
   const specialistLines = SPECIALIST_NAMES.map((role) => {
     const config = preset[role];
@@ -260,7 +276,9 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   ensurePackageAssets(PACKAGE_ROOT);
 
   let active = false;
-  let childSession = false;
+  let sessionRole: SessionRole = "unknown";
+  let pendingActivation: { shouldActivate: boolean; requestedPreset?: string } | undefined;
+  let childProjectContext: string | undefined;
   let nudgeSentThisUserTurn = false;
   let stopToolRegistered = false;
   let activePresetName: string | undefined;
@@ -287,7 +305,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   }
 
   function updateStatus(ctx: ExtensionContext): void {
-    const text = active && !childSession
+    const text = active && sessionRole === "main"
       ? `orchestrator${activePresetName ? `:${activePresetName}` : ""}`
       : undefined;
     ctx.ui.setStatus(
@@ -459,6 +477,12 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   pi.registerCommand("omps", {
     description: "Manage orchestration: /omps [on [preset]|off|status|presets|preset <name>|uninstall]",
     handler: async (args, ctx) => {
+      if (sessionRole === "child") return;
+      if (sessionRole === "unknown") {
+        sessionRole = "main";
+        pendingActivation = undefined;
+        updateStatus(ctx);
+      }
       const parts = args.trim().split(/\s+/).filter(Boolean);
       const action = (parts[0] ?? "on").toLowerCase();
 
@@ -526,7 +550,9 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    childSession = false;
+    sessionRole = "unknown";
+    pendingActivation = undefined;
+    childProjectContext = undefined;
     active = false;
     activePresetName = undefined;
     activePreset = undefined;
@@ -534,12 +560,29 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     originalThinking = undefined;
     nudgeSentThisUserTurn = false;
 
+    let basePrompt = "";
+    try {
+      basePrompt = ctx.getSystemPrompt();
+    } catch {
+      basePrompt = "";
+    }
+    if (basePrompt && CHILD_AGENT_TAG.test(basePrompt)) {
+      sessionRole = "child";
+      return;
+    }
+
     const flagPreset = pi.getFlag("omps-preset");
     const requestedPreset = typeof flagPreset === "string" && flagPreset.trim()
       ? flagPreset.trim()
       : envPreset();
     const shouldActivate = pi.getFlag("omps") === true || envEnabled() || requestedPreset !== undefined;
 
+    if (!basePrompt) {
+      pendingActivation = { shouldActivate, requestedPreset };
+      return;
+    }
+
+    sessionRole = "main";
     if (shouldActivate) {
       try {
         await activate(ctx, requestedPreset);
@@ -551,23 +594,49 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("input", (event) => {
-    if (!active || childSession) return;
+    if (!active || sessionRole !== "main") return;
     if (event.source !== "extension") nudgeSentThisUserTurn = false;
   });
 
-  pi.on("before_agent_start", (event, ctx) => {
-    // pi-subagents places this tag in every child session. The orchestrator
-    // prompt and main-session gates must never be injected into a specialist.
+  pi.on("before_agent_start", async (event, ctx) => {
     if (CHILD_AGENT_TAG.test(event.systemPrompt)) {
-      childSession = true;
+      pendingActivation = undefined;
+      if (sessionRole !== "child" && active) await deactivate(ctx);
+      sessionRole = "child";
+    } else if (sessionRole === "unknown") {
+      sessionRole = "main";
+      const pending = pendingActivation;
+      pendingActivation = undefined;
+      if (pending?.shouldActivate) {
+        try {
+          await activate(ctx, pending.requestedPreset);
+        } catch (error) {
+          report(ctx, error instanceof Error ? error.message : String(error), "error");
+        }
+      }
       updateStatus(ctx);
-      return;
+    }
+
+    if (sessionRole === "child") {
+      if (childProjectContext === undefined) {
+        childProjectContext = renderProjectContext(loadProjectContextFiles({
+          cwd: ctx.cwd,
+          agentDir: getAgentDir(),
+        }));
+      }
+      const toolGuidance = renderToolGuidance(event.systemPromptOptions);
+      let systemPrompt = injectToolGuidance(event.systemPrompt, toolGuidance);
+      systemPrompt = injectSharedProjectContext(systemPrompt, childProjectContext);
+      if (isAnthropicOAuth(ctx)) systemPrompt = removeChildPiIdentity(systemPrompt);
+      return { systemPrompt };
     }
 
     if (!active || !activePreset || !activePresetName) return;
 
+    let systemPrompt = event.systemPrompt;
+    if (isAnthropicOAuth(ctx)) systemPrompt = removeMainPiIdentity(systemPrompt);
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${ORCHESTRATOR_PROMPT}\n\n${buildPresetPrompt(activePresetName, activePreset)}`,
+      systemPrompt: `${systemPrompt}\n\n${ORCHESTRATOR_PROMPT}\n\n${buildPresetPrompt(activePresetName, activePreset)}`,
       message: {
         customType: "oh-my-pi-slim:phase-reminder",
         content: PHASE_REMINDER,
@@ -577,7 +646,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("tool_call", (event) => {
-    if (!active || childSession) return;
+    if (!active || sessionRole !== "main") return;
 
     if (event.toolName === STEER_TOOL) {
       const input = event.input as { agent_id?: unknown };
@@ -655,7 +724,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("tool_result", async (event, ctx) => {
-    if (!active || childSession || event.toolName !== STEER_TOOL || event.isError) return;
+    if (!active || sessionRole !== "main" || event.toolName !== STEER_TOOL || event.isError) return;
     const input = event.input as { agent_id?: unknown; message?: unknown };
     if (typeof input.agent_id !== "string" || typeof input.message !== "string") return;
     if (!isCompletedSteerRejection(toolResultText(event.content), input.agent_id)) return;
@@ -708,7 +777,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
 
   pi.on("tool_execution_end", (event) => {
     operationClaims.releaseToolCall(event.toolCallId);
-    if (!active || childSession || nudgeSentThisUserTurn || !FILE_TOOLS.has(event.toolName)) return;
+    if (!active || sessionRole !== "main" || nudgeSentThisUserTurn || !FILE_TOOLS.has(event.toolName)) return;
 
     nudgeSentThisUserTurn = true;
     pi.sendMessage(
@@ -733,6 +802,9 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       if (originalModel) await pi.setModel(originalModel);
       if (originalThinking) pi.setThinkingLevel(originalThinking);
     }
+    sessionRole = "unknown";
+    pendingActivation = undefined;
+    childProjectContext = undefined;
     activePresetName = undefined;
     activePreset = undefined;
     originalModel = undefined;

@@ -3,10 +3,13 @@ description: Strategic technical advisor. Use for architecture decisions, comple
 display_name: Oracle
 disallowed_tools: Agent, get_subagent_result, steer_subagent, stop_subagent, ask_user_question
 extensions: true
-exclude_extensions: oh-my-pi-slim
 skills: true
 prompt_mode: replace
 ---
+
+<omps-tool-guidance/>
+
+<omps-shared-context/>
 
 You are Oracle - a strategic technical advisor and code reviewer.
 

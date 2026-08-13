@@ -35,9 +35,15 @@ for (const name of AGENTS) {
     `${name}.md must deny only orchestration and direct-user-question tools`,
   );
   check(/\nextensions:\s*true\b/.test(text), `${name}.md must inherit extension tools`);
+  check(!/\nexclude_extensions:/.test(text), `${name}.md must not exclude extensions`);
+  check(text.includes("\n<omps-tool-guidance/>\n"), `${name}.md must include the tool guidance marker`);
+  check(text.includes("\n<omps-shared-context/>\n"), `${name}.md must include the shared context marker`);
+  const toolMarkerIndex = text.indexOf("<omps-tool-guidance/>");
+  const contextMarkerIndex = text.indexOf("<omps-shared-context/>");
+  const roleIndex = text.indexOf("You are ");
   check(
-    /\nexclude_extensions:\s*oh-my-pi-slim\b/.test(text),
-    `${name}.md must exclude only the main-session orchestration extension`,
+    toolMarkerIndex < contextMarkerIndex && contextMarkerIndex < roleIndex,
+    `${name}.md markers must be ordered tool guidance, shared context, specialist role`,
   );
 }
 
@@ -89,8 +95,10 @@ check(orchestrator.includes("<orchestration-preset>"), "orchestrator must use th
 
 const extensionPath = join(ROOT, "extensions", "oh-my-pi-slim", "index.ts");
 const bootstrapPath = join(ROOT, "extensions", "oh-my-pi-slim", "bootstrap.ts");
+const promptContextPath = join(ROOT, "extensions", "oh-my-pi-slim", "prompt-context.ts");
 const extension = read(extensionPath);
 const bootstrap = read(bootstrapPath);
+const promptContext = read(promptContextPath);
 for (const role of AGENTS) check(extension.includes(`\"${role}\"`), `extension allowlist missing ${role}`);
 check(extension.includes('pi.registerFlag("omps-preset"'), "extension must register --omps-preset");
 check(extension.includes("CONFIG_DIR_NAME"), "extension must use Pi's project config directory constant");
@@ -128,9 +136,68 @@ check(
   "package scripts must not install rpiv-ask-user-question automatically",
 );
 check(extension.includes("CHILD_AGENT_TAG"), "extension must avoid injecting orchestrator into child sessions");
+check(
+  extension.includes('const CHILD_AGENT_TAG = /^<active_agent\\s+name="[^\"]+"\\s*\\/>/;'),
+  "child detection must only match an active_agent tag at the start of the prompt",
+);
+check(
+  extension.includes('if (sessionRole !== "child" && active) await deactivate(ctx);'),
+  "before_agent_start must restore accidentally activated child sessions",
+);
+const commandHandlerStart = extension.indexOf('pi.registerCommand("omps"');
+const commandHandlerEnd = extension.indexOf('pi.on("session_start"', commandHandlerStart);
+const commandHandler = extension.slice(commandHandlerStart, commandHandlerEnd);
+check(commandHandler.includes('if (sessionRole === "child") return;'), "/omps must remain inert in child sessions");
+check(!commandHandler.includes('if (sessionRole !== "main") return;'), "/omps must not silently return for an unknown session role");
+check(
+  commandHandler.includes('if (sessionRole === "unknown") {') &&
+    commandHandler.includes('sessionRole = "main";') &&
+    commandHandler.includes('pendingActivation = undefined;'),
+  "/omps must safely classify an unknown interactive session as main and clear pending activation",
+);
+check(!commandHandler.includes("pending.shouldActivate"), "/omps must not auto-activate a pending startup request before handling the explicit command");
+check(
+  extension.indexOf("CHILD_AGENT_TAG.test(event.systemPrompt)") < extension.indexOf('sessionRole === "unknown"', extension.indexOf('pi.on("before_agent_start"')),
+  "before_agent_start must recheck the child tag before unknown-role handling",
+);
+check(extension.includes("ctx.getSystemPrompt()"), "session_start must inspect the built base system prompt");
+check(extension.indexOf("ctx.getSystemPrompt()") < extension.indexOf('pi.getFlag("omps-preset")'), "session_start must identify child sessions before activation-related flag handling");
+check(extension.includes("loadProjectContextFiles({"), "child sessions must use Pi's project context loader");
+check(extension.includes("agentDir: getAgentDir()"), "child context loading must include Pi's agent directory");
+const beforeAgentStart = extension.slice(
+  extension.indexOf('pi.on("before_agent_start"'),
+  extension.indexOf('pi.on("tool_call"', extension.indexOf('pi.on("before_agent_start"')),
+);
+check(
+  beforeAgentStart.includes("renderToolGuidance(event.systemPromptOptions)"),
+  "child tool guidance must use the current turn's event.systemPromptOptions active tool view",
+);
+check(
+  beforeAgentStart.indexOf("injectToolGuidance(event.systemPrompt, toolGuidance)") <
+    beforeAgentStart.indexOf("injectSharedProjectContext(systemPrompt, childProjectContext)"),
+  "child tool guidance must be injected before cached project context",
+);
+check(
+  extension.includes('ctx.model?.provider === "anthropic"') &&
+    extension.includes('ctx.model?.api === "anthropic-messages"') &&
+    extension.includes("ctx.modelRegistry.isUsingOAuth(ctx.model)"),
+  "identity handling must require Anthropic provider, Messages API, and registry-confirmed OAuth",
+);
+check(
+  beforeAgentStart.indexOf('if (!active || !activePreset || !activePresetName) return;') < beforeAgentStart.indexOf("removeMainPiIdentity(systemPrompt)"),
+  "inactive main sessions must return before Anthropic OAuth identity trimming",
+);
+check(!extension.includes("before_provider_request"), "extension must not rewrite provider payloads");
+check(!/access[_-]?token|id[_-]?token|refresh[_-]?token/i.test(extension), "extension must not parse OAuth tokens");
 check(extension.includes("ensurePackageAssets(PACKAGE_ROOT)"), "package extension must bootstrap undeclarable agent assets");
 check(bootstrap.includes("AGENT_NAMES"), "bootstrap must install the five agent definitions");
 check(bootstrap.includes("removePackageAssets"), "bootstrap must support reversible package cleanup");
+check(promptContext.includes("prompt.startsWith(MAIN_PI_IDENTITY)"), "main identity removal must be prefix-only");
+check(promptContext.includes("CHILD_PROMPT_PREFIX"), "child identity removal must use the narrow child prompt prefix");
+check(
+  read(join(ROOT, "scripts", "install.mjs")).includes('target: join(extensionDir, "prompt-context.ts")'),
+  "legacy install must copy the prompt-context helper",
+);
 
 const readme = read(join(ROOT, "README.md"));
 check(!readme.includes("non-blocking `tool_result`"), "README must not describe waited auto-resume as non-blocking");
@@ -143,7 +210,7 @@ check(
 );
 
 const packageJson = JSON.parse(read(join(ROOT, "package.json")));
-check(packageJson.version === "0.4.0", "independent-package release must be version 0.4.0");
+check(packageJson.version === "0.5.0", "independent-package release must be version 0.5.0");
 check(
   !packageJson.dependencies || Object.keys(packageJson.dependencies).length === 0,
   "oh-my-pi-slim must not install third-party Pi packages as dependencies",
@@ -158,6 +225,157 @@ const subagentsConfig = JSON.parse(read(join(ROOT, "config", "subagents.json")))
 check(subagentsConfig.disableDefaultAgents === true, "config must disable default agents");
 check(subagentsConfig.fallbackSubagent === "none", "config must disable fallback agents");
 check(subagentsConfig.maxSubagentDepth === 1, "config must disable nested delegation at depth 1");
+
+const {
+  CHILD_PI_IDENTITY_LINE,
+  MAIN_PI_IDENTITY,
+  SHARED_CONTEXT_MARKER,
+  TOOL_GUIDANCE_MARKER,
+  injectSharedProjectContext,
+  injectToolGuidance,
+  removeChildPiIdentity,
+  removeMainPiIdentity,
+  renderProjectContext,
+  renderToolGuidance,
+} = await import(new URL("../extensions/oh-my-pi-slim/prompt-context.ts", import.meta.url));
+{
+  const guidancePrefix = "Available tools:\n";
+  const guidanceSuffix = "\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n\nGuidelines:\n";
+  const fixedGuidelines = "- Be concise in your responses\n- Show file paths clearly when working with files";
+  check(
+    renderToolGuidance({
+      selectedTools: ["custom", "read", "hidden"],
+      toolSnippets: { read: "Read files", custom: "Run custom work", hidden: "" },
+    }) === `${guidancePrefix}- custom: Run custom work\n- read: Read files${guidanceSuffix}${fixedGuidelines}`,
+    "tool guidance must list only active tools with truthy snippets in selectedTools order",
+  );
+  check(
+    renderToolGuidance({ selectedTools: ["custom"], toolSnippets: {} }) ===
+      `${guidancePrefix}(none)${guidanceSuffix}${fixedGuidelines}`,
+    "tool guidance must render (none) when no active tool has a visible snippet",
+  );
+  check(
+    renderToolGuidance({
+      selectedTools: ["grep"],
+      promptGuidelines: [
+        "  Prefer exact matches  ",
+        "",
+        "Prefer exact matches",
+        " Be concise in your responses ",
+        " Show file paths clearly when working with files ",
+      ],
+    }) === `${guidancePrefix}(none)${guidanceSuffix}` +
+      "- Prefer exact matches\n- Be concise in your responses\n- Show file paths clearly when working with files",
+    "tool guidance must trim, ignore empty, and first-occurrence deduplicate custom and fixed guidelines",
+  );
+  const bashFallback = renderToolGuidance({
+    selectedTools: ["bash"],
+    toolSnippets: { bash: "Run commands" },
+  });
+  check(
+    bashFallback.includes("Guidelines:\n- Use bash for file operations like ls, rg, find\n"),
+    "tool guidance must add Pi's bash file-operation fallback when grep, find, and ls are inactive",
+  );
+  const noBashFallback = renderToolGuidance({
+    selectedTools: ["bash", "grep"],
+    toolSnippets: { bash: "Run commands", grep: "Search files" },
+  });
+  check(
+    !noBashFallback.includes("Use bash for file operations like ls, rg, find"),
+    "tool guidance must omit the bash fallback when grep, find, or ls is active",
+  );
+  const defaultTools = renderToolGuidance({ toolSnippets: { bash: "Run commands" } });
+  check(
+    defaultTools.startsWith(`${guidancePrefix}- bash: Run commands${guidanceSuffix}`) &&
+      defaultTools.includes("Use bash for file operations like ls, rg, find"),
+    "tool guidance must default selectedTools to read, bash, edit, write",
+  );
+
+  const guidance = renderToolGuidance({ selectedTools: [] });
+  const wrappedGuidance = `<omps-tool-guidance>\n${guidance}\n</omps-tool-guidance>`;
+  const markerPrompt = `environment\n${TOOL_GUIDANCE_MARKER}\n${SHARED_CONTEXT_MARKER}\nrole`;
+  check(
+    injectToolGuidance(markerPrompt, guidance) ===
+      `environment\n${wrappedGuidance}\n${SHARED_CONTEXT_MARKER}\nrole`,
+    "tool guidance placeholder must be replaced with the stable wrapper",
+  );
+  const promptWithMarkerAndWrapper = `${TOOL_GUIDANCE_MARKER}\nold ${wrappedGuidance}`;
+  const placeholderFirst = injectToolGuidance(promptWithMarkerAndWrapper, guidance);
+  check(
+    placeholderFirst.startsWith(wrappedGuidance) && !placeholderFirst.includes(TOOL_GUIDANCE_MARKER),
+    "tool guidance placeholder replacement must take priority when a wrapper also exists",
+  );
+  const alreadyWrapped = `environment\n${wrappedGuidance}\nrole`;
+  const changedWrappedGuidance = "<omps-tool-guidance>\nchanged guidance\n</omps-tool-guidance>";
+  check(
+    injectToolGuidance(alreadyWrapped, "changed guidance") ===
+      `environment\n${changedWrappedGuidance}\nrole`,
+    "existing tool guidance wrappers must be updated for the current turn",
+  );
+  check(
+    injectToolGuidance("prompt without marker", guidance) ===
+      `prompt without marker\n\n${wrappedGuidance}`,
+    "tool guidance injection must safely append when marker and wrapper are missing",
+  );
+  const damagedWrapper = "environment\n<omps-tool-guidance>\nold incomplete guidance\nrole";
+  check(
+    injectToolGuidance(damagedWrapper, "changed guidance") ===
+      `${damagedWrapper}\n\n${changedWrappedGuidance}`,
+    "damaged tool guidance wrappers must be preserved while a fresh wrapper is appended",
+  );
+
+  const files = [
+    { path: "/global/AGENTS.md", content: "global rules" },
+    { path: "/project/CLAUDE.md", content: "project rules" },
+  ];
+  const expected = "\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n" +
+    '<project_instructions path="/global/AGENTS.md">\nglobal rules\n</project_instructions>\n\n' +
+    '<project_instructions path="/project/CLAUDE.md">\nproject rules\n</project_instructions>\n\n' +
+    "</project_context>\n";
+  const context = renderProjectContext(files);
+  check(context === expected, "project context rendering must exactly match Pi formatting and preserve order");
+  check(renderProjectContext([]) === "", "empty project context must render as an empty string");
+  const base = `prefix\n${SHARED_CONTEXT_MARKER}\nspecialist`;
+  const injected = injectSharedProjectContext(base, context);
+  check(injected === `prefix\n${context}\nspecialist`, "shared context must replace the specialist marker");
+  const roleMentionsContext = `prefix\n${SHARED_CONTEXT_MARKER}\nrole describes <project_context> semantics`;
+  const injectedWithRoleMention = injectSharedProjectContext(roleMentionsContext, context);
+  check(
+    injectedWithRoleMention === `prefix\n${context}\nrole describes <project_context> semantics`,
+    "shared context marker must take priority over project_context text in specialist role instructions",
+  );
+  const markerWithExistingContext = `${context}prefix\n${SHARED_CONTEXT_MARKER}\nspecialist`;
+  check(
+    injectSharedProjectContext(markerWithExistingContext, context) === `${context}prefix\n\nspecialist`,
+    "an existing matching shared context must only cause the marker to be removed",
+  );
+  const roleOnlyMentionsContext = "prefix\nrole describes <project_context> semantics";
+  check(
+    injectSharedProjectContext(roleOnlyMentionsContext, context) === `${roleOnlyMentionsContext}${context}`,
+    "project_context text in role instructions must not prevent real context from being appended",
+  );
+  check(injectSharedProjectContext(injected, context) === injected, "shared context injection must be idempotent");
+  check(injectSharedProjectContext(injectedWithRoleMention, context) === injectedWithRoleMention, "already-injected prompts with role project_context text must remain unchanged");
+  check(injectSharedProjectContext(`prefix\n${SHARED_CONTEXT_MARKER}\nspecialist`, "") === "prefix\n\nspecialist", "empty context must remove the marker without creating a section");
+  check(injectSharedProjectContext("prompt without marker", context) === `prompt without marker${context}`, "missing marker must safely append context");
+  check(injectSharedProjectContext("prompt without marker", "") === "prompt without marker", "empty context without a marker must leave the prompt unchanged");
+  const mainPrompt = `${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read`;
+  check(removeMainPiIdentity(mainPrompt) === "\n\nAvailable tools:\n- read", "main identity removal must preserve Available tools and later content");
+  check(removeMainPiIdentity(`${MAIN_PI_IDENTITY}\n${MAIN_PI_IDENTITY}`).endsWith(MAIN_PI_IDENTITY), "main identity removal must affect only the first exact prefix");
+  const middleMainIdentity = `prefix\n${MAIN_PI_IDENTITY}\nsuffix`;
+  check(removeMainPiIdentity(middleMainIdentity) === middleMainIdentity, "main identity removal must not affect identity text in the middle");
+  check(removeMainPiIdentity("no main identity") === "no main identity", "main identity removal must be unchanged without its exact anchor");
+  const childTag = '<active_agent name="fixer"/>';
+  const childPrompt = `${childTag}\n\n${CHILD_PI_IDENTITY_LINE}You have been invoked to work.`;
+  check(removeChildPiIdentity(childPrompt) === `${childTag}\n\nYou have been invoked to work.`, "child identity removal must preserve the active_agent tag and invocation text");
+  const repeatedChildIdentity = `${childTag}\n\n${CHILD_PI_IDENTITY_LINE}${CHILD_PI_IDENTITY_LINE}`;
+  check(removeChildPiIdentity(repeatedChildIdentity).endsWith(CHILD_PI_IDENTITY_LINE), "child identity removal must affect only the first exact prefixed identity");
+  const middleChildIdentity = `${childTag}\n\nrole instructions\n${CHILD_PI_IDENTITY_LINE}invocation`;
+  check(removeChildPiIdentity(middleChildIdentity) === middleChildIdentity, "child identity removal must not affect identity text in the middle");
+  check(removeChildPiIdentity(`${CHILD_PI_IDENTITY_LINE}no tag`) === `${CHILD_PI_IDENTITY_LINE}no tag`, "child identity removal must require the active_agent prompt prefix");
+  check(removeChildPiIdentity("no child identity") === "no child identity", "child identity removal must be unchanged without its exact anchor");
+  check(mainPrompt === `${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read`, "non-OAuth flow must retain identity by not invoking the trimming helper");
+}
 
 // Exercise the completed-steer compatibility logic with controllable live-session mocks.
 const { cancelledResumeOutcome, resumeCompletedRecord } = await import(
@@ -449,6 +667,10 @@ try {
       `install missed ${role}`,
     );
   }
+  check(
+    read(join(tempAgentDir, "extensions", "oh-my-pi-slim", "prompt-context.ts")) === promptContext,
+    "legacy install must copy the prompt-context helper",
+  );
 
   const uninstall = spawnSync(process.execPath, [join(ROOT, "scripts", "uninstall.mjs")], {
     cwd: ROOT,

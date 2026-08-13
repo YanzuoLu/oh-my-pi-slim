@@ -3,10 +3,13 @@ description: UI/UX design, review, and implementation. Use for styling, responsi
 display_name: Designer
 disallowed_tools: Agent, get_subagent_result, steer_subagent, stop_subagent, ask_user_question
 extensions: true
-exclude_extensions: oh-my-pi-slim
 skills: true
 prompt_mode: replace
 ---
+
+<omps-tool-guidance/>
+
+<omps-shared-context/>
 
 You are a Designer - a frontend UI/UX specialist who creates and reviews intentional, polished experiences.
 

@@ -74,7 +74,7 @@ pi install git:github.com/YanzuoLu/oh-my-pi-slim
 To pin the current release instead of tracking `main`:
 
 ```bash
-pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.4.0
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.0
 ```
 
 `oh-my-pi-slim` does **not** declare, install, bundle, enable, update, or remove third-party Pi packages. Every dependency remains independently visible and user-managed through `pi list`, `pi install`, `pi update`, and `pi remove`.
@@ -287,7 +287,11 @@ Every specialist uses:
 prompt_mode: replace
 ```
 
-All specialists inherit available Pi extension tools except the main-session-only `oh-my-pi-slim` extension, which is excluded to prevent child sessions from applying the orchestrator preset or prompt.
+All specialists load the full available Pi extension set, including `oh-my-pi-slim`. On `session_start`, OMPS detects the pi-subagents `<active_agent>` marker and keeps orchestrator activation, preset/model gates, status, and phase reminders inert in that child session. Its child-only behavior is to load global and project `AGENTS.md`/`CLAUDE.md` context with Pi's normal context-file selection rules for the child's effective working directory, then inject that shared context before the specialist role. `SYSTEM.md` and `APPEND_SYSTEM.md` are not inherited.
+
+Each child dynamically renders Pi-style `Available tools` and `Guidelines` from its own active tool view instead of copying the main session's tools. Tools without a `promptSnippet` remain usable through their provider tool definition but do not appear in the short list. Tools registered late are reflected from the next turn after `turn_end` re-narrows the active set and rebuilds the prompt.
+
+For active main orchestrator and specialist child sessions using Anthropic Messages models with OAuth, the provider's official Claude Code identity is authoritative: OMPS removes only the exact conflicting Pi identity text while preserving tools and the rest of the prompt. Inactive main sessions and other providers retain Pi's identity text.
 
 No specialist defines a `tools:` allowlist. Their only explicit tool denylist is:
 
@@ -327,7 +331,7 @@ pi update --extensions
 Pinned refs do not move automatically. Install the new release ref explicitly:
 
 ```bash
-pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.4.0
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.0
 ```
 
 On the next startup, the package bootstrap updates unchanged managed agent files and preserves user-edited preset configuration.
@@ -391,6 +395,7 @@ agents/                                Five pi-subagents Markdown definitions
 config/subagents.json                  Strict pi-subagents settings
 extensions/oh-my-pi-slim/index.ts      Main-session extension and policy gates
 extensions/oh-my-pi-slim/bootstrap.ts  Direct-package asset bootstrap and cleanup
+extensions/oh-my-pi-slim/prompt-context.ts  Shared project-context and identity helpers
 extensions/oh-my-pi-slim/orchestrator.md
 package-lock.json                      Dependency-free package lock
 scripts/install.mjs
