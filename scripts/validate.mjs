@@ -311,7 +311,7 @@ check(
 );
 
 const packageJson = JSON.parse(read(join(ROOT, "package.json")));
-check(packageJson.version === "0.5.2", "independent-package release must be version 0.5.2");
+check(packageJson.version === "0.5.3", "independent-package release must be version 0.5.3");
 check(
   !packageJson.dependencies || Object.keys(packageJson.dependencies).length === 0,
   "oh-my-pi-slim must not install third-party Pi packages as dependencies",

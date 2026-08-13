@@ -295,6 +295,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   let activePreset: Preset | undefined;
   let originalModel: ExtensionContext["model"];
   let originalThinking: ThinkingLevel | undefined;
+  let sessionCtx: ExtensionContext | undefined;
   const resumeLocks = new Map<string, Promise<void>>();
   const operationClaims = new AgentOperationClaims();
   const loadedPiDocumentationSkill = loadSkillsFromDir({
@@ -509,6 +510,26 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
 
   pi.registerCommand("preset", {
     description: "Switch the oh-my-pi-slim preset: /preset <name>",
+    getArgumentCompletions: (argumentPrefix) => {
+      if (!sessionCtx) return null;
+      let config: PresetConfig;
+      try {
+        config = loadPresetConfig(sessionCtx);
+      } catch {
+        return null;
+      }
+      const query = argumentPrefix.trim().toLowerCase();
+      const items = Object.entries(config.presets)
+        .filter(([name]) => name.toLowerCase().includes(query))
+        .map(([name, preset]) => ({
+          value: name,
+          label: name,
+          description: name === config.defaultPreset
+            ? `${fullModelName(preset.orchestrator)} ${preset.orchestrator.thinking} · default`
+            : `${fullModelName(preset.orchestrator)} ${preset.orchestrator.thinking}`,
+        }));
+      return items.length > 0 ? items : null;
+    },
     handler: async (args, ctx) => {
       if (sessionRole === "child") return;
       if (sessionRole === "unknown") {
@@ -613,6 +634,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    sessionCtx = ctx;
     sessionRole = "unknown";
     pendingActivation = undefined;
     childProjectContext = undefined;

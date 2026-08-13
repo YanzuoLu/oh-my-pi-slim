@@ -74,7 +74,7 @@ pi install git:github.com/YanzuoLu/oh-my-pi-slim
 To pin the current release instead of tracking `main`:
 
 ```bash
-pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.2
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.3
 ```
 
 `oh-my-pi-slim` does **not** declare, install, bundle, enable, update, or remove third-party Pi packages. Every dependency remains independently visible and user-managed through `pi list`, `pi install`, `pi update`, and `pi remove`.
@@ -345,7 +345,7 @@ pi update --extensions
 Pinned refs do not move automatically. Install the new release ref explicitly:
 
 ```bash
-pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.2
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.3
 ```
 
 On the next startup, the package bootstrap updates unchanged managed agent files and preserves user-edited preset configuration. The extension reads the updated private `pi-documentation` skill from the package checkout when OMPS is active.
