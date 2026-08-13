@@ -74,7 +74,7 @@ pi install git:github.com/YanzuoLu/oh-my-pi-slim
 To pin the current release instead of tracking `main`:
 
 ```bash
-pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.0
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.1
 ```
 
 `oh-my-pi-slim` does **not** declare, install, bundle, enable, update, or remove third-party Pi packages. Every dependency remains independently visible and user-managed through `pi list`, `pi install`, `pi update`, and `pi remove`.
@@ -219,20 +219,29 @@ Environment-variable activation is also supported:
 OMPS_ENABLE=1 OMPS_PRESET=balanced pi
 ```
 
-Inside an existing Pi session:
+Switch the current session directly:
+
+```text
+/preset economy
+```
+
+`/preset` without a name lists the available preset names, the configured default, and `Usage: /preset <name>`; it does not activate a preset.
+
+Naming a preset enables oh-my-pi-slim when it is inactive, then immediately updates the main orchestrator model, thinking level, active preset prompt, and status. New specialist sessions use the newly selected preset; existing and resumed specialist sessions retain the model with which their Pi session was created.
+
+The broader management command remains available:
 
 ```text
 /omps on
 /omps on balanced
-/omps preset economy
 /omps presets
 /omps status
 /omps off
 ```
 
-`/omps off` disables the orchestration prompt and restores the model and thinking level that were active before the preset was enabled. The extension also restores that pre-preset state during session shutdown, so a startup preset does not permanently replace Pi's normal default model.
+`/omps preset economy` remains supported as a compatibility entry point, but `/preset economy` is the recommended in-session form.
 
-Changing a preset affects the main orchestrator and new specialist launches. Already-running and resumed specialist sessions retain the model with which their Pi session was created.
+`/omps off` disables the orchestration prompt and restores the model and thinking level that were active before the preset was first enabled. Switching between presets does not replace that original snapshot. The extension also restores the pre-preset state during session shutdown, so a startup preset does not permanently replace Pi's normal default model.
 
 ## Preset enforcement
 
@@ -331,7 +340,7 @@ pi update --extensions
 Pinned refs do not move automatically. Install the new release ref explicitly:
 
 ```bash
-pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.0
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.5.1
 ```
 
 On the next startup, the package bootstrap updates unchanged managed agent files and preserves user-edited preset configuration.

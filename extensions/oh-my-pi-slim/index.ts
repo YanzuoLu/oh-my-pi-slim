@@ -249,6 +249,10 @@ function fullModelName(role: RolePreset): string {
   return `${role.provider}/${role.model}`;
 }
 
+function availablePresetsMessage(config: PresetConfig): string {
+  return `Available presets: ${Object.keys(config.presets).join(", ")}. Default: ${config.defaultPreset ?? "none"}.\nUsage: /preset <name>`;
+}
+
 function isAnthropicOAuth(ctx: ExtensionContext): boolean {
   return ctx.model?.provider === "anthropic" &&
     ctx.model?.api === "anthropic-messages" &&
@@ -473,6 +477,36 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     originalThinking = undefined;
     updateStatus(ctx);
   }
+
+  pi.registerCommand("preset", {
+    description: "Switch the oh-my-pi-slim preset: /preset <name>",
+    handler: async (args, ctx) => {
+      if (sessionRole === "child") return;
+      if (sessionRole === "unknown") {
+        sessionRole = "main";
+        pendingActivation = undefined;
+        updateStatus(ctx);
+      }
+
+      const requestedPreset = args.trim();
+      if (!requestedPreset) {
+        try {
+          const config = loadPresetConfig(ctx);
+          report(ctx, availablePresetsMessage(config), "info");
+        } catch (error) {
+          report(ctx, error instanceof Error ? error.message : String(error), "error");
+        }
+        return;
+      }
+
+      try {
+        await activate(ctx, requestedPreset);
+        report(ctx, `oh-my-pi-slim enabled with preset "${activePresetName}".`, "info");
+      } catch (error) {
+        report(ctx, error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
 
   pi.registerCommand("omps", {
     description: "Manage orchestration: /omps [on [preset]|off|status|presets|preset <name>|uninstall]",

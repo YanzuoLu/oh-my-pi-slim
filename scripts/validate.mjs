@@ -101,6 +101,7 @@ const bootstrap = read(bootstrapPath);
 const promptContext = read(promptContextPath);
 for (const role of AGENTS) check(extension.includes(`\"${role}\"`), `extension allowlist missing ${role}`);
 check(extension.includes('pi.registerFlag("omps-preset"'), "extension must register --omps-preset");
+check(extension.includes('pi.registerCommand("preset"'), "extension must register the standalone /preset command");
 check(extension.includes("CONFIG_DIR_NAME"), "extension must use Pi's project config directory constant");
 check(extension.includes("loadPresetConfig"), "extension must load preset configuration");
 check(extension.includes("pi.setModel(orchestratorModel)"), "extension must apply the orchestrator model");
@@ -144,7 +145,44 @@ check(
   extension.includes('if (sessionRole !== "child" && active) await deactivate(ctx);'),
   "before_agent_start must restore accidentally activated child sessions",
 );
+const presetCommandStart = extension.indexOf('pi.registerCommand("preset"');
 const commandHandlerStart = extension.indexOf('pi.registerCommand("omps"');
+const presetCommand = extension.slice(presetCommandStart, commandHandlerStart);
+check(presetCommandStart !== -1, "/preset command handler must exist");
+check(
+  presetCommand.includes('description: "Switch the oh-my-pi-slim preset: /preset <name>"'),
+  "/preset description must document the required preset name",
+);
+check(presetCommand.includes('if (sessionRole === "child") return;'), "/preset must remain inert in child sessions");
+check(
+  presetCommand.includes('if (sessionRole === "unknown") {') &&
+    presetCommand.includes('sessionRole = "main";') &&
+    presetCommand.includes("pendingActivation = undefined;"),
+  "/preset must safely classify an unknown interactive session as main and clear pending activation",
+);
+check(
+  presetCommand.includes("const requestedPreset = args.trim();") &&
+    presetCommand.includes("await activate(ctx, requestedPreset);"),
+  "/preset <name> must trim the full argument and activate the requested preset directly",
+);
+const emptyPresetStart = presetCommand.indexOf("if (!requestedPreset) {");
+const directPresetStart = presetCommand.indexOf("\n\n      try {", emptyPresetStart);
+const emptyPresetHandler = presetCommand.slice(emptyPresetStart, directPresetStart);
+check(
+  emptyPresetStart !== -1 &&
+    directPresetStart !== -1 &&
+    emptyPresetHandler.includes("const config = loadPresetConfig(ctx);") &&
+    emptyPresetHandler.includes("availablePresetsMessage(config)") &&
+    emptyPresetHandler.includes("return;") &&
+    !emptyPresetHandler.includes("activate(ctx"),
+  "/preset without arguments must load config, report available presets/default/usage, and return without activation",
+);
+check(
+  extension.includes("if (!active) {") &&
+    extension.includes("originalModel = ctx.model;") &&
+    extension.includes("originalThinking = pi.getThinkingLevel() as ThinkingLevel;"),
+  "preset switching must preserve the original model/thinking snapshot after first activation",
+);
 const commandHandlerEnd = extension.indexOf('pi.on("session_start"', commandHandlerStart);
 const commandHandler = extension.slice(commandHandlerStart, commandHandlerEnd);
 check(commandHandler.includes('if (sessionRole === "child") return;'), "/omps must remain inert in child sessions");
@@ -202,6 +240,16 @@ check(
 const readme = read(join(ROOT, "README.md"));
 check(!readme.includes("non-blocking `tool_result`"), "README must not describe waited auto-resume as non-blocking");
 check(
+  readme.includes("/preset economy") &&
+    readme.includes("`/preset` without a name lists the available preset names") &&
+    readme.includes("Usage: /preset <name>") &&
+    readme.includes("/omps preset economy") &&
+    readme.includes("immediately updates the main orchestrator model, thinking level, active preset prompt, and status") &&
+    readme.includes("New specialist sessions use the newly selected preset") &&
+    readme.includes("existing and resumed specialist sessions retain the model"),
+  "README Launching must document direct /preset switching, empty-argument usage, compatibility, and session model semantics",
+);
+check(
   readme.includes("validated against pi-subagents 0.15.0/current cross-package registry shape") &&
     readme.includes("about 10 minutes") &&
     readme.includes("session replacement/switch") &&
@@ -210,7 +258,7 @@ check(
 );
 
 const packageJson = JSON.parse(read(join(ROOT, "package.json")));
-check(packageJson.version === "0.5.0", "independent-package release must be version 0.5.0");
+check(packageJson.version === "0.5.1", "independent-package release must be version 0.5.1");
 check(
   !packageJson.dependencies || Object.keys(packageJson.dependencies).length === 0,
   "oh-my-pi-slim must not install third-party Pi packages as dependencies",
