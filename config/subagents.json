@@ -1,6 +1,0 @@
-{
-  "disableDefaultAgents": true,
-  "fallbackSubagent": "none",
-  "maxSubagentDepth": 1,
-  "defaultJoinMode": "smart"
-}

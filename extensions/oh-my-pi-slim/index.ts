@@ -1,41 +1,28 @@
-import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CONFIG_DIR_NAME,
-  formatSkillsForPrompt,
   getAgentDir,
-  loadProjectContextFiles,
-  loadSkillsFromDir,
-  type BuildSystemPromptOptions,
+  SettingsManager,
+  shouldCompact,
   type ExtensionAPI,
   type ExtensionContext,
+  type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
-import { ensurePackageAssets, removePackageAssets } from "./bootstrap.js";
 import {
-  cancelledResumeOutcome,
-  resumeCompletedRecord,
-  type ResumeOutcome,
-  type SubagentRegistry,
-} from "./auto-resume.js";
-import { AgentOperationClaims } from "./operation-claims.js";
+  ensureNativePackageSetup,
+  getDefaultPresetPath,
+  restoreNativePackageSetup,
+} from "./bootstrap.js";
 import {
-  injectPiDocumentationSkill,
-  injectSharedProjectContext,
-  injectToolGuidance,
-  removeChildPiIdentity,
   removeMainPiDocumentation,
   removeMainPiIdentity,
-  renderProjectContext,
-  renderToolGuidance,
 } from "./prompt-context.js";
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(EXTENSION_DIR, "../..");
 const ORCHESTRATOR_PROMPT = readFileSync(join(EXTENSION_DIR, "orchestrator.md"), "utf8").trim();
-const PI_DOCUMENTATION_SKILL_DIR = join(EXTENSION_DIR, "skills", "pi-documentation");
 const CONFIG_FILE = "oh-my-pi-slim.json";
 
 const SPECIALIST_NAMES = [
@@ -56,15 +43,46 @@ const THINKING_LEVELS = new Set([
   "xhigh",
   "max",
 ]);
-
+const LEGACY_TINTIN_FACADE = [
+  "Agent",
+  "get_subagent_result",
+  "steer_subagent",
+] as const;
+const REQUIRED_NATIVE_TOOLS = ["subagent", "subagent_wait"] as const;
+const DENIED_ACTIONS = new Set([
+  "create",
+  "update",
+  "delete",
+  "eject",
+  "enable",
+  "append-step",
+  "refine",
+  "refine.show",
+  "refine.rollback",
+]);
+const RESUME_LAUNCH_OVERRIDE_FIELDS = [
+  "agent",
+  "model",
+  "thinking",
+  "turnBudget",
+] as const;
+const FORBIDDEN_SCHEDULE_CHILD_FIELDS = new Set([
+  "action",
+  "workflowScript",
+  "tasks",
+  "chain",
+  "parallel",
+  "step",
+  "steps",
+  "config",
+  "concurrency",
+  "chainDir",
+]);
 const FILE_TOOLS = new Set(["read", "edit", "write"]);
-const CHILD_AGENT_TAG = /^<active_agent\s+name="[^"]+"\s*\/>/;
 const TRUE_VALUES = /^(1|true|yes|on)$/i;
 const SAFE_PRESET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_MODEL_PART = /^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$/;
-const STOP_TOOL = "stop_subagent";
-const STEER_TOOL = "steer_subagent";
-const SUBAGENT_MANAGER_KEY = Symbol.for("pi-subagents:manager");
+const CANONICAL_SCHEDULE_SCRIPT = /^\s*return\s+runs\.run\s*\(\s*("(?:\\.|[^"\\])*")\s*,\s*(\{[\s\S]*\})\s*\)\s*;?\s*$/;
 
 const PHASE_REMINDER = `<orchestration-reminder>
 Scheduler workflow: understand the request; map lanes and dependencies; dispatch independent specialists in the background; track agent IDs and write ownership; do not poll running agents; reconcile automatic completion notifications; inspect the real changes; verify the result.
@@ -73,7 +91,6 @@ Scheduler workflow: understand the request; map lanes and dependencies; dispatch
 type RoleName = (typeof ROLE_NAMES)[number];
 type SpecialistName = (typeof SPECIALIST_NAMES)[number];
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-type SessionRole = "unknown" | "main" | "child";
 
 interface RolePreset {
   provider: string;
@@ -88,32 +105,10 @@ interface PresetConfig {
   presets: Record<string, Preset>;
 }
 
-type RpcReply<T = void> =
-  | { success: true; data?: T }
-  | { success: false; error: string };
+type MutableInput = Record<string, unknown>;
 
-function combinedResumeResult(outcome: ResumeOutcome): string {
-  const previous = outcome.previousResult.trim() || "(no previous output)";
-  const resumed = outcome.newResult.trim() || "(no new output)";
-  const action = outcome.failure
-    ? "oh-my-pi-slim could not automatically resume the same session."
-    : "oh-my-pi-slim automatically resumed the same session with the steering message.";
-  const failure = outcome.failure ? `\n\nAutomatic resume failed: ${outcome.failure}` : "";
-  return `Agent ${outcome.agentId} had already ${outcome.previousStatus}. ${action}\n\n` +
-    `Previous result:\n${previous}\n\nResumed result:\n${resumed}${failure}`;
-}
-
-function toolResultText(content: Array<{ type?: string; text?: string }>): string {
-  return content
-    .filter((part) => part.type === "text")
-    .map((part) => part.text ?? "")
-    .join("\n");
-}
-
-function isCompletedSteerRejection(text: string, agentId: string): boolean {
-  return text.includes(`Agent "${agentId}" is not running`) &&
-    /\(status: (completed|steered)\)/.test(text) &&
-    text.includes("Cannot steer a non-running agent.");
+function hasOwn(value: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 function envEnabled(): boolean {
@@ -123,10 +118,6 @@ function envEnabled(): boolean {
 function envPreset(): string | undefined {
   const value = String(process.env.OMPS_PRESET ?? "").trim();
   return value || undefined;
-}
-
-function normalizeAgentType(value: unknown): string {
-  return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
 function nonEmptyString(value: unknown, field: string): string {
@@ -221,25 +212,29 @@ function mergeConfig(base: PresetConfig, overlay: PresetConfig): PresetConfig {
 }
 
 function loadPresetConfig(ctx: ExtensionContext): PresetConfig {
+  const packagePath = getDefaultPresetPath(PACKAGE_ROOT);
+  if (!existsSync(packagePath)) {
+    throw new Error(`Package preset is missing: ${packagePath}`);
+  }
+
+  let config = parseConfigFile(packagePath);
+  if (Object.keys(config.presets).length === 0) {
+    throw new Error(`Package preset contains no presets: ${packagePath}`);
+  }
+
   const globalPath = join(getAgentDir(), CONFIG_FILE);
+  if (existsSync(globalPath)) {
+    config = mergeConfig(config, parseConfigFile(globalPath));
+  }
+
   const projectPath = join(ctx.cwd, CONFIG_DIR_NAME, CONFIG_FILE);
-  let config: PresetConfig = { presets: {} };
-
-  if (existsSync(globalPath)) config = mergeConfig(config, parseConfigFile(globalPath));
-
   if (existsSync(projectPath)) {
     if (!ctx.isProjectTrusted()) {
       throw new Error(
-        `Refusing project preset config from untrusted project: ${projectPath}. Approve the project or use the global config at ${globalPath}.`,
+        `Refusing project preset config from untrusted project: ${projectPath}. Approve the project or use the compatibility user config at ${globalPath}.`,
       );
     }
     config = mergeConfig(config, parseConfigFile(projectPath));
-  }
-
-  if (Object.keys(config.presets).length === 0) {
-    throw new Error(
-      `No presets found. Create ${projectPath} or install a global config at ${globalPath}.`,
-    );
   }
 
   if (config.defaultPreset && !config.presets[config.defaultPreset]) {
@@ -255,6 +250,10 @@ function fullModelName(role: RolePreset): string {
   return `${role.provider}/${role.model}`;
 }
 
+function launchModelName(role: RolePreset): string {
+  return `${fullModelName(role)}:${role.thinking}`;
+}
+
 function availablePresetsMessage(config: PresetConfig): string {
   return `Available presets: ${Object.keys(config.presets).join(", ")}. Default: ${config.defaultPreset ?? "none"}.\nUsage: /preset <name>`;
 }
@@ -265,62 +264,184 @@ function isAnthropicOAuth(ctx: ExtensionContext): boolean {
     ctx.modelRegistry.isUsingOAuth(ctx.model);
 }
 
-function buildPresetPrompt(name: string, preset: Preset): string {
-  const specialistLines = SPECIALIST_NAMES.map((role) => {
-    const config = preset[role];
-    return `- ${role}: model: "${fullModelName(config)}", thinking: "${config.thinking}"`;
-  }).join("\n");
-  const orchestrator = preset.orchestrator;
+function toolSourceText(tool: unknown): string {
+  if (!tool || typeof tool !== "object") return "";
+  const object = tool as Record<string, unknown>;
+  const sourceInfo = object.sourceInfo;
+  const info = sourceInfo && typeof sourceInfo === "object"
+    ? sourceInfo as Record<string, unknown>
+    : {};
+  return [object.provenance, info.provenance, info.path, info.source, info.baseDir]
+    .filter((value): value is string => typeof value === "string")
+    .join("\n");
+}
 
-  return `<orchestration-preset name="${name}">
-The extension has selected the main orchestrator model ${fullModelName(orchestrator)} with requested thinking level ${orchestrator.thinking}.
+function assertNativeBackend(pi: ExtensionAPI): void {
+  const tools = pi.getAllTools();
+  const legacy = tools.find((tool) =>
+    toolSourceText(tool).includes("@tintinweb/pi-subagents")
+  );
+  if (legacy) {
+    throw new Error(
+      `oh-my-pi-slim refuses legacy @tintinweb/pi-subagents tool "${legacy.name}" from ${toolSourceText(legacy) || "unknown source"}. Remove the legacy backend before starting Pi.`,
+    );
+  }
 
-Every fresh or scheduled Agent call MUST include the exact model and thinking values below. Calls with missing or different values are blocked by the extension:
-${specialistLines}
+  const names = new Set(tools.map((tool) => tool.name));
+  if (LEGACY_TINTIN_FACADE.every((name) => names.has(name))) {
+    throw new Error(
+      `oh-my-pi-slim refuses the legacy pi-subagents facade: ${LEGACY_TINTIN_FACADE.join(", ")}. Remove the legacy backend before starting Pi.`,
+    );
+  }
 
-A resumed Agent session retains its existing model and thinking. For Agent calls with resume, omit model and thinking and use the original specialist type.
-</orchestration-preset>`;
+  const missing = REQUIRED_NATIVE_TOOLS.filter((name) => !names.has(name));
+  if (missing.length > 0) {
+    throw new Error(
+      `oh-my-pi-slim requires pi-subagents@0.49.0 to load first. Missing native tool(s): ${missing.join(", ")}.`,
+    );
+  }
+}
+
+function presetRole(value: unknown): SpecialistName {
+  if (typeof value !== "string") {
+    throw new Error("agent must be one of explorer, librarian, oracle, designer, or fixer.");
+  }
+  const agent = value.trim();
+  if (!ALLOWED_AGENT_TYPES.has(agent)) {
+    throw new Error(
+      `agent "${agent || "(empty)"}" is not allowed. Use the exact bare name explorer, librarian, oracle, designer, or fixer.`,
+    );
+  }
+  return agent as SpecialistName;
+}
+
+function applyFreshPreset(child: MutableInput, preset: Preset): void {
+  const role = presetRole(child.agent);
+  child.agent = role;
+  child.model = launchModelName(preset[role]);
+  delete child.thinking;
+  delete child.turnBudget;
+}
+
+function resumeOverrideFields(input: MutableInput): string[] {
+  return RESUME_LAUNCH_OVERRIDE_FIELDS.filter((field) => hasOwn(input, field));
+}
+
+function parseCanonicalScheduleScript(script: unknown): { key: string; child: MutableInput } {
+  if (typeof script !== "string") {
+    throw new Error("schedule.create requires a canonical workflowScript string.");
+  }
+  const match = CANONICAL_SCHEDULE_SCRIPT.exec(script);
+  if (!match) {
+    throw new Error(
+      "schedule.create workflowScript must be exactly: return runs.run(<JSON string key>, <strict JSON object child>);",
+    );
+  }
+
+  let key: unknown;
+  let child: unknown;
+  try {
+    key = JSON.parse(match[1]);
+    child = JSON.parse(match[2]);
+  } catch (error) {
+    throw new Error(
+      `schedule.create workflowScript must contain strict JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (typeof key !== "string") {
+    throw new Error("schedule.create runs.run key must be a JSON string.");
+  }
+  const normalizedKey = key.trim();
+  if (!normalizedKey) {
+    throw new Error("schedule.create runs.run key must be non-empty after trimming.");
+  }
+  if (!child || typeof child !== "object" || Array.isArray(child)) {
+    throw new Error("schedule.create runs.run child must be a strict JSON object.");
+  }
+  return { key: normalizedKey, child: child as MutableInput };
+}
+
+function mutateScheduleCreate(input: MutableInput, preset: Preset): void {
+  const { key, child } = parseCanonicalScheduleScript(input.workflowScript);
+  const forbidden = Object.keys(child).filter((field) => FORBIDDEN_SCHEDULE_CHILD_FIELDS.has(field));
+  if (forbidden.length > 0) {
+    throw new Error(`schedule.create child cannot contain management or nested fields: ${forbidden.join(", ")}.`);
+  }
+
+  if (hasOwn(child, "task") && typeof child.task !== "string") {
+    throw new Error("schedule.create child task must be a string when provided.");
+  }
+
+  if (hasOwn(child, "resume")) {
+    if (typeof child.resume !== "string" || !child.resume.trim()) {
+      throw new Error("schedule.create resume must be a non-empty retained run ID.");
+    }
+    if (hasOwn(child, "agent")) {
+      throw new Error("schedule.create resume child cannot also specify agent.");
+    }
+    const overrides = resumeOverrideFields(child);
+    if (overrides.length > 0) {
+      throw new Error(
+        `schedule.create resume preserves the source run contract; remove launch override field(s): ${overrides.join(", ")}.`,
+      );
+    }
+    child.resume = child.resume.trim();
+  } else {
+    applyFreshPreset(child, preset);
+  }
+
+  input.workflowScript = `return runs.run(${JSON.stringify(key)}, ${JSON.stringify(child)});`;
+  delete input.model;
+  delete input.thinking;
+  delete input.turnBudget;
+}
+
+interface CheckpointTool {
+  id: string;
+  name: string;
+}
+
+function completedToolBatch(event: TurnEndEvent): CheckpointTool[] | undefined {
+  if (event.message.role !== "assistant" || event.message.stopReason !== "toolUse") return;
+
+  const tools: CheckpointTool[] = [];
+  const callsById = new Map<string, string>();
+  for (const content of event.message.content) {
+    if (content.type !== "toolCall") continue;
+    if (callsById.has(content.id)) return;
+    callsById.set(content.id, content.name);
+    tools.push({ id: content.id, name: content.name });
+  }
+  if (tools.length === 0 || event.toolResults.length !== tools.length) return;
+
+  const resultIds = new Set<string>();
+  for (const result of event.toolResults) {
+    if (resultIds.has(result.toolCallId)) return;
+    resultIds.add(result.toolCallId);
+    if (callsById.get(result.toolCallId) !== result.toolName) return;
+  }
+
+  return tools;
 }
 
 export default function ohMyPiSlim(pi: ExtensionAPI): void {
-  ensurePackageAssets(PACKAGE_ROOT);
+  if (process.env.PI_SUBAGENT_CHILD === "1") return;
 
   let active = false;
-  let sessionRole: SessionRole = "unknown";
-  let pendingActivation: { shouldActivate: boolean; requestedPreset?: string } | undefined;
-  let childProjectContext: string | undefined;
   let nudgeSentThisUserTurn = false;
-  let stopToolRegistered = false;
   let activePresetName: string | undefined;
   let activePreset: Preset | undefined;
   let originalModel: ExtensionContext["model"];
   let originalThinking: ThinkingLevel | undefined;
   let sessionCtx: ExtensionContext | undefined;
-  const resumeLocks = new Map<string, Promise<void>>();
-  const operationClaims = new AgentOperationClaims();
-  const loadedPiDocumentationSkill = loadSkillsFromDir({
-    dir: PI_DOCUMENTATION_SKILL_DIR,
-    source: "extension:oh-my-pi-slim",
-  }).skills.find((skill) => skill.name === "pi-documentation");
-  if (!loadedPiDocumentationSkill) {
-    throw new Error(`Missing OMPS skill: ${join(PI_DOCUMENTATION_SKILL_DIR, "SKILL.md")}`);
-  }
-  const canReadSkills = (options: BuildSystemPromptOptions): boolean =>
-    (options.selectedTools ?? ["read", "bash", "edit", "write"]).includes("read");
-  const injectDocumentationSkill = (
-    prompt: string,
-    options: BuildSystemPromptOptions,
-  ): string => {
-    const currentSkills = options.skills ?? [];
-    if (currentSkills.some((skill) => skill.filePath === loadedPiDocumentationSkill.filePath)) {
-      return prompt;
-    }
-    return injectPiDocumentationSkill(
-      prompt,
-      formatSkillsForPrompt(currentSkills),
-      formatSkillsForPrompt([...currentSkills, loadedPiDocumentationSkill]),
-    );
-  };
+  let sessionEpoch = 0;
+  let pendingCheckpoint: {
+    epoch: number;
+    tools: CheckpointTool[];
+    sawThresholdCompaction: boolean;
+    resumeScheduled: boolean;
+  } | undefined;
+  let fileToolSeenThisTurn = false;
 
   pi.registerFlag("omps", {
     description: "Run the main Pi session as the oh-my-pi-slim orchestrator",
@@ -339,97 +460,43 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   }
 
   function updateStatus(ctx: ExtensionContext): void {
-    const text = active && sessionRole === "main"
-      ? `orchestrator${activePresetName ? `:${activePresetName}` : ""}`
-      : undefined;
+    if (!ctx.hasUI) return;
+    const text = active ? `orchestrator${activePresetName ? `:${activePresetName}` : ""}` : undefined;
     ctx.ui.setStatus(
       "oh-my-pi-slim",
       text ? ctx.ui.theme.fg("accent", text) : undefined,
     );
   }
 
-  function subagentRegistry(): SubagentRegistry | undefined {
-    const value = (globalThis as Record<PropertyKey, unknown>)[SUBAGENT_MANAGER_KEY];
-    if (!value || typeof value !== "object") return undefined;
-    const registry = value as Partial<SubagentRegistry>;
-    return typeof registry.getRecord === "function" ? registry as SubagentRegistry : undefined;
+  function invalidateCheckpoint(): void {
+    sessionEpoch += 1;
+    pendingCheckpoint = undefined;
+    fileToolSeenThisTurn = false;
   }
 
-  async function withResumeLock<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
-    const previous = resumeLocks.get(agentId) ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>((resolve) => { release = resolve; });
-    const queued = previous.catch(() => {}).then(() => current);
-    resumeLocks.set(agentId, queued);
-    await previous.catch(() => {});
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (resumeLocks.get(agentId) === queued) resumeLocks.delete(agentId);
-    }
-  }
+  function scheduleCheckpointResume(
+    checkpoint: NonNullable<typeof pendingCheckpoint>,
+    ctx: ExtensionContext,
+  ): void {
+    if (pendingCheckpoint !== checkpoint || checkpoint.resumeScheduled) return;
+    checkpoint.resumeScheduled = true;
 
-  function requestStop(agentId: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const requestId = randomUUID();
-      const replyEvent = `subagents:rpc:stop:reply:${requestId}`;
-      let settled = false;
+    setImmediate(() => {
+      if (
+        pendingCheckpoint !== checkpoint ||
+        checkpoint.epoch !== sessionEpoch ||
+        !active
+      ) return;
 
-      const finish = (error?: Error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        unsubscribe();
-        if (error) reject(error);
-        else resolve();
-      };
-
-      const unsubscribe = pi.events.on(replyEvent, (reply: RpcReply) => {
-        if (reply.success) finish();
-        else finish(new Error(reply.error || `Failed to stop subagent ${agentId}.`));
-      });
-
-      const timer = setTimeout(() => {
-        finish(
-          new Error(
-            "Timed out waiting for pi-subagents. Confirm @tintinweb/pi-subagents is installed and active.",
-          ),
-        );
-      }, 3_000);
-
-      pi.events.emit("subagents:rpc:stop", { requestId, agentId });
-    });
-  }
-
-  function ensureStopTool(): void {
-    if (stopToolRegistered) return;
-    stopToolRegistered = true;
-
-    pi.registerTool({
-      name: STOP_TOOL,
-      label: "Stop Subagent",
-      description:
-        "Stop a running or queued pi-subagents agent by ID. Use only when the task is obsolete, unsafe, or conflicts with a replacement plan. Stopping does not roll back file changes.",
-      promptSnippet: "Stop an obsolete or conflicting background subagent by ID",
-      promptGuidelines: [
-        "Use stop_subagent only for an obsolete, unsafe, or conflicting running agent; inspect partial file changes afterward because stopping is not rollback.",
-      ],
-      parameters: Type.Object({
-        agent_id: Type.String({ description: "Agent ID returned by a background Agent call." }),
-      }),
-      async execute(_toolCallId, params) {
-        await requestStop(params.agent_id);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Stop requested for subagent ${params.agent_id}. Inspect partial changes before replacement work.`,
-            },
-          ],
-          details: { agentId: params.agent_id },
-        };
-      },
+      pendingCheckpoint = undefined;
+      const completedTools = checkpoint.tools.map(({ id, name }) => `- ${id}: ${name}`).join("\n");
+      const resumeText = `This is a new post-compaction turn, not a transparent continuation.\n\nCompleted tool calls at the checkpoint:\n${completedTools}\n\nContinue from the compacted context. Do not repeat these calls solely because the turn restarted. Re-fetch only when needed to verify state or recover missing information.`;
+      report(
+        ctx,
+        "Pi compaction completed; starting a best-effort extension user turn from the checkpoint.",
+        "warning",
+      );
+      pi.sendUserMessage(resumeText, { deliverAs: "followUp" });
     });
   }
 
@@ -451,6 +518,9 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   }
 
   async function activate(ctx: ExtensionContext, requestedPreset?: string): Promise<void> {
+    assertNativeBackend(pi);
+    ensureNativePackageSetup(PACKAGE_ROOT);
+
     const config = loadPresetConfig(ctx);
     const presetName = requestedPreset || config.defaultPreset;
     if (!presetName) {
@@ -492,17 +562,17 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     activePresetName = presetName;
     activePreset = preset;
     nudgeSentThisUserTurn = false;
-    ensureStopTool();
     updateStatus(ctx);
   }
 
   async function deactivate(ctx: ExtensionContext): Promise<void> {
+    invalidateCheckpoint();
     active = false;
     activePresetName = undefined;
     activePreset = undefined;
     nudgeSentThisUserTurn = false;
     if (originalModel) await pi.setModel(originalModel);
-    if (originalThinking) pi.setThinkingLevel(originalThinking);
+    if (originalThinking !== undefined) pi.setThinkingLevel(originalThinking);
     originalModel = undefined;
     originalThinking = undefined;
     updateStatus(ctx);
@@ -531,18 +601,10 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       return items.length > 0 ? items : null;
     },
     handler: async (args, ctx) => {
-      if (sessionRole === "child") return;
-      if (sessionRole === "unknown") {
-        sessionRole = "main";
-        pendingActivation = undefined;
-        updateStatus(ctx);
-      }
-
       const requestedPreset = args.trim();
       if (!requestedPreset) {
         try {
-          const config = loadPresetConfig(ctx);
-          report(ctx, availablePresetsMessage(config), "info");
+          report(ctx, availablePresetsMessage(loadPresetConfig(ctx)), "info");
         } catch (error) {
           report(ctx, error instanceof Error ? error.message : String(error), "error");
         }
@@ -561,21 +623,16 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   pi.registerCommand("omps", {
     description: "Manage orchestration: /omps [on [preset]|off|status|presets|preset <name>|uninstall]",
     handler: async (args, ctx) => {
-      if (sessionRole === "child") return;
-      if (sessionRole === "unknown") {
-        sessionRole = "main";
-        pendingActivation = undefined;
-        updateStatus(ctx);
-      }
       const parts = args.trim().split(/\s+/).filter(Boolean);
       const action = (parts[0] ?? "on").toLowerCase();
 
       if (action === "uninstall") {
         if (active) await deactivate(ctx);
-        const cleanup = removePackageAssets();
+        const cleanup = restoreNativePackageSetup();
         const summary = [
-          `${cleanup.removed.length} package-created file(s) removed.`,
-          `${cleanup.preserved.length} pre-existing file(s) preserved.`,
+          "Restored the native pi-subagents user settings and backend config recorded before oh-my-pi-slim setup.",
+          `Removed empty restored file(s): ${cleanup.removed.length}.`,
+          `Preserved restored file(s): ${cleanup.preserved.length}.`,
           ...cleanup.warnings,
           "Exit Pi, then run: pi remove git:github.com/YanzuoLu/oh-my-pi-slim",
         ].join("\n");
@@ -634,10 +691,8 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    invalidateCheckpoint();
     sessionCtx = ctx;
-    sessionRole = "unknown";
-    pendingActivation = undefined;
-    childProjectContext = undefined;
     active = false;
     activePresetName = undefined;
     activePreset = undefined;
@@ -645,14 +700,11 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     originalThinking = undefined;
     nudgeSentThisUserTurn = false;
 
-    let basePrompt = "";
     try {
-      basePrompt = ctx.getSystemPrompt();
-    } catch {
-      basePrompt = "";
-    }
-    if (basePrompt && CHILD_AGENT_TAG.test(basePrompt)) {
-      sessionRole = "child";
+      assertNativeBackend(pi);
+      ensureNativePackageSetup(PACKAGE_ROOT);
+    } catch (error) {
+      report(ctx, error instanceof Error ? error.message : String(error), "error");
       return;
     }
 
@@ -662,12 +714,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       : envPreset();
     const shouldActivate = pi.getFlag("omps") === true || envEnabled() || requestedPreset !== undefined;
 
-    if (!basePrompt) {
-      pendingActivation = { shouldActivate, requestedPreset };
-      return;
-    }
-
-    sessionRole = "main";
     if (shouldActivate) {
       try {
         await activate(ctx, requestedPreset);
@@ -678,56 +724,23 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     updateStatus(ctx);
   });
 
-  pi.on("input", (event) => {
-    if (!active || sessionRole !== "main") return;
-    if (event.source !== "extension") nudgeSentThisUserTurn = false;
+  pi.on("session_before_switch", () => {
+    invalidateCheckpoint();
   });
 
-  pi.on("before_agent_start", async (event, ctx) => {
-    if (CHILD_AGENT_TAG.test(event.systemPrompt)) {
-      pendingActivation = undefined;
-      if (sessionRole !== "child" && active) await deactivate(ctx);
-      sessionRole = "child";
-    } else if (sessionRole === "unknown") {
-      sessionRole = "main";
-      const pending = pendingActivation;
-      pendingActivation = undefined;
-      if (pending?.shouldActivate) {
-        try {
-          await activate(ctx, pending.requestedPreset);
-        } catch (error) {
-          report(ctx, error instanceof Error ? error.message : String(error), "error");
-        }
-      }
-      updateStatus(ctx);
-    }
+  pi.on("input", (event) => {
+    if (!active || event.source === "extension") return;
+    pendingCheckpoint = undefined;
+    nudgeSentThisUserTurn = false;
+  });
 
-    if (sessionRole === "child") {
-      if (childProjectContext === undefined) {
-        childProjectContext = renderProjectContext(loadProjectContextFiles({
-          cwd: ctx.cwd,
-          agentDir: getAgentDir(),
-        }));
-      }
-      const toolGuidance = renderToolGuidance(event.systemPromptOptions);
-      let systemPrompt = injectToolGuidance(event.systemPrompt, toolGuidance);
-      systemPrompt = injectSharedProjectContext(systemPrompt, childProjectContext);
-      if (canReadSkills(event.systemPromptOptions)) {
-        systemPrompt = injectDocumentationSkill(systemPrompt, event.systemPromptOptions);
-      }
-      if (isAnthropicOAuth(ctx)) systemPrompt = removeChildPiIdentity(systemPrompt);
-      return { systemPrompt };
-    }
-
+  pi.on("before_agent_start", (event, ctx) => {
     if (!active || !activePreset || !activePresetName) return;
 
     let systemPrompt = removeMainPiDocumentation(event.systemPrompt);
-    if (canReadSkills(event.systemPromptOptions)) {
-      systemPrompt = injectDocumentationSkill(systemPrompt, event.systemPromptOptions);
-    }
     if (isAnthropicOAuth(ctx)) systemPrompt = removeMainPiIdentity(systemPrompt);
     return {
-      systemPrompt: `${systemPrompt}\n\n${ORCHESTRATOR_PROMPT}\n\n${buildPresetPrompt(activePresetName, activePreset)}`,
+      systemPrompt: `${systemPrompt}\n\n${ORCHESTRATOR_PROMPT}`,
       message: {
         customType: "oh-my-pi-slim:phase-reminder",
         content: PHASE_REMINDER,
@@ -737,169 +750,155 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("tool_call", (event) => {
-    if (!active || sessionRole !== "main") return;
-
-    if (event.toolName === STEER_TOOL) {
-      const input = event.input as { agent_id?: unknown };
-      if (typeof input.agent_id !== "string" || !input.agent_id.trim()) return;
-      const agentId = input.agent_id.trim();
-      let status: unknown;
-      try {
-        status = (subagentRegistry()?.getRecord(agentId) as { status?: unknown } | undefined)?.status;
-      } catch {
-        status = undefined;
-      }
-      const claim = operationClaims.claimSteer(agentId, event.toolCallId, status);
-      if (!claim.allowed) {
-        return {
-          block: true,
-          reason: `oh-my-pi-slim: agent ${agentId} already has an in-flight ${claim.conflict?.kind} operation. The first operation wins; wait for its tool result.`,
-        };
-      }
-      return;
-    }
-
-    if (event.toolName !== "Agent") return;
-    const input = event.input as {
-      subagent_type?: unknown;
-      model?: unknown;
-      thinking?: unknown;
-      resume?: unknown;
-    };
-    const requested = normalizeAgentType(input.subagent_type);
-    if (!ALLOWED_AGENT_TYPES.has(requested)) {
-      return {
-        block: true,
-        reason:
-          "oh-my-pi-slim: the orchestrator may only launch explorer, librarian, oracle, designer, or fixer. Unknown and built-in agent types are not allowed.",
-      };
-    }
-
-    // pi-subagents resumes the existing in-memory session and ignores model and
-    // thinking overrides. Every original spawn was preset-gated, so resume is safe.
-    if (typeof input.resume === "string" && input.resume.trim()) {
-      const resumeId = input.resume.trim();
-      const claim = operationClaims.claimExplicitResume(resumeId, event.toolCallId);
-      if (!claim.allowed) {
-        return {
-          block: true,
-          reason: `oh-my-pi-slim: agent ${resumeId} already has an in-flight ${claim.conflict?.kind} operation. The first operation wins; wait for its tool result.`,
-        };
-      }
-      return;
-    }
-
-    if (!activePreset || !activePresetName) {
+    if (!active || event.toolName !== "subagent") return;
+    if (!activePreset) {
       return { block: true, reason: "oh-my-pi-slim: no active preset is available." };
     }
 
-    const role = requested as SpecialistName;
-    const expected = activePreset[role];
-    const expectedModel = fullModelName(expected);
-    const actualModel = typeof input.model === "string" ? input.model.trim() : "";
-    const actualThinking = typeof input.thinking === "string"
-      ? input.thinking.trim().toLowerCase()
-      : "";
+    const input = event.input as MutableInput;
+    if (!hasOwn(input, "action")) {
+      if (hasOwn(input, "workflowScript")) {
+        return {
+          block: true,
+          reason:
+            "oh-my-pi-slim blocks direct workflowScript execution. Launch one fresh specialist with subagent({ agent, task? }); constrained schedules use action:\"schedule.create\".",
+        };
+      }
+      if (hasOwn(input, "resume")) {
+        return {
+          block: true,
+          reason:
+            "oh-my-pi-slim fresh launches cannot use resume. Use subagent({ action: \"resume\", id, message }) and omit launch overrides.",
+        };
+      }
 
-    if (
-      actualModel.toLowerCase() !== expectedModel.toLowerCase() ||
-      actualThinking !== expected.thinking
-    ) {
+      try {
+        applyFreshPreset(input, activePreset);
+        input.context = "fresh";
+      } catch (error) {
+        return { block: true, reason: `oh-my-pi-slim: ${error instanceof Error ? error.message : String(error)}` };
+      }
+      return;
+    }
+
+    const action = typeof input.action === "string" ? input.action.trim() : "";
+    if (DENIED_ACTIONS.has(action)) {
       return {
         block: true,
-        reason:
-          `oh-my-pi-slim preset "${activePresetName}" requires ${role} Agent calls to include ` +
-          `model: "${expectedModel}" and thinking: "${expected.thinking}". Retry with those exact values.`,
-      };
-    }
-  });
-
-  pi.on("tool_result", async (event, ctx) => {
-    if (!active || sessionRole !== "main" || event.toolName !== STEER_TOOL || event.isError) return;
-    const input = event.input as { agent_id?: unknown; message?: unknown };
-    if (typeof input.agent_id !== "string" || typeof input.message !== "string") return;
-    if (!isCompletedSteerRejection(toolResultText(event.content), input.agent_id)) return;
-
-    const rejectedStatus = toolResultText(event.content).includes("(status: steered)")
-      ? "steered"
-      : "completed";
-    const registry = subagentRegistry();
-    let outcome: ResumeOutcome;
-    try {
-      outcome = await withResumeLock(input.agent_id, async () => {
-        if (ctx.signal?.aborted) {
-          return cancelledResumeOutcome(registry, input.agent_id as string, rejectedStatus);
-        }
-        return resumeCompletedRecord(
-          registry,
-          input.agent_id as string,
-          input.message as string,
-          rejectedStatus,
-          {
-            emit: (name, data) => pi.events.emit(name, data),
-            append: (data) => pi.appendEntry("subagents:record", data),
-          },
-          ctx.signal,
-        );
-      });
-    } catch (error) {
-      outcome = {
-        ...cancelledResumeOutcome(registry, input.agent_id, rejectedStatus),
-        status: ctx.signal?.aborted ? "aborted" : "error",
-        failure: ctx.signal?.aborted
-          ? "Automatic resume was cancelled before completion."
-          : `Automatic resume failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`,
+        reason: `oh-my-pi-slim blocks native subagent action "${action}" while orchestration is active.`,
       };
     }
 
-    return {
-      content: [{ type: "text", text: combinedResumeResult(outcome) }],
-      details: {
-        ...(event.details && typeof event.details === "object" ? event.details : {}),
-        agentId: outcome.agentId,
-        previousStatus: outcome.previousStatus,
-        status: outcome.status,
-        autoResumeAttempted: true,
-        autoResumed: outcome.status === "completed",
-      },
-      isError: outcome.status !== "completed",
-    };
+    if (action === "resume") {
+      const overrides = resumeOverrideFields(input);
+      if (overrides.length > 0) {
+        return {
+          block: true,
+          reason:
+            `oh-my-pi-slim native resume preserves the source model and thinking contract and unlimited turns. Remove prohibited field(s): ${overrides.join(", ")}.`,
+        };
+      }
+      return;
+    }
+
+    if (action === "schedule.create") {
+      try {
+        mutateScheduleCreate(input, activePreset);
+      } catch (error) {
+        return { block: true, reason: `oh-my-pi-slim: ${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
   });
 
   pi.on("tool_execution_end", (event) => {
-    operationClaims.releaseToolCall(event.toolCallId);
-    if (!active || sessionRole !== "main" || nudgeSentThisUserTurn || !FILE_TOOLS.has(event.toolName)) return;
+    if (active && FILE_TOOLS.has(event.toolName)) fileToolSeenThisTurn = true;
+  });
 
-    nudgeSentThisUserTurn = true;
-    pi.sendMessage(
-      {
-        customType: "oh-my-pi-slim:file-nudge",
-        content: PHASE_REMINDER,
-        display: false,
-      },
-      { deliverAs: "steer", triggerTurn: true },
+  pi.on("turn_end", (event, ctx) => {
+    const sawFileTool = fileToolSeenThisTurn;
+    fileToolSeenThisTurn = false;
+    if (!active) return;
+
+    const tools = completedToolBatch(event);
+    if (tools && !pendingCheckpoint && !ctx.hasPendingMessages()) {
+      const usage = ctx.getContextUsage();
+      if (usage && usage.tokens !== null && usage.contextWindow !== null) {
+        const settings = SettingsManager.create(
+          ctx.cwd,
+          getAgentDir(),
+          { projectTrusted: ctx.isProjectTrusted() },
+        ).getCompactionSettings();
+        if (shouldCompact(usage.tokens, usage.contextWindow, settings)) {
+          const checkpoint = {
+            epoch: sessionEpoch,
+            tools,
+            sawThresholdCompaction: false,
+            resumeScheduled: false,
+          };
+          pendingCheckpoint = checkpoint;
+          report(
+            ctx,
+            "Context reached Pi's native compaction threshold; checkpointing after the completed tool batch.",
+            "info",
+          );
+          ctx.abort();
+          return;
+        }
+      }
+    }
+
+    if (sawFileTool && !nudgeSentThisUserTurn && !ctx.hasPendingMessages()) {
+      nudgeSentThisUserTurn = true;
+      pi.sendMessage(
+        {
+          customType: "oh-my-pi-slim:file-nudge",
+          content: PHASE_REMINDER,
+          display: false,
+        },
+        { deliverAs: "steer", triggerTurn: true },
+      );
+    }
+  });
+
+  pi.on("session_compact", (event) => {
+    if (
+      pendingCheckpoint?.epoch === sessionEpoch &&
+      event.reason === "threshold" &&
+      event.willRetry === false
+    ) {
+      pendingCheckpoint.sawThresholdCompaction = true;
+    }
+  });
+
+  pi.on("agent_settled", (_event, ctx) => {
+    const checkpoint = pendingCheckpoint;
+    if (!checkpoint || checkpoint.epoch !== sessionEpoch) return;
+    if (checkpoint.sawThresholdCompaction) {
+      scheduleCheckpointResume(checkpoint, ctx);
+      return;
+    }
+
+    pendingCheckpoint = undefined;
+    report(
+      ctx,
+      "OMPS stopped the previous low-level run after a complete tool batch, but Pi did not complete threshold compaction; automatic checkpoint resume was not started.",
+      "warning",
     );
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    operationClaims.clear();
-    resumeLocks.clear();
-
-    // pi.setModel()/setThinkingLevel() update Pi's defaults as well as the live
-    // session. Restore the pre-preset state so a startup preset remains scoped
-    // to this orchestration session.
+    invalidateCheckpoint();
     if (active) {
       active = false;
       if (originalModel) await pi.setModel(originalModel);
-      if (originalThinking) pi.setThinkingLevel(originalThinking);
+      if (originalThinking !== undefined) pi.setThinkingLevel(originalThinking);
     }
-    sessionRole = "unknown";
-    pendingActivation = undefined;
-    childProjectContext = undefined;
+    sessionCtx = undefined;
     activePresetName = undefined;
     activePreset = undefined;
     originalModel = undefined;
     originalThinking = undefined;
-    ctx.ui.setStatus("oh-my-pi-slim", undefined);
+    nudgeSentThisUserTurn = false;
+    if (ctx.hasUI) ctx.ui.setStatus("oh-my-pi-slim", undefined);
   });
 }

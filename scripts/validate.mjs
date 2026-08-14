@@ -1,992 +1,609 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const AGENTS = ["explorer", "librarian", "oracle", "designer", "fixer"];
-const ROLES = ["orchestrator", ...AGENTS];
+const AGENTS = ["designer", "explorer", "fixer", "librarian", "oracle"];
+const ROLES = ["orchestrator", "explorer", "librarian", "oracle", "designer", "fixer"];
+const READ_ONLY = new Set(["explorer", "librarian", "oracle"]);
 const THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const FORBIDDEN_ROLE_TOOL_NAMES = [
+  "web_search",
+  "url_context",
+  "web_fetch",
+  "batch_web_fetch",
+  "ask_user_question",
+];
+const DENIED_ACTIONS = [
+  "create",
+  "update",
+  "delete",
+  "eject",
+  "enable",
+  "append-step",
+  "refine",
+  "refine.show",
+  "refine.rollback",
+].sort();
 const errors = [];
-const check = (condition, message) => { if (!condition) errors.push(message); };
-const read = (path) => readFileSync(path, "utf8");
-const agentFiles = readdirSync(join(ROOT, "agents")).filter((name) => name.endsWith(".md")).sort();
+
+function check(condition, message) {
+  if (!condition) errors.push(message);
+}
+
+function read(relativePath) {
+  return readFileSync(join(ROOT, relativePath), "utf8");
+}
+
+function json(relativePath) {
+  try {
+    return JSON.parse(read(relativePath));
+  } catch (error) {
+    errors.push(`${relativePath} must be valid JSON: ${error.message}`);
+    return {};
+  }
+}
+
+function frontmatter(text, file) {
+  const match = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
+  check(Boolean(match), `${file} must have YAML frontmatter and a body`);
+  if (!match) return { fields: new Map(), body: text, raw: "" };
+
+  const fields = new Map();
+  for (const line of match[1].split("\n")) {
+    if (!line.trim() || line.trimStart().startsWith("#")) continue;
+    const field = /^([A-Za-z][A-Za-z0-9]*):(?:\s*(.*))?$/.exec(line);
+    if (field) fields.set(field[1], field[2] ?? "");
+  }
+  return { fields, body: match[2], raw: match[1] };
+}
+
+function hasAll(text, terms, label) {
+  for (const term of terms) check(text.includes(term), `${label} missing: ${term}`);
+}
+
+function hasNone(text, terms, label) {
+  for (const term of terms) check(!text.includes(term), `${label} contains forbidden legacy token: ${term}`);
+}
+
+const packageJson = json("package.json");
+const lock = json("package-lock.json");
+const installedBackend = json("node_modules/pi-subagents/package.json");
+
+check(packageJson.version === "0.6.0", "package.json version must be 0.6.0");
+check(
+  packageJson.dependencies?.["pi-subagents"] === "0.49.0",
+  "package.json must depend exactly on pi-subagents 0.49.0",
+);
+check(
+  JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
+    "./node_modules/pi-subagents/index.ts",
+    "./extensions/oh-my-pi-slim/index.ts",
+  ]),
+  "package extensions must load native pi-subagents before OMPS",
+);
+check(
+  JSON.stringify(packageJson.pi?.subagents?.agents) === JSON.stringify(["./agents"]),
+  "package manifest must expose package-scoped agents from ./agents",
+);
+check(
+  JSON.stringify(packageJson.pi?.skills) === JSON.stringify(["./extensions/oh-my-pi-slim/skills"]),
+  "package manifest must expose the package skill directory",
+);
+check(!packageJson.scripts?.["install:user"], "package must not define install:user");
+check(!packageJson.scripts?.["uninstall:user"], "package must not define uninstall:user");
+check(lock.version === packageJson.version, "package-lock root version must match package.json");
+check(lock.packages?.[""]?.version === packageJson.version, "package-lock package version must match package.json");
+check(
+  lock.packages?.[""]?.dependencies?.["pi-subagents"] === "0.49.0",
+  "package-lock root dependency must pin pi-subagents 0.49.0",
+);
+check(
+  lock.packages?.["node_modules/pi-subagents"]?.version === "0.49.0",
+  "package-lock installed backend must be pi-subagents 0.49.0",
+);
+check(installedBackend.version === "0.49.0", "node_modules/pi-subagents must be version 0.49.0");
+
+for (const obsolete of [
+  "config/subagents.json",
+  "scripts/install.mjs",
+  "scripts/uninstall.mjs",
+  "scripts/auto-resume.mjs",
+  "extensions/oh-my-pi-slim/auto-resume.ts",
+  "extensions/oh-my-pi-slim/operation-claims.ts",
+]) {
+  check(!existsSync(join(ROOT, obsolete)), `${obsolete} must not exist`);
+}
+check(read(".gitignore").split(/\r?\n/).includes(".cache/"), ".gitignore must contain .cache/");
+
+const agentFiles = readdirSync(join(ROOT, "agents"))
+  .filter((name) => name.endsWith(".md"))
+  .sort();
 check(
   JSON.stringify(agentFiles) === JSON.stringify(AGENTS.map((name) => `${name}.md`).sort()),
-  `agents/ must contain exactly: ${AGENTS.map((name) => `${name}.md`).join(", ")}`,
+  "agents/ must contain exactly five specialist markdown files",
 );
 
 for (const name of AGENTS) {
-  const path = join(ROOT, "agents", `${name}.md`);
-  const text = read(path);
-  check(text.startsWith("---\n"), `${name}.md must start with YAML frontmatter`);
-  check(!/\nmodel:/.test(text), `${name}.md must not hard-code a model; presets own model selection`);
-  check(!/\nthinking:/.test(text), `${name}.md must not hard-code thinking; presets own thinking selection`);
-  check(/\nprompt_mode:\s*replace\b/.test(text), `${name}.md must use prompt_mode: replace`);
-  check(!/\nallowed_subagents:/.test(text), `${name}.md must not enable nested delegation`);
-  check(!/\ntools:/.test(text), `${name}.md must not define a tool allowlist`);
-  check(
-    text.includes(
-      "disallowed_tools: Agent, get_subagent_result, steer_subagent, stop_subagent, ask_user_question",
-    ),
-    `${name}.md must deny only orchestration and direct-user-question tools`,
+  const file = `agents/${name}.md`;
+  const parsed = frontmatter(read(file), file);
+  const expectedRole = READ_ONLY.has(name) ? "read-only" : "writer";
+
+  check(parsed.fields.get("name") === name, `${file} name must be ${name}`);
+  check(parsed.fields.get("systemPromptMode") === "replace", `${file} must use systemPromptMode: replace`);
+  check(parsed.fields.get("inheritProjectContext") === "true", `${file} must inherit project context`);
+  check(parsed.fields.get("inheritSkills") === "true", `${file} must inherit skills`);
+  check(parsed.fields.get("acceptanceRole") === expectedRole, `${file} acceptanceRole must be ${expectedRole}`);
+  if (READ_ONLY.has(name)) {
+    check(parsed.fields.get("completionGuard") === "false", `${file} must set completionGuard: false`);
+  }
+
+  for (const forbidden of [
+    "turnBudget",
+    "max_turns",
+    "prompt_mode",
+    "disallowed_tools",
+    "tools",
+    "aliases",
+  ]) {
+    check(!parsed.fields.has(forbidden), `${file} must not define ${forbidden}`);
+  }
+  hasAll(
+    parsed.body,
+    ["subagent", "subagent_wait", "subagent_supervisor", "contact_supervisor", "Do not ask the user directly"],
+    `${file} body`,
   );
-  check(/\nextensions:\s*true\b/.test(text), `${name}.md must inherit extension tools`);
-  check(!/\nexclude_extensions:/.test(text), `${name}.md must not exclude extensions`);
-  check(text.includes("\n<omps-tool-guidance/>\n"), `${name}.md must include the tool guidance marker`);
-  check(text.includes("\n<omps-shared-context/>\n"), `${name}.md must include the shared context marker`);
-  const toolMarkerIndex = text.indexOf("<omps-tool-guidance/>");
-  const contextMarkerIndex = text.indexOf("<omps-shared-context/>");
-  const roleIndex = text.indexOf("You are ");
   check(
-    toolMarkerIndex < contextMarkerIndex && contextMarkerIndex < roleIndex,
-    `${name}.md markers must be ordered tool guidance, shared context, specialist role`,
+    /Do not call `subagent`, `subagent_wait`, or `subagent_supervisor`\./.test(parsed.body),
+    `${file} must explicitly forbid native nested tools`,
   );
+  check(
+    /If blocked on a decision, use `contact_supervisor` with reason `need_decision`;/.test(parsed.body),
+    `${file} must route blocked decisions to contact_supervisor`,
+  );
+  hasNone(parsed.body, FORBIDDEN_ROLE_TOOL_NAMES, `${file} body`);
+
+  if (name === "librarian") {
+    check(
+      parsed.fields.get("description")?.includes("public source repository examples"),
+      `${file} description must describe public source repository examples generically`,
+    );
+    hasAll(parsed.body, [
+      "**Research Approach**",
+      "external research capabilities available in the child environment",
+      "official documentation",
+      "public source repositories/examples",
+      "user-provided URLs",
+      "Do not assume any particular external research extension or tool is installed",
+    ], `${file} generic research contract`);
+  }
 }
 
-const presetPath = join(ROOT, ".pi", "oh-my-pi-slim.json");
-const presetConfig = JSON.parse(read(presetPath));
+const extension = read("extensions/oh-my-pi-slim/index.ts");
+const bootstrap = read("extensions/oh-my-pi-slim/bootstrap.ts");
+const orchestrator = read("extensions/oh-my-pi-slim/orchestrator.md");
+const readme = read("README.md");
+
+const functionStart = extension.indexOf("export default function ohMyPiSlim");
+const childReturn = extension.indexOf('if (process.env.PI_SUBAGENT_CHILD === "1") return;', functionStart);
+const firstRegistration = extension.indexOf("pi.register", functionStart);
+check(functionStart >= 0 && childReturn > functionStart, "extension must have a child-process early return");
+check(childReturn < firstRegistration, "child early return must happen before any registration");
+hasAll(extension, [
+  'pi.on("session_start"',
+  "assertNativeBackend(pi)",
+  "ensureNativePackageSetup(PACKAGE_ROOT)",
+  'pi.on("tool_call"',
+  'event.toolName !== "subagent"',
+  "function launchModelName",
+  "launchModelName(preset[role])",
+  "let activePreset: Preset | undefined",
+  "activePreset = preset",
+  "applyFreshPreset(input, activePreset)",
+  "mutateScheduleCreate(input, activePreset)",
+  "delete child.thinking",
+  "delete child.turnBudget",
+  'input.context = "fresh"',
+  "blocks direct workflowScript execution",
+  "CANONICAL_SCHEDULE_SCRIPT",
+  'action === "schedule.create"',
+  "RESUME_LAUNCH_OVERRIDE_FIELDS",
+  'action === "resume"',
+], "native extension contract");
+hasNone(extension, [
+  "function buildPresetPrompt",
+  "<orchestration-preset",
+], "static orchestrator prompt contract");
+
+const freshPresetStart = extension.indexOf("function applyFreshPreset");
+const freshPresetEnd = extension.indexOf("function resumeOverrideFields", freshPresetStart);
+const freshPresetBlock = extension.slice(freshPresetStart, freshPresetEnd);
+check(freshPresetStart >= 0 && freshPresetEnd > freshPresetStart, "extension must define fresh preset enforcement");
+hasAll(freshPresetBlock, [
+  "child.model = launchModelName(preset[role])",
+  "delete child.thinking",
+  "delete child.turnBudget",
+], "fresh preset model enforcement");
+
+const scheduleCreateStart = extension.indexOf("function mutateScheduleCreate");
+const scheduleCreateEnd = extension.indexOf("interface CheckpointTool", scheduleCreateStart);
+const scheduleCreateBlock = extension.slice(scheduleCreateStart, scheduleCreateEnd);
+check(scheduleCreateStart >= 0 && scheduleCreateEnd > scheduleCreateStart, "extension must define schedule preset enforcement");
+hasAll(scheduleCreateBlock, [
+  "applyFreshPreset(child, preset)",
+  "delete input.model",
+  "delete input.thinking",
+  "delete input.turnBudget",
+], "schedule preset model enforcement");
+
+const beforeAgentStart = extension.indexOf('pi.on("before_agent_start"');
+const beforeAgentStartEnd = extension.indexOf('pi.on("tool_call"', beforeAgentStart);
+const beforeAgentStartBlock = extension.slice(beforeAgentStart, beforeAgentStartEnd);
+check(beforeAgentStart >= 0 && beforeAgentStartEnd > beforeAgentStart, "extension must register before_agent_start");
 check(
-  presetConfig.presets && Object.keys(presetConfig.presets).length >= 2,
-  "preset config must define multiple presets",
+  beforeAgentStartBlock.includes('systemPrompt: `${systemPrompt}\\n\\n${ORCHESTRATOR_PROMPT}`,') &&
+    beforeAgentStartBlock.split("ORCHESTRATOR_PROMPT").length === 2,
+  "before_agent_start must append only ORCHESTRATOR_PROMPT",
 );
+hasNone(beforeAgentStartBlock, ["buildPresetPrompt", "<orchestration-preset"], "before_agent_start prompt assembly");
+
 check(
-  typeof presetConfig.defaultPreset === "string" && presetConfig.presets[presetConfig.defaultPreset],
-  "preset config defaultPreset must reference an existing preset",
+  extension.indexOf("assertNativeBackend(pi)", extension.indexOf("async function activate")) >= 0,
+  "activate must check the native backend",
 );
+
+const rootImportEndMarker = 'from "@earendil-works/pi-coding-agent";';
+const rootImportEnd = extension.indexOf(rootImportEndMarker);
+const importBlock = extension.slice(0, rootImportEnd + rootImportEndMarker.length);
+check(rootImportEnd >= 0, "extension must import checkpoint APIs from the Pi public root export");
+hasAll(importBlock, [
+  "SettingsManager",
+  "shouldCompact",
+  "getAgentDir",
+  "type TurnEndEvent",
+], "checkpoint public root imports");
+
+const batchHelperStart = extension.indexOf("function completedToolBatch(event: TurnEndEvent)");
+const batchHelperEnd = extension.indexOf("export default function ohMyPiSlim", batchHelperStart);
+const batchHelper = extension.slice(batchHelperStart, batchHelperEnd);
+check(batchHelperStart >= 0 && batchHelperEnd > batchHelperStart, "extension must define the pure completedToolBatch helper");
+hasAll(batchHelper, [
+  'event.message.role !== "assistant"',
+  'event.message.stopReason !== "toolUse"',
+  'content.type !== "toolCall"',
+  "callsById.has(content.id)",
+  "event.toolResults.length !== tools.length",
+  "resultIds.has(result.toolCallId)",
+  "callsById.get(result.toolCallId) !== result.toolName",
+  "tools.push({ id: content.id, name: content.name })",
+], "complete tool batch helper");
+hasNone(batchHelper, [
+  "result.content",
+  "result.details",
+  "result.isError",
+  "pi.",
+  "ctx.",
+  "SettingsManager",
+], "complete tool batch helper");
+
+hasAll(extension, [
+  "let sessionEpoch = 0",
+  "let pendingCheckpoint:",
+  "sawThresholdCompaction: boolean",
+  "resumeScheduled: boolean",
+  "let fileToolSeenThisTurn = false",
+  'pi.on("session_before_switch"',
+  'pi.on("turn_end"',
+  'pi.on("session_compact"',
+  'pi.on("agent_settled"',
+  "SettingsManager.create(",
+  "ctx.cwd",
+  "getAgentDir()",
+  "{ projectTrusted: ctx.isProjectTrusted() }",
+  ").getCompactionSettings()",
+  "ctx.getContextUsage()",
+  "usage.tokens !== null",
+  "usage.contextWindow !== null",
+  "shouldCompact(usage.tokens, usage.contextWindow, settings)",
+  "!pendingCheckpoint && !ctx.hasPendingMessages()",
+  "ctx.abort();",
+  'event.reason === "threshold"',
+  "event.willRetry === false",
+  "if (checkpoint.sawThresholdCompaction)",
+  "setImmediate(() =>",
+  "pendingCheckpoint !== checkpoint",
+  "checkpoint.epoch !== sessionEpoch",
+  "pendingCheckpoint = undefined",
+  'pi.sendUserMessage(resumeText, { deliverAs: "followUp" })',
+  'pi.on("tool_execution_end"',
+  "fileToolSeenThisTurn = true",
+  "const sawFileTool = fileToolSeenThisTurn",
+  "fileToolSeenThisTurn = false",
+], "tool-batch checkpoint runtime");
+const toolEndStart = extension.indexOf('pi.on("tool_execution_end"');
+const turnEndStart = extension.indexOf('pi.on("turn_end"', toolEndStart);
+const turnEndEnd = extension.indexOf('pi.on("session_compact"', turnEndStart);
+const toolEndBlock = extension.slice(toolEndStart, turnEndStart);
+const turnEndBlock = extension.slice(turnEndStart, turnEndEnd);
+hasNone(toolEndBlock, ["pi.sendMessage", "pi.sendUserMessage"], "tool_execution_end file nudge");
+hasAll(turnEndBlock, [
+  "ctx.abort();",
+  "return;",
+], "turn_end checkpoint dispatch");
+hasNone(turnEndBlock, [
+  "await ctx.abort",
+  "waitForIdle",
+  "isIdle()",
+], "turn_end checkpoint dispatch");
+check(
+  turnEndBlock.indexOf("ctx.abort();") < turnEndBlock.indexOf("pi.sendMessage("),
+  "turn_end must abort the old low-level run before the file nudge",
+);
+const sessionCompactStart = extension.indexOf('pi.on("session_compact"', turnEndStart);
+const agentSettledStart = extension.indexOf('pi.on("agent_settled"', sessionCompactStart);
+const agentSettledEnd = extension.indexOf('pi.on("session_shutdown"', agentSettledStart);
+const sessionCompactBlock = extension.slice(sessionCompactStart, agentSettledStart);
+const agentSettledBlock = extension.slice(agentSettledStart, agentSettledEnd);
+hasAll(sessionCompactBlock, [
+  "pendingCheckpoint?.epoch === sessionEpoch",
+  'event.reason === "threshold"',
+  "event.willRetry === false",
+  "pendingCheckpoint.sawThresholdCompaction = true",
+], "threshold session_compact checkpoint");
+hasAll(agentSettledBlock, [
+  "const checkpoint = pendingCheckpoint",
+  "if (!checkpoint || checkpoint.epoch !== sessionEpoch) return",
+  "if (checkpoint.sawThresholdCompaction)",
+  "scheduleCheckpointResume(checkpoint, ctx)",
+  "pendingCheckpoint = undefined",
+  "Pi did not complete threshold compaction",
+  '"warning"',
+], "agent_settled checkpoint outcome");
+hasNone(agentSettledBlock, [
+  "ctx.abort",
+  "ctx.compact",
+  "waitForIdle",
+], "agent_settled checkpoint outcome");
+check(
+  /async function deactivate[\s\S]*?invalidateCheckpoint\(\);[\s\S]*?active = false;/.test(extension),
+  "deactivate must invalidate checkpoint identity before disabling OMPS",
+);
+hasAll(extension.slice(extension.indexOf('pi.on("input"'), extension.indexOf('pi.on("before_agent_start"')), [
+  'event.source === "extension"',
+  "pendingCheckpoint = undefined",
+  "nudgeSentThisUserTurn = false",
+], "non-extension input cancellation");
+
+const resumeStart = extension.indexOf("function scheduleCheckpointResume");
+const resumeEnd = extension.indexOf("function resolvePresetModels", resumeStart);
+const resumeBlock = extension.slice(resumeStart, resumeEnd);
+hasAll(resumeBlock, [
+  "setImmediate(() =>",
+  "checkpoint.tools.map(({ id, name }) => `- ${id}: ${name}`)",
+  "new post-compaction turn, not a transparent continuation",
+  "Do not repeat these calls solely because the turn restarted",
+  "Re-fetch only when needed to verify state or recover missing information",
+  '"warning"',
+], "checkpoint resume copy");
+hasNone(resumeBlock, [
+  "toolResults",
+  "tool output",
+  "custom summary",
+  "plan:",
+], "checkpoint resume copy");
+
+hasNone(extension, [
+  'pi.on("context"',
+  'pi.on("session_before_compact"',
+  "customInstructions",
+  "DEFAULT_COMPACTION_SETTINGS",
+  "reserveTokens",
+  "keepRecentTokens",
+  "truncateHead",
+  "truncateTail",
+  "emergency truncation",
+  "ctx.compact(",
+  "onComplete:",
+  "onError:",
+  "Tool-batch checkpoint compaction failed",
+  "await ctx.abort",
+  "waitForIdle",
+  "isIdle()",
+  "usage.percent",
+  "percentage",
+  "百分比",
+  '"%"',
+], "checkpoint forbidden implementation");
+
+const deniedBlock = /const DENIED_ACTIONS = new Set\(\[([\s\S]*?)\]\);/.exec(extension)?.[1] ?? "";
+const sourceDenied = [...deniedBlock.matchAll(/"([^"]+)"/g)].map((match) => match[1]).sort();
+check(
+  JSON.stringify(sourceDenied) === JSON.stringify(DENIED_ACTIONS),
+  `DENIED_ACTIONS must contain exactly: ${DENIED_ACTIONS.join(", ")}`,
+);
+check(!sourceDenied.includes("disable") && !sourceDenied.includes("reset"), "denylist must not include disable or reset");
+hasNone(extension, [
+  "registerTool",
+  'Symbol.for("pi-subagents:manager")',
+  "subagents:rpc:",
+  "findHistoricalSubagentRecord",
+  "historicalSubagentResult",
+  "resumeCompletedRecord",
+  "AgentOperationClaims",
+  "autoResume",
+], "extension");
+
+const exportedBootstrapFunctions = [...bootstrap.matchAll(/export function\s+(\w+)/g)]
+  .map((match) => match[1])
+  .sort();
+check(
+  JSON.stringify(exportedBootstrapFunctions) === JSON.stringify([
+    "ensureNativePackageSetup",
+    "getDefaultPresetPath",
+    "restoreNativePackageSetup",
+  ]),
+  "bootstrap must export only native setup, restore, and default preset helpers",
+);
+hasAll(bootstrap, [
+  'join(agentDir, "settings.json")',
+  'join(agentDir, "extensions", "subagent", "config.json")',
+  "disableBuiltins",
+  "maxSubagentDepth",
+  "ohMyPiSlimMigration",
+  "MigrationState",
+], "bootstrap native setup");
+hasNone(bootstrap, [
+  "copyFileSync",
+  "cpSync",
+  "installAgents",
+  "copyAgents",
+  "installPreset",
+  "copyPreset",
+  "aliases",
+], "bootstrap");
+
+hasAll(orchestrator, [
+  'subagent({ agent: "explorer", task:',
+  "asynchronous and run in the background by default",
+  "async: false",
+  "For fresh calls, do not pass `model`, `thinking`, or `turnBudget`",
+  "The OMPS runtime enforces the current active preset's model contract and removes caller overrides",
+  "subagent_wait",
+  'action: "status"',
+  'action: "steer"',
+  'action: "interrupt"',
+  'action: "stop"',
+  'action: "resume"',
+  "creates a new run ID",
+  "Direct `workflowScript` execution is blocked",
+  'action: "schedule.create"',
+  "contact_supervisor",
+  "Only the main orchestrator may ask the user direct questions",
+], "orchestrator native contract");
+hasNone(orchestrator, [...FORBIDDEN_ROLE_TOOL_NAMES, "<orchestration-preset"], "orchestrator body");
+
+hasAll(readme, [
+  "0.6.0 breaking migration",
+  "pi-subagents@0.49.0",
+  "pi remove npm:@tintinweb/pi-subagents",
+  "pi install git:github.com/YanzuoLu/oh-my-pi-slim",
+  "会拒绝激活",
+  "./node_modules/pi-subagents/index.ts",
+  'pi.subagents.agents: ["./agents"]',
+  "不会把 agent 复制到 `~/.pi/agent/agents`",
+  "pi --omps",
+  "pi --omps --omps-preset balanced",
+  "/omps on economy",
+  "/preset openai",
+  "/omps status",
+  "/omps off",
+  "/omps presets",
+  "/omps uninstall",
+  'subagent({ agent: "explorer", task:',
+  "subagent_wait",
+  "不要 sleep，也不要循环调用 status 轮询",
+  "新的 run ID",
+  "provider/model:thinking",
+  'context: "fresh"',
+  "禁止直接 arbitrary `workflowScript`",
+  "create, update, delete, eject, enable, append-step",
+  "disable` 与 `reset` 不在 OMPS denylist",
+  "canonical strict-JSON",
+  "backend timer 直接执行，不经过 OMPS 的 `tool_call` gate",
+  "不是完整 sandbox",
+  "原生 persistence、status、result、events 和 restart recovery",
+  "Tool-batch checkpoint compaction",
+  "Pi `SettingsManager`",
+  "`shouldCompact`",
+  "完整 tool batch",
+  "public `ctx.abort()`",
+  "post-run `_checkCompaction`",
+  "threshold auto path",
+  '`reason === "threshold"`',
+  "`willRetry === false`",
+  "`agent_settled`",
+  "新的 extension user turn",
+  "不是 transparent continuation",
+  "不是透明 continuation",
+  "模型仍可能重复调用",
+  "batch 不完整",
+  "usage 未知",
+  "compaction 已禁用",
+  "已有 pending",
+  "不裁剪或改写 context request 副本",
+  "不修改 Pi compaction settings",
+  '"disableBuiltins": true',
+  '"maxSubagentDepth": 1',
+  "trusted project settings 可以覆盖",
+  "shadow package agent",
+  "PI_SUBAGENT_CHILD=1",
+  "contact_supervisor",
+  "禁止直接询问用户",
+  "角色 prompt 不依赖具体外部 extension 工具名",
+  "native child 环境当前加载的工具决定",
+  "@gotgenes/pi-anthropic-auth",
+  "<package>/.pi/oh-my-pi-slim.json",
+  "~/.pi/agent/oh-my-pi-slim.json",
+  "<project>/.pi/oh-my-pi-slim.json",
+  "整个 preset",
+  "balanced",
+  "economy",
+  "openai",
+  "pi remove git:github.com/YanzuoLu/oh-my-pi-slim",
+  "npm run validate",
+], "README 0.6 contract");
+
+const legacyCalls = [
+  "`Agent(",
+  "Agent({",
+  "get_subagent_result(",
+  "steer_subagent(",
+  "resume_subagent(",
+  "stop_subagent(",
+];
+for (const [label, text] of [["README", readme], ["orchestrator", orchestrator]]) {
+  hasNone(text, [...legacyCalls, "max_turns", "same-ID resume", "same ID resume", "10-minute", "10 minutes", "ten minutes"], label);
+}
+hasNone(readme, ["manual native compaction"], "README checkpoint contract");
+
+const presetPath = ".pi/oh-my-pi-slim.json";
+check(existsSync(join(ROOT, presetPath)), "package base preset must exist");
+const presetConfig = json(presetPath);
+check(
+  typeof presetConfig.defaultPreset === "string" && presetConfig.presets?.[presetConfig.defaultPreset],
+  "defaultPreset must reference a package preset",
+);
+for (const required of ["balanced", "economy", "openai"]) {
+  check(Boolean(presetConfig.presets?.[required]), `package presets must include ${required}`);
+}
 for (const [presetName, preset] of Object.entries(presetConfig.presets ?? {})) {
+  check(
+    JSON.stringify(Object.keys(preset).sort()) === JSON.stringify([...ROLES].sort()),
+    `${presetName} must define exactly six roles`,
+  );
   for (const role of ROLES) {
-    const roleConfig = preset[role];
-    check(roleConfig && typeof roleConfig === "object", `${presetName}.${role} must be configured`);
-    check(typeof roleConfig?.provider === "string" && roleConfig.provider, `${presetName}.${role}.provider missing`);
-    check(typeof roleConfig?.model === "string" && roleConfig.model, `${presetName}.${role}.model missing`);
-    check(THINKING.has(roleConfig?.thinking), `${presetName}.${role}.thinking invalid`);
+    const config = preset[role];
+    check(config && typeof config === "object" && !Array.isArray(config), `${presetName}.${role} must be an object`);
+    check(typeof config?.provider === "string" && config.provider.trim(), `${presetName}.${role}.provider must be non-empty`);
+    check(typeof config?.model === "string" && config.model.trim(), `${presetName}.${role}.model must be non-empty`);
+    check(THINKING.has(config?.thinking), `${presetName}.${role}.thinking is invalid`);
   }
 }
 
-const orchestrator = read(join(ROOT, "extensions", "oh-my-pi-slim", "orchestrator.md"));
-for (const role of AGENTS) check(orchestrator.includes(`@${role}`), `orchestrator prompt missing @${role}`);
-for (const tool of ["Agent", "get_subagent_result", "steer_subagent", "stop_subagent", "ask_user_question"]) {
-  check(orchestrator.includes(tool), `orchestrator prompt missing Pi tool ${tool}`);
-}
-for (const claudeOnly of [
-  "SendMessage",
-  "TaskStop",
-  "AskUserQuestion",
-  "EnterPlanMode",
-  "subagent_type: \"oh-my-claude-code-slim:",
-]) {
-  check(!orchestrator.includes(claudeOnly), `orchestrator prompt contains Claude Code-only term: ${claudeOnly}`);
-}
-check(orchestrator.includes("resume: agent_id"), "orchestrator prompt must document Pi resume semantics");
-check(
-  orchestrator.includes("automatically preserves its prior result") &&
-    orchestrator.includes("Do not follow it with `get_subagent_result` or a manual `Agent` resume"),
-  "orchestrator prompt must document completed steer auto-resume semantics",
-);
-check(
-  orchestrator.includes("Background completions arrive automatically"),
-  "orchestrator prompt must document automatic completion notifications",
-);
-check(orchestrator.includes("<orchestration-preset>"), "orchestrator must use the injected preset contract");
-
-const extensionPath = join(ROOT, "extensions", "oh-my-pi-slim", "index.ts");
-const bootstrapPath = join(ROOT, "extensions", "oh-my-pi-slim", "bootstrap.ts");
-const promptContextPath = join(ROOT, "extensions", "oh-my-pi-slim", "prompt-context.ts");
-const piDocumentationSkillPath = join(
-  ROOT,
-  "extensions",
-  "oh-my-pi-slim",
-  "skills",
-  "pi-documentation",
-  "SKILL.md",
-);
-const extension = read(extensionPath);
-const bootstrap = read(bootstrapPath);
-const promptContext = read(promptContextPath);
-const piDocumentationSkill = read(piDocumentationSkillPath);
-for (const role of AGENTS) check(extension.includes(`\"${role}\"`), `extension allowlist missing ${role}`);
-check(extension.includes('pi.registerFlag("omps-preset"'), "extension must register --omps-preset");
-check(extension.includes('pi.registerCommand("preset"'), "extension must register the standalone /preset command");
-check(extension.includes("CONFIG_DIR_NAME"), "extension must use Pi's project config directory constant");
-check(extension.includes("loadPresetConfig"), "extension must load preset configuration");
-check(extension.includes("pi.setModel(orchestratorModel)"), "extension must apply the orchestrator model");
-check(extension.includes("pi.setThinkingLevel"), "extension must apply orchestrator thinking");
-check(!extension.includes("setActiveTools"), "extension must not override Pi's active tool list");
-check(!extension.includes("getActiveTools"), "extension must not snapshot or override Pi's active tool list");
-check(extension.includes('pi.on("session_shutdown", async'), "extension must restore session-scoped preset state on shutdown");
-check(extension.includes('event.toolName !== "Agent"'), "extension must gate Agent tool calls");
-check(extension.includes("actualModel.toLowerCase()"), "extension must enforce specialist preset models");
-check(extension.includes("actualThinking !== expected.thinking"), "extension must enforce specialist thinking");
-check(extension.includes('name: STOP_TOOL'), "extension must register stop_subagent");
-check(!extension.includes("ASK_USER_TOOL"), "extension must not reimplement ask_user_question");
-check(!extension.includes("ctx.ui.select"), "extension must use the installed question package");
-check(!extension.includes("ctx.ui.input"), "extension must use the installed question package");
-check(extension.includes("subagents:rpc:stop"), "stop_subagent must use pi-subagents RPC");
-check(extension.includes('pi.on("tool_result", async'), "completed steer fallback must run in async tool_result");
-check(extension.includes('event.toolName !== STEER_TOOL'), "completed steer fallback must target steer_subagent");
-check(extension.includes('Symbol.for("pi-subagents:manager")'), "completed steer fallback must use the cross-package global manager registry");
-check(extension.includes("resumeCompletedRecord"), "completed steer fallback must resume the same session with the steer message");
-check(extension.includes("isCompletedSteerRejection"), "completed steer fallback must only intercept upstream completed/steered rejections");
-check(extension.includes("withResumeLock"), "completed steer fallback must serialize resumes per agent");
-check(extension.includes("AgentOperationClaims"), "Agent resume and completed steer must share operation claims");
-check(extension.includes("operationClaims.claimSteer"), "steer_subagent must claim completed/steered agent IDs before execution");
-check(extension.includes("operationClaims.claimExplicitResume"), "Agent resume must claim agent IDs before execution");
-check(extension.includes("operationClaims.releaseToolCall(event.toolCallId)"), "tool execution end must release operation claims by toolCallId");
-check(!extension.includes("record.session.steer ="), "completed steer fallback must not replace session.steer");
-check(
-  read(join(ROOT, "README.md")).includes("pi install npm:@juicesharp/rpiv-ask-user-question"),
-  "README must tell users to install rpiv-ask-user-question explicitly",
-);
-check(
-  !read(join(ROOT, "package.json")).includes("--install-ask-user"),
-  "package scripts must not install rpiv-ask-user-question automatically",
-);
-check(extension.includes("CHILD_AGENT_TAG"), "extension must avoid injecting orchestrator into child sessions");
-check(
-  extension.includes('const CHILD_AGENT_TAG = /^<active_agent\\s+name="[^\"]+"\\s*\\/>/;'),
-  "child detection must only match an active_agent tag at the start of the prompt",
-);
-check(
-  extension.includes('if (sessionRole !== "child" && active) await deactivate(ctx);'),
-  "before_agent_start must restore accidentally activated child sessions",
-);
-const presetCommandStart = extension.indexOf('pi.registerCommand("preset"');
-const commandHandlerStart = extension.indexOf('pi.registerCommand("omps"');
-const presetCommand = extension.slice(presetCommandStart, commandHandlerStart);
-check(presetCommandStart !== -1, "/preset command handler must exist");
-check(
-  presetCommand.includes('description: "Switch the oh-my-pi-slim preset: /preset <name>"'),
-  "/preset description must document the required preset name",
-);
-check(presetCommand.includes('if (sessionRole === "child") return;'), "/preset must remain inert in child sessions");
-check(
-  presetCommand.includes('if (sessionRole === "unknown") {') &&
-    presetCommand.includes('sessionRole = "main";') &&
-    presetCommand.includes("pendingActivation = undefined;"),
-  "/preset must safely classify an unknown interactive session as main and clear pending activation",
-);
-check(
-  presetCommand.includes("const requestedPreset = args.trim();") &&
-    presetCommand.includes("await activate(ctx, requestedPreset);"),
-  "/preset <name> must trim the full argument and activate the requested preset directly",
-);
-const emptyPresetStart = presetCommand.indexOf("if (!requestedPreset) {");
-const directPresetStart = presetCommand.indexOf("\n\n      try {", emptyPresetStart);
-const emptyPresetHandler = presetCommand.slice(emptyPresetStart, directPresetStart);
-check(
-  emptyPresetStart !== -1 &&
-    directPresetStart !== -1 &&
-    emptyPresetHandler.includes("const config = loadPresetConfig(ctx);") &&
-    emptyPresetHandler.includes("availablePresetsMessage(config)") &&
-    emptyPresetHandler.includes("return;") &&
-    !emptyPresetHandler.includes("activate(ctx"),
-  "/preset without arguments must load config, report available presets/default/usage, and return without activation",
-);
-check(
-  extension.includes("if (!active) {") &&
-    extension.includes("originalModel = ctx.model;") &&
-    extension.includes("originalThinking = pi.getThinkingLevel() as ThinkingLevel;"),
-  "preset switching must preserve the original model/thinking snapshot after first activation",
-);
-const commandHandlerEnd = extension.indexOf('pi.on("session_start"', commandHandlerStart);
-const commandHandler = extension.slice(commandHandlerStart, commandHandlerEnd);
-check(commandHandler.includes('if (sessionRole === "child") return;'), "/omps must remain inert in child sessions");
-check(!commandHandler.includes('if (sessionRole !== "main") return;'), "/omps must not silently return for an unknown session role");
-check(
-  commandHandler.includes('if (sessionRole === "unknown") {') &&
-    commandHandler.includes('sessionRole = "main";') &&
-    commandHandler.includes('pendingActivation = undefined;'),
-  "/omps must safely classify an unknown interactive session as main and clear pending activation",
-);
-check(!commandHandler.includes("pending.shouldActivate"), "/omps must not auto-activate a pending startup request before handling the explicit command");
-check(
-  extension.indexOf("CHILD_AGENT_TAG.test(event.systemPrompt)") < extension.indexOf('sessionRole === "unknown"', extension.indexOf('pi.on("before_agent_start"')),
-  "before_agent_start must recheck the child tag before unknown-role handling",
-);
-check(extension.includes("ctx.getSystemPrompt()"), "session_start must inspect the built base system prompt");
-check(extension.indexOf("ctx.getSystemPrompt()") < extension.indexOf('pi.getFlag("omps-preset")'), "session_start must identify child sessions before activation-related flag handling");
-check(extension.includes("loadProjectContextFiles({"), "child sessions must use Pi's project context loader");
-check(extension.includes("agentDir: getAgentDir()"), "child context loading must include Pi's agent directory");
-const beforeAgentStart = extension.slice(
-  extension.indexOf('pi.on("before_agent_start"'),
-  extension.indexOf('pi.on("tool_call"', extension.indexOf('pi.on("before_agent_start"')),
-);
-check(
-  beforeAgentStart.includes("renderToolGuidance(event.systemPromptOptions)"),
-  "child tool guidance must use the current turn's event.systemPromptOptions active tool view",
-);
-check(
-  beforeAgentStart.indexOf("injectToolGuidance(event.systemPrompt, toolGuidance)") <
-    beforeAgentStart.indexOf("injectSharedProjectContext(systemPrompt, childProjectContext)"),
-  "child tool guidance must be injected before cached project context",
-);
-check(
-  extension.includes('ctx.model?.provider === "anthropic"') &&
-    extension.includes('ctx.model?.api === "anthropic-messages"') &&
-    extension.includes("ctx.modelRegistry.isUsingOAuth(ctx.model)"),
-  "identity handling must require Anthropic provider, Messages API, and registry-confirmed OAuth",
-);
-check(
-  beforeAgentStart.indexOf('if (!active || !activePreset || !activePresetName) return;') < beforeAgentStart.indexOf("removeMainPiIdentity(systemPrompt)"),
-  "inactive main sessions must return before Anthropic OAuth identity trimming",
-);
-check(!extension.includes("before_provider_request"), "extension must not rewrite provider payloads");
-check(!/access[_-]?token|id[_-]?token|refresh[_-]?token/i.test(extension), "extension must not parse OAuth tokens");
-check(extension.includes("ensurePackageAssets(PACKAGE_ROOT)"), "package extension must bootstrap undeclarable agent assets");
-check(bootstrap.includes("AGENT_NAMES"), "bootstrap must install the five agent definitions");
-check(bootstrap.includes("removePackageAssets"), "bootstrap must support reversible package cleanup");
-check(promptContext.includes("prompt.startsWith(MAIN_PI_IDENTITY)"), "main identity removal must remain prefix-only");
-check(promptContext.includes("PI_DOCUMENTATION_START"), "main prompt trimming must use the exact Pi documentation start anchor");
-check(promptContext.includes("PI_DOCUMENTATION_END"), "main prompt trimming must use the exact Pi documentation end anchor");
-check(promptContext.includes("CHILD_PROMPT_PREFIX"), "child identity removal must use the narrow child prompt prefix");
-const childBranchStart = beforeAgentStart.indexOf('if (sessionRole === "child") {');
-const childBranchEnd = beforeAgentStart.indexOf('if (!active || !activePreset || !activePresetName) return;');
-const childBranch = beforeAgentStart.slice(childBranchStart, childBranchEnd);
-const mainBranch = beforeAgentStart.slice(childBranchEnd);
-check(
-  mainBranch.includes("removeMainPiDocumentation(event.systemPrompt)") &&
-    mainBranch.indexOf("removeMainPiDocumentation(event.systemPrompt)") <
-      mainBranch.indexOf("injectDocumentationSkill(systemPrompt, event.systemPromptOptions)") &&
-    mainBranch.indexOf("injectDocumentationSkill(systemPrompt, event.systemPromptOptions)") <
-      mainBranch.indexOf("removeMainPiIdentity(systemPrompt)"),
-  "active main sessions must remove built-in Pi documentation, inject the conditional skill, then trim OAuth identity",
-);
-check(
-  mainBranch.startsWith('if (!active || !activePreset || !activePresetName) return;') &&
-    mainBranch.indexOf('if (!active || !activePreset || !activePresetName) return;') <
-      mainBranch.indexOf("injectDocumentationSkill(systemPrompt, event.systemPromptOptions)"),
-  "inactive main sessions must return before the Pi documentation skill is injected",
-);
-check(
-  childBranch.includes("injectDocumentationSkill(systemPrompt, event.systemPromptOptions)") &&
-    childBranch.indexOf("injectDocumentationSkill(systemPrompt, event.systemPromptOptions)") <
-      childBranch.indexOf('if (isAnthropicOAuth(ctx)) systemPrompt = removeChildPiIdentity(systemPrompt);'),
-  "managed child sessions must receive the Pi documentation skill through their normal prompt path",
-);
-check(
-  extension.includes("formatSkillsForPrompt(currentSkills)") &&
-    extension.includes("formatSkillsForPrompt([...currentSkills, loadedPiDocumentationSkill])") &&
-    extension.includes("loadSkillsFromDir({") &&
-    extension.includes('source: "extension:oh-my-pi-slim"'),
-  "OMPS must load and render its private skill with Pi's official skill APIs",
-);
-check(
-  extension.includes("canReadSkills(event.systemPromptOptions)") &&
-    extension.includes('.includes("read")'),
-  "OMPS must expose its conditional skill only when the session can read SKILL.md",
-);
-const legacyInstaller = read(join(ROOT, "scripts", "install.mjs"));
-check(
-  legacyInstaller.includes('target: join(extensionDir, "prompt-context.ts")'),
-  "legacy install must copy the prompt-context helper",
-);
-check(
-  legacyInstaller.includes('source: join(ROOT, "extensions", "oh-my-pi-slim", "skills", "pi-documentation", "SKILL.md")') &&
-    legacyInstaller.includes('target: join(extensionDir, "skills", "pi-documentation", "SKILL.md")'),
-  "legacy install must keep the conditional Pi documentation skill private to the OMPS extension",
-);
-
-const readme = read(join(ROOT, "README.md"));
-check(!readme.includes("non-blocking `tool_result`"), "README must not describe waited auto-resume as non-blocking");
-check(
-  readme.includes("/preset economy") &&
-    readme.includes("`/preset` without a name lists the available preset names") &&
-    readme.includes("Usage: /preset <name>") &&
-    readme.includes("/omps preset economy") &&
-    readme.includes("immediately updates the main orchestrator model, thinking level, active preset prompt, and status") &&
-    readme.includes("New specialist sessions use the newly selected preset") &&
-    readme.includes("existing and resumed specialist sessions retain the model"),
-  "README Launching must document direct /preset switching, empty-argument usage, compatibility, and session model semantics",
-);
-check(
-  readme.includes("validated against pi-subagents 0.15.0/current cross-package registry shape") &&
-    readme.includes("about 10 minutes") &&
-    readme.includes("session replacement/switch") &&
-    readme.includes("not a stable public resume API"),
-  "README must document the validated compatibility range and live-session cleanup limits",
-);
-
-const packageJson = JSON.parse(read(join(ROOT, "package.json")));
-check(packageJson.version === "0.5.3", "independent-package release must be version 0.5.3");
-check(
-  !packageJson.dependencies || Object.keys(packageJson.dependencies).length === 0,
-  "oh-my-pi-slim must not install third-party Pi packages as dependencies",
-);
-check(
-  JSON.stringify(packageJson.pi?.extensions) ===
-    JSON.stringify(["./extensions/oh-my-pi-slim/index.ts"]),
-  "Pi package must load only the oh-my-pi-slim extension",
-);
-check(
-  packageJson.pi?.skills === undefined && !existsSync(join(ROOT, "skills")),
-  "Pi package must not expose an OMPS-only skill through its manifest or conventional root skills directory",
-);
-const skillFrontmatterEnd = piDocumentationSkill.indexOf("\n---\n", 4);
-const skillFrontmatter = piDocumentationSkill.slice(4, skillFrontmatterEnd);
-const skillDescription = /^description:\s*["']?(.+?)["']?$/m.exec(skillFrontmatter)?.[1] ?? "";
-check(
-  piDocumentationSkill.startsWith("---\nname: pi-documentation\n") &&
-    skillFrontmatterEnd > 0 &&
-    skillDescription.length > 0 &&
-    skillDescription.length <= 1024 &&
-    !skillFrontmatter.includes("\ncompatibility:") &&
-    piDocumentationSkill.includes("Use this skill only when the task concerns Pi itself") &&
-    piDocumentationSkill.includes("PI_PACKAGE_DIR") &&
-    piDocumentationSkill.includes("docs/extensions.md") &&
-    piDocumentationSkill.includes("docs/packages.md"),
-  "Pi documentation skill must have standard frontmatter and verified installed-documentation guidance",
-);
-check(
-  !bootstrap.includes("pi-documentation"),
-  "package bootstrap must not expose the OMPS-only skill through the global skill directory",
-);
-const piExecutable = spawnSync("sh", ["-lc", "command -v pi"], { encoding: "utf8" });
-let installedPiRoot;
-if (piExecutable.status === 0 && piExecutable.stdout.trim()) {
-  const entrypoint = realpathSync(piExecutable.stdout.trim());
-  const candidates = [
-    process.env.PI_PACKAGE_DIR,
-    dirname(entrypoint),
-    dirname(dirname(entrypoint)),
-  ].filter((candidate) => typeof candidate === "string" && candidate.length > 0);
-  installedPiRoot = candidates.find((candidate) =>
-    existsSync(join(candidate, "README.md")) && existsSync(join(candidate, "dist", "core", "system-prompt.js"))
-  );
-  if (installedPiRoot) {
-    const installedSystemPrompt = read(join(installedPiRoot, "dist", "core", "system-prompt.js"));
-    check(
-      installedSystemPrompt.includes(
-        "Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):",
-      ) && installedSystemPrompt.includes(
-        "- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)",
-      ),
-      "installed Pi system prompt changed the documentation anchors used by OMPS",
-    );
-  }
-}
-check(typeof installedPiRoot === "string", "validation must locate the installed Pi package root");
-
-const subagentsConfig = JSON.parse(read(join(ROOT, "config", "subagents.json")));
-check(subagentsConfig.disableDefaultAgents === true, "config must disable default agents");
-check(subagentsConfig.fallbackSubagent === "none", "config must disable fallback agents");
-check(subagentsConfig.maxSubagentDepth === 1, "config must disable nested delegation at depth 1");
-
-const {
-  CHILD_PI_IDENTITY_LINE,
-  MAIN_PI_IDENTITY,
-  PI_DOCUMENTATION_END,
-  PI_DOCUMENTATION_START,
-  SHARED_CONTEXT_MARKER,
-  TOOL_GUIDANCE_MARKER,
-  injectPiDocumentationSkill,
-  injectSharedProjectContext,
-  injectToolGuidance,
-  removeChildPiIdentity,
-  removeMainPiDocumentation,
-  removeMainPiIdentity,
-  renderProjectContext,
-  renderToolGuidance,
-} = await import(new URL("../extensions/oh-my-pi-slim/prompt-context.ts", import.meta.url));
-{
-  const guidancePrefix = "Available tools:\n";
-  const guidanceSuffix = "\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n\nGuidelines:\n";
-  const fixedGuidelines = "- Be concise in your responses\n- Show file paths clearly when working with files";
-  check(
-    renderToolGuidance({
-      selectedTools: ["custom", "read", "hidden"],
-      toolSnippets: { read: "Read files", custom: "Run custom work", hidden: "" },
-    }) === `${guidancePrefix}- custom: Run custom work\n- read: Read files${guidanceSuffix}${fixedGuidelines}`,
-    "tool guidance must list only active tools with truthy snippets in selectedTools order",
-  );
-  check(
-    renderToolGuidance({ selectedTools: ["custom"], toolSnippets: {} }) ===
-      `${guidancePrefix}(none)${guidanceSuffix}${fixedGuidelines}`,
-    "tool guidance must render (none) when no active tool has a visible snippet",
-  );
-  check(
-    renderToolGuidance({
-      selectedTools: ["grep"],
-      promptGuidelines: [
-        "  Prefer exact matches  ",
-        "",
-        "Prefer exact matches",
-        " Be concise in your responses ",
-        " Show file paths clearly when working with files ",
-      ],
-    }) === `${guidancePrefix}(none)${guidanceSuffix}` +
-      "- Prefer exact matches\n- Be concise in your responses\n- Show file paths clearly when working with files",
-    "tool guidance must trim, ignore empty, and first-occurrence deduplicate custom and fixed guidelines",
-  );
-  const bashFallback = renderToolGuidance({
-    selectedTools: ["bash"],
-    toolSnippets: { bash: "Run commands" },
-  });
-  check(
-    bashFallback.includes("Guidelines:\n- Use bash for file operations like ls, rg, find\n"),
-    "tool guidance must add Pi's bash file-operation fallback when grep, find, and ls are inactive",
-  );
-  const noBashFallback = renderToolGuidance({
-    selectedTools: ["bash", "grep"],
-    toolSnippets: { bash: "Run commands", grep: "Search files" },
-  });
-  check(
-    !noBashFallback.includes("Use bash for file operations like ls, rg, find"),
-    "tool guidance must omit the bash fallback when grep, find, or ls is active",
-  );
-  const defaultTools = renderToolGuidance({ toolSnippets: { bash: "Run commands" } });
-  check(
-    defaultTools.startsWith(`${guidancePrefix}- bash: Run commands${guidanceSuffix}`) &&
-      defaultTools.includes("Use bash for file operations like ls, rg, find"),
-    "tool guidance must default selectedTools to read, bash, edit, write",
-  );
-
-  const guidance = renderToolGuidance({ selectedTools: [] });
-  const wrappedGuidance = `<omps-tool-guidance>\n${guidance}\n</omps-tool-guidance>`;
-  const markerPrompt = `environment\n${TOOL_GUIDANCE_MARKER}\n${SHARED_CONTEXT_MARKER}\nrole`;
-  check(
-    injectToolGuidance(markerPrompt, guidance) ===
-      `environment\n${wrappedGuidance}\n${SHARED_CONTEXT_MARKER}\nrole`,
-    "tool guidance placeholder must be replaced with the stable wrapper",
-  );
-  const promptWithMarkerAndWrapper = `${TOOL_GUIDANCE_MARKER}\nold ${wrappedGuidance}`;
-  const placeholderFirst = injectToolGuidance(promptWithMarkerAndWrapper, guidance);
-  check(
-    placeholderFirst.startsWith(wrappedGuidance) && !placeholderFirst.includes(TOOL_GUIDANCE_MARKER),
-    "tool guidance placeholder replacement must take priority when a wrapper also exists",
-  );
-  const alreadyWrapped = `environment\n${wrappedGuidance}\nrole`;
-  const changedWrappedGuidance = "<omps-tool-guidance>\nchanged guidance\n</omps-tool-guidance>";
-  check(
-    injectToolGuidance(alreadyWrapped, "changed guidance") ===
-      `environment\n${changedWrappedGuidance}\nrole`,
-    "existing tool guidance wrappers must be updated for the current turn",
-  );
-  check(
-    injectToolGuidance("prompt without marker", guidance) ===
-      `prompt without marker\n\n${wrappedGuidance}`,
-    "tool guidance injection must safely append when marker and wrapper are missing",
-  );
-  const damagedWrapper = "environment\n<omps-tool-guidance>\nold incomplete guidance\nrole";
-  check(
-    injectToolGuidance(damagedWrapper, "changed guidance") ===
-      `${damagedWrapper}\n\n${changedWrappedGuidance}`,
-    "damaged tool guidance wrappers must be preserved while a fresh wrapper is appended",
-  );
-
-  const files = [
-    { path: "/global/AGENTS.md", content: "global rules" },
-    { path: "/project/CLAUDE.md", content: "project rules" },
-  ];
-  const expected = "\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n" +
-    '<project_instructions path="/global/AGENTS.md">\nglobal rules\n</project_instructions>\n\n' +
-    '<project_instructions path="/project/CLAUDE.md">\nproject rules\n</project_instructions>\n\n' +
-    "</project_context>\n";
-  const context = renderProjectContext(files);
-  check(context === expected, "project context rendering must exactly match Pi formatting and preserve order");
-  check(renderProjectContext([]) === "", "empty project context must render as an empty string");
-  const base = `prefix\n${SHARED_CONTEXT_MARKER}\nspecialist`;
-  const injected = injectSharedProjectContext(base, context);
-  check(injected === `prefix\n${context}\nspecialist`, "shared context must replace the specialist marker");
-  const roleMentionsContext = `prefix\n${SHARED_CONTEXT_MARKER}\nrole describes <project_context> semantics`;
-  const injectedWithRoleMention = injectSharedProjectContext(roleMentionsContext, context);
-  check(
-    injectedWithRoleMention === `prefix\n${context}\nrole describes <project_context> semantics`,
-    "shared context marker must take priority over project_context text in specialist role instructions",
-  );
-  const markerWithExistingContext = `${context}prefix\n${SHARED_CONTEXT_MARKER}\nspecialist`;
-  check(
-    injectSharedProjectContext(markerWithExistingContext, context) === `${context}prefix\n\nspecialist`,
-    "an existing matching shared context must only cause the marker to be removed",
-  );
-  const roleOnlyMentionsContext = "prefix\nrole describes <project_context> semantics";
-  check(
-    injectSharedProjectContext(roleOnlyMentionsContext, context) === `${roleOnlyMentionsContext}${context}`,
-    "project_context text in role instructions must not prevent real context from being appended",
-  );
-  check(injectSharedProjectContext(injected, context) === injected, "shared context injection must be idempotent");
-  check(injectSharedProjectContext(injectedWithRoleMention, context) === injectedWithRoleMention, "already-injected prompts with role project_context text must remain unchanged");
-  check(injectSharedProjectContext(`prefix\n${SHARED_CONTEXT_MARKER}\nspecialist`, "") === "prefix\n\nspecialist", "empty context must remove the marker without creating a section");
-  check(injectSharedProjectContext("prompt without marker", context) === `prompt without marker${context}`, "missing marker must safely append context");
-  check(injectSharedProjectContext("prompt without marker", "") === "prompt without marker", "empty context without a marker must leave the prompt unchanged");
-  const documentationBlock = `${PI_DOCUMENTATION_START}\n` +
-    "- Main documentation: /installed/pi/README.md\n" +
-    "- Additional docs: /installed/pi/docs\n" +
-    `${PI_DOCUMENTATION_END}`;
-  const afterDocumentation = "\n\nAPPEND SYSTEM\n\n<project_context>project rules</project_context>\n" +
-    "<available_skills><skill>skill summary</skill></available_skills>\n" +
-    "Current working directory: /project";
-  const mainPromptWithDocumentation = `${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read` +
-    `${documentationBlock}${afterDocumentation}`;
-  check(
-    removeMainPiDocumentation(mainPromptWithDocumentation) ===
-      `${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read${afterDocumentation}`,
-    "main documentation removal must preserve tools, append system, project context, skills, and cwd",
-  );
-  check(
-    removeMainPiDocumentation(`${mainPromptWithDocumentation}${documentationBlock}`) ===
-      `${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read${afterDocumentation}${documentationBlock}`,
-    "main documentation removal must affect only the first exact block",
-  );
-  check(
-    removeMainPiDocumentation(`custom prompt${documentationBlock}`) === "custom prompt",
-    "main documentation removal must survive earlier extension changes to the Pi identity prefix",
-  );
-  check(
-    removeMainPiDocumentation(`${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read`) ===
-      `${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read`,
-    "main documentation removal must be unchanged without the start anchor",
-  );
-  check(
-    removeMainPiDocumentation(`${MAIN_PI_IDENTITY}${PI_DOCUMENTATION_START}\nchanged ending`) ===
-      `${MAIN_PI_IDENTITY}${PI_DOCUMENTATION_START}\nchanged ending`,
-    "main documentation removal must fail safe when Pi changes the end anchor",
-  );
-  const renderedPiSkill = "\n\nThe following skills provide specialized instructions for specific tasks.\n" +
-    "Use the read tool to load a skill's file when the task matches its description.\n" +
-    "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n" +
-    "<available_skills>\n  <skill>\n    <name>pi-documentation</name>\n" +
-    "    <description>Use for work about Pi itself.</description>\n" +
-    "    <location>/package/skills/pi-documentation/SKILL.md</location>\n" +
-    "  </skill>\n</available_skills>";
-  const existingSkills = renderedPiSkill
-    .replace("pi-documentation", "other-skill")
-    .replace("Use for work about Pi itself.", "Other skill")
-    .replace("/package/skills/pi-documentation/SKILL.md", "/skills/other/SKILL.md");
-  const nextSkills = existingSkills.replace(
-    "</available_skills>",
-    renderedPiSkill.slice(
-      renderedPiSkill.indexOf("  <skill>"),
-      renderedPiSkill.indexOf("</available_skills>"),
-    ) + "</available_skills>",
-  );
-  const promptWithSkills = `role${existingSkills}\nCurrent working directory: /project`;
-  const mergedSkills = injectPiDocumentationSkill(promptWithSkills, existingSkills, nextSkills);
-  check(
-    mergedSkills.includes("<name>other-skill</name>") &&
-      mergedSkills.includes("<name>pi-documentation</name>") &&
-      mergedSkills.indexOf("<name>pi-documentation</name>") < mergedSkills.indexOf("</available_skills>") &&
-      mergedSkills.endsWith("Current working directory: /project"),
-    "conditional skill injection must merge into Pi's existing available_skills block before cwd",
-  );
-  const promptWithoutSkills = "role\nCurrent working directory: /project";
-  check(
-    injectPiDocumentationSkill(promptWithoutSkills, "", renderedPiSkill) ===
-      `role${renderedPiSkill}\nCurrent working directory: /project`,
-    "conditional skill injection must create Pi's standard skills block before cwd",
-  );
-  const misleadingSkillsText = "role <available_skills>documentation example</available_skills>\nCurrent working directory: /project";
-  check(
-    injectPiDocumentationSkill(misleadingSkillsText, "", renderedPiSkill) ===
-      `role <available_skills>documentation example</available_skills>${renderedPiSkill}\nCurrent working directory: /project`,
-    "conditional skill injection must not merge into unrelated available_skills text",
-  );
-  check(
-    injectPiDocumentationSkill(mergedSkills, nextSkills, nextSkills) === mergedSkills,
-    "conditional skill injection must be idempotent",
-  );
-  const mainPrompt = `${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read`;
-  check(removeMainPiIdentity(mainPrompt) === "\n\nAvailable tools:\n- read", "main identity removal must preserve Available tools and later content");
-  check(removeMainPiIdentity(`${MAIN_PI_IDENTITY}\n${MAIN_PI_IDENTITY}`).endsWith(MAIN_PI_IDENTITY), "main identity removal must affect only the first exact prefix");
-  const middleMainIdentity = `prefix\n${MAIN_PI_IDENTITY}\nsuffix`;
-  check(removeMainPiIdentity(middleMainIdentity) === middleMainIdentity, "main identity removal must not affect identity text in the middle");
-  check(removeMainPiIdentity("no main identity") === "no main identity", "main identity removal must be unchanged without its exact anchor");
-  const childTag = '<active_agent name="fixer"/>';
-  const childPrompt = `${childTag}\n\n${CHILD_PI_IDENTITY_LINE}You have been invoked to work.`;
-  check(removeChildPiIdentity(childPrompt) === `${childTag}\n\nYou have been invoked to work.`, "child identity removal must preserve the active_agent tag and invocation text");
-  const repeatedChildIdentity = `${childTag}\n\n${CHILD_PI_IDENTITY_LINE}${CHILD_PI_IDENTITY_LINE}`;
-  check(removeChildPiIdentity(repeatedChildIdentity).endsWith(CHILD_PI_IDENTITY_LINE), "child identity removal must affect only the first exact prefixed identity");
-  const middleChildIdentity = `${childTag}\n\nrole instructions\n${CHILD_PI_IDENTITY_LINE}invocation`;
-  check(removeChildPiIdentity(middleChildIdentity) === middleChildIdentity, "child identity removal must not affect identity text in the middle");
-  check(removeChildPiIdentity(`${CHILD_PI_IDENTITY_LINE}no tag`) === `${CHILD_PI_IDENTITY_LINE}no tag`, "child identity removal must require the active_agent prompt prefix");
-  check(removeChildPiIdentity("no child identity") === "no child identity", "child identity removal must be unchanged without its exact anchor");
-  check(mainPrompt === `${MAIN_PI_IDENTITY}\n\nAvailable tools:\n- read`, "non-OAuth flow must retain identity by not invoking the trimming helper");
-}
-
-// Exercise the completed-steer compatibility logic with controllable live-session mocks.
-const { cancelledResumeOutcome, resumeCompletedRecord } = await import(
-  new URL("../extensions/oh-my-pi-slim/auto-resume.ts", import.meta.url)
-);
-const { AgentOperationClaims } = await import(
-  new URL("../extensions/oh-my-pi-slim/operation-claims.ts", import.meta.url)
-);
-const deferred = () => {
-  let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
-};
-const createResumeHarness = ({ status = "completed", result = "old output", prompt, isStreaming = false } = {}) => {
-  const lifecycle = [];
-  const messages = [{ role: "assistant", content: "old output", stopReason: "stop" }];
-  let listener = () => {};
-  let aborts = 0;
-  let promptCalls = 0;
-  let promptOptions;
-  const session = {
-    messages,
-    isStreaming,
-    abort() { aborts++; },
-    subscribe(next) { listener = next; return () => { listener = () => {}; }; },
-    async prompt(message, options) {
-      promptCalls++;
-      promptOptions = options;
-      await (prompt ?? (async () => {
-        const assistant = { role: "assistant", content: `new: ${message}`, stopReason: "stop" };
-        listener({ type: "message_start", message: assistant });
-        listener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: assistant.content } });
-        messages.push(assistant);
-        listener({ type: "message_end", message: assistant });
-      }))(message, options, { messages, emit: (event) => listener(event) });
-    },
-  };
-  const record = {
-    id: "agent-1",
-    type: "fixer",
-    description: "mock agent",
-    isBackground: true,
-    status,
-    result,
-    toolUses: 0,
-    startedAt: 1,
-    completedAt: 2,
-    session,
-    lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
-    compactionCount: 0,
-    resultConsumed: false,
-  };
-  return {
-    record,
-    session,
-    registry: { getRecord: () => record },
-    lifecycle: {
-      emit(name, data) { lifecycle.push({ name, data }); },
-      append(data) { lifecycle.push({ name: "subagents:record", data }); },
-    },
-    lifecycleEvents: lifecycle,
-    get aborts() { return aborts; },
-    get promptCalls() { return promptCalls; },
-    get promptOptions() { return promptOptions; },
-  };
-};
-
-{
-  const harness = createResumeHarness();
-  const outcome = await resumeCompletedRecord(
-    harness.registry, "agent-1", "/literal command", "completed", harness.lifecycle,
-  );
-  check(outcome.status === "completed" && outcome.previousResult === "old output" && outcome.newResult === "new: /literal command", "auto-resume happy path must preserve old output and return the new assistant output");
-  check(harness.promptOptions?.expandPromptTemplates === false, "auto-resume prompt must disable prompt template expansion");
-  check(harness.record.resultConsumed === true, "auto-resume must leave inline results consumed");
-  check(harness.record.promise instanceof Promise, "auto-resume must publish record.promise");
-  check(await harness.record.promise === outcome.newResult, "settled record.promise must resolve to the new result");
-  check(harness.lifecycleEvents.map((event) => event.name).join(",") === "subagents:started,subagents:completed,subagents:record", "successful auto-resume must emit and persist lifecycle events");
-}
-
-{
-  const gate = deferred();
-  const harness = createResumeHarness({
-    prompt: async (_message, _options, context) => {
-      await gate.promise;
-      const assistant = { role: "assistant", content: "delayed", stopReason: "stop" };
-      context.emit({ type: "message_start", message: assistant });
-      context.emit({ type: "message_end", message: assistant });
-    },
-  });
-  const running = resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  check(harness.record.status === "running" && harness.record.promise instanceof Promise, "record.promise must be pending while the resumed turn runs");
-  let settled = false;
-  harness.record.promise.then(() => { settled = true; });
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  check(!settled, "record.promise must not settle before the resumed prompt");
-  gate.resolve();
-  await running;
-  await harness.record.promise;
-  check(settled, "record.promise must settle with the resumed prompt");
-}
-
-{
-  const runningRecord = createResumeHarness({ status: "running" });
-  const outcome = await resumeCompletedRecord(runningRecord.registry, "agent-1", "continue", "completed", runningRecord.lifecycle);
-  check(outcome.status === "error" && runningRecord.promptCalls === 0, "running records must remain a no-op and must not start an auto-resume prompt");
-}
-
-{
-  const streamingRecord = createResumeHarness({ isStreaming: true });
-  const outcome = await resumeCompletedRecord(streamingRecord.registry, "agent-1", "continue", "completed", streamingRecord.lifecycle);
-  check(outcome.status === "error" && streamingRecord.promptCalls === 0, "terminal records with a streaming session must not start an auto-resume prompt");
-}
-
-{
-  const harness = createResumeHarness();
-  const controller = new AbortController();
-  controller.abort();
-  const outcome = await resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle, controller.signal);
-  check(outcome.status === "aborted" && harness.promptCalls === 0, "already-aborted callers must not start an auto-resume prompt");
-  check(harness.record.result === "old output" && harness.record.resultConsumed === true, "already-aborted auto-resume must preserve and consume the old result");
-}
-
-{
-  const gate = deferred();
-  const harness = createResumeHarness({
-    prompt: async (_message, _options, context) => {
-      await gate.promise;
-      const assistant = { role: "assistant", content: "partial", stopReason: "aborted" };
-      context.emit({ type: "message_start", message: assistant });
-      context.emit({ type: "message_end", message: assistant });
-    },
-  });
-  const controller = new AbortController();
-  const running = resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle, controller.signal);
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  controller.abort();
-  gate.resolve();
-  const outcome = await running;
-  check(outcome.status === "aborted" && harness.aborts === 1 && harness.record.status === "aborted", "mid-prompt caller abort must abort the session and settle as aborted");
-}
-
-{
-  const gate = deferred();
-  const harness = createResumeHarness({ prompt: async () => { await gate.promise; } });
-  const running = resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  harness.record.status = "stopped";
-  harness.record.abortController.abort();
-  gate.resolve();
-  const outcome = await running;
-  check(outcome.status === "stopped" && harness.record.status === "stopped", "manager stop must not be overwritten when the resumed turn settles");
-}
-
-{
-  const harness = createResumeHarness({ prompt: async () => {} });
-  const outcome = await resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
-  check(outcome.status === "error" && outcome.failure?.includes("no new assistant message"), "auto-resume without a message_end assistant must fail");
-  check(harness.record.resultConsumed === true, "failed inline auto-resume must remain consumed");
-}
-
-{
-  const harness = createResumeHarness({
-    prompt: async (_message, _options, context) => {
-      const assistant = { role: "assistant", content: "compaction-safe result", stopReason: "stop" };
-      context.emit({ type: "message_start", message: assistant });
-      context.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: assistant.content } });
-      context.emit({ type: "message_end", message: assistant });
-      harness.session.messages = [{ role: "assistant", content: "compacted history", stopReason: "stop" }];
-    },
-  });
-  const outcome = await resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
-  check(outcome.status === "completed" && outcome.newResult === "compaction-safe result", "auto-resume must use the subscribed final assistant when compaction replaces session.messages");
-}
-
-for (const stopReason of ["aborted", "error"]) {
-  const harness = createResumeHarness({
-    prompt: async (_message, _options, context) => {
-      const partial = { role: "assistant", content: "earlier partial", stopReason: "stop" };
-      context.emit({ type: "message_start", message: partial });
-      context.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: partial.content } });
-      context.emit({ type: "message_end", message: partial });
-      const final = { role: "assistant", content: "", stopReason, errorMessage: stopReason === "error" ? "provider failed" : undefined };
-      context.emit({ type: "message_start", message: final });
-      context.emit({ type: "message_end", message: final });
-    },
-  });
-  const outcome = await resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
-  check(outcome.status === stopReason && outcome.newResult === "", `final empty ${stopReason} assistant must control status and must not reuse an earlier partial assistant`);
-}
-
-{
-  const harness = createResumeHarness({
-    prompt: async (_message, _options, context) => {
-      const assistant = { role: "assistant", content: "", stopReason: "length" };
-      context.emit({ type: "message_start", message: assistant });
-      context.emit({ type: "message_end", message: assistant });
-    },
-  });
-  const outcome = await resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
-  check(outcome.status === "error" && outcome.failure?.includes("output token limit"), "final empty length assistant must fail rather than complete");
-}
-
-{
-  const harness = createResumeHarness({
-    prompt: async (_message, _options, context) => {
-      const assistant = { role: "assistant", content: "provider partial", stopReason: "error", errorMessage: "provider failed" };
-      context.emit({ type: "message_start", message: assistant });
-      context.emit({ type: "message_end", message: assistant });
-    },
-  });
-  const outcome = await resumeCompletedRecord(harness.registry, "agent-1", "continue", "completed", harness.lifecycle);
-  check(outcome.status === "error" && outcome.failure === "provider failed" && outcome.newResult === "provider partial", "provider error turns must fail while preserving the final assistant's partial output");
-}
-
-{
-  const claims = new AgentOperationClaims();
-  check(claims.claimExplicitResume("agent-1", "agent-call").allowed, "first explicit Agent resume claim must be allowed");
-  const steerSecond = claims.claimSteer("agent-1", "steer-call", "completed");
-  check(!steerSecond.allowed && steerSecond.conflict?.kind === "explicit-resume", "Agent-first/steer-second must block the completed steer claim");
-  const runningSteerSecond = claims.claimSteer("agent-1", "running-steer-call", "running");
-  check(!runningSteerSecond.allowed && runningSteerSecond.conflict?.kind === "explicit-resume", "an in-flight explicit resume must also block a same-ID steer whose record is now running");
-  claims.releaseToolCall("agent-call");
-  check(claims.claimSteer("agent-1", "steer-call", "completed").allowed, "first completed steer claim must be allowed after cleanup");
-  const agentSecond = claims.claimExplicitResume("agent-1", "agent-call-2");
-  check(!agentSecond.allowed && agentSecond.conflict?.kind === "auto-steer", "steer-first/Agent-second must block the explicit resume claim");
-  check(claims.claimExplicitResume("agent-2", "agent-call-2").allowed, "different agent IDs must be claimable concurrently");
-  const runningSteer = claims.claimSteer("agent-3", "running-steer", "running");
-  check(runningSteer.allowed && !runningSteer.claimed && !claims.get("agent-3"), "running steer must remain unclaimed");
-  claims.releaseToolCall("steer-call");
-  claims.releaseToolCall("agent-call-2");
-  check(!claims.get("agent-1") && !claims.get("agent-2"), "toolCallId cleanup must release all associated claims");
-}
-
-{
-  const harness = createResumeHarness();
-  const outcome = cancelledResumeOutcome(harness.registry, "agent-1", "completed");
-  check(outcome.status === "aborted" && harness.record.resultConsumed === true, "lock-wait cancellation must preserve the old inline result as consumed");
-}
-
-// Exercise Pi's TypeScript extension loader without invoking a model.
-const loadExtension = spawnSync(
-  "pi",
-  ["-p", "--no-extensions", "--extension", extensionPath, "--no-session"],
-  {
-    cwd: ROOT,
-    env: { ...process.env, PI_OFFLINE: "1", OMPS_SKIP_BOOTSTRAP: "1" },
-    encoding: "utf8",
-  },
-);
-check(
-  loadExtension.status === 0,
-  `Pi failed to load the orchestration extension: ${loadExtension.stderr || loadExtension.stdout}`,
-);
-
-// Exercise reversible installation in an isolated Pi agent directory.
-const tempAgentDir = mkdtempSync(join(tmpdir(), "oh-my-pi-slim-validate-"));
-try {
-  const oldExplorer = join(tempAgentDir, "agents", "explorer.md");
-  const oldPreset = join(tempAgentDir, "oh-my-pi-slim.json");
-  const oldPiDocumentationSkill = join(
-    tempAgentDir,
-    "extensions",
-    "oh-my-pi-slim",
-    "skills",
-    "pi-documentation",
-    "SKILL.md",
-  );
-  const customPresetText = `${JSON.stringify({
-    defaultPreset: "custom",
-    presets: { custom: presetConfig.presets[presetConfig.defaultPreset] },
-  }, null, 2)}\n`;
-  mkdirSync(dirname(oldExplorer), { recursive: true });
-  mkdirSync(dirname(oldPiDocumentationSkill), { recursive: true });
-  writeFileSync(oldExplorer, "previous explorer\n", "utf8");
-  writeFileSync(oldPreset, customPresetText, "utf8");
-  writeFileSync(oldPiDocumentationSkill, "previous Pi documentation skill\n", "utf8");
-  writeFileSync(
-    join(tempAgentDir, "subagents.json"),
-    `${JSON.stringify({ maxConcurrent: 9, disableDefaultAgents: false }, null, 2)}\n`,
-    "utf8",
-  );
-
-  const install = spawnSync(process.execPath, [join(ROOT, "scripts", "install.mjs")], {
-    cwd: ROOT,
-    env: { ...process.env, PI_CODING_AGENT_DIR: tempAgentDir },
-    encoding: "utf8",
-  });
-  check(install.status === 0, `isolated install failed: ${install.stderr || install.stdout}`);
-
-  const installedSettings = JSON.parse(read(join(tempAgentDir, "subagents.json")));
-  check(installedSettings.maxConcurrent === 9, "install must preserve unrelated subagents settings");
-  check(installedSettings.disableDefaultAgents === true, "install must apply strict agent settings");
-  check(read(oldPreset) === customPresetText, "install must preserve an existing global preset config");
-  for (const role of AGENTS) {
-    check(
-      read(join(tempAgentDir, "agents", `${role}.md`)).includes("prompt_mode: replace"),
-      `install missed ${role}`,
-    );
-  }
-  check(
-    read(join(tempAgentDir, "extensions", "oh-my-pi-slim", "prompt-context.ts")) === promptContext,
-    "legacy install must copy the prompt-context helper",
-  );
-  check(
-    read(oldPiDocumentationSkill) === piDocumentationSkill,
-    "legacy install must copy the Pi documentation skill",
-  );
-  const loadLegacySkill = spawnSync(
-    process.execPath,
-    [
-      "--input-type=module",
-      "-e",
-      `import { loadSkillsFromDir } from ${JSON.stringify(
-        installedPiRoot
-          ? pathToFileURL(join(installedPiRoot, "dist", "core", "skills.js")).href
-          : "",
-      )}; const result = loadSkillsFromDir({ dir: ${JSON.stringify(dirname(oldPiDocumentationSkill))}, source: "extension:oh-my-pi-slim" }); if (result.skills.length !== 1 || result.skills[0].name !== "pi-documentation" || result.diagnostics.length > 0) { console.error(JSON.stringify(result)); process.exit(1); }`,
-    ],
-    { cwd: ROOT, encoding: "utf8" },
-  );
-  check(
-    loadLegacySkill.status === 0,
-    `Pi failed to load the legacy copied private skill: ${loadLegacySkill.stderr || loadLegacySkill.stdout}`,
-  );
-
-  const uninstall = spawnSync(process.execPath, [join(ROOT, "scripts", "uninstall.mjs")], {
-    cwd: ROOT,
-    env: { ...process.env, PI_CODING_AGENT_DIR: tempAgentDir },
-    encoding: "utf8",
-  });
-  check(uninstall.status === 0, `isolated uninstall failed: ${uninstall.stderr || uninstall.stdout}`);
-  check(read(oldExplorer) === "previous explorer\n", "uninstall must restore an overwritten role file");
-  check(read(oldPreset) === customPresetText, "uninstall must preserve an existing preset config");
-  check(
-    read(oldPiDocumentationSkill) === "previous Pi documentation skill\n",
-    "uninstall must restore an overwritten Pi documentation skill",
-  );
-
-  const restoredSettings = JSON.parse(read(join(tempAgentDir, "subagents.json")));
-  check(restoredSettings.maxConcurrent === 9, "uninstall must preserve unrelated settings");
-  check(restoredSettings.disableDefaultAgents === false, "uninstall must restore prior settings values");
-  check(
-    !Object.prototype.hasOwnProperty.call(restoredSettings, "fallbackSubagent"),
-    "uninstall must remove newly-added settings",
-  );
-
-  rmSync(oldPreset, { force: true });
-  rmSync(oldPiDocumentationSkill, { force: true });
-  const freshInstall = spawnSync(process.execPath, [join(ROOT, "scripts", "install.mjs")], {
-    cwd: ROOT,
-    env: { ...process.env, PI_CODING_AGENT_DIR: tempAgentDir },
-    encoding: "utf8",
-  });
-  check(freshInstall.status === 0, `fresh preset install failed: ${freshInstall.stderr || freshInstall.stdout}`);
-  check(
-    read(oldPreset) === read(presetPath),
-    "install must copy the default global preset when none exists",
-  );
-
-  const freshUninstall = spawnSync(process.execPath, [join(ROOT, "scripts", "uninstall.mjs")], {
-    cwd: ROOT,
-    env: { ...process.env, PI_CODING_AGENT_DIR: tempAgentDir },
-    encoding: "utf8",
-  });
-  check(
-    freshUninstall.status === 0,
-    `fresh preset uninstall failed: ${freshUninstall.stderr || freshUninstall.stdout}`,
-  );
-  check(!existsSync(oldPreset), "uninstall must remove the default preset it created");
-  check(
-    !existsSync(oldPiDocumentationSkill),
-    "uninstall must remove the Pi documentation skill it created",
-  );
-} finally {
-  rmSync(tempAgentDir, { recursive: true, force: true });
-}
+const diffCheck = spawnSync("git", ["diff", "--check"], {
+  cwd: ROOT,
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "pipe"],
+});
+check(diffCheck.status === 0, `git diff --check failed:\n${diffCheck.stdout}${diffCheck.stderr}`.trim());
 
 if (errors.length > 0) {
-  console.error(`Validation failed:\n- ${errors.join("\n- ")}`);
+  console.error(`Validation failed with ${errors.length} error(s):`);
+  for (const error of errors) console.error(`- ${error}`);
   process.exit(1);
 }
 
-console.log("Validation passed.");
+console.log("Validation passed: oh-my-pi-slim 0.6 native contract is internally consistent.");

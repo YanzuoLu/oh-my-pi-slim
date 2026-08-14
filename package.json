@@ -1,8 +1,8 @@
 {
   "name": "oh-my-pi-slim",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "private": true,
-  "description": "Preset-driven main-session orchestration for Pi, powered by @tintinweb/pi-subagents.",
+  "description": "Preset-driven main-session orchestration for Pi with a native pi-subagents backend.",
   "type": "module",
   "license": "MIT",
   "author": "YanzuoLu",
@@ -28,12 +28,22 @@
   },
   "pi": {
     "extensions": [
+      "./node_modules/pi-subagents/index.ts",
       "./extensions/oh-my-pi-slim/index.ts"
+    ],
+    "subagents": {
+      "agents": [
+        "./agents"
+      ]
+    },
+    "skills": [
+      "./extensions/oh-my-pi-slim/skills"
     ]
   },
   "scripts": {
-    "install:user": "node scripts/install.mjs",
-    "uninstall:user": "node scripts/uninstall.mjs",
     "validate": "node scripts/validate.mjs"
+  },
+  "dependencies": {
+    "pi-subagents": "0.49.0"
   }
 }
