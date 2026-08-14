@@ -111,6 +111,8 @@ function hasOwn(value: object, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
+const RELOAD_PRESET_STORE_KEY = "__ompsActivePresetForReload";
+
 function envEnabled(): boolean {
   return TRUE_VALUES.test(String(process.env.OMPS_ENABLE ?? "").trim());
 }
@@ -562,6 +564,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     activePresetName = presetName;
     activePreset = preset;
     nudgeSentThisUserTurn = false;
+    (globalThis as Record<string, unknown>)[RELOAD_PRESET_STORE_KEY] = presetName;
     updateStatus(ctx);
   }
 
@@ -571,6 +574,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     activePresetName = undefined;
     activePreset = undefined;
     nudgeSentThisUserTurn = false;
+    delete (globalThis as Record<string, unknown>)[RELOAD_PRESET_STORE_KEY];
     if (originalModel) await pi.setModel(originalModel);
     if (originalThinking !== undefined) pi.setThinkingLevel(originalThinking);
     originalModel = undefined;
@@ -690,7 +694,14 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     },
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  function consumeReloadPresetSlot(): string | undefined {
+    const store = globalThis as Record<string, unknown>;
+    const saved = store[RELOAD_PRESET_STORE_KEY];
+    delete store[RELOAD_PRESET_STORE_KEY];
+    return typeof saved === "string" && saved.trim() ? saved.trim() : undefined;
+  }
+
+  pi.on("session_start", async (event, ctx) => {
     invalidateCheckpoint();
     sessionCtx = ctx;
     active = false;
@@ -712,11 +723,17 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     const requestedPreset = typeof flagPreset === "string" && flagPreset.trim()
       ? flagPreset.trim()
       : envPreset();
-    const shouldActivate = pi.getFlag("omps") === true || envEnabled() || requestedPreset !== undefined;
+    // /reload rebuilds extensions from scratch; the only in-session activation
+    // signals (commands) live in the destroyed closure. Restore the preset name
+    // stashed on globalThis, but only for reload — new/resume/fork sessions start
+    // clean, and the slot is always consumed so it never leaks sideways.
+    const savedPreset = consumeReloadPresetSlot();
+    const reloadPreset = event.reason === "reload" ? savedPreset : undefined;
+    const shouldActivate = pi.getFlag("omps") === true || envEnabled() || requestedPreset !== undefined || reloadPreset !== undefined;
 
     if (shouldActivate) {
       try {
-        await activate(ctx, requestedPreset);
+        await activate(ctx, requestedPreset ?? reloadPreset);
       } catch (error) {
         report(ctx, error instanceof Error ? error.message : String(error), "error");
       }
@@ -890,6 +907,9 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     invalidateCheckpoint();
     if (active) {
       active = false;
+      // Intentionally keep the reload slot: on "reload" the new extension
+      // instance restores from it; on "new"/"resume"/"fork" the following
+      // session_start consumes and discards it; on "quit" the process exits.
       if (originalModel) await pi.setModel(originalModel);
       if (originalThinking !== undefined) pi.setThinkingLevel(originalThinking);
     }

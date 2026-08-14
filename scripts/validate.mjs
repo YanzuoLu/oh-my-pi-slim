@@ -73,7 +73,7 @@ const packageJson = json("package.json");
 const lock = json("package-lock.json");
 const installedBackend = json("node_modules/pi-subagents/package.json");
 
-check(packageJson.version === "0.6.0", "package.json version must be 0.6.0");
+check(packageJson.version === "0.6.1", "package.json version must be 0.6.1");
 check(
   packageJson.dependencies?.["pi-subagents"] === "0.49.0",
   "package.json must depend exactly on pi-subagents 0.49.0",

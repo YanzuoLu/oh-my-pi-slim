@@ -68,6 +68,7 @@ pi --omps --omps-preset balanced
 - `/preset <name>` 会启用 OMPS（若尚未启用）并切换 preset；`/preset` 列出可用 preset。
 - `/omps off` 只关闭当前会话的 OMPS 编排，并恢复激活前的主模型与 thinking。
 - `/omps uninstall` 只执行可逆设置恢复；真正移除 package 见[卸载](#卸载)。
+- `/reload` 会重建全部扩展，但 OMPS 会通过进程内的一次性槽位恢复激活状态和当前 preset；`/new`、resume 和 fork 不继承，重启 Pi 后回到 flag/env/默认行为。
 
 ## 原生调用合同
 
