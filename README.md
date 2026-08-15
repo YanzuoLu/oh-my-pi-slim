@@ -101,7 +101,7 @@ explorer, librarian, oracle, designer, fixer
 当 OMPS 激活时，它会：
 
 - 用当前 preset 替换 caller 提供的 `model`；实际传给 backend 的值是 `provider/model:thinking` suffix。
-- 删除 caller 的 `thinking` 和 `turnBudget`。
+- 删除 caller 的 `thinking`、`turnBudget`、`usageBudget` 和 `toolBudget`。
 - 强制 `context: "fresh"`。
 - 拒绝其他 agent 名、alias 或 namespaced 名称。
 
@@ -129,7 +129,7 @@ subagent({ action: "stop", id: "run-id" })
 subagent({ action: "resume", id: "source-run-id", message: "应用后续修正。" })
 ```
 
-原生 `resume` 从持久化 session 创建新的 child process 和新的 run ID，同时保留 source run 的 model、thinking 与工具合同。后续 status/control/follow-up 必须使用返回的新 ID。resume 时不要传 `agent`、`model`、`thinking` 或 `turnBudget`；OMPS 会拒绝这些 launch override。
+原生 `resume` 从持久化 session 创建新的 child process 和新的 run ID，同时保留 source run 的 model、thinking 与工具合同。后续 status/control/follow-up 必须使用返回的新 ID。resume 时不要传 `agent`、`model`、`thinking`、`turnBudget`、`usageBudget` 或 `toolBudget`；OMPS 会拒绝这些 launch override。
 
 ### Native actions policy
 

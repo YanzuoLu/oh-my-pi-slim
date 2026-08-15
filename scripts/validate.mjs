@@ -73,7 +73,7 @@ const packageJson = json("package.json");
 const lock = json("package-lock.json");
 const installedBackend = json("node_modules/pi-subagents/package.json");
 
-check(packageJson.version === "0.6.1", "package.json version must be 0.6.1");
+check(packageJson.version === "0.6.2", "package.json version must be 0.6.2");
 check(
   packageJson.dependencies?.["pi-subagents"] === "0.49.0",
   "package.json must depend exactly on pi-subagents 0.49.0",
@@ -206,6 +206,8 @@ hasAll(extension, [
   "mutateScheduleCreate(input, activePreset)",
   "delete child.thinking",
   "delete child.turnBudget",
+  "delete child.usageBudget",
+  "delete child.toolBudget",
   'input.context = "fresh"',
   "blocks direct workflowScript execution",
   "CANONICAL_SCHEDULE_SCRIPT",
@@ -226,6 +228,8 @@ hasAll(freshPresetBlock, [
   "child.model = launchModelName(preset[role])",
   "delete child.thinking",
   "delete child.turnBudget",
+  "delete child.usageBudget",
+  "delete child.toolBudget",
 ], "fresh preset model enforcement");
 
 const scheduleCreateStart = extension.indexOf("function mutateScheduleCreate");
@@ -237,6 +241,8 @@ hasAll(scheduleCreateBlock, [
   "delete input.model",
   "delete input.thinking",
   "delete input.turnBudget",
+  "delete input.usageBudget",
+  "delete input.toolBudget",
 ], "schedule preset model enforcement");
 
 const beforeAgentStart = extension.indexOf('pi.on("before_agent_start"');
@@ -469,7 +475,7 @@ hasAll(orchestrator, [
   'subagent({ agent: "explorer", task:',
   "asynchronous and run in the background by default",
   "async: false",
-  "For fresh calls, do not pass `model`, `thinking`, or `turnBudget`",
+  "For fresh calls, do not pass `model`, `thinking`, `turnBudget`, `usageBudget`, or `toolBudget`",
   "The OMPS runtime enforces the current active preset's model contract and removes caller overrides",
   "subagent_wait",
   'action: "status"',

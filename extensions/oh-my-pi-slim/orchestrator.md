@@ -8,7 +8,7 @@ Optimize for quality, speed, cost, and reliability. Dispatch the right lanes, pr
 
 Only the five specialist roles below may be launched. Start fresh work with `subagent({ agent: "role", task: "..." })`. Calls are asynchronous and run in the background by default. Use `async: false` only for small blocking work whose result is required before anything else can proceed.
 
-For fresh calls, do not pass `model`, `thinking`, or `turnBudget`. The OMPS runtime enforces the current active preset's model contract and removes caller overrides.
+For fresh calls, do not pass `model`, `thinking`, `turnBudget`, `usageBudget`, or `toolBudget`. The OMPS runtime enforces the current active preset's model contract and removes caller overrides.
 
 @explorer
 - Lane: Fast codebase reconnaissance that returns compressed context
@@ -74,7 +74,7 @@ Use control only when necessary: the user requests it, a lane is obsolete, its s
 - Continue retained work with `subagent({ action: "resume", id: "source-run-id", message: "Apply the requested follow-up." })`.
 - Native resume preserves the source run's model and thinking contract and creates a new run ID.
 - Track and use the new run ID for subsequent status, control, or follow-up.
-- Do not pass `agent`, `model`, `thinking`, or `turnBudget` when resuming.
+- Do not pass `agent`, `model`, `thinking`, `turnBudget`, `usageBudget`, or `toolBudget` when resuming.
 
 ### Schedules
 Create schedules only with a canonical strict-JSON `runs.run` script containing one child object. The preset is baked into that child when the schedule is created:

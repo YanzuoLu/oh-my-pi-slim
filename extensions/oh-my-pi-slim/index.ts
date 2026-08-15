@@ -65,6 +65,8 @@ const RESUME_LAUNCH_OVERRIDE_FIELDS = [
   "model",
   "thinking",
   "turnBudget",
+  "usageBudget",
+  "toolBudget",
 ] as const;
 const FORBIDDEN_SCHEDULE_CHILD_FIELDS = new Set([
   "action",
@@ -79,6 +81,7 @@ const FORBIDDEN_SCHEDULE_CHILD_FIELDS = new Set([
   "chainDir",
 ]);
 const FILE_TOOLS = new Set(["read", "edit", "write"]);
+const RENDER_TICKER_INTERVAL_MS = 250;
 const TRUE_VALUES = /^(1|true|yes|on)$/i;
 const SAFE_PRESET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_MODEL_PART = /^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$/;
@@ -323,6 +326,8 @@ function applyFreshPreset(child: MutableInput, preset: Preset): void {
   child.model = launchModelName(preset[role]);
   delete child.thinking;
   delete child.turnBudget;
+  delete child.usageBudget;
+  delete child.toolBudget;
 }
 
 function resumeOverrideFields(input: MutableInput): string[] {
@@ -396,6 +401,8 @@ function mutateScheduleCreate(input: MutableInput, preset: Preset): void {
   delete input.model;
   delete input.thinking;
   delete input.turnBudget;
+  delete input.usageBudget;
+  delete input.toolBudget;
 }
 
 interface CheckpointTool {
@@ -444,6 +451,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     resumeScheduled: boolean;
   } | undefined;
   let fileToolSeenThisTurn = false;
+  let renderTicker: ReturnType<typeof setInterval> | undefined;
 
   pi.registerFlag("omps", {
     description: "Run the main Pi session as the oh-my-pi-slim orchestrator",
@@ -474,6 +482,26 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     sessionEpoch += 1;
     pendingCheckpoint = undefined;
     fileToolSeenThisTurn = false;
+  }
+
+  function startRenderTicker(ctx: ExtensionContext): void {
+    // pi-subagents animates its async widget via ctx.ui.requestRender?.(), which
+    // the Pi extension UI context does not expose; re-setting the same status
+    // text forces a TUI redraw (pi's setExtensionStatus always requests render),
+    // so its 250ms spinner frames advance while the main session is otherwise idle.
+    if (renderTicker || !ctx.hasUI) return;
+    renderTicker = setInterval(() => {
+      const current = sessionCtx;
+      if (!active || !current?.hasUI) return;
+      updateStatus(current);
+    }, RENDER_TICKER_INTERVAL_MS);
+    renderTicker.unref?.();
+  }
+
+  function stopRenderTicker(): void {
+    if (!renderTicker) return;
+    clearInterval(renderTicker);
+    renderTicker = undefined;
   }
 
   function scheduleCheckpointResume(
@@ -565,11 +593,13 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     activePreset = preset;
     nudgeSentThisUserTurn = false;
     (globalThis as Record<string, unknown>)[RELOAD_PRESET_STORE_KEY] = presetName;
+    startRenderTicker(ctx);
     updateStatus(ctx);
   }
 
   async function deactivate(ctx: ExtensionContext): Promise<void> {
     invalidateCheckpoint();
+    stopRenderTicker();
     active = false;
     activePresetName = undefined;
     activePreset = undefined;
@@ -905,6 +935,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     invalidateCheckpoint();
+    stopRenderTicker();
     if (active) {
       active = false;
       // Intentionally keep the reload slot: on "reload" the new extension
