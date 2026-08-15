@@ -1,10 +1,10 @@
 # oh-my-pi-slim
 
-> Preset-driven main-session orchestration for Pi, on a native [`pi-subagents`](https://www.npmjs.com/package/pi-subagents) backend.
+> Preset-driven main-session orchestration for Pi with a built-in one-child-per-run background runtime.
 
 **English** | [中文](./README.zh-CN.md)
 
-The main Pi session plans, dispatches and verifies. Child sessions do the bounded work. A preset decides which model and thinking level every role runs on, so you switch the whole fleet with one command instead of tuning calls one by one.
+The main Pi session plans, dispatches, supervises, and verifies. Each child is an isolated Pi RPC process with its own persisted session. A preset selects the model and thinking level for the main orchestrator and all five specialist roles.
 
 ```bash
 pi --omps
@@ -12,249 +12,157 @@ pi --omps
 
 ## The five agents
 
-Child sessions use exactly these five bare names:
-
-| Agent | Access | Use it for |
+| Agent | Tool allowlist | Use it for |
 | --- | --- | --- |
-| `explorer` | read-only | Codebase reconnaissance, locating files, symbols, tests |
-| `librarian` | read-only | External docs, library behavior, version-specific APIs |
-| `oracle` | read-only | Architecture, risk, debugging strategy, independent review |
-| `designer` | read + write | UI/UX design, implementation and polish |
-| `fixer` | read + write | Bounded implementation and verification |
+| `explorer` | `read`, `grep`, `find`, `ls`, `bash`, `contact_supervisor` | Codebase reconnaissance and locating relevant code/tests |
+| `librarian` | `read`, `grep`, `find`, `ls`, `bash`, `web_search`, `web_fetch`, `batch_web_fetch`, `contact_supervisor` | Official docs, library behavior, version-specific APIs |
+| `oracle` | `read`, `grep`, `find`, `ls`, `bash`, `contact_supervisor` | Architecture, risk, debugging strategy, review |
+| `designer` | `read`, `grep`, `find`, `ls`, `bash`, `edit`, `write`, `contact_supervisor` | UI/UX implementation and polish |
+| `fixer` | `read`, `grep`, `find`, `ls`, `bash`, `edit`, `write`, `contact_supervisor` | Bounded implementation and verification |
 
-`orchestrator` is the preset role for the main session only. It is not a launchable agent.
+`orchestrator` is the preset role for the main session only. Agents are loaded only from this package's root `agents/` directory with Pi's `parseFrontmatter`; user/project agent manifests do not participate.
 
-## Requirements
+## Requirements and install
 
-- Pi able to load TypeScript package extensions.
-- All six provider/model pairs in your chosen preset exist and have configured auth.
-- On Anthropic OAuth, make sure `@gotgenes/pi-anthropic-auth` is installed and configured. OMPS never reads, copies or logs credential paths or tokens.
-
-## Install
+- Pi 0.84.2-compatible package and RPC APIs.
+- All six provider/model pairs in the selected preset must exist and have configured authentication.
 
 ```bash
 pi install git:github.com/YanzuoLu/oh-my-pi-slim
 ```
 
-Restart Pi, or run `/reload`, so the already-loaded backend picks up the configuration.
-
-The package manifest loads extensions in this order:
-
-1. `./node_modules/pi-subagents/index.ts`
-2. `./extensions/oh-my-pi-slim/index.ts`
-
-The five agents are discovered through package-scoped `pi.subagents.agents: ["./agents"]`. Nothing is copied into `~/.pi/agent/agents`, and there is no asset-copy install script. OMPS verifies the native backend at startup and refuses to activate if it did not load first, rather than mixing two lifecycles.
-
-## Quick start
-
-```bash
-pi --omps                              # default preset
-pi --omps --omps-preset balanced       # pick one at launch
-```
+The package manifest loads only `./extensions/oh-my-pi-slim/index.ts`. There is no `pi-subagents` dependency or extension entry.
 
 ## Commands
 
 | Command | Effect |
 | --- | --- |
-| `/omps on [preset]` | Enable orchestration, optionally with a preset |
-| `/omps off` | Disable for this session, restoring the pre-activation model and thinking |
-| `/omps status` | Show current state |
-| `/omps presets` | List available presets |
-| `/preset [name]` | Switch preset (enables OMPS if needed); bare `/preset` lists them |
-| `/omps uninstall` | Reversible settings restore only — see [Uninstall](#uninstall) |
+| `/omps on [preset]` | Enable orchestration, optionally selecting a preset |
+| `/omps off` | Disable orchestration and restore the prior main model/thinking |
+| `/omps status` | Show activation state |
+| `/omps presets` | List presets |
+| `/preset [name]` | Switch preset; bare command lists presets |
+| `/omps uninstall` | Clean old OMPS backend migration state, then show the package removal command |
 
-`/reload` rebuilds every extension, but OMPS restores its active state and current preset through a one-shot in-process slot. `/new`, resume and fork do not inherit it; after a Pi restart you are back to flag/env/default behavior.
+`/reload` restores the active preset through a one-shot in-process slot. New, resumed, or forked parent sessions do not inherit that slot.
 
 ## Presets
 
-The single runtime source is your user file:
+The only runtime preset source is:
 
 ```text
 ~/.pi/agent/oh-my-pi-slim.json
 ```
 
-There is no package/project overlay and no merge semantics — `defaultPreset` and `presets` in that file are the complete runtime configuration.
+The bundled `config/oh-my-pi-slim.example.json` seeds that file once when it is absent. Existing user presets are never overwritten or removed. Every preset defines `orchestrator`, `explorer`, `librarian`, `oracle`, `designer`, and `fixer`, each with `provider`, `model`, and a thinking level from `off, minimal, low, medium, high, xhigh, max`.
 
-Every preset defines six roles (`orchestrator` plus the five specialists). Each role needs a non-empty `provider`, a non-empty `model`, and a `thinking` value from `off, minimal, low, medium, high, xhigh, max`:
+Activation validates every configured model and its authentication. The main session model is switched to the orchestrator role. For fresh child calls, OMPS injects the specialist's `provider/model:thinking` after tool-schema validation; the model-facing schema does not expose model, thinking, context, or tool overrides.
 
-```json
-{
-  "defaultPreset": "balanced",
-  "presets": {
-    "balanced": {
-      "orchestrator": { "provider": "anthropic", "model": "claude-opus-4-6", "thinking": "max" },
-      "explorer": { "provider": "anthropic", "model": "claude-haiku-4-5", "thinking": "medium" },
-      "librarian": { "provider": "anthropic", "model": "claude-haiku-4-5", "thinking": "medium" },
-      "oracle": { "provider": "anthropic", "model": "claude-opus-4-6", "thinking": "max" },
-      "designer": { "provider": "anthropic", "model": "claude-sonnet-4-6", "thinking": "high" },
-      "fixer": { "provider": "anthropic", "model": "claude-sonnet-4-6", "thinking": "high" }
-    }
-  }
-}
-```
-
-Activation validates all six models and their auth; any miss refuses activation. Use `pi --list-models` for exact provider/model IDs.
-
-The bundled example at `config/oh-my-pi-slim.example.json` ships `balanced`, `economy` and `openai`. It seeds your user file exactly once, via exclusive create, when that file does not exist. An existing file is never overwritten, never refreshed on upgrade, and never deleted by `/omps uninstall` — it is yours. To adopt a newer example, diff and merge it yourself.
-
-## Calling contract
+## Runtime contract
 
 ### Fresh runs
 
 ```js
-subagent({ agent: "explorer", task: "Locate the auth entry points, data flow and related tests." })
+subagent({ agent: "explorer", task: "Locate the auth flow and related tests." })
+subagent({ agent: "oracle", task: "Review this narrow API decision." })
 ```
 
-Calls are async and run in the background. Use foreground only when the result is small and the next step truly depends on it:
+Fresh input is exactly `{ agent, task, cwd? }`. Every fresh call writes a launch config, starts a detached background runner, and immediately returns a run ID. There is no wait tool and the parent never owns an in-process child client. The runner alone owns the Pi RPC child and exchanges lifecycle data with the parent through files.
+
+Child startup uses a complete Pi invocation containing:
+
+- `--mode rpc` and the preset-selected `--model`;
+- persistent `--session-dir` under the parent Pi session directory;
+- the package agent body as `--system-prompt`;
+- `--tools` with the agent frontmatter's strict allowlist;
+- a child-only `--extension` that registers `contact_supervisor`;
+- `--approve` only for a trusted contained cwd, otherwise `--no-approve`;
+- `PI_SUBAGENT_CHILD=1`, `OMPS_SUBAGENT_CHILD=1`, and the run ID, which keep the main OMPS extension inert in children.
+
+Ambient extensions remain discoverable, so librarian web tools can load, but only allowlisted names are model-visible. `subagent` and `subagent_supervisor` are absent from every child allowlist.
+
+### List, status, notifications, and control
 
 ```js
-subagent({ agent: "oracle", task: "Review this local API decision.", async: false })
-```
-
-Run work in parallel with multiple independent structured calls. OMPS blocks arbitrary `workflowScript`, so do not script chains, fanout or parallel flows.
-
-While OMPS is active it will:
-
-- Replace the caller's `model` with the current preset's, passed to the backend as `provider/model:thinking`.
-- Delete the caller's `thinking`, `turnBudget`, `usageBudget` and `toolBudget`.
-- Force `context: "fresh"`.
-- Reject any other agent name, alias or namespaced name.
-
-`fresh` controls session context only. Agent frontmatter still sets `systemPromptMode: replace`, `inheritProjectContext: true` and `inheritSkills: true` natively, so children keep project instructions and the skills catalog.
-
-### Waiting and control
-
-Completions notify the main session automatically. Prefer continuing non-conflicting work and consuming the notification — do not sleep, and do not poll `status` in a loop. When the current request genuinely cannot proceed, use a barrier:
-
-```js
-subagent_wait({ id: "run-id" })
-```
-
-```js
-subagent({ action: "status",  id: "run-id" })
-subagent({ action: "steer",   id: "run-id", message: "Only check the parser regression." })
+subagent({ action: "list" })
+subagent({ action: "steer", id: "run-id", message: "Focus on the parser test." })
 subagent({ action: "interrupt", id: "run-id" })
-subagent({ action: "stop",    id: "run-id" })
-subagent({ action: "resume",  id: "source-run-id", message: "Apply the follow-up fix." })
 ```
 
-Native `resume` restores the persisted session as a new child process and returns a **new run ID** — it never reuses the source ID. Use the returned ID for later status, control and follow-up. Do not pass `agent`, `model`, `thinking`, `turnBudget`, `usageBudget` or `toolBudget` to resume; OMPS rejects those launch overrides.
+Completion, supervisor waiting, failure, and interruption send hidden `followUp` notifications with `triggerTurn: true`, waking the main orchestrator. Notifications contain the complete request, output, or error. `list` returns every retained run, including its status and complete output, and supports one-time inspection and reconciliation. Dependent progress resumes from follow-up notifications rather than repeated `list` calls.
 
-### Blocked actions
+`steer`, `interrupt`, and supervisor replies atomically enqueue token-authenticated files under the run's `control/` directory and return without waiting. `steer` is best-effort. `interrupt` sends an interruption request, while the final notification reports the actual terminal status. The runner applies controls it can accept and publishes the actual transition. Before a terminal state is written, the runner captures final metadata, stops timers/watchers, and fully stops its RPC child, so a saved `sessionFile` is safe to resume.
 
-While OMPS is active these management actions are blocked:
+### Minimal supervisor
 
-```text
-create, update, delete, eject, enable, append-step,
-refine, refine.show, refine.rollback
-```
-
-`disable` and `reset` are not on the denylist. Other native status/control, `children.*`, `mission.*`, `worktree.*`, `schedule.*` and backend-supported actions stay available. This gate is main-session tool policy, not a general permission system.
-
-## Scheduling
-
-`schedule.create` accepts exactly one shape: canonical strict-JSON with a single `runs.run` child.
+A child calls `contact_supervisor` with `need_decision`, `interview_request`, or `progress_update`. Each call yields the child in `waiting`, including progress updates, so the main orchestrator must reply to continue it. Its terminating tool result carries the request in `details`; background runs send a hidden main-session notification.
 
 ```js
-subagent({
-  action: "schedule.create",
-  every: "6h",
-  workflowScript: 'return runs.run("trusted-scan", {"agent":"explorer","task":"Check recent changes and report risks."});'
-})
+subagent_supervisor({ action: "pending" })
+subagent_supervisor({ action: "reply", replyTo: "request-id", message: "Proceed with option A." })
 ```
 
-The script must match one `return runs.run(<JSON string>, <strict JSON object>);`, the key must be non-empty after trimming, and a fresh child must use one of the five bare roles — the current preset's model suffix is baked in at creation. Use the backend's native `schedule.*` actions for every other lifecycle operation.
+Reply writes a control message to the still-live detached runner and optimistically returns the journal status to `running`. The runner's next state confirms the transition. A subsequent waiting or terminal transition wakes the orchestrator through another hidden notification.
 
-Understand the boundary honestly: schedules that already exist, schedules created while OMPS is off, and entries written directly into the schedule store are executed by the backend timer without passing through the OMPS `tool_call` gate. OMPS cannot retroactively rewrite them. Run only schedules you trust, and protect the store from untrusted modification.
+### Resume
 
-<details>
-<summary><b>Persistence, results and recovery</b></summary>
-
-OMPS uses the backend's native persistence, status, results, events and restart recovery directly. It does not implement in-memory remediation and does not guess outcomes from historical error strings. Run state and recoverability are whatever the backend's persisted records say.
-
-</details>
-
-<details>
-<summary><b>Tool-batch checkpoint compaction</b></summary>
-
-Only while the main OMPS session is active, OMPS checks for a checkpoint at complete tool-batch boundaries on `turn_end`. Thresholds come from Pi's native compaction settings, merged by `SettingsManager` across cwd, agent directory and project trust, and judged by Pi's own `shouldCompact`. OMPS neither reimplements the threshold formula nor writes those settings.
-
-It triggers only when the assistant ended on `toolUse`, every tool call has a one-to-one name-matching result, no checkpoint exists, no message is pending, and Pi can report token/context-window usage. Failed results still count as completed calls; OMPS keeps only the ordered `id: tool-name` list and never copies tool output. Incomplete batches, ambiguous pairing, unknown usage, disabled compaction or pending work are all skipped.
-
-On a complete batch with the native threshold hit, OMPS calls public `ctx.abort()` to end the low-level run. Pi's own post-run threshold path then produces a standard compaction — OMPS does not start a manual one. Only after the matching `reason === "threshold"` compaction finishes with `willRetry === false` and reaches `agent_settled` does OMPS resume best-effort with a new extension user turn listing the calls completed before compaction.
-
-This is not a transparent continuation. The model may still repeat calls; the resume text only asks it not to redo work purely because the turn restarted, while allowing re-fetching to verify state or recover missing information. New non-extension input, a session switch, disabling OMPS or shutdown all cancel the pending resume turn.
-
-The mechanism registers no `context` hook, never trims or rewrites context request copies, does no emergency truncation, and does not modify Pi compaction settings.
-
-</details>
-
-<details>
-<summary><b>Bootstrap and settings impact</b></summary>
-
-On each parent `session_start`, OMPS verifies the native backend and then runs an idempotent setup. Beyond the one-time preset seed it maintains exactly two native fields — `subagents.disableBuiltins: true` in user Pi settings, and `maxSubagentDepth: 1` in backend config — targeting `settings.json` and `extensions/subagent/config.json` in your user agent directory.
-
-OMPS records whether those fields existed and their original values in the backend config's migration state, so `/omps uninstall` restores them reversibly. Unrelated fields are untouched.
-
-These are **user-level** settings and affect every session under that Pi agent directory, not just OMPS. Native precedence still applies: trusted project settings can override `subagents.disableBuiltins`, and same-named user or project agents can shadow the package agents with project taking priority. OMPS does not copy package agents and does not bypass that precedence.
-
-Changing setup requires a restart or `/reload` so the earlier-loaded backend re-reads configuration.
-
-</details>
-
-<details>
-<summary><b>Child behavior and boundaries</b></summary>
-
-The backend sets `PI_SUBAGENT_CHILD=1`. The OMPS extension returns immediately — before registering any flag, command, event or tool gate — so it is fully inert inside children: no re-activation, no model changes, no command registration, no recursive setup.
-
-Every agent prompt forbids calling `subagent`, `subagent_wait` and `subagent_supervisor`, and forbids questioning the user directly. A blocked child uses `contact_supervisor` to hand the decision back to the main session.
-
-None of the five agents declare a `tools` allowlist, so ordinary Pi tools and loaded extension tools are not narrowed by OMPS. The read-only nature of `explorer`, `librarian` and `oracle` is enforced by role prompt; `acceptanceRole` only affects backend acceptance inference and grants or revokes nothing.
-
-`maxSubagentDepth=1`, the tool gate and the prompts are orchestration constraints, **not** an OS or container sandbox. A child's real file, shell, network and extension capabilities are still determined by Pi, the loaded tools and the running user's system permissions.
-
-</details>
-
-<details>
-<summary><b>Architecture and limits</b></summary>
-
-```text
-main Pi
-  └─ oh-my-pi-slim: preset, main prompt, native tool_call policy
-       └─ pi-subagents: child processes, persistence, events, notification, control, recovery
-            └─ package-scoped explorer/librarian/oracle/designer/fixer
+```js
+subagent({ action: "resume", id: "source-run-id", message: "Apply the follow-up." })
 ```
 
-The scope is deliberately narrow: no second run manager or RPC layer, no dynamically registered replacement tools, no copied agent assets, no simulated backend persistence, and no promise of an OS sandbox. The bundled example seeds only when the user preset file is absent. The schedule-timer gap described above is a real limit.
+Resume is allowed only for a terminal retained run with a saved child session file. It starts a new detached background run with `--session <saved sessionFile>`, preserves agent/model/thinking/tools/cwd, creates a new run ID, and returns immediately. Resume exposes no launch overrides and refuses a session file already used by an active run.
 
-</details>
+## Persistence, run files, and shutdown
 
-## Uninstall
+OMPS reads legacy custom entries with `customType: "oh-my-pi-slim:subagents"` and `version: 1` full-registry snapshots. It then folds later `version: 2` single-run upserts in branch order, replacing a run by ID and skipping malformed entries. Every new logical state write appends only one complete run as a v2 entry. Heartbeats and UI activity stay in `state.json` and never inflate the journal.
 
-Two steps. First restore your pre-setup settings from inside Pi:
+Each run is isolated by owner session at `<parent-session-dir>/omps-subagent-runs/<ownerSessionId>/<runId>/`, containing mode-0600 `launch.json`, `runner.json`, and `state.json`, a mode-0700 `control/` inbox, and `runner.log`. `runner.json` binds the run token and PID to a verifiable OS process identity. The parent polls these files at a short interval, validates owner/run/token/process identity before signaling persisted PIDs, and drives hidden notification-based orchestration without blocking waits.
+
+Persisted metadata includes the run ID, role, task, cwd, model contract, tool allowlist, timestamps, status, final output/error, source run ID, supervisor request, and child `sessionFile`. The removed launch-mode field from old v1 data is ignored and not retained.
+
+Detached execution lasts only for the current owner session. Every `session_shutdown`—including reload, new/resume/fork session transitions, and quit—sends interrupt controls to all active owner runs, waits briefly, force-terminates stragglers, and journals `interrupted` while preserving `sessionFile`. Restore never adopts an old live runner: an abnormal leftover is terminated and marked `interrupted`; an already-terminal state remains terminal. Continue later with `resume`, which always creates a new run ID.
+
+## Background-agent UI
+
+TUI sessions show a widget above the editor adapted from `gotgenes/pi-packages`' `packages/pi-subagents` UI. It uses the same tree layout, 80 ms spinner, 12-line cap, active-first overflow policy, status bar, and short finished-run linger. It renders turns, tool uses, token/context/compaction stats, elapsed time, active-tool descriptions, and response summaries from the detached activity overlay. `starting` runs appear as queued, `running` runs animate, `waiting` runs use a warning marker and show the supervisor request, and terminal runs briefly show outcome icons. The widget is never registered in RPC mode.
+
+## Deliberate scope
+
+The built-in runtime manages one child per run and only the public surfaces documented above. It does not include scripted workflows, schedules, missions, fleets, watchdogs, authored profiles, worktree management, aggregate chain/parallel inputs, or nested child orchestration. Parallelism comes from issuing multiple independent background `subagent` calls from the main session.
+
+Tool allowlists constrain Pi's model-visible tools; they are not an OS sandbox. In particular, `bash` remains as capable as the running user and environment permit.
+
+## Tool-batch checkpoint compaction
+
+The existing main-session checkpoint behavior is retained. While OMPS is active, a complete assistant tool batch can trigger Pi's native threshold compaction using `SettingsManager` and `shouldCompact`. OMPS validates the completed batch internally, calls public `ctx.abort()`, waits for Pi's matching threshold compaction and `agent_settled`, then sends the package's fixed auto-continue prompt as a follow-up continuation turn. Tool call IDs and names are not included in that model-visible prompt. It does not rewrite context copies or compaction settings.
+
+## Bootstrap and uninstall
+
+Bootstrap now seeds only the user preset. It no longer maintains `settings.subagents.disableBuiltins` or `extensions/subagent/config.json`. On startup it performs a one-time safe cleanup for migration state left by older OMPS releases, restoring old values only when the still-present value matches what OMPS previously applied.
+
+To uninstall:
 
 ```text
 /omps uninstall
 ```
 
-Then quit Pi and remove the package:
+Then exit Pi and run:
 
 ```bash
 pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 ```
 
-Your `~/.pi/agent/oh-my-pi-slim.json` is not deleted, and neither are shared auth, search, questionnaire or other independent packages — `@gotgenes/pi-anthropic-auth`, for example, stays under your management.
+The user preset is preserved.
 
 ## Development
 
 ```bash
+npm test
 npm run validate
 git diff --check
 ```
 
-Static validation reads repository files and performs no writes. It checks package/lock/backend versions and load order, the five agent frontmatters, bundled preset completeness, the one-time seed contract, the reversible bootstrap contract, the single-source runtime config, child early return, the native policy gate, schedule canonicalization and the resume new-ID contract. It does not dynamically import the extension and does not touch the network, credentials, your home directory or sibling repositories.
-
-Real child startup, auth inheritance, notification and recovery, schedule timers and checkpoint behavior are integration concerns; this static validation makes no claim to cover those runtime paths.
+Tests cover detached launch configs, runner survival, control files, journal reconciliation, shutdown interruption, resume, grace windows, terminal ordering, notification wakeups, and exact activity UI formatting. Static validation rejects in-process runtime client code and requires the detached runner, launch, poller, and control protocol. A real authenticated model run is intentionally not required by the automated suite.
 
 ## License
 

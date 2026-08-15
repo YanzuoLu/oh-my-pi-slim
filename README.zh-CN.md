@@ -1,10 +1,10 @@
 # oh-my-pi-slim
 
-> Pi 主会话的 preset 驱动编排层，构建在原生 [`pi-subagents`](https://www.npmjs.com/package/pi-subagents) 后端之上。
+> Pi 主会话的 preset 驱动编排层，内置每个 run 一个 child 的后台运行时。
 
 [English](./README.md) | **中文**
 
-主 Pi 负责理解、调度和验收，子会话负责边界明确的执行。preset 决定每个角色跑在哪个模型和 thinking 档位上，因此切换整套配置只需一条命令，不必逐个调用去调参。
+主 Pi 会话负责规划、调度、监督与验收。每个 child 都是独立的 Pi RPC 进程，并拥有可持久化的 session。preset 统一选择主 orchestrator 与五个 specialist 的模型和 thinking 档位。
 
 ```bash
 pi --omps
@@ -12,249 +12,157 @@ pi --omps
 
 ## 五个 agent
 
-子会话只使用以下五个精确的 bare 名称：
-
-| Agent | 权限 | 用途 |
+| Agent | 工具 allowlist | 用途 |
 | --- | --- | --- |
-| `explorer` | 只读 | 代码库侦察，定位文件、符号与相关测试 |
-| `librarian` | 只读 | 外部文档、库行为、版本相关 API |
-| `oracle` | 只读 | 架构、风险、调试策略、独立审查 |
-| `designer` | 读写 | UI/UX 设计、实现与打磨 |
-| `fixer` | 读写 | 边界明确的实现与验证 |
+| `explorer` | `read`, `grep`, `find`, `ls`, `bash`, `contact_supervisor` | 代码库侦察，定位相关代码与测试 |
+| `librarian` | `read`, `grep`, `find`, `ls`, `bash`, `web_search`, `web_fetch`, `batch_web_fetch`, `contact_supervisor` | 官方文档、库行为、版本相关 API |
+| `oracle` | `read`, `grep`, `find`, `ls`, `bash`, `contact_supervisor` | 架构、风险、调试策略、审查 |
+| `designer` | `read`, `grep`, `find`, `ls`, `bash`, `edit`, `write`, `contact_supervisor` | UI/UX 实现与打磨 |
+| `fixer` | `read`, `grep`, `find`, `ls`, `bash`, `edit`, `write`, `contact_supervisor` | 边界明确的实现与验证 |
 
-`orchestrator` 只是主会话的 preset 角色，不是可启动的 agent。
+`orchestrator` 只是主会话 preset 角色。agent 只从 package 根目录的 `agents/` 加载，并使用 Pi 的 `parseFrontmatter`；用户或项目 agent manifest 不参与发现。
 
-## 要求
+## 要求与安装
 
-- Pi 可加载 TypeScript package extensions。
-- 所选 preset 的六个 provider/model 都存在且已配置认证。
-- 使用 Anthropic OAuth 时，请确保 `@gotgenes/pi-anthropic-auth` 已安装并配置。OMPS 不读取、复制或记录认证文件路径和 token。
-
-## 安装
+- 与 Pi 0.84.2 的 package 和 RPC API 兼容。
+- 所选 preset 的六个 provider/model 必须存在并已配置认证。
 
 ```bash
 pi install git:github.com/YanzuoLu/oh-my-pi-slim
 ```
 
-安装后请重启 Pi，或执行 `/reload`，使已经加载的 backend 读取新配置。
-
-package manifest 按以下顺序加载扩展：
-
-1. `./node_modules/pi-subagents/index.ts`
-2. `./extensions/oh-my-pi-slim/index.ts`
-
-五个 agent 通过 package-scoped `pi.subagents.agents: ["./agents"]` 发现。安装过程不会把 agent 复制到 `~/.pi/agent/agents`，也没有 asset-copy 安装脚本。OMPS 在启动时检查原生 backend，如果它没有先加载，OMPS 会拒绝激活，而不是混用两套生命周期。
-
-## 快速开始
-
-```bash
-pi --omps                              # 使用默认 preset
-pi --omps --omps-preset balanced       # 启动时指定 preset
-```
+package manifest 只加载 `./extensions/oh-my-pi-slim/index.ts`，不再包含 `pi-subagents` dependency 或 extension entry。
 
 ## 命令
 
 | 命令 | 作用 |
 | --- | --- |
-| `/omps on [preset]` | 启用编排，可同时指定 preset |
-| `/omps off` | 关闭当前会话的编排，并恢复激活前的主模型与 thinking |
-| `/omps status` | 查看当前状态 |
-| `/omps presets` | 列出可用 preset |
-| `/preset [name]` | 切换 preset（必要时会先启用 OMPS）；不带参数则列出 |
-| `/omps uninstall` | 只执行可逆的设置恢复 —— 见[卸载](#卸载) |
+| `/omps on [preset]` | 启用编排，可指定 preset |
+| `/omps off` | 停用编排并恢复原主模型/thinking |
+| `/omps status` | 查看激活状态 |
+| `/omps presets` | 列出 preset |
+| `/preset [name]` | 切换 preset；不带参数时列出 |
+| `/omps uninstall` | 清理旧 OMPS backend migration state，并显示 package 删除命令 |
 
-`/reload` 会重建全部扩展，但 OMPS 通过进程内的一次性槽位恢复激活状态和当前 preset。`/new`、resume 和 fork 不继承；重启 Pi 后回到 flag/env/默认行为。
+`/reload` 通过一次性进程内槽位恢复 active preset。新建、恢复或 fork 的 parent session 不继承该槽位。
 
 ## Presets
 
-运行时 preset 的唯一来源是用户文件：
+唯一运行时 preset 来源是：
 
 ```text
 ~/.pi/agent/oh-my-pi-slim.json
 ```
 
-不存在 package/project overlay，也没有合并语义 —— 该文件中的 `defaultPreset` 与 `presets` 就是完整的运行时配置。
+`config/oh-my-pi-slim.example.json` 只在用户文件缺失时 seed 一次。已有 preset 不会被覆盖或删除。每个 preset 定义 `orchestrator`、`explorer`、`librarian`、`oracle`、`designer`、`fixer`，每个角色包含 `provider`、`model` 和 `off, minimal, low, medium, high, xhigh, max` 之一的 thinking。
 
-每个 preset 必须完整定义六个角色（`orchestrator` 加五个 specialist）。每个角色都需要非空 `provider`、非空 `model`，以及取自 `off, minimal, low, medium, high, xhigh, max` 的 `thinking`：
+激活会验证全部模型与认证，并把主会话切到 orchestrator 配置。fresh child 的 `provider/model:thinking` 在 tool schema 校验后由 OMPS 注入；模型可见 schema 不暴露 model、thinking、context 或 tool override。
 
-```json
-{
-  "defaultPreset": "balanced",
-  "presets": {
-    "balanced": {
-      "orchestrator": { "provider": "anthropic", "model": "claude-opus-4-6", "thinking": "max" },
-      "explorer": { "provider": "anthropic", "model": "claude-haiku-4-5", "thinking": "medium" },
-      "librarian": { "provider": "anthropic", "model": "claude-haiku-4-5", "thinking": "medium" },
-      "oracle": { "provider": "anthropic", "model": "claude-opus-4-6", "thinking": "max" },
-      "designer": { "provider": "anthropic", "model": "claude-sonnet-4-6", "thinking": "high" },
-      "fixer": { "provider": "anthropic", "model": "claude-sonnet-4-6", "thinking": "high" }
-    }
-  }
-}
-```
-
-激活时会校验六个模型及其认证，任一缺失都会拒绝激活。使用 `pi --list-models` 获取准确的 provider/model ID。
-
-package 内的示例位于 `config/oh-my-pi-slim.example.json`，自带 `balanced`、`economy`、`openai`。它只在用户文件不存在时，以 exclusive create 方式 seed 一次。已有文件永远不会被覆盖，升级不会刷新它，`/omps uninstall` 也不会删除它 —— 该文件归你所有。需要采用新版示例时，请自行比较并合并。
-
-## 调用合同
+## 运行时合同
 
 ### Fresh runs
 
 ```js
-subagent({ agent: "explorer", task: "定位认证入口、数据流和相关测试。" })
+subagent({ agent: "explorer", task: "定位认证流程和相关测试。" })
+subagent({ agent: "oracle", task: "审查这个局部 API 决策。" })
 ```
 
-调用默认异步，在后台执行。只有结果很小且下一步确实依赖它时才使用前台阻塞：
+fresh 输入严格为 `{ agent, task, cwd? }`。每次调用都会先写 launch config，再启动 detached background runner，并立即返回 run ID。没有 wait tool，parent runtime 也不持有进程内 child client；只有 runner 持有 Pi RPC child，parent 与 runner 完全通过文件交换生命周期数据。
+
+child 启动使用完整 Pi invocation：
+
+- preset 选择的 `--model` 与 `--mode rpc`；
+- parent Pi session 目录下的持久化 `--session-dir`；
+- package agent body 作为 `--system-prompt`；
+- agent frontmatter 中的严格 `--tools` allowlist；
+- 只在 child 加载、注册 `contact_supervisor` 的 `--extension`；
+- trusted 且 cwd 位于 parent project 内时使用 `--approve`，否则使用 `--no-approve`；
+- `PI_SUBAGENT_CHILD=1`、`OMPS_SUBAGENT_CHILD=1` 与 run ID，使主 OMPS extension 在 child 中完全不注册。
+
+ambient extensions 仍可发现，因此 librarian 的 web tools 可以加载，但模型只能看到 allowlist 中的名称。所有 child allowlist 都排除 `subagent` 与 `subagent_supervisor`。
+
+### List、status、通知与控制
 
 ```js
-subagent({ agent: "oracle", task: "审查这个局部 API 决策。", async: false })
-```
-
-并行工作使用多个独立的结构化调用。OMPS 禁止直接 arbitrary `workflowScript`，不要用脚本拼接 chain、fanout 或并行流程。
-
-当 OMPS 激活时，它会：
-
-- 用当前 preset 替换 caller 提供的 `model`，传给 backend 的形式是 `provider/model:thinking`。
-- 删除 caller 的 `thinking`、`turnBudget`、`usageBudget` 和 `toolBudget`。
-- 强制 `context: "fresh"`。
-- 拒绝其他 agent 名、alias 或 namespaced 名称。
-
-`fresh` 只控制会话上下文。agent frontmatter 仍通过原生机制设置 `systemPromptMode: replace`、`inheritProjectContext: true` 和 `inheritSkills: true`，因此 child 仍继承项目指令与 skills catalog。
-
-### 等待与控制
-
-后台完成会自动通知主会话。优先继续不冲突的工作并消费通知 —— 不要 sleep，也不要循环轮询 `status`。当前请求确实无法推进时，才使用 barrier：
-
-```js
-subagent_wait({ id: "run-id" })
-```
-
-```js
-subagent({ action: "status",  id: "run-id" })
-subagent({ action: "steer",   id: "run-id", message: "只检查 parser 回归。" })
+subagent({ action: "list" })
+subagent({ action: "steer", id: "run-id", message: "只检查 parser 测试。" })
 subagent({ action: "interrupt", id: "run-id" })
-subagent({ action: "stop",    id: "run-id" })
-subagent({ action: "resume",  id: "source-run-id", message: "应用后续修正。" })
 ```
 
-原生 `resume` 把持久化 session 恢复为新的 child process，并返回**新的 run ID** —— 它不会复用 source run ID。后续 status/control/follow-up 必须使用返回的新 ID。resume 时不要传 `agent`、`model`、`thinking`、`turnBudget`、`usageBudget` 或 `toolBudget`，OMPS 会拒绝这些 launch override。
+completed、waiting、failed 与 interrupted 都会发送隐藏 `followUp` 通知并设置 `triggerTurn: true`，从而唤醒主 orchestrator。通知包含完整 request、output 或 error。`list` 会返回全部 retained run（含 status 与完整 output），用于一次性检查与 reconciliation。依赖结果的后续进度由 follow-up 通知恢复，而不是重复调用 `list`。
 
-### 被阻止的动作
+`steer`、`interrupt` 与 supervisor reply 都会向 run 的 `control/` 目录原子写入带 token 的控制文件，并立即返回而不等待。`steer` 是 best-effort。`interrupt` 发出 interruption request，最终通知报告实际 terminal status。runner 会应用可接受的控制并发布真实状态。写 terminal state 之前，runner 会先收集最终元数据、停止 timer/watcher，并完整停止 RPC child，因此保存的 `sessionFile` 可安全 resume。
 
-OMPS 激活时，以下管理动作被精确阻止：
+### 最小 supervisor
 
-```text
-create, update, delete, eject, enable, append-step,
-refine, refine.show, refine.rollback
-```
-
-`disable` 与 `reset` 不在 denylist。其他原生 status/control、`children.*`、`mission.*`、`worktree.*`、`schedule.*` 和 backend 支持的动作保持可用。此 gate 是主会话工具策略，不是通用权限系统。
-
-## Schedules
-
-`schedule.create` 只接受一种输入：canonical strict-JSON、单个 `runs.run` child。
+child 可通过 `contact_supervisor` 提交 `need_decision`、`interview_request` 或 `progress_update`。每次调用都会让 child 进入 `waiting`，progress update 也一样，因此主 orchestrator 必须 reply 才会继续。terminating tool result 的 `details` 携带 request；后台 run 会向主会话发送隐藏通知。
 
 ```js
-subagent({
-  action: "schedule.create",
-  every: "6h",
-  workflowScript: 'return runs.run("trusted-scan", {"agent":"explorer","task":"检查近期改动并报告风险。"});'
-})
+subagent_supervisor({ action: "pending" })
+subagent_supervisor({ action: "reply", replyTo: "request-id", message: "采用方案 A。" })
 ```
 
-`workflowScript` 必须严格匹配一个 `return runs.run(<JSON string>, <strict JSON object>);`，key trim 后非空，fresh child 必须使用五个 bare role 之一 —— 创建时会把当前 preset 的 model suffix 烘焙进 schedule。其他 schedule 生命周期操作直接使用 backend 原生 `schedule.*` action。
+reply 会向仍存活的 detached runner 写 control message，并乐观地把 journal 状态恢复为 `running`；runner 下一次 state 会确认该状态。之后再次 waiting 或进入 terminal 状态时，会用新的隐藏通知唤醒 orchestrator。
 
-安全边界必须诚实理解：已经存在的 schedule、OMPS 关闭时创建的 schedule，以及直接写入 schedule store 的条目，都由 backend timer 直接执行，不经过 OMPS 的 `tool_call` gate。OMPS 无法追溯重写这些记录。只运行你信任的 schedule，并保护其 store 不受不可信修改。
+### Resume
 
-<details>
-<summary><b>持久化、结果与恢复</b></summary>
-
-OMPS 直接采用 backend 的原生 persistence、status、result、events 和 restart recovery。它不实现 in-memory 补救，也不根据历史错误字符串猜测结果。运行状态和恢复能力以 backend 的持久化记录为准。
-
-</details>
-
-<details>
-<summary><b>Tool-batch checkpoint compaction</b></summary>
-
-仅在主 OMPS 会话已激活时，OMPS 会在 `turn_end` 的完整 tool batch 边界检查 checkpoint。阈值直接来自 Pi 的原生 compaction settings —— 由 `SettingsManager` 按当前 cwd、agent directory 与 project trust 合并得出，并由 Pi 的 `shouldCompact` 判定。OMPS 不复制阈值公式，也不写这些 settings。
-
-只有 assistant 以 `toolUse` 结束、全部 tool call 都有一一对应且名称匹配的 tool result、没有已有 checkpoint、没有 pending message，并且 Pi 能提供 token/context-window usage 时才会触发。失败的 tool result 也表示该调用已完成；OMPS 只保留有序的 `id: tool-name`，不会复制 tool output。batch 不完整、对应关系不明、usage 未知、compaction 已禁用或已有 pending 工作时都会跳过。
-
-在完整 batch 且原生阈值命中时，OMPS 调用 public `ctx.abort()` 结束旧的 low-level run，随后由 Pi 自己的 post-run threshold path 生成标准 compaction，而不是由 OMPS 发起 manual compaction。只有对应的 `reason === "threshold"` compaction 以 `willRetry === false` 完成并进入 `agent_settled` 后，OMPS 才以新的 extension user turn best-effort 恢复，并列出压缩前已完成的调用。
-
-它不是 transparent continuation。模型仍可能重复调用；恢复文本只要求不要仅因 turn 重启而重做，验证状态或补回缺失信息时仍可重新获取。新的非 extension 输入、session switch、关闭 OMPS 或 shutdown 都会取消待发送的恢复 turn。
-
-该机制不注册 `context` hook，不裁剪或改写 context request 副本，不做 emergency truncation，也不修改 Pi compaction settings。
-
-</details>
-
-<details>
-<summary><b>Bootstrap 与设置影响</b></summary>
-
-每次父会话 `session_start`，OMPS 会先验证原生 backend，再执行幂等 setup。除一次性 seed 用户 preset 文件外，它只维护两个原生字段 —— 用户 Pi settings 中的 `subagents.disableBuiltins: true`，以及 backend config 中的 `maxSubagentDepth: 1`，分别写入用户 agent 目录下的 `settings.json` 和 `extensions/subagent/config.json`。
-
-OMPS 在 backend config 的 migration state 中备份这些字段是否存在及其原值，因此 `/omps uninstall` 可逆恢复；无关字段保持不变。
-
-这些是**用户级**设置，会影响该 Pi agent directory 下的所有会话，不只影响 OMPS。原生 precedence 仍然适用：trusted project settings 可以覆盖 `subagents.disableBuiltins`，同名 user/project agent 可以 shadow package agent 且 project 优先级更高。OMPS 不复制 package agents，也不绕过这些原生优先级。
-
-修改 setup 后需要 restart 或 `/reload`，让先加载的 backend 重新读取配置。
-
-</details>
-
-<details>
-<summary><b>Child 行为与边界</b></summary>
-
-backend 为 child 设置 `PI_SUBAGENT_CHILD=1`。OMPS extension 在任何 flag、command、event 或 tool gate 注册前立即返回，因此在 child 中完全 inert：不会二次激活、改模型、注册命令或递归执行 setup。
-
-每个 agent prompt 明确禁止调用 `subagent`、`subagent_wait` 和 `subagent_supervisor`，并禁止直接询问用户。遇到阻塞决策时，child 使用 `contact_supervisor` 把问题交还主会话。
-
-五个 agent 都不声明 `tools` allowlist，所以普通 Pi 工具和已加载的 extension tools 不会被 OMPS 收窄。`explorer`、`librarian`、`oracle` 的只读属性靠角色 prompt 约束；`acceptanceRole` 只影响 backend 的验收推断，不授予或撤销任何工具。
-
-`maxSubagentDepth=1`、tool gate 与 prompt 都是编排约束，**不是** OS 或 container sandbox。child 拥有的实际文件、shell、网络和 extension 能力，仍由 Pi、所加载的工具及运行用户的系统权限决定。
-
-</details>
-
-<details>
-<summary><b>架构与限制</b></summary>
-
-```text
-main Pi
-  └─ oh-my-pi-slim: preset、主 prompt、native tool_call policy
-       └─ pi-subagents: child process、持久化、事件、通知、控制、恢复
-            └─ package-scoped explorer/librarian/oracle/designer/fixer
+```js
+subagent({ action: "resume", id: "source-run-id", message: "应用后续修改。" })
 ```
 
-职责有意保持窄：不实现第二套 run manager 或 RPC 层，不动态注册替代工具，不复制 agent 资产，不模拟 backend persistence，也不承诺 OS sandbox。bundled 示例只在用户 preset 文件缺失时 seed。上文描述的 schedule timer 缺口是真实存在的限制。
+resume 只允许拥有已保存 child session file 的 terminal retained run。它以 `--session <saved sessionFile>` 启动新的 detached background run，保留 agent/model/thinking/tools/cwd，创建新的 run ID，并立即返回。resume 不暴露 launch override，也拒绝复用正被 active run 使用的 session file。
 
-</details>
+## 持久化、run files 与 shutdown
 
-## 卸载
+OMPS 兼容读取 `customType: "oh-my-pi-slim:subagents"`、`version: 1` 的旧全量 registry snapshot，再按当前 branch 顺序 fold 后续 `version: 2` 单 run upsert：相同 ID 以后者覆盖，坏 entry 跳过。每次新的逻辑状态写入只追加一个完整 run 的 v2 entry；heartbeat 与 UI activity 只保存在 `state.json`，不会膨胀 journal。
 
-分两步。先在 Pi 内恢复 setup 前的用户设置：
+每个 run 按 owner session 隔离在 `<parent-session-dir>/omps-subagent-runs/<ownerSessionId>/<runId>/`，其中包括 mode-0600 的 `launch.json`、`runner.json`、`state.json`，mode-0700 的 `control/` inbox，以及 `runner.log`。`runner.json` 将 run token 与 PID 绑定到可验证的 OS process identity。parent 以短周期 poll 这些文件，并在 signal 持久化 PID 前验证 owner/run/token/process identity，再通过隐藏通知驱动 orchestration，不做阻塞等待。
+
+持久化元数据包括 run ID、role、task、cwd、model contract、tool allowlist、时间戳、状态、最终输出/error、source run ID、supervisor request 与 child `sessionFile`。旧 v1 中已存在的 launch-mode 字段会被忽略，不再保留。
+
+Detached execution 只持续到当前 owner session 结束。所有 `session_shutdown`（包括 reload、new/resume/fork session 切换与 quit）都会向当前 owner 的 active run 写 interrupt control，短暂有界等待，强制终止超时进程，并把 `interrupted` 写入 journal，同时保留 `sessionFile`。restore 从不接管旧 live runner：异常遗留进程会先被终止并标记 `interrupted`；已是 terminal 的 state 保持 terminal。之后可用 `resume` 继续，但一定创建新的 run ID。
+
+## 后台 agent UI
+
+TUI 会在 editor 上方显示一个适配自 `gotgenes/pi-packages` 中 `packages/pi-subagents` 的 widget。它保留原 UI 的 tree layout、80 ms spinner、最多 12 行、active 优先 overflow、status bar 与 finished 短暂 linger，并从 detached activity overlay 显示 turn、tool use、token/context/compaction、elapsed、active tool 描述与 response 摘要。`starting` 显示为 queued，`running` 使用动画，`waiting` 使用 warning 标记并显示 supervisor request，terminal run 短暂显示结果图标。RPC mode 绝不注册 widget。
+
+## 有意限制的范围
+
+内置 runtime 每个 run 只管理一个 child，仅提供本文记录的极小公开面。不包含脚本 workflow、schedule、mission、fleet、watchdog、agent/profile authoring、worktree 管理、聚合 chain/parallel 输入或 nested child orchestration。并发由主会话发起多个独立后台 `subagent` 调用实现。
+
+工具 allowlist 只限制 Pi 模型可见工具，并不是 OS sandbox。尤其是 `bash` 的真实能力仍取决于当前用户和运行环境。
+
+## Tool-batch checkpoint compaction
+
+保留现有主会话 checkpoint 行为。OMPS active 时，完整 assistant tool batch 可通过 `SettingsManager` 与 `shouldCompact` 触发 Pi 原生 threshold compaction。OMPS 在内部校验 completed batch，调用 public `ctx.abort()`，等待匹配的 threshold compaction 与 `agent_settled`，然后把 package 固定的 auto-continue prompt 作为 follow-up continuation turn 发送。model-visible prompt 不包含 tool call ID 或名称。它不改写 context 副本或 compaction settings。
+
+## Bootstrap 与卸载
+
+bootstrap 现在只 seed 用户 preset，不再维护 `settings.subagents.disableBuiltins` 或 `extensions/subagent/config.json`。启动时会对旧 OMPS release 遗留的 migration state 做一次性安全清理：只有当前值仍等于 OMPS 当时写入值时，才恢复旧值。
+
+卸载：
 
 ```text
 /omps uninstall
 ```
 
-然后退出 Pi，再移除 package：
+然后退出 Pi：
 
 ```bash
 pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 ```
 
-你的 `~/.pi/agent/oh-my-pi-slim.json` 不会被删除，共享认证、搜索、questionnaire 或其他独立 package 也不会 —— 例如 `@gotgenes/pi-anthropic-auth` 仍由你自行管理。
+用户 preset 保留。
 
 ## 开发
 
 ```bash
+npm test
 npm run validate
 git diff --check
 ```
 
-静态验证只读取仓库文件，不执行任何写操作。它检查 package/lock/backend 版本与加载顺序、五个 agent frontmatter、bundled preset 示例完整性、一次性 seed 合同、可逆 bootstrap 合同、单一来源运行时配置、child early return、native policy gate、schedule canonicalization，以及 resume 新 ID 合同。它不会动态 import extension，也不会访问网络、认证、用户 home 或 sibling repository。
-
-真实 child 启动、认证继承、通知与恢复、schedule timer 与 checkpoint 的端到端行为属于集成测试范畴；本静态验证不声称覆盖这些运行时路径。
+测试覆盖 detached launch config、runner survival、control files、journal reconcile、shutdown interruption、resume、grace window、terminal ordering、notification wakeup 与精确 activity UI 格式。静态验证禁止 runtime 中出现进程内 client，并要求 detached runner、launch、poller 与 control protocol。自动化测试不要求真实认证模型调用。
 
 ## License
 

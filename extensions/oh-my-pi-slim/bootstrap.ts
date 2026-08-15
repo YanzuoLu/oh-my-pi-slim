@@ -1,33 +1,10 @@
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 const MIGRATION_STATE_KEY = "ohMyPiSlimMigration";
 const LEGACY_MANIFEST_NAME = ".oh-my-pi-slim-package-assets.json";
-
-interface LegacyManagedFile {
-  target: string;
-  installedHash: string;
-  created: boolean;
-}
-
-interface LegacyAssetManifest {
-  files?: LegacyManagedFile[];
-  settings?: {
-    path: string;
-    fileExisted: boolean;
-    before: Record<string, SettingBefore>;
-    applied: Record<string, unknown>;
-  };
-}
 
 interface SettingBefore {
   existed: boolean;
@@ -47,14 +24,26 @@ interface MigrationState {
   };
 }
 
+interface LegacyManagedFile {
+  target: string;
+  installedHash: string;
+  created: boolean;
+}
+
+interface LegacyAssetManifest {
+  files?: LegacyManagedFile[];
+  settings?: {
+    path: string;
+    fileExisted: boolean;
+    before: Record<string, SettingBefore>;
+    applied: Record<string, unknown>;
+  };
+}
+
 export interface CleanupResult {
   removed: string[];
   preserved: string[];
   warnings: string[];
-}
-
-function hasOwn(value: object, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 function hashFile(path: string): string {
@@ -71,13 +60,9 @@ function readJsonObject(path: string): Record<string, unknown> {
   try {
     value = JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    throw new Error(
-      `${path} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    throw new Error(`${path} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${path} must contain a JSON object.`);
-  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${path} must contain a JSON object.`);
   return value as Record<string, unknown>;
 }
 
@@ -88,52 +73,34 @@ function writeJsonAtomic(path: string, value: Record<string, unknown>): void {
   renameSync(temp, path);
 }
 
-function parseMigrationState(value: unknown, path: string): MigrationState | undefined {
-  if (value === undefined) return undefined;
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`Invalid oh-my-pi-slim migration state in ${path}.`);
-  }
-
+function parseMigrationState(value: unknown): MigrationState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const state = value as Partial<MigrationState>;
   if (
     state.version !== 1 ||
-    !state.userSettings ||
-    !state.backendConfig ||
-    typeof state.userSettings.fileExisted !== "boolean" ||
-    typeof state.userSettings.subagentsExisted !== "boolean" ||
-    typeof state.userSettings.disableBuiltins?.existed !== "boolean" ||
-    typeof state.backendConfig.fileExisted !== "boolean" ||
-    typeof state.backendConfig.maxSubagentDepth?.existed !== "boolean"
-  ) {
-    throw new Error(`Invalid oh-my-pi-slim migration state in ${path}.`);
-  }
-
+    typeof state.userSettings?.fileExisted !== "boolean" ||
+    typeof state.userSettings?.subagentsExisted !== "boolean" ||
+    typeof state.userSettings?.disableBuiltins?.existed !== "boolean" ||
+    typeof state.backendConfig?.fileExisted !== "boolean" ||
+    typeof state.backendConfig?.maxSubagentDepth?.existed !== "boolean"
+  ) return undefined;
   return state as MigrationState;
 }
 
-function getMigrationPaths(): { agentDir: string; userSettingsPath: string; backendConfigPath: string } {
-  const agentDir = getAgentDir();
-  return {
-    agentDir,
-    userSettingsPath: join(agentDir, "settings.json"),
-    backendConfigPath: join(agentDir, "extensions", "subagent", "config.json"),
-  };
-}
-
-function removeLegacyPackageAssets(agentDir: string): void {
+function removeLegacyPackageAssets(agentDir: string, result: CleanupResult): void {
   const manifestPath = join(agentDir, LEGACY_MANIFEST_NAME);
   if (!existsSync(manifestPath)) return;
-
   const manifest = readJsonObject(manifestPath) as LegacyAssetManifest;
   let conflict = false;
   for (const file of manifest.files ?? []) {
     if (!file.created || !existsSync(file.target)) continue;
     if (hashFile(file.target) !== file.installedHash) {
       conflict = true;
-      console.warn(`[oh-my-pi-slim] Kept modified legacy managed file: ${file.target}`);
+      result.warnings.push(`Kept modified legacy managed file: ${file.target}`);
       continue;
     }
     rmSync(file.target, { force: true });
+    result.removed.push(file.target);
   }
 
   const settingsState = manifest.settings;
@@ -142,7 +109,7 @@ function removeLegacyPackageAssets(agentDir: string): void {
     for (const [key, applied] of Object.entries(settingsState.applied ?? {})) {
       if (!sameJson(settings[key], applied)) {
         conflict = true;
-        console.warn(`[oh-my-pi-slim] Kept modified legacy setting "${key}" in ${settingsState.path}`);
+        result.warnings.push(`Kept modified legacy setting "${key}" in ${settingsState.path}`);
         continue;
       }
       const prior = settingsState.before?.[key];
@@ -151,136 +118,68 @@ function removeLegacyPackageAssets(agentDir: string): void {
     }
     if (!settingsState.fileExisted && Object.keys(settings).length === 0) {
       rmSync(settingsState.path, { force: true });
+      result.removed.push(settingsState.path);
     } else {
       writeJsonAtomic(settingsState.path, settings);
+      result.preserved.push(settingsState.path);
     }
   }
 
-  if (!conflict) rmSync(manifestPath, { force: true });
-  else console.warn(`[oh-my-pi-slim] Kept legacy migration manifest for manual cleanup: ${manifestPath}`);
+  if (!conflict) {
+    rmSync(manifestPath, { force: true });
+    result.removed.push(manifestPath);
+  } else {
+    result.warnings.push(`Kept legacy asset manifest for manual cleanup: ${manifestPath}`);
+  }
 }
 
 export function getPresetTemplatePath(packageRoot: string): string {
   return join(packageRoot, "config", "oh-my-pi-slim.example.json");
 }
 
-/** Seed the user preset when missing and apply two native settings while preserving their original values. */
-export function ensureNativePackageSetup(packageRoot: string): void {
-  if (/^(1|true|yes|on)$/i.test(String(process.env.OMPS_SKIP_BOOTSTRAP ?? ""))) return;
-
-  const packageJson = readJsonObject(join(packageRoot, "package.json"));
-  if (packageJson.name !== "oh-my-pi-slim") return;
-
-  const bundledPresetPath = getPresetTemplatePath(packageRoot);
-  if (!existsSync(bundledPresetPath)) {
-    throw new Error(`Package preset template is missing: ${bundledPresetPath}`);
-  }
-
-  const { agentDir, userSettingsPath, backendConfigPath } = getMigrationPaths();
-  removeLegacyPackageAssets(agentDir);
-
-  const userPresetPath = join(agentDir, "oh-my-pi-slim.json");
-  if (!existsSync(userPresetPath)) {
-    mkdirSync(agentDir, { recursive: true });
-    try {
-      writeFileSync(userPresetPath, readFileSync(bundledPresetPath), { flag: "wx" });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-  }
-
-  const userSettingsFileExisted = existsSync(userSettingsPath);
-  const backendConfigFileExisted = existsSync(backendConfigPath);
-  const userSettings = readJsonObject(userSettingsPath);
-  const backendConfig = readJsonObject(backendConfigPath);
-  const existingSubagents = userSettings.subagents;
-  if (
-    existingSubagents !== undefined &&
-    (!existingSubagents || typeof existingSubagents !== "object" || Array.isArray(existingSubagents))
-  ) {
-    throw new Error(`${userSettingsPath}.subagents must be a JSON object.`);
-  }
-
-  const subagents = existingSubagents as Record<string, unknown> | undefined;
-  const state = parseMigrationState(backendConfig[MIGRATION_STATE_KEY], backendConfigPath) ?? {
-    version: 1,
-    userSettings: {
-      fileExisted: userSettingsFileExisted,
-      subagentsExisted: subagents !== undefined,
-      disableBuiltins: {
-        existed: subagents !== undefined && hasOwn(subagents, "disableBuiltins"),
-        value: subagents?.disableBuiltins,
-      },
-    },
-    backendConfig: {
-      fileExisted: backendConfigFileExisted,
-      maxSubagentDepth: {
-        existed: hasOwn(backendConfig, "maxSubagentDepth"),
-        value: backendConfig.maxSubagentDepth,
-      },
-    },
-  } satisfies MigrationState;
-
-  backendConfig.maxSubagentDepth = 1;
-  backendConfig[MIGRATION_STATE_KEY] = state;
-  writeJsonAtomic(backendConfigPath, backendConfig);
-
-  userSettings.subagents = {
-    ...(subagents ?? {}),
-    disableBuiltins: true,
-  };
-  writeJsonAtomic(userSettingsPath, userSettings);
-}
-
-/** Restore the exact pre-install values. The package itself is removed separately with `pi remove`. */
-export function restoreNativePackageSetup(): CleanupResult {
+/** Restore and remove setup state written by OMPS releases that depended on pi-subagents. */
+export function cleanupLegacySubagentSetup(): CleanupResult {
   const result: CleanupResult = { removed: [], preserved: [], warnings: [] };
-  const { userSettingsPath, backendConfigPath } = getMigrationPaths();
-  if (!existsSync(backendConfigPath)) {
-    result.warnings.push(`No pi-subagents config found at ${backendConfigPath}; migration state cannot be restored.`);
-    return result;
-  }
+  const agentDir = getAgentDir();
+  removeLegacyPackageAssets(agentDir, result);
+
+  const userSettingsPath = join(agentDir, "settings.json");
+  const backendConfigPath = join(agentDir, "extensions", "subagent", "config.json");
+  if (!existsSync(backendConfigPath)) return result;
 
   const backendConfig = readJsonObject(backendConfigPath);
-  const state = parseMigrationState(backendConfig[MIGRATION_STATE_KEY], backendConfigPath);
-  if (!state) {
-    result.warnings.push(`No oh-my-pi-slim migration state found in ${backendConfigPath}.`);
-    return result;
-  }
+  const state = parseMigrationState(backendConfig[MIGRATION_STATE_KEY]);
+  if (!state) return result;
 
   const userSettings = readJsonObject(userSettingsPath);
   const existingSubagents = userSettings.subagents;
-  if (
-    existingSubagents !== undefined &&
-    (!existingSubagents || typeof existingSubagents !== "object" || Array.isArray(existingSubagents))
-  ) {
-    throw new Error(`${userSettingsPath}.subagents must be a JSON object.`);
+  const subagents = existingSubagents && typeof existingSubagents === "object" && !Array.isArray(existingSubagents)
+    ? existingSubagents as Record<string, unknown>
+    : {};
+
+  if (sameJson(subagents.disableBuiltins, true)) {
+    if (state.userSettings.disableBuiltins.existed) subagents.disableBuiltins = state.userSettings.disableBuiltins.value;
+    else delete subagents.disableBuiltins;
+  } else if (Object.prototype.hasOwnProperty.call(subagents, "disableBuiltins")) {
+    result.warnings.push(`Kept modified settings.subagents.disableBuiltins in ${userSettingsPath}`);
   }
 
-  const subagents = (existingSubagents ?? {}) as Record<string, unknown>;
-  if (state.userSettings.disableBuiltins.existed) {
-    subagents.disableBuiltins = state.userSettings.disableBuiltins.value;
-  } else {
-    delete subagents.disableBuiltins;
-  }
-  if (!state.userSettings.subagentsExisted && Object.keys(subagents).length === 0) {
-    delete userSettings.subagents;
-  } else {
-    userSettings.subagents = subagents;
-  }
+  if (!state.userSettings.subagentsExisted && Object.keys(subagents).length === 0) delete userSettings.subagents;
+  else if (existingSubagents !== undefined || Object.keys(subagents).length > 0) userSettings.subagents = subagents;
 
   if (!state.userSettings.fileExisted && Object.keys(userSettings).length === 0) {
     rmSync(userSettingsPath, { force: true });
     result.removed.push(userSettingsPath);
-  } else {
+  } else if (existsSync(userSettingsPath) || Object.keys(userSettings).length > 0) {
     writeJsonAtomic(userSettingsPath, userSettings);
     result.preserved.push(userSettingsPath);
   }
 
-  if (state.backendConfig.maxSubagentDepth.existed) {
-    backendConfig.maxSubagentDepth = state.backendConfig.maxSubagentDepth.value;
-  } else {
-    delete backendConfig.maxSubagentDepth;
+  if (sameJson(backendConfig.maxSubagentDepth, 1)) {
+    if (state.backendConfig.maxSubagentDepth.existed) backendConfig.maxSubagentDepth = state.backendConfig.maxSubagentDepth.value;
+    else delete backendConfig.maxSubagentDepth;
+  } else if (Object.prototype.hasOwnProperty.call(backendConfig, "maxSubagentDepth")) {
+    result.warnings.push(`Kept modified maxSubagentDepth in ${backendConfigPath}`);
   }
   delete backendConfig[MIGRATION_STATE_KEY];
 
@@ -291,6 +190,26 @@ export function restoreNativePackageSetup(): CleanupResult {
     writeJsonAtomic(backendConfigPath, backendConfig);
     result.preserved.push(backendConfigPath);
   }
-
   return result;
+}
+
+/** Seed the user preset once and clean legacy backend migration state. */
+export function ensurePackageSetup(packageRoot: string): void {
+  if (/^(1|true|yes|on)$/i.test(String(process.env.OMPS_SKIP_BOOTSTRAP ?? ""))) return;
+  const packageJson = readJsonObject(join(packageRoot, "package.json"));
+  if (packageJson.name !== "oh-my-pi-slim") return;
+  const bundledPresetPath = getPresetTemplatePath(packageRoot);
+  if (!existsSync(bundledPresetPath)) throw new Error(`Package preset template is missing: ${bundledPresetPath}`);
+
+  cleanupLegacySubagentSetup();
+  const agentDir = getAgentDir();
+  const userPresetPath = join(agentDir, "oh-my-pi-slim.json");
+  if (!existsSync(userPresetPath)) {
+    mkdirSync(agentDir, { recursive: true });
+    try {
+      writeFileSync(userPresetPath, readFileSync(bundledPresetPath), { flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
 }
