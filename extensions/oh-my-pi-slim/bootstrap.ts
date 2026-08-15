@@ -160,22 +160,34 @@ function removeLegacyPackageAssets(agentDir: string): void {
   else console.warn(`[oh-my-pi-slim] Kept legacy migration manifest for manual cleanup: ${manifestPath}`);
 }
 
-export function getDefaultPresetPath(packageRoot: string): string {
-  return join(packageRoot, ".pi", "oh-my-pi-slim.json");
+export function getPresetTemplatePath(packageRoot: string): string {
+  return join(packageRoot, "config", "oh-my-pi-slim.example.json");
 }
 
-/** Apply the two native pi-subagents settings while preserving their original values. */
+/** Seed the user preset when missing and apply two native settings while preserving their original values. */
 export function ensureNativePackageSetup(packageRoot: string): void {
   if (/^(1|true|yes|on)$/i.test(String(process.env.OMPS_SKIP_BOOTSTRAP ?? ""))) return;
 
   const packageJson = readJsonObject(join(packageRoot, "package.json"));
   if (packageJson.name !== "oh-my-pi-slim") return;
 
-  const presetPath = getDefaultPresetPath(packageRoot);
-  if (!existsSync(presetPath)) throw new Error(`Package preset is missing: ${presetPath}`);
+  const bundledPresetPath = getPresetTemplatePath(packageRoot);
+  if (!existsSync(bundledPresetPath)) {
+    throw new Error(`Package preset template is missing: ${bundledPresetPath}`);
+  }
 
   const { agentDir, userSettingsPath, backendConfigPath } = getMigrationPaths();
   removeLegacyPackageAssets(agentDir);
+
+  const userPresetPath = join(agentDir, "oh-my-pi-slim.json");
+  if (!existsSync(userPresetPath)) {
+    mkdirSync(agentDir, { recursive: true });
+    try {
+      writeFileSync(userPresetPath, readFileSync(bundledPresetPath), { flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
 
   const userSettingsFileExisted = existsSync(userSettingsPath);
   const backendConfigFileExisted = existsSync(backendConfigPath);

@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CONFIG_DIR_NAME,
   getAgentDir,
   SettingsManager,
   shouldCompact,
@@ -12,7 +11,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   ensureNativePackageSetup,
-  getDefaultPresetPath,
   restoreNativePackageSetup,
 } from "./bootstrap.js";
 import {
@@ -209,37 +207,17 @@ function parseConfigFile(path: string): PresetConfig {
   return { defaultPreset, presets };
 }
 
-function mergeConfig(base: PresetConfig, overlay: PresetConfig): PresetConfig {
-  return {
-    defaultPreset: overlay.defaultPreset ?? base.defaultPreset,
-    presets: { ...base.presets, ...overlay.presets },
-  };
-}
-
-function loadPresetConfig(ctx: ExtensionContext): PresetConfig {
-  const packagePath = getDefaultPresetPath(PACKAGE_ROOT);
-  if (!existsSync(packagePath)) {
-    throw new Error(`Package preset is missing: ${packagePath}`);
+function loadPresetConfig(): PresetConfig {
+  const userPath = join(getAgentDir(), CONFIG_FILE);
+  if (!existsSync(userPath)) {
+    throw new Error(
+      `User preset config is missing: ${userPath}. Enable bootstrap and restart Pi to rebuild it from the bundled example, or create it manually before using oh-my-pi-slim.`,
+    );
   }
 
-  let config = parseConfigFile(packagePath);
+  const config = parseConfigFile(userPath);
   if (Object.keys(config.presets).length === 0) {
-    throw new Error(`Package preset contains no presets: ${packagePath}`);
-  }
-
-  const globalPath = join(getAgentDir(), CONFIG_FILE);
-  if (existsSync(globalPath)) {
-    config = mergeConfig(config, parseConfigFile(globalPath));
-  }
-
-  const projectPath = join(ctx.cwd, CONFIG_DIR_NAME, CONFIG_FILE);
-  if (existsSync(projectPath)) {
-    if (!ctx.isProjectTrusted()) {
-      throw new Error(
-        `Refusing project preset config from untrusted project: ${projectPath}. Approve the project or use the compatibility user config at ${globalPath}.`,
-      );
-    }
-    config = mergeConfig(config, parseConfigFile(projectPath));
+    throw new Error(`User preset config contains no presets: ${userPath}`);
   }
 
   if (config.defaultPreset && !config.presets[config.defaultPreset]) {
@@ -460,7 +438,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.registerFlag("omps-preset", {
-    description: `Select an oh-my-pi-slim preset from ${CONFIG_DIR_NAME}/${CONFIG_FILE}`,
+    description: "Select an oh-my-pi-slim preset from ~/.pi/agent/oh-my-pi-slim.json",
     type: "string",
   });
 
@@ -551,7 +529,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     assertNativeBackend(pi);
     ensureNativePackageSetup(PACKAGE_ROOT);
 
-    const config = loadPresetConfig(ctx);
+    const config = loadPresetConfig();
     const presetName = requestedPreset || config.defaultPreset;
     if (!presetName) {
       throw new Error(
@@ -618,7 +596,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       if (!sessionCtx) return null;
       let config: PresetConfig;
       try {
-        config = loadPresetConfig(sessionCtx);
+        config = loadPresetConfig();
       } catch {
         return null;
       }
@@ -638,7 +616,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       const requestedPreset = args.trim();
       if (!requestedPreset) {
         try {
-          report(ctx, availablePresetsMessage(loadPresetConfig(ctx)), "info");
+          report(ctx, availablePresetsMessage(loadPresetConfig()), "info");
         } catch (error) {
           report(ctx, error instanceof Error ? error.message : String(error), "error");
         }
@@ -687,7 +665,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
 
       if (action === "presets") {
         try {
-          const config = loadPresetConfig(ctx);
+          const config = loadPresetConfig();
           report(
             ctx,
             `Available presets: ${Object.keys(config.presets).join(", ")}. Default: ${config.defaultPreset ?? "none"}.`,

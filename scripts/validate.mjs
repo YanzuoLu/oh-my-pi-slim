@@ -73,7 +73,7 @@ const packageJson = json("package.json");
 const lock = json("package-lock.json");
 const installedBackend = json("node_modules/pi-subagents/package.json");
 
-check(packageJson.version === "0.6.2", "package.json version must be 0.6.2");
+check(packageJson.version === "0.7.0", "package.json version must be 0.7.0");
 check(
   packageJson.dependencies?.["pi-subagents"] === "0.49.0",
   "package.json must depend exactly on pi-subagents 0.49.0",
@@ -219,6 +219,37 @@ hasNone(extension, [
   "function buildPresetPrompt",
   "<orchestration-preset",
 ], "static orchestrator prompt contract");
+
+const loadPresetStart = extension.indexOf("function loadPresetConfig()");
+const loadPresetEnd = extension.indexOf("function fullModelName", loadPresetStart);
+const loadPresetBlock = extension.slice(loadPresetStart, loadPresetEnd);
+check(loadPresetStart >= 0 && loadPresetEnd > loadPresetStart, "extension must define user-only preset loading");
+hasAll(loadPresetBlock, [
+  "join(getAgentDir(), CONFIG_FILE)",
+  "parseConfigFile(userPath)",
+  "User preset config is missing",
+  "Enable bootstrap and restart Pi to rebuild it from the bundled example",
+  "or create it manually before using oh-my-pi-slim",
+  "User preset config contains no presets",
+], "user-only preset loading");
+hasNone(loadPresetBlock, [
+  "PACKAGE_ROOT",
+  "ctx.cwd",
+  "isProjectTrusted",
+  "mergeConfig",
+  "packagePath",
+  "projectPath",
+], "user-only preset loading");
+hasNone(extension, [
+  "function mergeConfig",
+  "getDefaultPresetPath",
+  "CONFIG_DIR_NAME",
+  "Refusing project preset config",
+  "compatibility user config",
+], "removed preset overlay implementation");
+hasAll(extension, [
+  'description: "Select an oh-my-pi-slim preset from ~/.pi/agent/oh-my-pi-slim.json"',
+], "stable preset flag description");
 
 const freshPresetStart = extension.indexOf("function applyFreshPreset");
 const freshPresetEnd = extension.indexOf("function resumeOverrideFields", freshPresetStart);
@@ -448,12 +479,13 @@ const exportedBootstrapFunctions = [...bootstrap.matchAll(/export function\s+(\w
 check(
   JSON.stringify(exportedBootstrapFunctions) === JSON.stringify([
     "ensureNativePackageSetup",
-    "getDefaultPresetPath",
+    "getPresetTemplatePath",
     "restoreNativePackageSetup",
   ]),
-  "bootstrap must export only native setup, restore, and default preset helpers",
+  "bootstrap must export only native setup, restore, and preset template helpers",
 );
 hasAll(bootstrap, [
+  "Seed the user preset when missing and apply two native settings",
   'join(agentDir, "settings.json")',
   'join(agentDir, "extensions", "subagent", "config.json")',
   "disableBuiltins",
@@ -461,6 +493,44 @@ hasAll(bootstrap, [
   "ohMyPiSlimMigration",
   "MigrationState",
 ], "bootstrap native setup");
+
+const templateHelperStart = bootstrap.indexOf("export function getPresetTemplatePath");
+const templateHelperEnd = bootstrap.indexOf("export function ensureNativePackageSetup", templateHelperStart);
+const templateHelperBlock = bootstrap.slice(templateHelperStart, templateHelperEnd);
+check(templateHelperStart >= 0 && templateHelperEnd > templateHelperStart, "bootstrap must export the preset template path helper");
+hasAll(templateHelperBlock, [
+  'join(packageRoot, "config", "oh-my-pi-slim.example.json")',
+], "preset template path helper");
+hasNone(templateHelperBlock, [
+  '".pi"',
+  "getDefaultPresetPath",
+], "preset template path helper");
+
+const setupStart = bootstrap.indexOf("export function ensureNativePackageSetup");
+const seedEnd = bootstrap.indexOf("const userSettingsFileExisted", setupStart);
+const seedBlock = bootstrap.slice(setupStart, seedEnd);
+check(setupStart >= 0 && seedEnd > setupStart, "bootstrap must seed the user preset before settings migration");
+hasAll(seedBlock, [
+  "getPresetTemplatePath(packageRoot)",
+  'join(agentDir, "oh-my-pi-slim.json")',
+  "if (!existsSync(userPresetPath))",
+  "mkdirSync(agentDir, { recursive: true })",
+  "writeFileSync(userPresetPath, readFileSync(bundledPresetPath), { flag: \"wx\" })",
+  'code !== "EEXIST"',
+], "bootstrap user preset seed contract");
+hasNone(seedBlock, [
+  "writeJsonAtomic(userPresetPath",
+  "rmSync(userPresetPath",
+], "bootstrap user preset seed contract");
+
+const restoreStart = bootstrap.indexOf("export function restoreNativePackageSetup");
+const restoreBlock = bootstrap.slice(restoreStart);
+check(restoreStart >= 0, "bootstrap must export native setup restore");
+hasNone(restoreBlock, [
+  '"oh-my-pi-slim.json"',
+  "userPresetPath",
+], "uninstall user preset preservation");
+
 hasNone(bootstrap, [
   "copyFileSync",
   "cpSync",
@@ -469,7 +539,8 @@ hasNone(bootstrap, [
   "installPreset",
   "copyPreset",
   "aliases",
-], "bootstrap");
+  "getDefaultPresetPath",
+], "removed bootstrap asset-copy implementation");
 
 hasAll(orchestrator, [
   'subagent({ agent: "explorer", task:',
@@ -490,6 +561,20 @@ hasAll(orchestrator, [
   "Only the main orchestrator may ask the user direct questions",
 ], "orchestrator native contract");
 hasNone(orchestrator, [...FORBIDDEN_ROLE_TOOL_NAMES, "<orchestration-preset"], "orchestrator body");
+
+hasAll(readme, [
+  "0.7.0 preset migration",
+  "breaking preset 配置变更",
+  "运行时仅从用户文件",
+  "移除 project/package overlay",
+  "用户文件缺失时",
+  "bundled 示例",
+  "已有文件不会被覆盖",
+  "不会自动获得 `balanced`、`economy` 或 `openai`",
+  "手工合并",
+  "pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.7.0",
+  "重启 Pi，或执行 `/reload`",
+], "README 0.7.0 preset migration contract");
 
 hasAll(readme, [
   "0.6.0 breaking migration",
@@ -551,13 +636,28 @@ hasAll(readme, [
   "角色 prompt 不依赖具体外部 extension 工具名",
   "native child 环境当前加载的工具决定",
   "@gotgenes/pi-anthropic-auth",
-  "<package>/.pi/oh-my-pi-slim.json",
+  "运行时 preset 的唯一来源是用户文件",
   "~/.pi/agent/oh-my-pi-slim.json",
-  "<project>/.pi/oh-my-pi-slim.json",
-  "整个 preset",
+  "不读取 package 内的 preset 配置",
+  "不读取任何 `<project>/.pi/oh-my-pi-slim.json`",
+  "不存在 package/user/project overlay 或 preset 合并语义",
+  "config/oh-my-pi-slim.example.json",
+  "exclusive create（`wx`）",
+  "`EEXIST` 会被安全忽略",
+  "升级不会覆盖或刷新",
+  "`/omps uninstall` 也不会删除",
+  "用户拥有",
   "balanced",
   "economy",
   "openai",
+  "默认是 `balanced`",
+  "从旧 overlay 语义升级",
+  "已有的用户 JSON 现在会成为完整真源",
+  "不会自动补入缺少的 `balanced`、`economy` 或 `openai`",
+  "手工合并",
+  "先备份再删除用户 JSON 并重启 Pi",
+  "bootstrap 重新 seed bundled 示例",
+  "直接删除会永久丢失原有自定义",
   "pi remove git:github.com/YanzuoLu/oh-my-pi-slim",
   "npm run validate",
 ], "README 0.6 contract");
@@ -573,29 +673,41 @@ const legacyCalls = [
 for (const [label, text] of [["README", readme], ["orchestrator", orchestrator]]) {
   hasNone(text, [...legacyCalls, "max_turns", "same-ID resume", "same ID resume", "10-minute", "10 minutes", "ten minutes"], label);
 }
-hasNone(readme, ["manual native compaction"], "README checkpoint contract");
+hasNone(readme, [
+  "manual native compaction",
+  "<package>/.pi/oh-my-pi-slim.json",
+  "后加载文件按 preset 名覆盖",
+  "不是逐 role 深合并",
+  "package base 自带",
+  "compatibility user overlay",
+  "trusted project overlay",
+], "README obsolete contract");
 
-const presetPath = ".pi/oh-my-pi-slim.json";
-check(existsSync(join(ROOT, presetPath)), "package base preset must exist");
+const legacyPresetPath = ".pi/oh-my-pi-slim.json";
+check(!existsSync(join(ROOT, legacyPresetPath)), "legacy package preset path must not exist");
+const presetPath = "config/oh-my-pi-slim.example.json";
+check(existsSync(join(ROOT, presetPath)), "bundled preset example must exist");
 const presetConfig = json(presetPath);
+check(presetConfig.defaultPreset === "balanced", "bundled preset example defaultPreset must be balanced");
 check(
-  typeof presetConfig.defaultPreset === "string" && presetConfig.presets?.[presetConfig.defaultPreset],
-  "defaultPreset must reference a package preset",
+  presetConfig.presets?.[presetConfig.defaultPreset],
+  "bundled preset example defaultPreset must reference a preset",
 );
-for (const required of ["balanced", "economy", "openai"]) {
-  check(Boolean(presetConfig.presets?.[required]), `package presets must include ${required}`);
-}
+check(
+  JSON.stringify(Object.keys(presetConfig.presets ?? {}).sort()) === JSON.stringify(["balanced", "economy", "openai"]),
+  "bundled preset example must contain exactly balanced, economy, and openai",
+);
 for (const [presetName, preset] of Object.entries(presetConfig.presets ?? {})) {
   check(
     JSON.stringify(Object.keys(preset).sort()) === JSON.stringify([...ROLES].sort()),
-    `${presetName} must define exactly six roles`,
+    `bundled ${presetName} preset must define exactly six roles`,
   );
   for (const role of ROLES) {
     const config = preset[role];
-    check(config && typeof config === "object" && !Array.isArray(config), `${presetName}.${role} must be an object`);
-    check(typeof config?.provider === "string" && config.provider.trim(), `${presetName}.${role}.provider must be non-empty`);
-    check(typeof config?.model === "string" && config.model.trim(), `${presetName}.${role}.model must be non-empty`);
-    check(THINKING.has(config?.thinking), `${presetName}.${role}.thinking is invalid`);
+    check(config && typeof config === "object" && !Array.isArray(config), `bundled ${presetName}.${role} must be an object`);
+    check(typeof config?.provider === "string" && config.provider.trim(), `bundled ${presetName}.${role}.provider must be non-empty`);
+    check(typeof config?.model === "string" && config.model.trim(), `bundled ${presetName}.${role}.model must be non-empty`);
+    check(THINKING.has(config?.thinking), `bundled ${presetName}.${role}.thinking is invalid`);
   }
 }
 
@@ -612,4 +724,4 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log("Validation passed: oh-my-pi-slim 0.6 native contract is internally consistent.");
+console.log("Validation passed: oh-my-pi-slim 0.7.0 native contract is internally consistent.");

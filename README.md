@@ -10,6 +10,18 @@
 
 `orchestrator` 只代表主会话的 preset 角色，不是可启动的 agent。
 
+## 0.7.0 preset migration
+
+0.7.0 包含 breaking preset 配置变更：运行时仅从用户文件 `~/.pi/agent/oh-my-pi-slim.json` 读取 preset，并移除 project/package overlay。用户文件缺失时，bootstrap 会从 bundled 示例 `config/oh-my-pi-slim.example.json` seed；已有文件不会被覆盖，也不会自动获得 `balanced`、`economy` 或 `openai`，需要时请从 bundled 示例手工合并。
+
+升级命令：
+
+```bash
+pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.7.0
+```
+
+升级后请重启 Pi，或执行 `/reload`。
+
 ## 0.6.0 breaking migration
 
 0.6.0 直接且精确依赖 `pi-subagents@0.49.0`，不兼容 0.5.x 使用的 tintinweb backend/facade。升级前先移除旧后端（若已安装），再安装 OMPS：
@@ -182,7 +194,7 @@ resume 是物理上的新运行：source session 被恢复为新的 child proces
 
 ## Bootstrap 与设置影响
 
-每次父会话 `session_start`，OMPS 会先验证 native backend，再执行幂等 setup。setup 只维护两个原生字段：
+每次父会话 `session_start`，OMPS 会先验证 native backend，再执行幂等 setup。除一次性 seed 用户 preset 文件外，setup 只维护两个原生字段：
 
 用户 Pi settings：
 
@@ -210,6 +222,8 @@ backend config：
 - 同名 user/project agent 可以 shadow package agent，且 project 优先级更高。
 - OMPS 不复制 package agents，也不绕过这些原生优先级。
 
+此外，setup 只在 `~/.pi/agent/oh-my-pi-slim.json` 不存在时，从 bundled 示例 `config/oh-my-pi-slim.example.json` 排他创建一次；并发创建遇到 `EEXIST` 会安全保留胜出的文件。已有 preset 文件不会被覆盖，升级也不会刷新它。
+
 因此修改 setup 后需要 restart 或 `/reload`，让先加载的 backend 重新读取配置。
 
 ## Child 行为与边界
@@ -224,13 +238,17 @@ backend 为 child 设置 `PI_SUBAGENT_CHILD=1`。OMPS extension 在任何 flag�
 
 ## Presets
 
-配置按以下顺序加载：
+运行时 preset 的唯一来源是用户文件：
 
-1. package base：`<package>/.pi/oh-my-pi-slim.json`
-2. compatibility user overlay：`~/.pi/agent/oh-my-pi-slim.json`
-3. trusted project overlay：`<project>/.pi/oh-my-pi-slim.json`
+```text
+~/.pi/agent/oh-my-pi-slim.json
+```
 
-后加载文件按 preset 名覆盖前面的**整个 preset**；不是逐 role 深合并。project 配置只有在 Pi 信任该项目时才读取。`defaultPreset` 也由后加载文件覆盖。
+OMPS 不读取 package 内的 preset 配置，也不读取任何 `<project>/.pi/oh-my-pi-slim.json`；不存在 package/user/project overlay 或 preset 合并语义。用户文件中的 `defaultPreset` 与 `presets` 就是完整运行时配置。
+
+package bundled 示例位于 `config/oh-my-pi-slim.example.json`，自带完整的 `balanced`、`economy`、`openai`，默认是 `balanced`。setup 仅在用户文件尚不存在时，以 exclusive create（`wx`）从该示例 seed 一次；若并发 setup 已先创建文件，`EEXIST` 会被安全忽略。已有用户文件始终保留：安装或升级不会覆盖或刷新，`/omps uninstall` 也不会删除。该文件由用户拥有；如需采用新版示例，请自行比较并编辑。
+
+从旧 overlay 语义升级时，已有的用户 JSON 现在会成为完整真源，setup 不会自动补入缺少的 `balanced`、`economy` 或 `openai`；需要这些 preset 时，请参考 `config/oh-my-pi-slim.example.json` 手工合并。也可以先备份再删除用户 JSON 并重启 Pi，让已启用的 bootstrap 重新 seed bundled 示例；直接删除会永久丢失原有自定义，未备份时无法恢复。
 
 每个 preset 必须完整定义六个角色：`orchestrator` 加五个 specialist。每个角色都需要非空 `provider`、非空 `model` 和合法 `thinking`：
 
@@ -238,7 +256,7 @@ backend 为 child 设置 `PI_SUBAGENT_CHILD=1`。OMPS extension 在任何 flag�
 off, minimal, low, medium, high, xhigh, max
 ```
 
-package base 自带 `balanced`、`economy`、`openai`。简化结构如下：
+bundled 示例自带 `balanced`、`economy`、`openai`。简化结构如下：
 
 ```json
 {
@@ -272,7 +290,7 @@ package base 自带 `balanced`、`economy`、`openai`。简化结构如下：
 pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 ```
 
-OMPS 不删除共享认证、搜索、questionnaire 或其他独立 package；例如 `@gotgenes/pi-anthropic-auth` 仍由用户自行管理。
+OMPS 不删除用户拥有的 `~/.pi/agent/oh-my-pi-slim.json`，也不删除共享认证、搜索、questionnaire 或其他独立 package；例如 `@gotgenes/pi-anthropic-auth` 仍由用户自行管理。
 
 ## Architecture 与限制
 
@@ -283,7 +301,7 @@ main Pi
             └─ package-scoped explorer/librarian/oracle/designer/fixer
 ```
 
-OMPS 有意保持窄职责：不实现第二套 run manager/RPC，不动态注册替代工具，不复制 agent/preset 资产，不模拟 backend persistence，也不承诺 OS sandbox。schedule timer 绕过主会话 `tool_call` gate 的限制见上文。
+OMPS 有意保持窄职责：不实现第二套 run manager/RPC，不动态注册替代工具，不复制 agent 资产，只在用户 preset 文件缺失时 seed bundled 示例，不模拟 backend persistence，也不承诺 OS sandbox。schedule timer 绕过主会话 `tool_call` gate 的限制见上文。
 
 ## Development
 
@@ -294,7 +312,7 @@ npm run validate
 git diff --check
 ```
 
-`npm run validate` 检查 package/lock/backend 版本与加载顺序、五个 agent frontmatter、preset 完整性、bootstrap 可逆设置合同、child early return、native policy gate、schedule canonicalization、resume 新 ID 合同、README/orchestrator 文档关键字，以及已删除的 0.5 资产和符号。它不会动态 import extension，也不会访问网络、认证、用户 home 或 sibling repository。
+`npm run validate` 检查 package/lock/backend 版本与加载顺序、五个 agent frontmatter、bundled preset 示例完整性、用户 preset 一次性 seed 合同、bootstrap 可逆设置合同、运行时单一用户配置来源、child early return、native policy gate、schedule canonicalization、resume 新 ID 合同、README/orchestrator 文档关键字，以及已删除的 0.5 资产和符号。它不会动态 import extension，也不会访问网络、认证、用户 home 或 sibling repository。
 
 真实 child 启动、认证继承、通知/恢复、schedule timer 与 checkpoint 的端到端行为属于集成 smoke；本静态验证不声称覆盖这些运行时路径。
 
