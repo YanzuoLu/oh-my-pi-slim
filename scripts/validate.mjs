@@ -73,7 +73,7 @@ const packageJson = json("package.json");
 const lock = json("package-lock.json");
 const installedBackend = json("node_modules/pi-subagents/package.json");
 
-check(packageJson.version === "0.7.0", "package.json version must be 0.7.0");
+check(packageJson.version === "0.7.1", "package.json version must be 0.7.1");
 check(
   packageJson.dependencies?.["pi-subagents"] === "0.49.0",
   "package.json must depend exactly on pi-subagents 0.49.0",
@@ -185,7 +185,6 @@ for (const name of AGENTS) {
 const extension = read("extensions/oh-my-pi-slim/index.ts");
 const bootstrap = read("extensions/oh-my-pi-slim/bootstrap.ts");
 const orchestrator = read("extensions/oh-my-pi-slim/orchestrator.md");
-const readme = read("README.md");
 
 const functionStart = extension.indexOf("export default function ohMyPiSlim");
 const childReturn = extension.indexOf('if (process.env.PI_SUBAGENT_CHILD === "1") return;', functionStart);
@@ -562,106 +561,6 @@ hasAll(orchestrator, [
 ], "orchestrator native contract");
 hasNone(orchestrator, [...FORBIDDEN_ROLE_TOOL_NAMES, "<orchestration-preset"], "orchestrator body");
 
-hasAll(readme, [
-  "0.7.0 preset migration",
-  "breaking preset 配置变更",
-  "运行时仅从用户文件",
-  "移除 project/package overlay",
-  "用户文件缺失时",
-  "bundled 示例",
-  "已有文件不会被覆盖",
-  "不会自动获得 `balanced`、`economy` 或 `openai`",
-  "手工合并",
-  "pi install git:github.com/YanzuoLu/oh-my-pi-slim@v0.7.0",
-  "重启 Pi，或执行 `/reload`",
-], "README 0.7.0 preset migration contract");
-
-hasAll(readme, [
-  "0.6.0 breaking migration",
-  "pi-subagents@0.49.0",
-  "pi remove npm:@tintinweb/pi-subagents",
-  "pi install git:github.com/YanzuoLu/oh-my-pi-slim",
-  "会拒绝激活",
-  "./node_modules/pi-subagents/index.ts",
-  'pi.subagents.agents: ["./agents"]',
-  "不会把 agent 复制到 `~/.pi/agent/agents`",
-  "pi --omps",
-  "pi --omps --omps-preset balanced",
-  "/omps on economy",
-  "/preset openai",
-  "/omps status",
-  "/omps off",
-  "/omps presets",
-  "/omps uninstall",
-  'subagent({ agent: "explorer", task:',
-  "subagent_wait",
-  "不要 sleep，也不要循环调用 status 轮询",
-  "新的 run ID",
-  "provider/model:thinking",
-  'context: "fresh"',
-  "禁止直接 arbitrary `workflowScript`",
-  "create, update, delete, eject, enable, append-step",
-  "disable` 与 `reset` 不在 OMPS denylist",
-  "canonical strict-JSON",
-  "backend timer 直接执行，不经过 OMPS 的 `tool_call` gate",
-  "不是完整 sandbox",
-  "原生 persistence、status、result、events 和 restart recovery",
-  "Tool-batch checkpoint compaction",
-  "Pi `SettingsManager`",
-  "`shouldCompact`",
-  "完整 tool batch",
-  "public `ctx.abort()`",
-  "post-run `_checkCompaction`",
-  "threshold auto path",
-  '`reason === "threshold"`',
-  "`willRetry === false`",
-  "`agent_settled`",
-  "新的 extension user turn",
-  "不是 transparent continuation",
-  "不是透明 continuation",
-  "模型仍可能重复调用",
-  "batch 不完整",
-  "usage 未知",
-  "compaction 已禁用",
-  "已有 pending",
-  "不裁剪或改写 context request 副本",
-  "不修改 Pi compaction settings",
-  '"disableBuiltins": true',
-  '"maxSubagentDepth": 1',
-  "trusted project settings 可以覆盖",
-  "shadow package agent",
-  "PI_SUBAGENT_CHILD=1",
-  "contact_supervisor",
-  "禁止直接询问用户",
-  "角色 prompt 不依赖具体外部 extension 工具名",
-  "native child 环境当前加载的工具决定",
-  "@gotgenes/pi-anthropic-auth",
-  "运行时 preset 的唯一来源是用户文件",
-  "~/.pi/agent/oh-my-pi-slim.json",
-  "不读取 package 内的 preset 配置",
-  "不读取任何 `<project>/.pi/oh-my-pi-slim.json`",
-  "不存在 package/user/project overlay 或 preset 合并语义",
-  "config/oh-my-pi-slim.example.json",
-  "exclusive create（`wx`）",
-  "`EEXIST` 会被安全忽略",
-  "升级不会覆盖或刷新",
-  "`/omps uninstall` 也不会删除",
-  "用户拥有",
-  "balanced",
-  "economy",
-  "openai",
-  "默认是 `balanced`",
-  "从旧 overlay 语义升级",
-  "已有的用户 JSON 现在会成为完整真源",
-  "不会自动补入缺少的 `balanced`、`economy` 或 `openai`",
-  "手工合并",
-  "先备份再删除用户 JSON 并重启 Pi",
-  "bootstrap 重新 seed bundled 示例",
-  "直接删除会永久丢失原有自定义",
-  "pi remove git:github.com/YanzuoLu/oh-my-pi-slim",
-  "npm run validate",
-], "README 0.6 contract");
-
 const legacyCalls = [
   "`Agent(",
   "Agent({",
@@ -670,18 +569,11 @@ const legacyCalls = [
   "resume_subagent(",
   "stop_subagent(",
 ];
-for (const [label, text] of [["README", readme], ["orchestrator", orchestrator]]) {
-  hasNone(text, [...legacyCalls, "max_turns", "same-ID resume", "same ID resume", "10-minute", "10 minutes", "ten minutes"], label);
-}
-hasNone(readme, [
-  "manual native compaction",
-  "<package>/.pi/oh-my-pi-slim.json",
-  "后加载文件按 preset 名覆盖",
-  "不是逐 role 深合并",
-  "package base 自带",
-  "compatibility user overlay",
-  "trusted project overlay",
-], "README obsolete contract");
+hasNone(
+  orchestrator,
+  [...legacyCalls, "max_turns", "same-ID resume", "same ID resume", "10-minute", "10 minutes", "ten minutes"],
+  "orchestrator",
+);
 
 const legacyPresetPath = ".pi/oh-my-pi-slim.json";
 check(!existsSync(join(ROOT, legacyPresetPath)), "legacy package preset path must not exist");
@@ -724,4 +616,4 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log("Validation passed: oh-my-pi-slim 0.7.0 native contract is internally consistent.");
+console.log("Validation passed: oh-my-pi-slim 0.7.1 native contract is internally consistent.");

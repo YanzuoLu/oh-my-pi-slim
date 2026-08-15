@@ -79,7 +79,7 @@ const FORBIDDEN_SCHEDULE_CHILD_FIELDS = new Set([
   "chainDir",
 ]);
 const FILE_TOOLS = new Set(["read", "edit", "write"]);
-const RENDER_TICKER_INTERVAL_MS = 250;
+const RENDER_TICKER_INTERVAL_MS = 80;
 const TRUE_VALUES = /^(1|true|yes|on)$/i;
 const SAFE_PRESET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_MODEL_PART = /^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$/;
@@ -467,6 +467,10 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     // the Pi extension UI context does not expose; re-setting the same status
     // text forces a TUI redraw (pi's setExtensionStatus always requests render),
     // so its 250ms spinner frames advance while the main session is otherwise idle.
+    // Tick faster than those frames (matching pi-tui's own 80ms Loader): the widget
+    // derives its frame from Math.floor(Date.now() / 250), so a 250ms ticker samples
+    // at the frame period and setInterval drift makes it miss or double frame
+    // boundaries. Oversampling keeps frame advance even.
     if (renderTicker || !ctx.hasUI) return;
     renderTicker = setInterval(() => {
       const current = sessionCtx;
