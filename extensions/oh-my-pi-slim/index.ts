@@ -325,6 +325,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       }
       return launchModelName(rolePreset);
     });
+    // Intentionally reread deny for each create/resume; role models remain fixed at preset activation.
     subagents.setDenyResolver((role) => loadPresetConfig().deny[role]);
   }
 

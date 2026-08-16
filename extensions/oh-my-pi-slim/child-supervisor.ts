@@ -50,4 +50,8 @@ export default function childSupervisor(pi: ExtensionAPI): void {
       };
     },
   });
+
+  pi.on("session_start", () => {
+    pi.setActiveTools(pi.getAllTools().map((tool) => tool.name));
+  });
 }

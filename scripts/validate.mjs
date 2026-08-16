@@ -65,7 +65,8 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.8.4", "package version must be 0.8.4");
+check(packageJson.version === "0.8.5", "package version must be 0.8.5");
+check(lock.version === "0.8.5" && lock.packages?.[""]?.version === "0.8.5", "package-lock version must be 0.8.5");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify(["./extensions/oh-my-pi-slim/index.ts"]), "package must load only the OMPS extension");
 check(packageJson.pi?.subagents === undefined, "package must not expose a pi.subagents manifest");
 check(packageJson.dependencies === undefined || Object.keys(packageJson.dependencies).length === 0, "package must have no runtime dependency on the removed backend");
@@ -80,9 +81,12 @@ check(JSON.stringify(agentFiles) === JSON.stringify(AGENTS.map((name) => `${name
 for (const name of AGENTS) {
   const file = `agents/${name}.md`;
   const parsed = frontmatter(read(file), file);
+  check(JSON.stringify([...parsed.fields.keys()].sort()) === JSON.stringify(["description", "name"]), `${file} frontmatter must contain only name and description`);
   check(parsed.fields.get("name") === name, `${file} name must match filename`);
   check(parsed.fields.get("description"), `${file} must define a description`);
   check(parsed.body.trim().length > 0, `${file} must contain a role prompt body`);
+  hasAll(parsed.body, ["**Supervisor Rules**:", "Do not ask the user directly.", "contact_supervisor", "Do not attempt to create, steer, interrupt, resume, or supervise other specialist runs."], `${file} child lifecycle boundary`);
+  hasNone(parsed.body, ["ast_grep_search", "context7", "gh_grep", "apply_patch"], `${file} removed OpenCode tools`);
 }
 
 const extension = read("extensions/oh-my-pi-slim/index.ts");
@@ -251,6 +255,8 @@ hasAll(child, [
   '"progress_update"',
   "details: { request }",
   "terminate: true",
+  'pi.on("session_start"',
+  "pi.setActiveTools(pi.getAllTools().map((tool) => tool.name))",
 ], "child supervisor extension");
 
 hasAll(runFiles, [
@@ -316,8 +322,18 @@ hasAll(bootstrap, [
 check(!/export function ensurePackageSetup[\s\S]*disableBuiltins\s*=\s*true/.test(bootstrap), "future bootstrap must not maintain disableBuiltins");
 check(!/export function ensurePackageSetup[\s\S]*maxSubagentDepth\s*=\s*1/.test(bootstrap), "future bootstrap must not maintain maxSubagentDepth");
 
-hasAll(orchestrator, ["<Role>", "<Agents>", "@explorer", "@librarian", "@oracle", "@designer", "@fixer", "@observer", "<Workflow>"], "upstream orchestrator role set");
+hasAll(orchestrator, [
+  "<Role>", "<Agents>", "@explorer", "@librarian", "@oracle", "@designer", "@fixer", "@observer", "<Workflow>",
+  'subagent({ action: "create", agent, task, cwd? })', 'subagent({ action: "list" })',
+  'subagent({ action: "steer", id, message })', 'subagent({ action: "interrupt", id })',
+  'subagent({ action: "resume", id: "source-run-id", message: "continuation objective" })',
+  "subagent_supervisor", "lifecycle notifications arrive automatically at the next safe model boundary",
+], "orchestrator OMPS contract");
 check(!orchestrator.includes("@council"), "orchestrator must keep Council excluded");
+hasNone(orchestrator, [
+  "task_result", "task_status", "task_nudge", "cancel_task", "wait_for_user", "Background Job Board",
+  "Reusable Sessions", "Active / Unreconciled", "subagent_type", "task_id", "ast_grep_search", "apply_patch",
+], "orchestrator removed OpenCode runtime");
 
 for (const file of ["README.md", "README.zh-CN.md"]) {
   const text = read(file);
@@ -341,9 +357,23 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
     "follow-up continuation turn",
   ], file);
   hasAll(text, file === "README.md"
-    ? ["next safe model boundary", "same custom message"]
-    : ["下一个安全模型边界", "同一条消息"], `${file} notification delivery`);
-  hasNone(text, ["RpcClient", "RPC-client seam", "hidden follow-up", "隐藏 follow-up"], file);
+    ? [
+        "The six specialists", "All seven provider/model pairs", 'action: "create"', "`action` is mandatory",
+        "Top-level `deny`", "`--exclude-tools", "launch-time `deniedTools`", "image input",
+        "copies that preset's `explorer` configuration", "reread before every create and resume",
+        "next safe model boundary", "same custom message",
+      ]
+    : [
+        "六个 specialist", "七个 provider/model", 'action: "create"', "`action` 必填",
+        "顶层 `deny`", "`--exclude-tools", "启动时 `deniedTools`", "image input",
+        "复制同一 preset 的 `explorer` 配置", "每次 create 与 resume 前都会重新读取 deny",
+        "下一个安全模型边界", "同一条消息",
+      ], `${file} 0.8.5 contract`);
+  hasNone(text, [
+    "RpcClient", "RPC-client seam", "hidden follow-up", "隐藏 follow-up", "The five agents", "五个 agent",
+    "all five specialist roles", "五个 specialist", "### Fresh runs", "fresh child calls", "fresh child",
+    'subagent({ agent:', "`--tools`", "model/tools",
+  ], file);
   check(!text.includes(REMOVED_WAIT_TOOL), `${file} must not mention the removed wait tool`);
 }
 
@@ -420,6 +450,7 @@ if (packCheck.status === 0) {
     check(files.includes("extensions/oh-my-pi-slim/runner/rpc-child.mjs"), "npm pack must include the runner RPC child helper");
     check(files.includes("extensions/oh-my-pi-slim/subagent-model-display.ts"), "npm pack must include the shared subagent model formatter");
     check(files.includes("extensions/oh-my-pi-slim/subagent-transcript-renderer.ts"), "npm pack must include the subagent transcript renderer");
+    check(files.includes("agents/observer.md"), "npm pack must include the Observer role");
   } catch (error) {
     errors.push(`npm pack --dry-run output must be JSON: ${error.message}`);
   }

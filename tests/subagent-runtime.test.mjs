@@ -261,7 +261,7 @@ function controls(harness, id) {
   }
 }
 
-async function fresh(harness, overrides = {}) {
+async function createRun(harness, overrides = {}) {
   harness.runtime.setModelResolver((agent) => `preset/${agent}:high`);
   harness.runtime.setDenyResolver(() => []);
   return harness.tools.get("subagent").execute("create", { action: "create", agent: "fixer", task: "detached task", ...overrides });
@@ -437,7 +437,7 @@ test("subagent list returns only status summaries in model content and details",
     });
     harness.runtime.registry.add(completed, false);
     harness.runtime.activity.set(completed.id, { responseText: "ACTIVITY_SENTINEL" });
-    const started = await fresh(harness, { task: "WAITING_TASK_SENTINEL" });
+    const started = await createRun(harness, { task: "WAITING_TASK_SENTINEL" });
     const waitingId = started.details.run.id;
     const config = readConfig(harness, waitingId);
     harness.alive.add(999);
@@ -480,7 +480,7 @@ test("subagent list returns only status summaries in model content and details",
     assert.equal(result.content[0].text, JSON.stringify(result.details.runs, null, 2));
     const exposed = JSON.stringify({ content: result.content, details: result.details });
     for (const field of [
-      "task", "cwd", "model", "tools", "createdAt", "updatedAt", "sessionFile", "activity",
+      "task", "cwd", "model", "deniedTools", "createdAt", "updatedAt", "sessionFile", "activity",
       "output", "error", "notificationPending", "request", "message", "interview",
     ]) {
       assert.equal(exposed.includes(`\"${field}\"`), false, `${field} must not enter list output`);
@@ -503,8 +503,19 @@ test("contact_supervisor prompt metadata describes persistent reply-to-continue 
   process.env.PI_SUBAGENT_CHILD = "1";
   try {
     let definition;
+    let sessionStart;
+    let activeTools;
+    const allTools = ["read", "bash", "grep", "find", "ls", "project_extension_tool", "contact_supervisor"];
     const module = await import(`${new URL("../extensions/oh-my-pi-slim/child-supervisor.ts", import.meta.url).href}?metadata=1`);
-    module.default({ registerTool(tool) { definition = tool; } });
+    module.default({
+      registerTool(tool) { definition = tool; },
+      on(event, handler) { if (event === "session_start") sessionStart = handler; },
+      getAllTools() { return allTools.map((name) => ({ name })); },
+      setActiveTools(names) { activeTools = names; },
+    });
+    assert.equal(typeof sessionStart, "function");
+    sessionStart();
+    assert.deepEqual(activeTools, allTools);
     assert.equal(definition.promptSnippet, "Create a supervisor request and pause until reply.");
     assert.equal(definition.promptGuidelines[0], "A call includes reason; optional message adds request context; optional interview carries structured questions.");
     assert.equal(definition.parameters.required.includes("message"), false);
@@ -579,7 +590,7 @@ test("create writes secure detached config, journals once, launches, and returns
   const harness = createHarness();
   try {
     await harness.restore();
-    const result = await fresh(harness);
+    const result = await createRun(harness);
     const id = result.details.run.id;
     const config = readConfig(harness, id);
     assert.match(result.content[0].text, new RegExp(`${id}.*status starting`));
@@ -647,7 +658,7 @@ test("create persists exact deny entries and emits --exclude-tools without a pos
   } finally { harness.cleanup(); }
 });
 
-test("each create resolves a fresh deny policy while active runs retain launch-time policy", async () => {
+test("each create resolves the current deny policy while active runs retain launch-time policy", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
@@ -701,7 +712,7 @@ test("create waits for the just-spawned PID to exit before cleaning up when proc
     await harness.restore();
     harness.alive.add(999);
     harness.setProcessIdentity(999, undefined);
-    const result = await fresh(harness);
+    const result = await createRun(harness);
     const run = result.details.run;
     assert.deepEqual(run, {
       id: run.id,
@@ -733,7 +744,7 @@ test("create retains the run directory when the just-spawned PID cannot be confi
     await harness.restore();
     harness.alive.add(999);
     harness.setProcessIdentity(999, undefined);
-    const result = await fresh(harness);
+    const result = await createRun(harness);
     const run = result.details.run;
     assert.equal(run.status, "failed");
     assert.match(run.error, /capture OS process identity/);
@@ -753,7 +764,7 @@ test("create failure returns the complete failed run", async () => {
   const harness = createHarness({ launchError: new Error("spawn failed") });
   try {
     await harness.restore();
-    const result = await fresh(harness);
+    const result = await createRun(harness);
     const run = result.details.run;
     assert.match(result.content[0].text, new RegExp(`${run.id}.*status failed`));
     assert.deepEqual(run, {
@@ -780,7 +791,7 @@ test("poll folds logical state but activity and heartbeat changes do not journal
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     harness.alive.add(999);
@@ -815,7 +826,7 @@ test("waiting notification and supervisor reply use detached control without blo
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     harness.alive.add(999);
@@ -878,7 +889,7 @@ test("waiting delivery keys isolate request cycles and stale acknowledgements", 
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     harness.alive.add(999);
@@ -931,7 +942,7 @@ test("waiting-to-waiting request replacement creates a new notification after pr
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     harness.alive.add(999);
@@ -967,7 +978,7 @@ test("reply grace suppression still fails a stale waiting runner whose PID dies"
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     harness.alive.add(999);
@@ -990,7 +1001,7 @@ test("stale waiting state is restored after the supervisor reply grace expires",
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     harness.alive.add(999);
@@ -1016,7 +1027,7 @@ test("steer and interrupt only enqueue controls and return requested", async () 
     const harness = createHarness();
     try {
       await harness.restore();
-      const started = await fresh(harness);
+      const started = await createRun(harness);
       const id = started.details.run.id;
       const config = readConfig(harness, id);
       harness.alive.add(999);
@@ -1036,7 +1047,7 @@ test("interrupt accepts a waiting non-terminal run", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     harness.alive.add(999);
@@ -1055,7 +1066,7 @@ test("terminal notification stays pending until matching delivered message ackno
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness, { task: "TASK_DETAILS_SENTINEL" });
+    const started = await createRun(harness, { task: "TASK_DETAILS_SENTINEL" });
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
@@ -1129,7 +1140,7 @@ test("agent-settled retry re-enqueues each still-pending delivery at most once p
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
@@ -1167,7 +1178,7 @@ test("undelivered pending notification replays once on restore and keeps complet
   const output = "complete-output-".repeat(6000);
   try {
     await first.restore();
-    const started = await fresh(first);
+    const started = await createRun(first);
     id = started.details.run.id;
     const config = readConfig(first, id);
     atomicWriteJson(first.paths(id).stateFile, stateFor(id, config.token, {
@@ -1238,7 +1249,7 @@ test("restore and shutdown clear runtime notification queue state", async () => 
     await harness.restore();
     assert.equal(harness.runtime.queuedNotifications.size, 0);
 
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     harness.alive.add(999);
@@ -1266,7 +1277,7 @@ test("no-state and stale-heartbeat failures honor local grace windows", async ()
   const noState = createHarness();
   try {
     await noState.restore();
-    const started = await fresh(noState);
+    const started = await createRun(noState);
     const id = started.details.run.id;
     noState.alive.add(999);
     await inspect(noState, id);
@@ -1283,7 +1294,7 @@ test("no-state and stale-heartbeat failures honor local grace windows", async ()
   const stale = createHarness();
   try {
     await stale.restore();
-    const started = await fresh(stale);
+    const started = await createRun(stale);
     const id = started.details.run.id;
     const config = readConfig(stale, id);
     stale.alive.add(999);
@@ -1310,7 +1321,7 @@ test("poller prevents concurrent termination of the same unhealthy run", async (
   });
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     harness.alive.add(999);
     harness.advance(5001);
@@ -1337,7 +1348,7 @@ test("health failure retains a PID-reused run directory without signaling", asyn
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     harness.alive.add(999);
@@ -1365,7 +1376,7 @@ test("health termination adopts a terminal state published during TERM grace", a
   });
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     harness.alive.add(999);
@@ -1385,7 +1396,7 @@ test("unhealthy SIGSTOP-like runner waits between process-group SIGTERM and SIGK
   const harness = createHarness({ keepAliveAfterKill: true, sleep: async (ms) => { sleeps.push(ms); } });
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     harness.alive.add(999);
     harness.advance(5001);
@@ -1405,7 +1416,7 @@ test("missing run directories clear health and pending reply bookkeeping", async
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     harness.runtime.health.set(id, { trackedAt: NOW_MS });
     harness.runtime.pendingReplies.set(id, { requestId: "stale", sentAt: NOW_MS });
@@ -1424,7 +1435,7 @@ test("invalid launch config retains the unverifiable run directory without signa
   console.error = (...args) => { errors.push(args.join(" ")); };
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     harness.alive.add(999);
     atomicWriteJson(harness.paths(id).configFile, { invalid: true });
@@ -1454,7 +1465,7 @@ test("nonterminal state with a dead PID fails immediately", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token));
@@ -1468,7 +1479,7 @@ test("shutdown kills a just-launched runner from its verified identity before st
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     harness.alive.add(999);
     await harness.runtime.shutdown();
@@ -1482,7 +1493,7 @@ test("shutdown retains a PID-reused directory and sends no signal", async () => 
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     harness.alive.add(999);
     harness.setProcessIdentity(999, "reused-process");
@@ -1497,7 +1508,7 @@ test("shutdown does not signal when state PID disagrees with runner identity", a
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     harness.alive.add(999);
@@ -1513,7 +1524,7 @@ test("shutdown process-group signaling falls back to the verified PID", async ()
   const harness = createHarness({ rejectGroupSignal: true });
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     harness.alive.add(999);
     await harness.runtime.shutdown();
@@ -1529,7 +1540,7 @@ test("shutdown adopts an already-completed verified state without interrupting o
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     const sessionFile = join(harness.tempDir, "completed.jsonl");
@@ -1575,7 +1586,7 @@ test("shutdown adopts natural completion while waiting for interrupt", async () 
   });
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     harness.alive.add(999);
@@ -1601,7 +1612,7 @@ test("shutdown journals a pending interruption and the next runtime delivers it 
   const harness = createHarness({ sendMessageError: new Error("closing parent") });
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     const sessionFile = join(harness.tempDir, "resume.jsonl");
@@ -1849,7 +1860,7 @@ test("owner session paths are isolated and RPC mode never registers a widget", a
   const harness = createHarness({ ownerSessionId: "owner-b", mode: "rpc" });
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await createRun(harness);
     const id = started.details.run.id;
     assert.match(harness.paths(id).runDir, /owner-b/);
     assert.equal(harness.widgetCalls.length, 0);
