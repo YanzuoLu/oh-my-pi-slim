@@ -275,6 +275,131 @@ test("long streaming activity stays bounded while terminal output remains comple
   }
 });
 
+test("runner context tokens stay monotonic within an epoch and ignore cumulative session totals", async () => {
+  const run = makeRun("token-regression");
+  try {
+    const firstPositive = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.responseText.includes("marker-1200") &&
+        !state.responseText.includes("marker-zero") ? state : undefined;
+    });
+    assert.equal(firstPositive.tokens, 1200);
+
+    const afterZero = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.responseText.includes("marker-zero") &&
+        !state.responseText.includes("marker-1350") ? state : undefined;
+    });
+    assert.equal(afterZero.tokens, 1200, "a zero streaming usage event does not erase the last positive token count");
+
+    const laterPositive = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.responseText.includes("marker-1350") ? state : undefined;
+    });
+    assert.equal(laterPositive.tokens, 1350);
+
+    const completed = await waitForStatus(run, "completed");
+    assert.equal(completed.output, "token regression complete");
+    assert.equal(completed.tokens, 1350, "message_end zero, contextUsage 900, and cumulative stats total 9000 cannot regress tokens");
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    await cleanup(run);
+  }
+});
+
+test("successful compaction starts a new context-token epoch without hiding the old value", async () => {
+  const run = makeRun("token-compaction-success");
+  try {
+    const precompact = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.responseText.includes("pre-marker-1200") ? state : undefined;
+    });
+    assert.equal(precompact.tokens, 1200);
+
+    const compacted = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.compactionCount === 1 &&
+        !state.responseText.includes("post-marker-300") ? state : undefined;
+    });
+    assert.equal(compacted.tokens, 1200, "successful compaction retains the prior token display until post-compact usage arrives");
+    assert.equal(compacted.contextPercent, undefined);
+
+    const postBaseline = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.responseText.includes("post-marker-300") &&
+        !state.responseText.includes("post-marker-zero") ? state : undefined;
+    });
+    assert.equal(postBaseline.tokens, 300, "the first positive post-compact usage establishes a lower new baseline");
+
+    const afterZero = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.responseText.includes("post-marker-zero") &&
+        !state.responseText.includes("post-marker-350") ? state : undefined;
+    });
+    assert.equal(afterZero.tokens, 300);
+
+    const later = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.responseText.includes("post-marker-350") ? state : undefined;
+    });
+    assert.equal(later.tokens, 350);
+
+    const completed = await waitForStatus(run, "completed");
+    assert.equal(completed.tokens, 350, "final contextUsage 320 cannot regress the post-compact epoch");
+    assert.equal(completed.compactionCount, 1);
+    assert.equal(completed.contextPercent, 16);
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    await cleanup(run);
+  }
+});
+
+test("aborted or result-less compaction does not reset the context-token epoch", async () => {
+  const run = makeRun("token-compaction-aborted");
+  try {
+    const precompact = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.responseText.includes("aborted-pre-1200") ? state : undefined;
+    });
+    assert.equal(precompact.tokens, 1200);
+
+    const afterLowerUsage = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.responseText.includes("aborted-later-300") ? state : undefined;
+    });
+    assert.equal(afterLowerUsage.tokens, 1200);
+    assert.equal(afterLowerUsage.compactionCount, 0);
+
+    const completed = await waitForStatus(run, "completed");
+    assert.equal(completed.tokens, 1200);
+    assert.equal(completed.compactionCount, 0);
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    await cleanup(run);
+  }
+});
+
+test("successful compaction with null final context usage preserves the last visible token value", async () => {
+  const run = makeRun("token-compaction-null-stats");
+  try {
+    const compacted = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.compactionCount === 1 ? state : undefined;
+    });
+    assert.equal(compacted.tokens, 1200);
+    assert.equal(compacted.contextPercent, undefined);
+
+    const completed = await waitForStatus(run, "completed");
+    assert.equal(completed.output, "token null stats complete");
+    assert.equal(completed.tokens, 1200);
+    assert.equal(completed.compactionCount, 1);
+    assert.equal(completed.contextPercent, undefined, "null context usage never becomes 0% after compaction");
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    await cleanup(run);
+  }
+});
+
 test("waiting request persists, wrong-token controls are ignored, and matching reply continues", async () => {
   const run = makeRun("contact");
   try {

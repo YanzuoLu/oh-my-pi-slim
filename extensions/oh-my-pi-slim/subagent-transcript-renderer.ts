@@ -137,6 +137,13 @@ function fallbackResult(result: ToolResultLike, theme: Theme, partial: boolean):
   return new Text(theme.fg(partial ? "warning" : "dim", partial ? "Result pending…" : "No result content."), 0, 0);
 }
 
+function spacedToolResult(component: Component): Container {
+  const container = new Container();
+  container.addChild(new Spacer(1));
+  container.addChild(component);
+  return container;
+}
+
 function actionFromContext(context: ToolRenderContextLike, fallback: string): { action: string; args: UnknownRecord } {
   const args = asRecord(context.args) ?? {};
   return { action: asString(args.action) ?? fallback, args };
@@ -168,7 +175,7 @@ function immediateAck(run: UnknownRecord, action: string, args: UnknownRecord, t
 
 function renderRunList(runs: unknown[], theme: Theme): Container {
   const container = new Container();
-  container.addChild(styledTitle(theme, "Retained subagent runs", `· ${runs.length}`));
+  container.addChild(styledTitle(theme, "Retained subagent run status", `· ${runs.length}`));
   if (runs.length === 0) {
     container.addChild(new Text(theme.fg("dim", "No retained runs."), 0, 0));
     return container;
@@ -178,15 +185,14 @@ function renderRunList(runs: unknown[], theme: Theme): Container {
     const { status } = runIdentity(run);
     container.addChild(new Spacer(1));
     container.addChild(compactRunHeader(run, theme));
-    if (TERMINAL_STATUSES.has(status)) {
-      addFinalOutput(container, theme, run);
-      return;
+    if (status !== "waiting") return;
+    const requestId = asString(run.requestId);
+    const reason = asString(run.reason);
+    if (requestId || reason) {
+      const identity = requestId ? ` [${requestId}]` : "";
+      const detail = reason ? ` · ${reason}` : "";
+      container.addChild(new Text(theme.fg("dim", `Request${identity}${detail}`), 0, 0));
     }
-    if (status === "waiting") {
-      addRequest(container, theme, run.request);
-      return;
-    }
-    if (LIVE_STATUSES.has(status) && run.output === undefined) addLiveActivity(container, theme, run.activity);
   });
   return container;
 }
@@ -216,7 +222,7 @@ export function renderSubagentCall(argsValue: unknown, theme: Theme, context: To
   } else if (action === "list") {
     container.addChild(new Spacer(1));
     container.addChild(new Text(
-      theme.fg("toolOutput", "Returns every retained run with complete status-related request, output, and error text."),
+      theme.fg("toolOutput", "Returns retained run identity and current status, plus waiting request identity when present."),
       0,
       0,
     ));
@@ -236,11 +242,11 @@ export function renderSubagentResult(
   const details = asRecord(result.details);
   const { action, args } = actionFromContext(context, "fresh");
   const runs = details?.runs;
-  if (action === "list" && Array.isArray(runs)) return renderRunList(runs, theme);
+  if (action === "list" && Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme));
   const run = asRecord(details?.run);
-  if (run) return immediateAck(run, action, args, theme);
-  if (Array.isArray(runs)) return renderRunList(runs, theme);
-  return fallbackResult(result, theme, options.isPartial === true);
+  if (run) return spacedToolResult(immediateAck(run, action, args, theme));
+  if (Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme));
+  return spacedToolResult(fallbackResult(result, theme, options.isPartial === true));
 }
 
 export function renderSupervisorCall(argsValue: unknown, theme: Theme): Component {
@@ -274,29 +280,29 @@ export function renderSupervisorResult(
     container.addChild(styledTitle(theme, "Pending supervisor requests", `· ${pending.length}`));
     if (pending.length === 0) {
       container.addChild(new Text(theme.fg("dim", "No pending requests."), 0, 0));
-      return container;
+      return spacedToolResult(container);
     }
     pending.forEach((request, index) => addRequest(container, theme, request, `Request ${index + 1}`));
-    return container;
+    return spacedToolResult(container);
   }
   const run = asRecord(details?.run);
   if (action === "reply" && run) {
     const { agent, id, status } = runIdentity(run);
     const request = asString(args.replyTo) ?? "unknown request";
     const glyph = TERMINAL_STATUSES.has(status) ? statusGlyph(status, theme) : theme.fg("success", "✓");
-    return new Text(
+    return spacedToolResult(new Text(
       `${glyph} ${theme.fg("toolOutput", `Replied [${request}] · ${agent} [${id}] · ${status}`)}`,
       0,
       0,
-    );
+    ));
   }
   if (Array.isArray(pending)) {
     const container = new Container();
     container.addChild(styledTitle(theme, "Pending supervisor requests", `· ${pending.length}`));
     pending.forEach((request, index) => addRequest(container, theme, request, `Request ${index + 1}`));
-    return container;
+    return spacedToolResult(container);
   }
-  return fallbackResult(result, theme, options.isPartial === true);
+  return spacedToolResult(fallbackResult(result, theme, options.isPartial === true));
 }
 
 export function renderSubagentNotification(

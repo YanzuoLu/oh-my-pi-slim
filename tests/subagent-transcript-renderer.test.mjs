@@ -34,9 +34,12 @@ const theme = {
   bold: (text) => text,
 };
 
+function renderLines(component, width = 240) {
+  return component.render(width).map((line) => stripVTControlCharacters(line).trimEnd());
+}
+
 function render(component, width = 240) {
-  return component.render(width)
-    .map((line) => stripVTControlCharacters(line).trimEnd())
+  return renderLines(component, width)
     .join("\n")
     .replace(/^\n+|\n+$/g, "");
 }
@@ -105,7 +108,8 @@ test("call renderers keep complete action-specific input", () => {
   assertFull(interrupt, ["Action: interrupt", "Run: run-interrupt-full"]);
 
   const list = render(renderSubagentCall({ action: "list" }, theme));
-  assertFull(list, ["Action: list", "every retained run", "status-related request, output, and error text"]);
+  assertFull(list, ["Action: list", "retained run identity and current status", "waiting request identity"]);
+  assert.doesNotMatch(list, /output|error|activity|task/i);
 
   const pending = render(renderSupervisorCall({ action: "pending" }, theme));
   assertFull(pending, ["Action: pending", "every pending supervisor request in full"]);
@@ -114,6 +118,22 @@ test("call renderers keep complete action-specific input", () => {
     action: "reply", replyTo: "req-full", message: "Reply line one\n<results>reply payload</results>\nReply line three",
   }, theme));
   assertFull(reply, ["Action: reply", "Request: req-full", "Reply line one", "<results>reply payload</results>", "Reply line three"]);
+});
+
+test("tool results start with one blank separator line", () => {
+  const subagent = renderLines(renderSubagentResult(
+    { details: { run: run({ id: "spacing-run", agent: "explorer", status: "starting", output: undefined, error: undefined }) } },
+    { expanded: false, isPartial: false }, theme, { args: { agent: "explorer", task: "spacing task" } },
+  ));
+  assert.equal(subagent[0], "");
+  assert.equal(subagent[1], "✓ Started explorer [spacing-run] · starting");
+
+  const supervisor = renderLines(renderSupervisorResult(
+    { details: { run: run({ id: "spacing-reply", agent: "fixer", status: "running" }) } },
+    { expanded: false, isPartial: false }, theme, { args: { action: "reply", replyTo: "spacing-request", message: "continue" } },
+  ));
+  assert.equal(supervisor[0], "");
+  assert.equal(supervisor[1], "✓ Replied [spacing-request] · fixer [spacing-reply] · running");
 });
 
 test("subagent immediate results use accurate compact action acknowledgements", () => {
@@ -172,42 +192,51 @@ test("failed immediate result adds only complete final output and error", () => 
   assert.doesNotMatch(failed, /Task:|Cwd:|Model:|Activity|Response:|Live response|Session:/);
 });
 
-test("list shows compact status-related sections and never repeats terminal live response", () => {
+test("list renders only compact run status and waiting request identity", () => {
   const listText = render(renderSubagentResult({
     details: {
       runs: [
         run({
           id: "terminal-id",
           status: "completed",
-          activity: { responseText: "TERMINAL RESPONSE MUST NOT APPEAR", activeTools: { old: { name: "read" } } },
+          task: "TASK_SENTINEL",
+          cwd: "CWD_SENTINEL",
+          model: "MODEL_SENTINEL",
+          tools: ["TOOLS_SENTINEL"],
+          createdAt: "CREATED_SENTINEL",
+          updatedAt: "UPDATED_SENTINEL",
+          sessionFile: "SESSION_SENTINEL",
+          sourceRunId: "SOURCE_SENTINEL",
+          activity: { responseText: "ACTIVITY_SENTINEL", activeTools: { old: { name: "ACTIVITY_TOOL_SENTINEL" } } },
+          output: "OUTPUT_SENTINEL",
+          error: "ERROR_SENTINEL",
+          notificationPending: "NOTIFICATION_SENTINEL",
         }),
         run({
           id: "active-id",
           agent: "explorer",
           status: "running",
-          output: undefined,
-          error: undefined,
-          activity: {
-            responseText: "Active response full\n<results>active response payload</results>",
-            activeTools: { liveTool: { name: "grep", startedAt: "now" } },
-          },
+          task: "ACTIVE_TASK_SENTINEL",
+          activity: { responseText: "ACTIVE_ACTIVITY_SENTINEL" },
+          output: "ACTIVE_OUTPUT_SENTINEL",
+          error: "ACTIVE_ERROR_SENTINEL",
         }),
         run({
           id: "waiting-id",
           status: "waiting",
-          output: undefined,
-          error: undefined,
-          activity: {
-            responseText: "WAITING RESPONSE MUST NOT APPEAR",
-            activeTools: { pausedTool: { name: "read" } },
-          },
+          requestId: "req-waiting",
+          reason: "interview_request",
+          task: "WAITING_TASK_SENTINEL",
+          activity: { responseText: "WAITING_ACTIVITY_SENTINEL" },
+          output: "WAITING_OUTPUT_SENTINEL",
+          error: "WAITING_ERROR_SENTINEL",
           request: {
-            id: "req-waiting",
+            id: "NESTED_REQUEST_ID_SENTINEL",
             runId: "waiting-id",
-            reason: "interview_request",
-            message: "Waiting message full\n<results>waiting payload</results>",
-            interview: { title: "Full interview", questions: [{ prompt: "Full question" }] },
-            createdAt: "low-value timestamp",
+            reason: "progress_update",
+            message: "REQUEST_MESSAGE_SENTINEL",
+            interview: { title: "INTERVIEW_SENTINEL", questions: [{ prompt: "QUESTION_SENTINEL" }] },
+            createdAt: "REQUEST_CREATED_SENTINEL",
           },
         }),
       ],
@@ -215,23 +244,23 @@ test("list shows compact status-related sections and never repeats terminal live
   }, { expanded: false, isPartial: false }, theme, { args: { action: "list" } }));
 
   assertFull(listText, [
-    "Retained subagent runs · 3",
+    "Retained subagent run status · 3",
     "✓ fixer [terminal-id] · completed",
-    "<results>stored output payload</results>",
-    "<results>stored error payload</results>",
     "● explorer [active-id] · running",
-    "Live response:",
-    "<results>active response payload</results>",
-    "liveTool",
     "! fixer [waiting-id] · waiting",
-    "Request [req-waiting]",
-    "interview_request",
-    "<results>waiting payload</results>",
-    "Full interview",
-    "Full question",
+    "Request [req-waiting] · interview_request",
   ]);
-  assert.doesNotMatch(listText, /TERMINAL RESPONSE MUST NOT APPEAR|WAITING RESPONSE MUST NOT APPEAR|pausedTool|Task:|Cwd:|Tools:|Model:|Created:|Updated:|Session:|Source run:|Live:/);
-  assert.doesNotMatch(listText, /Response:/);
+  for (const sentinel of [
+    "TASK_SENTINEL", "CWD_SENTINEL", "MODEL_SENTINEL", "TOOLS_SENTINEL", "CREATED_SENTINEL",
+    "UPDATED_SENTINEL", "SESSION_SENTINEL", "SOURCE_SENTINEL", "ACTIVITY_SENTINEL", "ACTIVITY_TOOL_SENTINEL",
+    "OUTPUT_SENTINEL", "ERROR_SENTINEL", "NOTIFICATION_SENTINEL", "ACTIVE_TASK_SENTINEL",
+    "ACTIVE_ACTIVITY_SENTINEL", "ACTIVE_OUTPUT_SENTINEL", "ACTIVE_ERROR_SENTINEL", "WAITING_TASK_SENTINEL",
+    "WAITING_ACTIVITY_SENTINEL", "WAITING_OUTPUT_SENTINEL", "WAITING_ERROR_SENTINEL", "NESTED_REQUEST_ID_SENTINEL",
+    "REQUEST_MESSAGE_SENTINEL", "INTERVIEW_SENTINEL", "QUESTION_SENTINEL", "REQUEST_CREATED_SENTINEL",
+  ]) {
+    assert.doesNotMatch(listText, new RegExp(sentinel));
+  }
+  assert.doesNotMatch(listText, /Task:|Cwd:|Tools:|Model:|Created:|Updated:|Session:|Source run:|Live response:|Output:|Error:|Message:|Interview:/);
 });
 
 test("supervisor pending keeps the full request while reply is one compact line", () => {

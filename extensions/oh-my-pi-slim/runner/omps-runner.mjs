@@ -147,6 +147,7 @@ let activityFlushTimer;
 let controlWatcher;
 let client;
 let lastAssistantOutput = "";
+let tokenResetPending = false;
 
 function writeState() {
   atomicWriteJson(stateFile, state);
@@ -187,13 +188,32 @@ function transition(status, patch = {}) {
   writeState();
 }
 
+function updateContextTokens(candidate) {
+  if (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate <= 0) return false;
+  if (tokenResetPending) {
+    state.tokens = candidate;
+    tokenResetPending = false;
+    return true;
+  }
+  const current = typeof state.tokens === "number" && Number.isFinite(state.tokens) && state.tokens > 0
+    ? state.tokens
+    : 0;
+  const next = Math.max(current, candidate);
+  if (next === state.tokens) return false;
+  state.tokens = next;
+  return true;
+}
+
 function updateStats(stats) {
   if (!isRecord(stats)) return;
-  if (isRecord(stats.tokens) && typeof stats.tokens.total === "number") state.tokens = stats.tokens.total;
   const usage = stats.contextUsage;
   if (isRecord(usage)) {
-    if (typeof usage.percent === "number") state.contextPercent = usage.percent;
-    else if (typeof usage.tokens === "number" && typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
+    updateContextTokens(usage.tokens);
+    if (typeof usage.percent === "number" && Number.isFinite(usage.percent)) state.contextPercent = usage.percent;
+    else if (
+      typeof usage.tokens === "number" && Number.isFinite(usage.tokens) && usage.tokens > 0 &&
+      typeof usage.contextWindow === "number" && Number.isFinite(usage.contextWindow) && usage.contextWindow > 0
+    ) {
       state.contextPercent = (usage.tokens / usage.contextWindow) * 100;
     }
   }
@@ -263,8 +283,8 @@ function handleEvent(event) {
     if (isRecord(update) && update.type === "text_delta" && typeof update.delta === "string") {
       patch.responseText = boundedResponseText(state.responseText + update.delta);
     }
-    if (isRecord(event.usage) && typeof event.usage.totalTokens === "number") {
-      patch.tokens = event.usage.totalTokens;
+    if (isRecord(event.usage) && updateContextTokens(event.usage.totalTokens)) {
+      patch.tokens = state.tokens;
     }
     if (Object.keys(patch).length > 0) patchActivity(patch, { defer: true });
     return;
@@ -278,11 +298,12 @@ function handleEvent(event) {
     if (isRecord(event.message) && event.message.role === "assistant") {
       if (typeof event.message.stopReason === "string") lastStopReason = event.message.stopReason;
       if (typeof event.message.errorMessage === "string") lastError = event.message.errorMessage;
-      if (isRecord(event.message.usage) && typeof event.message.usage.totalTokens === "number") {
-        state.tokens = event.message.usage.totalTokens;
-      }
+      if (isRecord(event.message.usage)) updateContextTokens(event.message.usage.totalTokens);
     }
-    patchActivity({ responseText: state.responseText, tokens: state.tokens });
+    patchActivity({
+      responseText: state.responseText,
+      ...(state.tokens > 0 ? { tokens: state.tokens } : {}),
+    });
     return;
   }
   if (event.type === "tool_execution_start") {
@@ -307,8 +328,11 @@ function handleEvent(event) {
     patchActivity({ activeTools });
     return;
   }
-  if (event.type === "session_compact" || event.type === "compaction_end") {
-    patchActivity({ compactionCount: state.compactionCount + 1 });
+  if (event.type === "compaction_end") {
+    if (event.aborted === false && isRecord(event.result)) {
+      tokenResetPending = true;
+      patchActivity({ compactionCount: state.compactionCount + 1, contextPercent: undefined });
+    }
     return;
   }
   if (event.type === "agent_settled") void settleRun();

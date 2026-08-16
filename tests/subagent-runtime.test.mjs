@@ -101,6 +101,25 @@ function branchEntry(data) {
   return { type: "custom", customType: "oh-my-pi-slim:subagents", data };
 }
 
+function notificationBranchEntry(message) {
+  return {
+    type: "custom_message",
+    customType: message.customType,
+    content: message.content,
+    display: message.display,
+    details: message.details,
+  };
+}
+
+function deliveredMessage(message, details = message.details) {
+  return { role: "custom", customType: message.customType, content: message.content, display: message.display, details };
+}
+
+function expectedDeliveryKey(runId, event, requestId) {
+  const parts = event === "waiting" ? [runId, event, requestId] : [runId, event];
+  return `oh-my-pi-slim:subagent-notification:${JSON.stringify(parts)}`;
+}
+
 function createHarness({
   branch = [],
   ownerSessionId = "owner-a",
@@ -240,8 +259,13 @@ async function fresh(harness, overrides = {}) {
 }
 
 async function inspect(harness, id) {
-  const result = await harness.tools.get("subagent").execute("list", { action: "list" });
-  return result.details.runs.find((run) => run.id === id);
+  await harness.tools.get("subagent").execute("list", { action: "list" });
+  const run = harness.runtime.registry.require(id);
+  return {
+    ...run,
+    live: harness.runtime.registry.isLive(id),
+    activity: harness.runtime.activity.get(id),
+  };
 }
 
 test("public schemas and package-agent boundaries remain minimal", async () => {
@@ -302,10 +326,10 @@ test("registered tool prompt metadata describes the notification-driven lifecycl
   try {
     const subagent = harness.tools.get("subagent");
     const supervisor = harness.tools.get("subagent_supervisor");
-    assert.equal(subagent.description, "Start a package specialist asynchronously and receive a new run ID with status starting. Follow-up notifications deliver waiting requests and complete terminal results. Use list for retained runs, steer for running work, interrupt for active work, and resume for saved child sessions.");
+    assert.equal(subagent.description, "Start a package specialist asynchronously and receive a new run ID with status starting. Lifecycle notifications use one visible custom message delivered through steer at the next safe model boundary. Use list only for status-only retained run identity, liveness, and waiting request ID/reason; use steer for running work, interrupt for active work, and resume for saved child sessions.");
     assert.equal(subagent.promptSnippet, "Launch a package specialist asynchronously and manage its run by ID.");
     const subagentGuidelines = subagent.promptGuidelines.join("\n");
-    for (const phrase of ["run ID", "status starting", "request ID", "reason", "message", "completed", "failed", "interrupted", "stored output", "stored output and error", "list", "steer", "running run", "interrupt", "resume", "saved child session", "new run ID"]) {
+    for (const phrase of ["run ID", "status starting", "request ID", "reason", "message", "completed", "failed", "interrupted", "stored output", "stored output and error", "list", "retained run ID", "liveness", "historical results", "lifecycle notification", "safe model boundary", "steer", "running run", "interrupt", "resume", "saved child session", "new run ID"]) {
       assert.match(subagentGuidelines, new RegExp(phrase, "i"));
     }
     assert.equal(subagent.promptGuidelines[0], "A fresh subagent call supplies agent, task, and optional cwd; the result contains the complete new run record with status starting.");
@@ -316,12 +340,91 @@ test("registered tool prompt metadata describes the notification-driven lifecycl
     assert.equal(typeof supervisor.renderCall, "function");
     assert.equal(typeof supervisor.renderResult, "function");
     assert.equal(typeof harness.messageRenderers.get("oh-my-pi-slim:subagent-notification"), "function");
+    assert.equal(supervisor.description, "View waiting specialist requests and reply to continue a specialist. The next waiting or terminal transition uses one visible custom message delivered through steer at the next safe model boundary.");
     assert.equal(supervisor.promptSnippet, "Inspect waiting child requests and reply by request ID.");
     const supervisorGuidelines = supervisor.promptGuidelines.join("\n");
-    for (const phrase of ["pending", "request ID", "reply", "same run ID", "running", "child-session context", "follow-up notification"]) {
+    for (const phrase of ["pending", "request ID", "reply", "same run ID", "running", "child-session context", "visible custom message", "steer", "safe model boundary"]) {
       assert.match(supervisorGuidelines, new RegExp(phrase, "i"));
     }
     assert.doesNotMatch(supervisorGuidelines, /\b(can|may|later)\b|as needed|do not|cannot|implementation|protocol/i);
+  } finally { harness.cleanup(); }
+});
+
+test("subagent list returns only status summaries in model content and details", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const completed = persistedRun({
+      id: "status-completed",
+      status: "completed",
+      sourceRunId: "source-status",
+      task: "TASK_SENTINEL",
+      cwd: "/CWD_SENTINEL",
+      model: "MODEL_SENTINEL",
+      tools: ["TOOLS_SENTINEL"],
+      sessionFile: "/SESSION_SENTINEL",
+      output: "OUTPUT_SENTINEL",
+      error: "ERROR_SENTINEL",
+      notificationPending: "completed",
+    });
+    harness.runtime.registry.add(completed, false);
+    harness.runtime.activity.set(completed.id, { responseText: "ACTIVITY_SENTINEL" });
+    const started = await fresh(harness, { task: "WAITING_TASK_SENTINEL" });
+    const waitingId = started.details.run.id;
+    const config = readConfig(harness, waitingId);
+    harness.alive.add(999);
+    atomicWriteJson(harness.paths(waitingId).stateFile, stateFor(waitingId, config.token, {
+      status: "waiting",
+      sessionFile: "/WAITING_SESSION_SENTINEL",
+      output: "WAITING_OUTPUT_SENTINEL",
+      error: "WAITING_ERROR_SENTINEL",
+      responseText: "WAITING_ACTIVITY_SENTINEL",
+      request: {
+        id: "request-status",
+        runId: waitingId,
+        reason: "need_decision",
+        message: "REQUEST_MESSAGE_SENTINEL",
+        interview: { title: "INTERVIEW_SENTINEL" },
+        createdAt: "REQUEST_TIMESTAMP_SENTINEL",
+      },
+    }));
+
+    const result = await harness.tools.get("subagent").execute("list", { action: "list" });
+    const expected = [
+      {
+        id: "status-completed",
+        agent: "fixer",
+        status: "completed",
+        live: false,
+        sourceRunId: "source-status",
+      },
+      {
+        id: waitingId,
+        agent: "fixer",
+        status: "waiting",
+        live: true,
+        requestId: "request-status",
+        reason: "need_decision",
+      },
+    ];
+    assert.deepEqual(result.details, { runs: expected });
+    assert.deepEqual(JSON.parse(result.content[0].text), expected);
+    assert.equal(result.content[0].text, JSON.stringify(result.details.runs, null, 2));
+    const exposed = JSON.stringify({ content: result.content, details: result.details });
+    for (const field of [
+      "task", "cwd", "model", "tools", "createdAt", "updatedAt", "sessionFile", "activity",
+      "output", "error", "notificationPending", "request", "message", "interview",
+    ]) {
+      assert.equal(exposed.includes(`\"${field}\"`), false, `${field} must not enter list output`);
+    }
+    for (const sentinel of [
+      "TASK_SENTINEL", "CWD_SENTINEL", "MODEL_SENTINEL", "TOOLS_SENTINEL", "SESSION_SENTINEL",
+      "OUTPUT_SENTINEL", "ERROR_SENTINEL", "ACTIVITY_SENTINEL", "WAITING_SESSION_SENTINEL",
+      "WAITING_OUTPUT_SENTINEL", "WAITING_ERROR_SENTINEL", "WAITING_ACTIVITY_SENTINEL",
+      "REQUEST_MESSAGE_SENTINEL", "INTERVIEW_SENTINEL", "REQUEST_TIMESTAMP_SENTINEL",
+    ]) {
+      assert.equal(exposed.includes(sentinel), false, `${sentinel} must not enter list output`);
+    }
   } finally { harness.cleanup(); }
 });
 
@@ -480,6 +583,7 @@ test("fresh launch waits for the just-spawned PID to exit before cleaning up whe
       createdAt: new Date(NOW_MS).toISOString(),
       updatedAt: new Date(NOW_MS).toISOString(),
       error: "Could not capture OS process identity for detached runner PID 999.",
+      notificationPending: "failed",
       live: false,
     });
     assert.deepEqual(harness.killed, [
@@ -509,7 +613,7 @@ test("fresh launch retains the run directory when the just-spawned PID cannot be
     assert.deepEqual(sleeps, [1500, 1500]);
     assert.equal(harness.alive.has(999), true);
     assert.equal(existsSync(harness.paths(run.id).runDir), true);
-    assert.equal(harness.journalWrites.length, 3, "starting, failed pending, and notification acknowledgement are journaled");
+    assert.equal(harness.journalWrites.length, 2, "starting and failed-pending states are journaled before acknowledgement");
     assert.equal(harness.notifications.length, 1);
   } finally { harness.cleanup(); }
 });
@@ -532,10 +636,11 @@ test("fresh launch failure returns the complete failed run", async () => {
       createdAt: new Date(NOW_MS).toISOString(),
       updatedAt: new Date(NOW_MS).toISOString(),
       error: "spawn failed",
+      notificationPending: "failed",
       live: false,
     });
     assert.equal(harness.runtime.registry.isLive(run.id), false);
-    assert.equal(harness.journalWrites.length, 3, "starting, failed pending, and notification acknowledgement are journaled");
+    assert.equal(harness.journalWrites.length, 2, "starting and failed-pending states are journaled before acknowledgement");
     assert.equal(existsSync(harness.paths(run.id).runDir), false);
   } finally { harness.cleanup(); }
 });
@@ -588,11 +693,17 @@ test("waiting notification and supervisor reply use detached control without blo
       request: { id: "req-1", runId: id, reason: "need_decision", message: "choose", createdAt: new Date(NOW_MS).toISOString() },
     }));
     await inspect(harness, id);
-    const waitingNotification = harness.notifications.at(-1).message;
+    const waitingDelivery = harness.notifications.at(-1);
+    const waitingNotification = waitingDelivery.message;
+    assert.deepEqual(waitingDelivery.options, { deliverAs: "steer", triggerTurn: true });
     assert.equal(waitingNotification.display, true);
     assert.equal(waitingNotification.details.status, "waiting");
     assert.equal(waitingNotification.details.reason, "need_decision");
+    assert.equal(waitingNotification.details.deliveryKey, expectedDeliveryKey(id, "waiting", "req-1"));
     assert.equal(waitingNotification.details.run.request.message, "choose");
+    assert.equal(harness.runtime.registry.get(id).notificationPending, "waiting", "sendMessage does not acknowledge delivery");
+    harness.runtime.deliverPendingNotification(id);
+    assert.equal(harness.notifications.length, 1, "waiting delivery is queued only once before message_end");
     assert.equal(waitingNotification.content, `Subagent ${id} (fixer) is waiting.\nRequest req-1 (need_decision): choose`);
     const reply = await harness.tools.get("subagent_supervisor").execute("reply", {
       action: "reply", replyTo: "req-1", message: "option A",
@@ -602,6 +713,7 @@ test("waiting notification and supervisor reply use detached control without blo
       v: 1, token: config.token, type: "reply", message: "option A", requestId: "req-1",
     });
     assert.equal(harness.runtime.registry.get(id).request, undefined);
+    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined, "reply keeps the existing waiting-marker clear semantics");
 
     const notificationsAfterReply = harness.notifications.length;
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
@@ -628,6 +740,95 @@ test("waiting notification and supervisor reply use detached control without blo
     await inspect(harness, id);
     assert.equal(harness.runtime.registry.get(id).status, "completed");
     assert.equal(harness.notifications.at(-1).message.details.status, "completed");
+  } finally { harness.cleanup(); }
+});
+
+test("waiting delivery keys isolate request cycles and stale acknowledgements", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const started = await fresh(harness);
+    const id = started.details.run.id;
+    const config = readConfig(harness, id);
+    harness.alive.add(999);
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "waiting",
+      request: { id: "req-old", runId: id, reason: "need_decision", message: "old", createdAt: new Date(NOW_MS).toISOString() },
+    }));
+    await inspect(harness, id);
+    const oldMessage = harness.notifications.at(-1).message;
+    await harness.tools.get("subagent_supervisor").execute("reply-old", {
+      action: "reply", replyTo: "req-old", message: "continue",
+    });
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "running",
+      heartbeatAt: new Date(NOW_MS + 100).toISOString(),
+    }));
+    await inspect(harness, id);
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "waiting",
+      heartbeatAt: new Date(NOW_MS + 200).toISOString(),
+      request: { id: "req-new", runId: id, reason: "interview_request", message: "new", createdAt: new Date(NOW_MS + 200).toISOString() },
+    }));
+    await inspect(harness, id);
+    const newMessage = harness.notifications.at(-1).message;
+    assert.equal(newMessage.details.deliveryKey, expectedDeliveryKey(id, "waiting", "req-new"));
+    assert.notEqual(newMessage.details.deliveryKey, oldMessage.details.deliveryKey);
+    assert.equal(harness.runtime.registry.get(id).notificationPending, "waiting");
+    assert.equal(harness.runtime.registry.get(id).request.id, "req-new");
+
+    assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(oldMessage)), false);
+    assert.equal(harness.runtime.queuedNotifications.has(oldMessage.details.deliveryKey), false,
+      "stale acknowledgement removes only its old queued key");
+    assert.equal(harness.runtime.queuedNotifications.has(newMessage.details.deliveryKey), true);
+    assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(newMessage, {
+      ...newMessage.details,
+      requestId: "req-old",
+      deliveryKey: expectedDeliveryKey(id, "waiting", "req-old"),
+    })), false);
+    assert.equal(harness.runtime.registry.get(id).notificationPending, "waiting");
+    assert.equal(harness.runtime.registry.get(id).request.id, "req-new");
+
+    const { deliveryKey: _deliveryKey, ...legacyWaitingDetails } = newMessage.details;
+    assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(newMessage, legacyWaitingDetails)), true,
+      "legacy waiting details derive the delivery key from runId/status/requestId");
+    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+  } finally { harness.cleanup(); }
+});
+
+test("waiting-to-waiting request replacement creates a new notification after prior acknowledgement", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const started = await fresh(harness);
+    const id = started.details.run.id;
+    const config = readConfig(harness, id);
+    harness.alive.add(999);
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "waiting",
+      request: { id: "req-direct-1", runId: id, reason: "need_decision", message: "first", createdAt: new Date(NOW_MS).toISOString() },
+    }));
+    await inspect(harness, id);
+    const firstMessage = harness.notifications.at(-1).message;
+    assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(firstMessage)), true);
+    assert.equal(harness.runtime.registry.get(id).status, "waiting");
+    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "waiting",
+      heartbeatAt: new Date(NOW_MS + 100).toISOString(),
+      request: { id: "req-direct-2", runId: id, reason: "interview_request", message: "second", createdAt: new Date(NOW_MS + 100).toISOString() },
+    }));
+    await inspect(harness, id);
+    const secondMessage = harness.notifications.at(-1).message;
+    assert.equal(harness.notifications.length, 2);
+    assert.equal(secondMessage.details.deliveryKey, expectedDeliveryKey(id, "waiting", "req-direct-2"));
+    assert.equal(harness.runtime.registry.get(id).notificationPending, "waiting");
+    assert.equal(harness.runtime.registry.get(id).request.id, "req-direct-2");
+
+    assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(firstMessage)), false);
+    assert.equal(harness.runtime.registry.get(id).notificationPending, "waiting");
+    assert.equal(harness.runtime.registry.get(id).request.id, "req-direct-2");
   } finally { harness.cleanup(); }
 });
 
@@ -674,7 +875,8 @@ test("stale waiting state is restored after the supervisor reply grace expires",
     await inspect(harness, id);
     assert.equal(harness.runtime.registry.get(id).status, "waiting");
     assert.equal(harness.runtime.registry.get(id).request.id, "req-grace");
-    assert.equal(harness.notifications.filter(({ message }) => message.details.status === "waiting").length, 2);
+    assert.equal(harness.notifications.filter(({ message }) => message.details.status === "waiting").length, 1,
+      "the same waiting request ID is not enqueued twice in one session");
   } finally { harness.cleanup(); }
 });
 
@@ -718,11 +920,11 @@ test("interrupt accepts a waiting non-terminal run", async () => {
   } finally { harness.cleanup(); }
 });
 
-test("terminal state journals once, stops tracking, and sends one visible structured notification", async () => {
+test("terminal notification stays pending until matching delivered message acknowledgement", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
-    const started = await fresh(harness);
+    const started = await fresh(harness, { task: "TASK_DETAILS_SENTINEL" });
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
@@ -733,26 +935,57 @@ test("terminal state journals once, stops tracking, and sends one visible struct
       sessionFile: join(harness.tempDir, "session.jsonl"),
     }));
     await inspect(harness, id);
+    const sent = harness.notifications[0];
+    const deliveryKey = expectedDeliveryKey(id, "completed");
     assert.equal(harness.runtime.registry.get(id).status, "completed");
     assert.equal(harness.runtime.registry.isLive(id), false);
-    assert.equal(harness.journalWrites.length, 3, "terminal pending and delivery acknowledgement are journaled");
+    assert.equal(harness.runtime.registry.get(id).notificationPending, "completed");
+    assert.equal(harness.journalWrites.length, 2, "starting and terminal-pending states are journaled before delivery acknowledgement");
     assert.equal(existsSync(harness.paths(id).runDir), false);
-    assert.deepEqual(harness.notifications[0].options, { deliverAs: "followUp", triggerTurn: true });
-    assert.equal(harness.notifications[0].message.display, true);
-    assert.equal(harness.notifications[0].message.details.event, "completed");
-    assert.equal(harness.notifications[0].message.details.status, "completed");
-    assert.equal(harness.notifications[0].message.details.run.id, id);
-    assert.equal(harness.notifications[0].message.details.run.task, "detached task");
-    assert.equal(harness.notifications[0].message.details.run.model, "preset/fixer:high");
-    assert.equal(harness.notifications[0].message.details.run.output, "complete output\nsecond output line");
-    assert.equal(harness.notifications[0].message.details.run.error, "complete error\nsecond error line");
+    assert.deepEqual(sent.options, { deliverAs: "steer", triggerTurn: true });
+    assert.equal(sent.message.display, true);
+    assert.equal(sent.message.details.event, "completed");
+    assert.equal(sent.message.details.status, "completed");
+    assert.equal(sent.message.details.deliveryKey, deliveryKey);
+    assert.equal(sent.message.details.run.id, id);
+    assert.equal(sent.message.details.run.task, "TASK_DETAILS_SENTINEL");
+    assert.equal(sent.message.details.run.model, "preset/fixer:high");
+    assert.equal(sent.message.details.run.output, "complete output\nsecond output line");
+    assert.equal(sent.message.details.run.error, "complete error\nsecond error line");
     assert.equal(
-      harness.notifications[0].message.content,
+      sent.message.content,
       `Subagent ${id} (fixer) is completed.\n\nOutput: complete output\nsecond output line\n\nError: complete error\nsecond error line`,
     );
+    assert.doesNotMatch(sent.message.content, /deliveryKey|TASK_DETAILS_SENTINEL|preset\/fixer/,
+      "custom-message details remain outside model-facing content");
+    assert.equal(harness.notifications.length, 1, "one custom message serves both TUI and model delivery");
+    assert.equal(harness.journalWrites.every(({ type }) => type === "oh-my-pi-slim:subagents"), true,
+      "notification delivery does not append a second TUI entry");
+
+    harness.runtime.deliverPendingNotification(id);
+    harness.runtime.deliverPendingNotification(id);
+    assert.equal(harness.notifications.length, 1, "queued delivery is not enqueued twice before message_end");
+
+    for (const wrong of [
+      { ...deliveredMessage(sent.message), role: "assistant" },
+      { ...deliveredMessage(sent.message), customType: "other" },
+      deliveredMessage(sent.message, { ...sent.message.details, runId: "wrong-run", deliveryKey: expectedDeliveryKey("wrong-run", "completed") }),
+      deliveredMessage(sent.message, { ...sent.message.details, event: "failed", status: "failed", deliveryKey: expectedDeliveryKey(id, "failed") }),
+      deliveredMessage(sent.message, { ...sent.message.details, deliveryKey: "wrong-key" }),
+    ]) {
+      assert.equal(harness.runtime.acknowledgeNotificationMessage(wrong), false);
+      assert.equal(harness.runtime.registry.get(id).notificationPending, "completed");
+      assert.equal(harness.journalWrites.length, 2);
+    }
+
+    assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(sent.message)), true);
+    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+    assert.equal(harness.journalWrites.length, 3, "matching message_end appends the acknowledgement journal state");
+    assert.equal(harness.journalWrites.at(-1).data.run.notificationPending, undefined);
+
     const notificationRenderer = harness.messageRenderers.get("oh-my-pi-slim:subagent-notification");
     const renderedNotification = notificationRenderer(
-      harness.notifications[0].message,
+      sent.message,
       { expanded: false, outputPad: 1 },
       transcriptTheme,
     ).render(240).map((line) => stripVTControlCharacters(line)).join("\n");
@@ -761,14 +994,50 @@ test("terminal state journals once, stops tracking, and sends one visible struct
   } finally { harness.cleanup(); }
 });
 
-test("notification delivery is durable, replayed on restore, and keeps complete output", async () => {
+test("agent-settled retry re-enqueues each still-pending delivery at most once per callback", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const started = await fresh(harness);
+    const id = started.details.run.id;
+    const config = readConfig(harness, id);
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "completed", output: "retry me", responseText: "retry me",
+    }));
+    await inspect(harness, id);
+    assert.equal(harness.notifications.length, 1);
+    assert.equal(harness.runtime.registry.get(id).notificationPending, "completed");
+    assert.equal(harness.runtime.queuedNotifications.size, 1);
+
+    harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+    assert.equal(harness.notifications.length, 2, "one settled callback retries the delivery exactly once");
+    assert.equal(harness.runtime.queuedNotifications.size, 1, "retry re-arms the same queued key without looping");
+    harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+    assert.equal(harness.notifications.length, 3, "a later settled callback performs at most one further retry");
+
+    const delivered = harness.notifications.at(-1).message;
+    assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(delivered)), true);
+    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+    assert.equal(harness.runtime.queuedNotifications.size, 0);
+    harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+    assert.equal(harness.notifications.length, 3, "message_end acknowledgement before settled retry prevents resend");
+
+    harness.runtime.queuedNotifications.add("stale-without-pending");
+    harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+    assert.equal(harness.runtime.queuedNotifications.has("stale-without-pending"), false);
+    assert.equal(harness.notifications.length, 3, "a stale key without current pending delivery is removed without resend");
+  } finally { harness.cleanup(); }
+});
+
+test("undelivered pending notification replays once on restore and keeps complete output", async () => {
   const first = createHarness({ sendMessageError: new Error("delivery failed") });
   let branch;
+  let id;
   const output = "complete-output-".repeat(6000);
   try {
     await first.restore();
     const started = await fresh(first);
-    const id = started.details.run.id;
+    id = started.details.run.id;
     const config = readConfig(first, id);
     atomicWriteJson(first.paths(id).stateFile, stateFor(id, config.token, {
       status: "completed", output, responseText: "done",
@@ -777,6 +1046,7 @@ test("notification delivery is durable, replayed on restore, and keeps complete 
     assert.equal(retained.output, output);
     assert.equal(first.runtime.registry.get(id).notificationPending, "completed");
     assert.equal(first.notifications.length, 0);
+    assert.equal(first.runtime.queuedNotifications.size, 0, "synchronous send failure removes the queued delivery key");
     assert.equal(existsSync(first.paths(id).runDir), false);
     branch = first.journalWrites.map(({ data }) => branchEntry(data));
   } finally { first.cleanup(); }
@@ -785,10 +1055,71 @@ test("notification delivery is durable, replayed on restore, and keeps complete 
   try {
     await restored.restore();
     assert.equal(restored.notifications.length, 1);
+    assert.deepEqual(restored.notifications[0].options, { deliverAs: "steer", triggerTurn: true });
     assert.match(restored.notifications[0].message.content, new RegExp(`${output.slice(0, 100)}`));
     assert.equal(restored.notifications[0].message.content.endsWith(output), true);
-    assert.equal(restored.runtime.registry.get(branch.at(-1).data.run.id).notificationPending, undefined);
+    assert.equal(restored.runtime.registry.get(id).notificationPending, "completed");
+    restored.runtime.deliverPendingNotification(id);
+    assert.equal(restored.notifications.length, 1, "one restore does not enqueue the same pending key twice");
+    assert.equal(restored.runtime.acknowledgeNotificationMessage(deliveredMessage(restored.notifications[0].message)), true);
+    assert.equal(restored.runtime.registry.get(id).notificationPending, undefined);
+    assert.equal(restored.journalWrites.at(-1).data.run.notificationPending, undefined);
   } finally { restored.cleanup(); }
+});
+
+test("restore acknowledges persisted new and legacy notification messages without resending", async () => {
+  const newRun = persistedRun({ id: "persisted-new", status: "completed", output: "new", notificationPending: "completed" });
+  const legacyRun = persistedRun({ id: "persisted-legacy", status: "failed", error: "legacy", notificationPending: "failed" });
+  const newKey = expectedDeliveryKey(newRun.id, "completed");
+  const branch = [
+    branchEntry({ version: 2, run: newRun }),
+    notificationBranchEntry({
+      customType: "oh-my-pi-slim:subagent-notification",
+      content: "new delivered",
+      display: true,
+      details: { runId: newRun.id, event: "completed", status: "completed", deliveryKey: newKey },
+    }),
+    branchEntry({ version: 2, run: legacyRun }),
+    notificationBranchEntry({
+      customType: "oh-my-pi-slim:subagent-notification",
+      content: "legacy delivered",
+      display: true,
+      details: { runId: legacyRun.id, status: "failed" },
+    }),
+  ];
+  const harness = createHarness({ branch });
+  try {
+    await harness.restore();
+    assert.equal(harness.notifications.length, 0);
+    assert.equal(harness.runtime.registry.get(newRun.id).notificationPending, undefined);
+    assert.equal(harness.runtime.registry.get(legacyRun.id).notificationPending, undefined);
+    assert.deepEqual(harness.journalWrites.map(({ data }) => [data.run.id, data.run.notificationPending]), [
+      [newRun.id, undefined],
+      [legacyRun.id, undefined],
+    ]);
+  } finally { harness.cleanup(); }
+});
+
+test("restore and shutdown clear runtime notification queue state", async () => {
+  const harness = createHarness();
+  try {
+    harness.runtime.queuedNotifications.add("stale-before-restore");
+    await harness.restore();
+    assert.equal(harness.runtime.queuedNotifications.size, 0);
+
+    const started = await fresh(harness);
+    const id = started.details.run.id;
+    const config = readConfig(harness, id);
+    harness.alive.add(999);
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "waiting",
+      request: { id: "req-shutdown-queue", runId: id, reason: "progress_update", message: "pause", createdAt: new Date(NOW_MS).toISOString() },
+    }));
+    await inspect(harness, id);
+    assert.equal(harness.runtime.queuedNotifications.size, 1);
+    await harness.runtime.shutdown();
+    assert.equal(harness.runtime.queuedNotifications.size, 0);
+  } finally { harness.cleanup(); }
 });
 
 test("legacy terminal history without notificationPending does not replay", async () => {
@@ -973,8 +1304,8 @@ test("invalid launch config retains the unverifiable run directory without signa
     assert.equal(existsSync(harness.paths(id).runDir), true);
     assert.deepEqual(
       harness.journalWrites.map(({ data }) => data.run.status),
-      ["starting", "failed", "failed"],
-      "starting, failed pending, and notification acknowledgement are journaled",
+      ["starting", "failed"],
+      "starting and failed-pending states are journaled before acknowledgement",
     );
     assert.equal(harness.notifications.length, 1);
     assert.equal(harness.notifications[0].message.details.status, "failed");
@@ -1095,7 +1426,7 @@ test("shutdown adopts an already-completed verified state without interrupting o
       assert.equal(next.notifications.length, 1);
       assert.equal(next.notifications[0].message.details.status, "completed");
       assert.equal(next.notifications[0].message.content.endsWith("finished before shutdown"), true);
-      assert.equal(next.runtime.registry.get(id).notificationPending, undefined);
+      assert.equal(next.runtime.registry.get(id).notificationPending, "completed");
     } finally { next.cleanup(); }
   } finally { harness.cleanup(); }
 });
@@ -1170,7 +1501,7 @@ test("shutdown journals a pending interruption and the next runtime delivers it 
       assert.equal(next.notifications.length, 1);
       assert.equal(next.notifications[0].message.details.status, "interrupted");
       assert.equal(next.notifications[0].message.content.endsWith("Error: Parent session shut down."), true);
-      assert.equal(next.runtime.registry.get(id).notificationPending, undefined);
+      assert.equal(next.runtime.registry.get(id).notificationPending, "interrupted");
     } finally { next.cleanup(); }
   } finally { harness.cleanup(); }
 });
@@ -1401,6 +1732,10 @@ test("index tree lifecycle, widget turn binding, and fixed checkpoint resume pro
   assert.match(source, /pi\.on\("session_tree", async[\s\S]*await subagents\.restore\(ctx\)[\s\S]*subagents\.setModelResolver/);
   assert.match(source, /pi\.on\("turn_start", \(\) => \{\s*subagents\.onTurnStart\(\)/);
   assert.doesNotMatch(source, /pi\.on\("tool_execution_start", \(\) => \{\s*subagents\.onTurnStart\(\)/);
+  assert.match(source, /pi\.on\("message_end", \(event, ctx\) => \{[\s\S]*event\.message\.role !== "custom"[\s\S]*event\.message\.customType !== SUBAGENT_NOTIFICATION_TYPE[\s\S]*deliveryEpoch = sessionEpoch[\s\S]*deliverySessionId = ctx\.sessionManager\.getSessionId\(\)[\s\S]*setImmediate\(\(\) => \{[\s\S]*deliveryEpoch !== sessionEpoch[\s\S]*acknowledgeNotificationMessage\(message\)/);
+  assert.match(source, /pi\.on\("agent_settled", \(_event, ctx\) => \{[\s\S]*deliveryEpoch = sessionEpoch[\s\S]*deliverySessionId = ctx\.sessionManager\.getSessionId\(\)[\s\S]*setImmediate\(\(\) => \{[\s\S]*deliveryEpoch !== sessionEpoch[\s\S]*sessionCtx\?\.sessionManager\.getSessionId\(\) !== deliverySessionId[\s\S]*retryQueuedNotificationsAfterAgentSettled\(\)[\s\S]*const checkpoint = pendingCheckpoint[\s\S]*scheduleCheckpointResume/);
+  assert.equal(source.indexOf('pi.on("message_end"') < source.indexOf('pi.on("agent_settled"'), true,
+    "Pi message_end binding is registered before agent_settled retry so its ack immediate is queued first");
   assert.equal(source.includes(`const CHECKPOINT_RESUME_TEXT = ${JSON.stringify(resumeText)};`), true);
   assert.match(source, /pi\.sendUserMessage\(CHECKPOINT_RESUME_TEXT, \{ deliverAs: "followUp" \}\)/);
   assert.doesNotMatch(source, /checkpoint\.tools|Completed tool calls at the checkpoint|Re-fetch/);

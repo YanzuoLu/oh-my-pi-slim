@@ -77,7 +77,7 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.8.3", "package version must be 0.8.3");
+check(packageJson.version === "0.8.4", "package version must be 0.8.4");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify(["./extensions/oh-my-pi-slim/index.ts"]), "package must load only the OMPS extension");
 check(packageJson.pi?.subagents === undefined, "package must not expose a pi.subagents manifest");
 check(packageJson.dependencies === undefined || Object.keys(packageJson.dependencies).length === 0, "package must have no runtime dependency on the removed backend");
@@ -125,10 +125,32 @@ hasAll(extension, [
   'pi.on("session_tree"',
   'pi.on("turn_end"',
   'pi.on("turn_start"',
+  'pi.on("message_end"',
+  "setImmediate(() =>",
+  "subagents.acknowledgeNotificationMessage(message)",
   "SettingsManager.create(",
   "shouldCompact(",
 ], "main extension contract");
 hasNone(extension, REMOVED_CAPABILITIES, "main extension");
+const notificationMessageEndStart = extension.indexOf('pi.on("message_end"');
+const notificationMessageEndEnd = extension.indexOf('pi.on("tool_execution_end"', notificationMessageEndStart);
+const notificationMessageEnd = extension.slice(notificationMessageEndStart, notificationMessageEndEnd);
+hasAll(notificationMessageEnd, [
+  'event.message.role !== "custom"', "event.message.customType !== SUBAGENT_NOTIFICATION_TYPE",
+  "deliveryEpoch = sessionEpoch", "deliverySessionId = ctx.sessionManager.getSessionId()", "setImmediate(() =>",
+  "deliveryEpoch !== sessionEpoch", "sessionCtx?.sessionManager.getSessionId() !== deliverySessionId",
+  "subagents.acknowledgeNotificationMessage(message)",
+], "deferred notification acknowledgement binding");
+const agentSettledStart = extension.indexOf('pi.on("agent_settled"');
+const agentSettledEnd = extension.indexOf('pi.on("session_shutdown"', agentSettledStart);
+const agentSettled = extension.slice(agentSettledStart, agentSettledEnd);
+hasAll(agentSettled, [
+  "deliveryEpoch = sessionEpoch", "deliverySessionId = ctx.sessionManager.getSessionId()", "setImmediate(() =>",
+  "deliveryEpoch !== sessionEpoch", "sessionCtx?.sessionManager.getSessionId() !== deliverySessionId",
+  "subagents.retryQueuedNotificationsAfterAgentSettled()", "const checkpoint = pendingCheckpoint",
+  "scheduleCheckpointResume(checkpoint, ctx)",
+], "deferred settled notification retry and checkpoint compatibility");
+check(notificationMessageEndStart < agentSettledStart, "message_end acknowledgement binding must precede agent_settled retry binding");
 
 hasAll(runtime, [
   "parseFrontmatter",
@@ -154,13 +176,76 @@ hasAll(runtime, [
   "runJournalEntry(run)",
   "sourceRunId: sourceId",
   "notificationPending",
+  "queuedNotifications",
+  "notificationDeliveryKey",
+  "notificationDeliveryFromDetails",
+  "acknowledgeNotificationMessage",
+  "retryQueuedNotificationsAfterAgentSettled",
   "collectRunDirectoryGarbage",
   "Launch a package specialist asynchronously and manage its run by ID.",
   "Inspect waiting child requests and reply by request ID.",
   "PI_SUBAGENT_CHILD: \"1\"",
   "OMPS_SUBAGENT_CHILD: \"1\"",
 ], "built-in detached runtime");
-hasNone(runtime, ["RpcClient", "getPackageDir", "promptLive", "watchClientLiveness", "closingSessions"], "built-in detached runtime");
+hasNone(runtime, ["RpcClient", "getPackageDir", "promptLive", "watchClientLiveness", "closingSessions", 'deliverAs: "followUp"'], "built-in detached runtime");
+const sendNotificationStart = runtime.indexOf("private sendNotification(run: PersistedRun");
+const deliverNotificationStart = runtime.indexOf("private deliverPendingNotification", sendNotificationStart);
+const deliverNotificationEnd = runtime.indexOf("private failRun", deliverNotificationStart);
+const sendNotification = runtime.slice(sendNotificationStart, deliverNotificationStart);
+const deliverNotification = runtime.slice(deliverNotificationStart, deliverNotificationEnd);
+hasAll(sendNotification, ['display: true', "deliveryKey: delivery.deliveryKey", 'deliverAs: "steer"', "triggerTurn: true"], "single steer notification message");
+hasAll(deliverNotification, ["queuedNotifications.has", "queuedNotifications.add", "sendNotification", "queuedNotifications.delete"], "pending-until-message-end notification queue");
+hasNone(deliverNotification, ["notificationPending: undefined", "appendEntry"], "pending-until-message-end notification queue");
+const acknowledgeNotificationStart = runtime.indexOf("acknowledgeNotificationMessage(messageValue: unknown)");
+const acknowledgeNotificationEnd = runtime.indexOf("private sendNotification", acknowledgeNotificationStart);
+const acknowledgeNotification = runtime.slice(acknowledgeNotificationStart, acknowledgeNotificationEnd);
+hasAll(acknowledgeNotification, ['message?.role !== "custom"', "notificationDeliveryFromDetails", "acknowledgeNotificationDelivery"], "delivered custom-message acknowledgement");
+const acknowledgeDeliveryStart = runtime.indexOf("private acknowledgeNotificationDelivery");
+const acknowledgeDeliveryEnd = runtime.indexOf("acknowledgeNotificationMessage", acknowledgeDeliveryStart);
+const acknowledgeDelivery = runtime.slice(acknowledgeDeliveryStart, acknowledgeDeliveryEnd);
+hasAll(acknowledgeDelivery, ["queuedNotifications.delete(delivery.deliveryKey)", "pendingNotificationDelivery(run)", "notificationPending: undefined"], "stale-safe notification acknowledgement");
+check(
+  acknowledgeDelivery.indexOf("queuedNotifications.delete(delivery.deliveryKey)") < acknowledgeDelivery.indexOf("pendingNotificationDelivery(run)"),
+  "notification acknowledgement must remove its queued key before checking current pending delivery",
+);
+const retryNotificationStart = runtime.indexOf("retryQueuedNotificationsAfterAgentSettled(): void");
+const retryNotificationEnd = runtime.indexOf("private failRun", retryNotificationStart);
+const retryNotification = runtime.slice(retryNotificationStart, retryNotificationEnd);
+hasAll(retryNotification, [
+  "pendingByKey", "this.registry.list()", "this.pendingNotificationDelivery(run)",
+  "[...this.queuedNotifications]", "this.queuedNotifications.delete(deliveryKey)",
+  "this.deliverPendingNotification(delivery.runId)",
+], "agent-settled notification retry");
+check(!runtime.includes("appendEntry(SUBAGENT_NOTIFICATION_TYPE"), "notification delivery must not append a second TUI entry");
+const restoreStart = runtime.indexOf("async restore(ctx: ExtensionContext)");
+const restoreEnd = runtime.indexOf("onTurnStart(): void", restoreStart);
+const restoreNotificationFlow = runtime.slice(restoreStart, restoreEnd);
+hasAll(restoreNotificationFlow, [
+  "queuedNotifications.clear()", 'entry.type === "custom_message"', "SUBAGENT_NOTIFICATION_TYPE",
+  "notificationDeliveryFromDetails(entry.details)", "acknowledgeNotificationDelivery(delivery)",
+  "deliverPendingNotification(run.id)",
+], "restore notification replay and persisted-message acknowledgement");
+const shutdownStart = runtime.indexOf("async shutdown(): Promise<void>");
+const shutdownEnd = runtime.indexOf("private startPoller", shutdownStart);
+hasAll(runtime.slice(shutdownStart, shutdownEnd), ["queuedNotifications.clear()"], "shutdown notification queue cleanup");
+const applyStateStart = runtime.indexOf("private applyState(");
+const applyStateEnd = runtime.indexOf("private async failUnhealthyRun", applyStateStart);
+const applyState = runtime.slice(applyStateStart, applyStateEnd);
+hasAll(applyState, [
+  'current.status === "waiting" && state.status === "waiting"', "!sameRequest(current.request, request)",
+  "enteredWaiting || waitingRequestChanged", '? "waiting"', "deliverPendingNotification(id)",
+], "changed waiting-request notification transition");
+const statusFormatterStart = runtime.indexOf("private formatRunStatus(run: PersistedRun)");
+const fullFormatterStart = runtime.indexOf("private formatRun(run: PersistedRun)", statusFormatterStart);
+const listActionStart = runtime.indexOf('if (action === "list") {', fullFormatterStart);
+const listActionEnd = runtime.indexOf("const id = requireString", listActionStart);
+check(statusFormatterStart >= 0 && fullFormatterStart > statusFormatterStart, "runtime must define a dedicated list status formatter before formatRun");
+const statusFormatter = runtime.slice(statusFormatterStart, fullFormatterStart);
+hasAll(statusFormatter, ["id: run.id", "agent: run.agent", "status: run.status", "live:", "sourceRunId", "requestId", "reason"], "list status formatter");
+hasNone(statusFormatter, ["...run", "task:", "cwd:", "model:", "tools:", "createdAt:", "updatedAt:", "sessionFile:", "activity:", "output:", "error:", "notificationPending:"], "list status formatter");
+const listAction = runtime.slice(listActionStart, listActionEnd);
+hasAll(listAction, ["reconcileAll", "formatRunStatus", "JSON.stringify(runs, null, 2)", "{ runs }"], "list status action");
+hasNone(listAction, [".formatRun(", "this.activity", ".output", ".error", ".task"], "list status action");
 const publicSchema = runtime.slice(runtime.indexOf("export const subagentParameters"), runtime.indexOf("export const supervisorParameters"));
 hasNone(publicSchema, REMOVED_CAPABILITIES, "public tool schemas");
 check(!runtime.includes(REMOVED_WAIT_TOOL), "runtime must not register or mention the removed wait tool");
@@ -194,9 +279,44 @@ hasAll(rpcChild, [
 ], "detached RPC child");
 hasAll(detachedRunner, [
   'status: "starting"', 'transition("running"', 'transition("waiting"', "heartbeatAt", "updatedAt",
-  "tool_execution_start", "tool_execution_end", "session_compact", "processControls", "watch(controlDir",
+  "tool_execution_start", "tool_execution_end", "compaction_end", "processControls", "watch(controlDir",
   'finish("failed"', 'client.prompt(config.task)', 'process.on(signal', 'REPLY_PROMPT_TIMEOUT_MS',
+  "updateContextTokens", "let tokenResetPending = false",
 ], "detached runner");
+hasNone(detachedRunner, ['event.type === "session_compact"'], "detached runner RPC compaction semantics");
+const contextTokensStart = detachedRunner.indexOf("function updateContextTokens(candidate)");
+const updateStatsStart = detachedRunner.indexOf("function updateStats(stats)", contextTokensStart);
+const collectMetadataStart = detachedRunner.indexOf("async function collectFinalMetadata()", updateStatsStart);
+const messageUpdateStart = detachedRunner.indexOf('if (event.type === "message_update")');
+const messageEndStart = detachedRunner.indexOf('if (event.type === "message_end")', messageUpdateStart);
+const toolStart = detachedRunner.indexOf('if (event.type === "tool_execution_start")', messageEndStart);
+const compactionStart = detachedRunner.indexOf('if (event.type === "compaction_end")', toolStart);
+const settledStart = detachedRunner.indexOf('if (event.type === "agent_settled")', compactionStart);
+const contextTokens = detachedRunner.slice(contextTokensStart, updateStatsStart);
+const updateStatsTokens = detachedRunner.slice(updateStatsStart, collectMetadataStart);
+const collectMetadata = detachedRunner.slice(collectMetadataStart, detachedRunner.indexOf("async function publishTerminal", collectMetadataStart));
+const messageUpdateTokens = detachedRunner.slice(messageUpdateStart, messageEndStart);
+const messageEndTokens = detachedRunner.slice(messageEndStart, toolStart);
+const compactionTokens = detachedRunner.slice(compactionStart, settledStart);
+hasAll(contextTokens, [
+  "Number.isFinite(candidate)", "candidate <= 0", "if (tokenResetPending)", "state.tokens = candidate",
+  "tokenResetPending = false", "Number.isFinite(state.tokens)", "Math.max(current, candidate)", "state.tokens = next",
+], "epoch-aware runner context-token helper");
+hasAll(updateStatsTokens, [
+  "const usage = stats.contextUsage", "updateContextTokens(usage.tokens)", "Number.isFinite(usage.percent)",
+  "Number.isFinite(usage.tokens)", "usage.tokens > 0", "Number.isFinite(usage.contextWindow)", "usage.contextWindow > 0",
+], "final current-context stats path");
+hasNone(updateStatsTokens, ["stats.tokens.total", "updateContextTokens(stats.tokens"], "cumulative session stats exclusion");
+hasAll(collectMetadata, ["client.getSessionStats()", "updateStats(stats)"], "final metadata context-token path");
+hasAll(messageUpdateTokens, ["updateContextTokens(event.usage.totalTokens)", "patch.tokens = state.tokens"], "streaming current-context token path");
+hasNone(messageUpdateTokens, ["patch.tokens = event.usage.totalTokens"], "streaming current-context token path");
+hasAll(messageEndTokens, ["updateContextTokens(event.message.usage.totalTokens)", "state.tokens > 0"], "message-end current-context token path");
+hasNone(messageEndTokens, ["state.tokens = event.message.usage.totalTokens"], "message-end current-context token path");
+hasAll(compactionTokens, [
+  'event.aborted === false', "isRecord(event.result)", "tokenResetPending = true",
+  "compactionCount: state.compactionCount + 1", "contextPercent: undefined",
+], "successful RPC compaction token-epoch reset");
+check((detachedRunner.match(/state\.tokens\s*=(?!=)/g) ?? []).length === 2, "runner token state must only be assigned by the epoch-aware context-token helper");
 check(existsSync(join(ROOT, "tests/fixtures/stub-pi-rpc.mjs")), "detached RPC test fixture must exist");
 check(existsSync(join(ROOT, "tests/detached-runner.test.mjs")), "detached runner integration tests must exist");
 
@@ -214,8 +334,10 @@ check(!/export function ensurePackageSetup[\s\S]*maxSubagentDepth\s*=\s*1/.test(
 hasAll(orchestrator, [
   'subagent({ agent: "explorer", task:',
   "returns immediately",
-  "follow-up notifications",
-  "yield the turn so its follow-up notification resumes orchestration",
+  "lifecycle notification",
+  "next safe model boundary",
+  "same message appears in the TUI and enters model context",
+  "without requiring the orchestrator to yield or wait for idle",
   'action: "list"',
   'action: "steer"',
   'action: "interrupt"',
@@ -237,6 +359,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
     "--session-dir",
     "--session <saved sessionFile>",
     "triggerTurn: true",
+    'deliverAs: "steer"',
     "version: 2",
     "launch.json",
     "state.json",
@@ -247,6 +370,9 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
     "resume",
     "follow-up continuation turn",
   ], file);
+  hasAll(text, file === "README.md"
+    ? ["next safe model boundary", "same custom message"]
+    : ["下一个安全模型边界", "同一条消息"], `${file} notification delivery`);
   hasNone(text, ["RpcClient", "RPC-client seam", "hidden follow-up", "隐藏 follow-up"], file);
   check(!text.includes(REMOVED_WAIT_TOOL), `${file} must not mention the removed wait tool`);
 }
@@ -268,19 +394,17 @@ hasAll(transcriptRenderer, [
   "renderSubagentCall", "renderSubagentResult", "renderSupervisorCall", "renderSupervisorResult",
   "renderSubagentNotification", "details?.run", "details?.runs", "details?.pending",
   'actionFromContext(context, "fresh")', 'actionFromContext(context, "pending")',
-  "immediateAck", "renderRunList", "addFinalOutput", '"Live response"',
+  "immediateAck", "renderRunList", "addFinalOutput", "spacedToolResult", '"Live response"',
+  '"Retained subagent run status"', "run.requestId", "run.reason",
 ], "subagent transcript renderer");
 hasNone(transcriptRenderer, [
   "gotgenes", "Nico", "preview", "truncated", '"Subagent result"', "renderRunSection", "addActivity",
 ], "subagent transcript renderer ownership and focused-output contract");
-const listTerminalBranch = transcriptRenderer.indexOf("if (TERMINAL_STATUSES.has(status))");
-const listLiveBranch = transcriptRenderer.indexOf("if (LIVE_STATUSES.has(status)", listTerminalBranch);
-check(
-  listTerminalBranch >= 0 && listLiveBranch > listTerminalBranch &&
-  transcriptRenderer.slice(listTerminalBranch, listLiveBranch).includes("addFinalOutput") &&
-  transcriptRenderer.slice(listTerminalBranch, listLiveBranch).includes("return;"),
-  "terminal list entries must render final output and return before live activity",
-);
+const listRendererStart = transcriptRenderer.indexOf("function renderRunList");
+const listRendererEnd = transcriptRenderer.indexOf("export function renderSubagentCall", listRendererStart);
+const listRenderer = transcriptRenderer.slice(listRendererStart, listRendererEnd);
+hasAll(listRenderer, ["styledTitle", "compactRunHeader", 'status !== "waiting"', "run.requestId", "run.reason"], "status-only list renderer");
+hasNone(listRenderer, ["addFinalOutput", "addLiveActivity", "addRequest", "run.task", "run.cwd", "run.model", "run.tools", "run.output", "run.error", "run.activity", "run.request)"], "status-only list renderer");
 const notificationStart = transcriptRenderer.indexOf("export function renderSubagentNotification");
 const notificationTerminal = transcriptRenderer.indexOf("if (TERMINAL_STATUSES.has(event))", notificationStart);
 const notificationWaiting = transcriptRenderer.indexOf('else if (event === "waiting")', notificationTerminal);

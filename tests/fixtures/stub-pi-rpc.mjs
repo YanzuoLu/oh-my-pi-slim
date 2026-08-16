@@ -28,7 +28,7 @@ function respond(command, data) {
   send({ type: "response", id: command.id, command: command.type, success: true, data });
 }
 
-function assistant(text, stopReason = "stop") {
+function assistant(text, stopReason = "stop", totalTokens = 42) {
   lastAssistantText = text;
   send({
     type: "message_end",
@@ -36,7 +36,7 @@ function assistant(text, stopReason = "stop") {
       role: "assistant",
       content: [{ type: "text", text }],
       stopReason,
-      usage: { totalTokens: 42 },
+      usage: { totalTokens },
     },
   });
 }
@@ -46,7 +46,7 @@ function complete(text) {
   send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text.slice(0, 4) }, usage: { totalTokens: 21 } });
   send({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "read", args: {} });
   send({ type: "tool_execution_end", toolCallId: "tool-1", toolName: "read", result: { content: [] }, isError: false });
-  send({ type: "session_compact", reason: "threshold" });
+  send({ type: "compaction_end", result: { summary: "stub compaction" }, aborted: false });
   assistant(text);
   settled = true;
   send({ type: "agent_settled" });
@@ -73,6 +73,110 @@ function handlePrompt(command) {
         settled = true;
         send({ type: "agent_settled" });
       }, 250);
+    } else if (scenario === "token-regression") {
+      const text = "token regression complete";
+      send({ type: "turn_start", turnIndex: promptCount, timestamp: Date.now() });
+      send({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "marker-1200" },
+        usage: { totalTokens: 1200 },
+      });
+      setTimeout(() => {
+        send({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "|marker-zero" },
+          usage: { totalTokens: 0 },
+        });
+      }, 220);
+      setTimeout(() => {
+        send({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "|marker-1350" },
+          usage: { totalTokens: 1350 },
+        });
+      }, 440);
+      setTimeout(() => {
+        assistant(text, "stop", 0);
+        settled = true;
+        send({ type: "agent_settled" });
+      }, 660);
+    } else if (scenario === "token-compaction-success") {
+      send({ type: "turn_start", turnIndex: promptCount, timestamp: Date.now() });
+      send({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "pre-marker-1200" },
+        usage: { totalTokens: 1200 },
+      });
+      setTimeout(() => assistant("precompact assistant", "stop", 1200), 220);
+      setTimeout(() => {
+        send({ type: "compaction_end", result: { summary: "compacted" }, aborted: false });
+      }, 440);
+      setTimeout(() => {
+        send({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "|post-marker-300" },
+          usage: { totalTokens: 300 },
+        });
+      }, 660);
+      setTimeout(() => {
+        send({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "|post-marker-zero" },
+          usage: { totalTokens: 0 },
+        });
+      }, 880);
+      setTimeout(() => {
+        send({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "|post-marker-350" },
+          usage: { totalTokens: 350 },
+        });
+      }, 1100);
+      setTimeout(() => {
+        assistant("token compaction success complete", "stop", 0);
+        settled = true;
+        send({ type: "agent_settled" });
+      }, 1320);
+    } else if (scenario === "token-compaction-aborted") {
+      send({ type: "turn_start", turnIndex: promptCount, timestamp: Date.now() });
+      send({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "aborted-pre-1200" },
+        usage: { totalTokens: 1200 },
+      });
+      setTimeout(() => {
+        send({ type: "compaction_end", result: null, aborted: true });
+      }, 220);
+      setTimeout(() => {
+        send({ type: "compaction_end", aborted: false });
+      }, 440);
+      setTimeout(() => {
+        send({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "|aborted-later-300" },
+          usage: { totalTokens: 300 },
+        });
+      }, 660);
+      setTimeout(() => {
+        assistant("token aborted compaction complete", "stop", 0);
+        settled = true;
+        send({ type: "agent_settled" });
+      }, 880);
+    } else if (scenario === "token-compaction-null-stats") {
+      send({ type: "turn_start", turnIndex: promptCount, timestamp: Date.now() });
+      send({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "null-pre-1200" },
+        usage: { totalTokens: 1200 },
+      });
+      setTimeout(() => {
+        send({ type: "compaction_end", result: { summary: "compacted without post usage" }, aborted: false });
+      }, 220);
+      setTimeout(() => {
+        lastAssistantText = "token null stats complete";
+        settled = true;
+        send({ type: "agent_settled" });
+      }, 440);
     } else if (scenario.startsWith("contact") && promptCount === 1) {
       send({ type: "turn_start", turnIndex: 1, timestamp: Date.now() });
       send({ type: "tool_execution_start", toolCallId: "contact-1", toolName: "contact_supervisor", args: {} });
@@ -115,10 +219,25 @@ input.on("line", (line) => {
   if (command.type === "get_state") {
     respond(command, { sessionFile, isStreaming: !settled });
   } else if (command.type === "get_session_stats") {
+    let total = 42;
+    let contextUsage = { tokens: 42, contextWindow: 200, percent: 25 };
+    if (scenario === "token-regression") {
+      total = 9000;
+      contextUsage = { tokens: 900, contextWindow: 2000, percent: 45 };
+    } else if (scenario === "token-compaction-success") {
+      total = 9000;
+      contextUsage = { tokens: 320, contextWindow: 2000, percent: 16 };
+    } else if (scenario === "token-compaction-aborted") {
+      total = 9000;
+      contextUsage = { tokens: 300, contextWindow: 2000, percent: 15 };
+    } else if (scenario === "token-compaction-null-stats") {
+      total = 9000;
+      contextUsage = { tokens: null, contextWindow: 2000, percent: null };
+    }
     respond(command, {
       sessionFile,
-      tokens: { input: 20, output: 22, cacheRead: 0, cacheWrite: 0, total: 42 },
-      contextUsage: { tokens: 50, contextWindow: 200, percent: 25 },
+      tokens: { input: 20, output: 22, cacheRead: 0, cacheWrite: 0, total },
+      contextUsage,
     });
   } else if (command.type === "get_last_assistant_text") {
     respond(command, { text: lastAssistantText });

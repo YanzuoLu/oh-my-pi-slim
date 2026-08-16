@@ -12,6 +12,7 @@ import {
 import { cleanupLegacySubagentSetup, ensurePackageSetup } from "./bootstrap.js";
 import { removeMainPiDocumentation, removeMainPiIdentity } from "./prompt-context.js";
 import { registerSubagentRuntime } from "./subagent-runtime.js";
+import { SUBAGENT_NOTIFICATION_TYPE } from "./subagent-transcript-renderer.js";
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(EXTENSION_DIR, "../..");
@@ -453,6 +454,17 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     subagents.onTurnStart();
   });
 
+  pi.on("message_end", (event, ctx) => {
+    if (event.message.role !== "custom" || event.message.customType !== SUBAGENT_NOTIFICATION_TYPE) return;
+    const message = event.message;
+    const deliveryEpoch = sessionEpoch;
+    const deliverySessionId = ctx.sessionManager.getSessionId();
+    setImmediate(() => {
+      if (deliveryEpoch !== sessionEpoch || sessionCtx?.sessionManager.getSessionId() !== deliverySessionId) return;
+      subagents.acknowledgeNotificationMessage(message);
+    });
+  });
+
   pi.on("tool_execution_end", (event) => {
     if (active && FILE_TOOLS.has(event.toolName)) fileToolSeenThisTurn = true;
   });
@@ -490,6 +502,13 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", (_event, ctx) => {
+    const deliveryEpoch = sessionEpoch;
+    const deliverySessionId = ctx.sessionManager.getSessionId();
+    setImmediate(() => {
+      if (deliveryEpoch !== sessionEpoch || sessionCtx?.sessionManager.getSessionId() !== deliverySessionId) return;
+      subagents.retryQueuedNotificationsAfterAgentSettled();
+    });
+
     const checkpoint = pendingCheckpoint;
     if (!checkpoint || checkpoint.epoch !== sessionEpoch) return;
     if (checkpoint.sawThresholdCompaction) {

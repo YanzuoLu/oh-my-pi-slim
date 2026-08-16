@@ -89,7 +89,7 @@ subagent({ action: "steer", id: "run-id", message: "只检查 parser 测试。" 
 subagent({ action: "interrupt", id: "run-id" })
 ```
 
-completed、waiting、failed 与 interrupted 都会发送在 TUI 中可见的 `followUp` 通知并设置 `triggerTurn: true`，从而唤醒主 orchestrator。通知包含完整 request、output 或 error。`list` 会返回全部 retained run（含 status 与完整 output），用于一次性检查与 reconciliation。依赖结果的后续进度由 follow-up 通知恢复，而不是重复调用 `list`。
+completed、waiting、failed 与 interrupted 都只入队一条 custom message，并设置 `display: true`、`deliverAs: "steer"` 与 `triggerTurn: true`。Pi 会在当前 assistant/tool batch 之后的下一个安全模型边界交付同一条消息；它同时显示在 TUI 并进入 model context，orchestrator 不需要主动 yield 或等待 idle。消息 content 包含完整 request、output 或 error，delivery metadata 保存在不会进入 model context 的 `details` 中；不会创建第二条 TUI entry 或模型消息。`list` 只查询状态：每个 retained item 仅包含 run ID、agent、status、liveness、可选 source run ID，以及 waiting 时的 request ID 与 reason。它绝不返回 task、cwd、model/tools、时间戳、session file、activity、output、error 或其他历史结果。完整 waiting request 由 `subagent_supervisor({ action: "pending" })` 提供。依赖结果的后续进度由 lifecycle notification 恢复，而不是重复调用 `list`。
 
 `steer`、`interrupt` 与 supervisor reply 都会向 run 的 `control/` 目录原子写入带 token 的控制文件，并立即返回而不等待。`steer` 是 best-effort。`interrupt` 发出 interruption request，最终通知报告实际 terminal status。runner 会应用可接受的控制并发布真实状态。写 terminal state 之前，runner 会先收集最终元数据、停止 timer/watcher，并完整停止 RPC child，因此保存的 `sessionFile` 可安全 resume。
 
@@ -102,7 +102,7 @@ subagent_supervisor({ action: "pending" })
 subagent_supervisor({ action: "reply", replyTo: "request-id", message: "采用方案 A。" })
 ```
 
-reply 会向仍存活的 detached runner 写 control message，并乐观地把 journal 状态恢复为 `running`；runner 下一次 state 会确认该状态。之后再次 waiting 或进入 terminal 状态时，会用新的可见通知唤醒 orchestrator。
+reply 会向仍存活的 detached runner 写 control message，并乐观地把 journal 状态恢复为 `running`；runner 下一次 state 会确认该状态。之后再次 waiting 或进入 terminal 状态时，会在下一个安全模型边界通过另一条单一 lifecycle custom message 到达 orchestrator。
 
 ### Resume
 
@@ -126,7 +126,7 @@ Detached execution 只持续到当前 owner session 结束。所有 `session_shu
 
 TUI 会在 editor 上方显示一个适配自 `gotgenes/pi-packages` 中 `packages/pi-subagents` 的 widget。它保留原 UI 的 tree layout、80 ms spinner、最多 12 行、active 优先 overflow、status bar 与 finished 短暂 linger。每个 active run 是不可拆分的三行 tree entry：第一行显示 spinner 或 waiting 标记、agent、run ID、waiting 状态与 task；dim 的第二行以 `(provider) model • thinking` 开头，随后显示 turn、tool use、token/context/compaction 与 elapsed；第三行显示当前 activity，或以 warning 色显示 supervisor request。task 只占第一行并随该行截断，不再挤掉优先可见的 model/stats 行。12 行预算绝不显示半个 active entry，因此最多完整显示 3 个 active run，overflow 会准确汇总；`starting` 仍是一行 queued summary，terminal run 仍短暂显示一行 outcome。RPC mode 绝不注册 widget。
 
-TUI transcript 还为 `subagent` 与 `subagent_supervisor` 的 call/result 提供 package 自有 renderer。call 会完整显示对应 action 的输入，包括完整 task、continuation、guidance、reply、ID 与 cwd；非 terminal 的 immediate result 使用紧凑的单行确认；already-terminal 或启动失败的结果可附加完整最终 output/error。retained run list 与生命周期通知只显示和当前状态相关的信息：waiting 的完整 request、terminal 的完整 output/error，以及 active run 中明确标为 `Live response` 的 response/tool activity。terminal entry 绝不重复过期的 live response。显示不受 tool expansion 状态影响；renderer 只影响显示，不会创建重复消息，也不会把 renderer details 复制进 model context。
+TUI transcript 还为 `subagent` 与 `subagent_supervisor` 的 call/result 提供 package 自有 renderer。call 会完整显示对应 action 的输入，包括完整 task、continuation、guidance、reply、ID 与 cwd；非 terminal 的 immediate result 使用紧凑的单行确认；already-terminal 或启动失败的结果可附加完整最终 output/error。retained run `list` 只渲染标题和每个 run 的一行紧凑 status header；waiting item 最多再显示 request ID 与 reason。它绝不渲染历史 task、activity、output、error、message 或 interview。每条 lifecycle notification 就是用于模型交付的同一条 custom message，不会再创建第二条 TUI-only entry：waiting 通知显示完整 request，terminal 通知显示完整 output/error，active 通知可显示明确标为 `Live response` 的 response/tool activity；terminal 通知绝不重复过期的 live response。显示不受 tool expansion 状态影响，renderer 也不会把 message `details` 复制进 model context。
 
 ## 有意限制的范围
 
