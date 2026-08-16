@@ -126,7 +126,7 @@ Detached execution 只持续到当前 owner session 结束。所有 `session_shu
 
 TUI 会在 editor 上方显示一个适配自 `gotgenes/pi-packages` 中 `packages/pi-subagents` 的 widget。它保留原 UI 的 tree layout、80 ms spinner、最多 12 行、active 优先 overflow、status bar 与 finished 短暂 linger。每个 active run 是不可拆分的三行 tree entry：第一行显示 spinner 或 waiting 标记、agent、run ID、waiting 状态与 task；dim 的第二行以 `(provider) model • thinking` 开头，随后显示 turn、tool use、token/context/compaction 与 elapsed；第三行显示当前 activity，或以 warning 色显示 supervisor request。task 只占第一行并随该行截断，不再挤掉优先可见的 model/stats 行。12 行预算绝不显示半个 active entry，因此最多完整显示 3 个 active run，overflow 会准确汇总；`starting` 仍是一行 queued summary，terminal run 仍短暂显示一行 outcome。RPC mode 绝不注册 widget。
 
-TUI transcript 还为 `subagent` 与 `subagent_supervisor` 的 call/result 提供 package 自有 renderer。call 会完整显示对应 action 的 task、continuation、guidance、ID 与 cwd；结构化单 run 结果、retained run list、pending request 和 reply 结果不受 tool expansion 状态影响，始终显示所有持久化字段，包括完整 task、request、activity、output 与 error。waiting 和 terminal 生命周期通知会把同一条 custom follow-up 显示出来，并渲染完整结构化 run；renderer 只影响显示，不会创建重复消息，也不会把显示数据复制进 model context。
+TUI transcript 还为 `subagent` 与 `subagent_supervisor` 的 call/result 提供 package 自有 renderer。call 会完整显示对应 action 的输入，包括完整 task、continuation、guidance、reply、ID 与 cwd；非 terminal 的 immediate result 使用紧凑的单行确认；already-terminal 或启动失败的结果可附加完整最终 output/error。retained run list 与生命周期通知只显示和当前状态相关的信息：waiting 的完整 request、terminal 的完整 output/error，以及 active run 中明确标为 `Live response` 的 response/tool activity。terminal entry 绝不重复过期的 live response。显示不受 tool expansion 状态影响；renderer 只影响显示，不会创建重复消息，也不会把 renderer details 复制进 model context。
 
 ## 有意限制的范围
 

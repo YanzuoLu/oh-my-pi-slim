@@ -77,7 +77,7 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.8.2", "package version must be 0.8.2");
+check(packageJson.version === "0.8.3", "package version must be 0.8.3");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify(["./extensions/oh-my-pi-slim/index.ts"]), "package must load only the OMPS extension");
 check(packageJson.pi?.subagents === undefined, "package must not expose a pi.subagents manifest");
 check(packageJson.dependencies === undefined || Object.keys(packageJson.dependencies).length === 0, "package must have no runtime dependency on the removed backend");
@@ -267,8 +267,31 @@ hasAll(transcriptRenderer, [
   "Container", "Box", "Text", "Markdown", "Spacer", "getMarkdownTheme", "RAW_HTML_TAG",
   "renderSubagentCall", "renderSubagentResult", "renderSupervisorCall", "renderSupervisorResult",
   "renderSubagentNotification", "details?.run", "details?.runs", "details?.pending",
+  'actionFromContext(context, "fresh")', 'actionFromContext(context, "pending")',
+  "immediateAck", "renderRunList", "addFinalOutput", '"Live response"',
 ], "subagent transcript renderer");
-hasNone(transcriptRenderer, ["gotgenes", "Nico", "preview", "truncated"], "subagent transcript renderer ownership and full-output contract");
+hasNone(transcriptRenderer, [
+  "gotgenes", "Nico", "preview", "truncated", '"Subagent result"', "renderRunSection", "addActivity",
+], "subagent transcript renderer ownership and focused-output contract");
+const listTerminalBranch = transcriptRenderer.indexOf("if (TERMINAL_STATUSES.has(status))");
+const listLiveBranch = transcriptRenderer.indexOf("if (LIVE_STATUSES.has(status)", listTerminalBranch);
+check(
+  listTerminalBranch >= 0 && listLiveBranch > listTerminalBranch &&
+  transcriptRenderer.slice(listTerminalBranch, listLiveBranch).includes("addFinalOutput") &&
+  transcriptRenderer.slice(listTerminalBranch, listLiveBranch).includes("return;"),
+  "terminal list entries must render final output and return before live activity",
+);
+const notificationStart = transcriptRenderer.indexOf("export function renderSubagentNotification");
+const notificationTerminal = transcriptRenderer.indexOf("if (TERMINAL_STATUSES.has(event))", notificationStart);
+const notificationWaiting = transcriptRenderer.indexOf('else if (event === "waiting")', notificationTerminal);
+const notificationLive = transcriptRenderer.indexOf("else if (LIVE_STATUSES.has(event)", notificationWaiting);
+check(
+  notificationStart >= 0 && notificationTerminal > notificationStart && notificationWaiting > notificationTerminal &&
+  notificationLive > notificationWaiting &&
+  transcriptRenderer.slice(notificationTerminal, notificationWaiting).includes("addFinalOutput") &&
+  !transcriptRenderer.slice(notificationTerminal, notificationWaiting).includes("addLiveActivity"),
+  "terminal notifications must render final output without live response",
+);
 hasAll(runtime, [
   "registerMessageRenderer(SUBAGENT_NOTIFICATION_TYPE, renderSubagentNotification)",
   "renderCall: renderSubagentCall", "renderResult: renderSubagentResult",

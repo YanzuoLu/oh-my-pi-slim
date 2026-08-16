@@ -1,16 +1,17 @@
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Markdown, Spacer, Text, type Component } from "@earendil-works/pi-tui";
-import { formatSubagentModel } from "./subagent-model-display.js";
 
 export const SUBAGENT_NOTIFICATION_TYPE = "oh-my-pi-slim:subagent-notification";
 
 type UnknownRecord = Record<string, unknown>;
 type ToolResultLike = { content?: unknown; details?: unknown };
-type ToolRenderContextLike = { cwd?: string };
+type ToolRenderContextLike = { cwd?: string; args?: unknown };
 type MessageLike = { content?: unknown; details?: unknown };
 type MessageRenderOptionsLike = { outputPad?: number };
 
 const RAW_HTML_TAG = /<\/?[A-Za-z][^>]*>/;
+const LIVE_STATUSES = new Set(["starting", "running"]);
+const TERMINAL_STATUSES = new Set(["completed", "failed", "interrupted"]);
 
 function asRecord(value: unknown): UnknownRecord | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -69,7 +70,7 @@ function addFullSection(container: Container, theme: Theme, label: string, text:
   container.addChild(fullBody(text, theme));
 }
 
-function statusStyle(status: string, theme: Theme): string {
+function statusGlyph(status: string, theme: Theme): string {
   if (status === "completed") return theme.fg("success", "✓");
   if (status === "failed") return theme.fg("error", "✗");
   if (status === "interrupted") return theme.fg("warning", "✗");
@@ -79,102 +80,115 @@ function statusStyle(status: string, theme: Theme): string {
   return theme.fg("muted", "○");
 }
 
-function addRequest(container: Container, theme: Theme, value: unknown): void {
+function runIdentity(run: UnknownRecord): { agent: string; id: string; status: string } {
+  return {
+    agent: asString(run.agent) ?? "unknown agent",
+    id: asString(run.id) ?? "unknown id",
+    status: asString(run.status) ?? "unknown",
+  };
+}
+
+function compactRunHeader(run: UnknownRecord, theme: Theme, statusOverride?: string): Text {
+  const identity = runIdentity(run);
+  const status = statusOverride ?? identity.status;
+  return new Text(
+    `${statusGlyph(status, theme)} ${theme.fg("toolTitle", theme.bold(identity.agent))} ${theme.fg("accent", `[${identity.id}]`)} ${theme.fg("muted", `· ${status}`)}`,
+    0,
+    0,
+  );
+}
+
+function addRequest(container: Container, theme: Theme, value: unknown, numberedLabel?: string): void {
   const request = asRecord(value);
-  if (!request) {
-    addField(container, theme, "Request", undefined, "none");
-    return;
-  }
+  if (!request) return;
   container.addChild(new Spacer(1));
+  const label = numberedLabel ?? "Request";
   container.addChild(new Text(
-    `${theme.fg("warning", "!")} ${theme.fg("toolTitle", theme.bold("Request"))} ${theme.fg("accent", `[${displayValue(request.id)}]`)}`,
+    `${theme.fg("warning", "!")} ${theme.fg("toolTitle", theme.bold(label))} ${theme.fg("accent", `[${displayValue(request.id)}]`)}`,
     0,
     0,
   ));
   addField(container, theme, "Run", request.runId);
   addField(container, theme, "Reason", request.reason);
-  addField(container, theme, "Created", request.createdAt);
   if (typeof request.message === "string") addFullSection(container, theme, "Message", request.message);
-  if (request.interview !== undefined) {
-    addFullSection(container, theme, "Interview", displayValue(request.interview));
-  }
+  if (request.interview !== undefined) addFullSection(container, theme, "Interview", displayValue(request.interview));
 }
 
-function addActivity(container: Container, theme: Theme, value: unknown): void {
+function addFinalOutput(container: Container, theme: Theme, run: UnknownRecord): void {
+  if (typeof run.output === "string") addFullSection(container, theme, "Output", run.output);
+  if (typeof run.error === "string") addFullSection(container, theme, "Error", run.error);
+}
+
+function addLiveActivity(container: Container, theme: Theme, value: unknown): void {
   const activity = asRecord(value);
-  if (!activity) {
-    addField(container, theme, "Activity", undefined, "none");
-    return;
+  if (!activity) return;
+  if (typeof activity.responseText === "string" && activity.responseText.length > 0) {
+    addFullSection(container, theme, "Live response", activity.responseText);
   }
-  container.addChild(new Spacer(1));
-  container.addChild(styledTitle(theme, "Activity"));
-  addField(container, theme, "Turns", activity.turnCount);
-  addField(container, theme, "Tool uses", activity.toolUses);
-  addField(container, theme, "Tokens", activity.tokens);
-  addField(container, theme, "Context", activity.contextPercent === undefined ? undefined : `${displayValue(activity.contextPercent)}%`);
-  addField(container, theme, "Compactions", activity.compactionCount);
   const activeTools = asRecord(activity.activeTools);
   if (activeTools && Object.keys(activeTools).length > 0) {
     addFullSection(container, theme, "Active tools", displayValue(activeTools));
-  } else {
-    addField(container, theme, "Active tools", undefined, "none");
   }
-  if (typeof activity.responseText === "string") {
-    addFullSection(container, theme, "Response", activity.responseText);
-  }
-}
-
-function renderRunSection(value: unknown, theme: Theme, heading?: string): Container {
-  const run = asRecord(value) ?? {};
-  const status = asString(run.status) ?? "unknown";
-  const agent = asString(run.agent) ?? "unknown agent";
-  const id = asString(run.id) ?? "unknown id";
-  const container = new Container();
-  if (heading) container.addChild(styledTitle(theme, heading));
-  container.addChild(new Text(
-    `${statusStyle(status, theme)} ${theme.fg("toolTitle", theme.bold(agent))} ${theme.fg("accent", `[${id}]`)} ${theme.fg("muted", `· ${status}`)}`,
-    0,
-    0,
-  ));
-  const model = asString(run.model);
-  addField(container, theme, "Model", model ? formatSubagentModel(model) : undefined);
-  addField(container, theme, "Status", status);
-  addField(container, theme, "Live", run.live);
-  addField(container, theme, "Created", run.createdAt);
-  addField(container, theme, "Updated", run.updatedAt);
-  addField(container, theme, "Cwd", run.cwd);
-  addField(container, theme, "Tools", Array.isArray(run.tools) ? run.tools.join(", ") : run.tools, "none");
-  addField(container, theme, "Source run", run.sourceRunId);
-  addField(container, theme, "Session", run.sessionFile);
-  if (typeof run.task === "string") addFullSection(container, theme, "Task", run.task);
-  else addField(container, theme, "Task", undefined, "(pending)");
-  addRequest(container, theme, run.request);
-  addActivity(container, theme, run.activity);
-  if (typeof run.output === "string") addFullSection(container, theme, "Output", run.output);
-  if (typeof run.error === "string") addFullSection(container, theme, "Error", run.error);
-  return container;
-}
-
-function renderRequestSection(value: unknown, theme: Theme, index: number): Container {
-  const request = asRecord(value) ?? {};
-  const container = new Container();
-  container.addChild(new Text(
-    `${theme.fg("warning", "!")} ${theme.fg("toolTitle", theme.bold(`Request ${index + 1}`))} ${theme.fg("accent", `[${displayValue(request.id)}]`)}`,
-    0,
-    0,
-  ));
-  addField(container, theme, "Run", request.runId);
-  addField(container, theme, "Reason", request.reason);
-  addField(container, theme, "Created", request.createdAt);
-  if (typeof request.message === "string") addFullSection(container, theme, "Message", request.message);
-  if (request.interview !== undefined) addFullSection(container, theme, "Interview", displayValue(request.interview));
-  return container;
 }
 
 function fallbackResult(result: ToolResultLike, theme: Theme, partial: boolean): Component {
   const text = contentText(result.content);
   if (text) return fullBody(text, theme, 0);
   return new Text(theme.fg(partial ? "warning" : "dim", partial ? "Result pending…" : "No result content."), 0, 0);
+}
+
+function actionFromContext(context: ToolRenderContextLike, fallback: string): { action: string; args: UnknownRecord } {
+  const args = asRecord(context.args) ?? {};
+  return { action: asString(args.action) ?? fallback, args };
+}
+
+function immediateAck(run: UnknownRecord, action: string, args: UnknownRecord, theme: Theme): Container {
+  const { agent, id, status } = runIdentity(run);
+  const terminal = TERMINAL_STATUSES.has(status);
+  let glyph = terminal ? statusGlyph(status, theme) : theme.fg("success", "✓");
+  let text: string;
+  if (terminal && (action === "steer" || action === "interrupt")) {
+    text = `${agent} [${id}] · already ${status}`;
+  } else if (action === "resume") {
+    const source = asString(args.id) ?? asString(run.sourceRunId) ?? "unknown source";
+    text = `Resumed [${source}] → ${agent} [${id}] · ${status}`;
+  } else if (action === "steer") {
+    text = `Steer requested · ${agent} [${id}] · ${status}`;
+  } else if (action === "interrupt") {
+    glyph = theme.fg("warning", "!");
+    text = `Interrupt requested · ${agent} [${id}] · ${status}`;
+  } else {
+    text = `Started ${agent} [${id}] · ${status}`;
+  }
+  const container = new Container();
+  container.addChild(new Text(`${glyph} ${theme.fg("toolOutput", text)}`, 0, 0));
+  if (terminal) addFinalOutput(container, theme, run);
+  return container;
+}
+
+function renderRunList(runs: unknown[], theme: Theme): Container {
+  const container = new Container();
+  container.addChild(styledTitle(theme, "Retained subagent runs", `· ${runs.length}`));
+  if (runs.length === 0) {
+    container.addChild(new Text(theme.fg("dim", "No retained runs."), 0, 0));
+    return container;
+  }
+  runs.forEach((value) => {
+    const run = asRecord(value) ?? {};
+    const { status } = runIdentity(run);
+    container.addChild(new Spacer(1));
+    container.addChild(compactRunHeader(run, theme));
+    if (TERMINAL_STATUSES.has(status)) {
+      addFinalOutput(container, theme, run);
+      return;
+    }
+    if (status === "waiting") {
+      addRequest(container, theme, run.request);
+      return;
+    }
+    if (LIVE_STATUSES.has(status) && run.output === undefined) addLiveActivity(container, theme, run.activity);
+  });
+  return container;
 }
 
 export function renderSubagentCall(argsValue: unknown, theme: Theme, context: ToolRenderContextLike = {}): Component {
@@ -202,7 +216,7 @@ export function renderSubagentCall(argsValue: unknown, theme: Theme, context: To
   } else if (action === "list") {
     container.addChild(new Spacer(1));
     container.addChild(new Text(
-      theme.fg("toolOutput", "Returns every retained run with its complete stored result, including full output and error fields."),
+      theme.fg("toolOutput", "Returns every retained run with complete status-related request, output, and error text."),
       0,
       0,
     ));
@@ -217,23 +231,15 @@ export function renderSubagentResult(
   result: ToolResultLike,
   options: { isPartial?: boolean } = {},
   theme: Theme,
+  context: ToolRenderContextLike = {},
 ): Component {
   const details = asRecord(result.details);
-  if (details?.run !== undefined) return renderRunSection(details.run, theme, "Subagent result");
+  const { action, args } = actionFromContext(context, "fresh");
   const runs = details?.runs;
-  if (Array.isArray(runs)) {
-    const container = new Container();
-    container.addChild(styledTitle(theme, "Retained subagent runs", `· ${runs.length}`));
-    if (runs.length === 0) {
-      container.addChild(new Text(theme.fg("dim", "No retained runs."), 0, 0));
-      return container;
-    }
-    runs.forEach((run, index) => {
-      container.addChild(new Spacer(1));
-      container.addChild(renderRunSection(run, theme, `Run ${index + 1}`));
-    });
-    return container;
-  }
+  if (action === "list" && Array.isArray(runs)) return renderRunList(runs, theme);
+  const run = asRecord(details?.run);
+  if (run) return immediateAck(run, action, args, theme);
+  if (Array.isArray(runs)) return renderRunList(runs, theme);
   return fallbackResult(result, theme, options.isPartial === true);
 }
 
@@ -258,23 +264,38 @@ export function renderSupervisorResult(
   result: ToolResultLike,
   options: { isPartial?: boolean } = {},
   theme: Theme,
+  context: ToolRenderContextLike = {},
 ): Component {
   const details = asRecord(result.details);
+  const { action, args } = actionFromContext(context, "pending");
   const pending = details?.pending;
-  if (Array.isArray(pending)) {
+  if (action === "pending" && Array.isArray(pending)) {
     const container = new Container();
     container.addChild(styledTitle(theme, "Pending supervisor requests", `· ${pending.length}`));
     if (pending.length === 0) {
       container.addChild(new Text(theme.fg("dim", "No pending requests."), 0, 0));
       return container;
     }
-    pending.forEach((request, index) => {
-      container.addChild(new Spacer(1));
-      container.addChild(renderRequestSection(request, theme, index));
-    });
+    pending.forEach((request, index) => addRequest(container, theme, request, `Request ${index + 1}`));
     return container;
   }
-  if (details?.run !== undefined) return renderRunSection(details.run, theme, "Supervisor reply result");
+  const run = asRecord(details?.run);
+  if (action === "reply" && run) {
+    const { agent, id, status } = runIdentity(run);
+    const request = asString(args.replyTo) ?? "unknown request";
+    const glyph = TERMINAL_STATUSES.has(status) ? statusGlyph(status, theme) : theme.fg("success", "✓");
+    return new Text(
+      `${glyph} ${theme.fg("toolOutput", `Replied [${request}] · ${agent} [${id}] · ${status}`)}`,
+      0,
+      0,
+    );
+  }
+  if (Array.isArray(pending)) {
+    const container = new Container();
+    container.addChild(styledTitle(theme, "Pending supervisor requests", `· ${pending.length}`));
+    pending.forEach((request, index) => addRequest(container, theme, request, `Request ${index + 1}`));
+    return container;
+  }
   return fallbackResult(result, theme, options.isPartial === true);
 }
 
@@ -284,23 +305,22 @@ export function renderSubagentNotification(
   theme: Theme,
 ): Component {
   const details = asRecord(message.details);
-  const event = asString(details?.event) ?? asString(details?.status) ?? "update";
+  const run = asRecord(details?.run);
+  if (!run) {
+    const content = typeof message.content === "string" ? message.content : displayValue(message.content, "");
+    return content ? fullBody(content, theme, options.outputPad ?? 0) : new Text("", 0, 0);
+  }
+
+  const event = asString(details?.event) ?? asString(details?.status) ?? asString(run.status) ?? "update";
   const box = new Box(options.outputPad ?? 1, 1, (text) => theme.bg("customMessageBg", text));
   const container = new Container();
-  container.addChild(new Text(
-    `${statusStyle(event, theme)} ${theme.fg("customMessageLabel", theme.bold("Subagent notification"))} ${theme.fg("muted", `· ${event}`)}`,
-    0,
-    0,
-  ));
-  if (details?.run !== undefined) {
-    container.addChild(new Spacer(1));
-    container.addChild(renderRunSection(details.run, theme));
-  } else {
-    const content = typeof message.content === "string" ? message.content : displayValue(message.content, "");
-    if (content) {
-      container.addChild(new Spacer(1));
-      container.addChild(fullBody(content, theme, 0));
-    }
+  container.addChild(compactRunHeader(run, theme, event));
+  if (TERMINAL_STATUSES.has(event)) {
+    addFinalOutput(container, theme, run);
+  } else if (event === "waiting") {
+    addRequest(container, theme, run.request);
+  } else if (LIVE_STATUSES.has(event) && run.output === undefined) {
+    addLiveActivity(container, theme, run.activity);
   }
   box.addChild(container);
   return box;
