@@ -47,7 +47,7 @@ export interface DetachedLaunchConfig {
   task: string;
   cwd: string;
   model: string;
-  tools: string[];
+  deniedTools: string[];
   systemPrompt: string;
   approve: boolean;
   childSessionDir: string;
@@ -285,7 +285,7 @@ export function isDetachedLaunchConfig(value: unknown): value is DetachedLaunchC
     !isNonEmptyString(value.task) ||
     !isNonEmptyString(value.cwd) ||
     !isNonEmptyString(value.model) ||
-    !Array.isArray(value.tools) || value.tools.some((tool) => !isNonEmptyString(tool)) ||
+    !Array.isArray(value.deniedTools) || value.deniedTools.some((tool) => !isNonEmptyString(tool)) ||
     typeof value.systemPrompt !== "string" ||
     typeof value.approve !== "boolean" ||
     !isNonEmptyString(value.childSessionDir) ||

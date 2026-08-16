@@ -39,7 +39,8 @@ function validConfig(value) {
     nonEmpty(value.runId) && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.runId) &&
     nonEmpty(value.token) && nonEmpty(value.ownerSessionId) && nonEmpty(value.agent) &&
     nonEmpty(value.task) && nonEmpty(value.cwd) && nonEmpty(value.model) &&
-    Array.isArray(value.tools) && value.tools.every(nonEmpty) && typeof value.systemPrompt === "string" &&
+    Array.isArray(value.deniedTools) && value.deniedTools.every(nonEmpty) &&
+    typeof value.systemPrompt === "string" &&
     typeof value.approve === "boolean" && nonEmpty(value.childSessionDir) &&
     (value.resumeSessionFile === undefined || nonEmpty(value.resumeSessionFile)) &&
     isRecord(value.piInvocation) && nonEmpty(value.piInvocation.command) &&

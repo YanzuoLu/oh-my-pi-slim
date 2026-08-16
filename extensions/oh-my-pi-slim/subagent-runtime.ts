@@ -19,7 +19,7 @@ import {
   requireString,
   restoreRunJournal,
   runJournalEntry,
-  validateFreshInput,
+  validateCreateInput,
   type PersistedRun,
   type RunStatus,
   type SpecialistName,
@@ -70,16 +70,17 @@ const DEFAULT_POLL_MS = 250;
 const DEFAULT_GRACE_MS = 5000;
 const DEFAULT_SHUTDOWN_WAIT_MS = 3500;
 const POST_TERM_GRACE_MS = 1500;
+const LIFECYCLE_TOOLS = new Set(["subagent", "subagent_supervisor", "contact_supervisor"]);
 
 interface AgentDefinition {
   name: SpecialistName;
   description: string;
-  tools: string[];
   systemPrompt: string;
   filePath: string;
 }
 
 type ModelResolver = (agent: SpecialistName) => string;
+type DenyResolver = (agent: SpecialistName) => string[];
 
 type TimerHandle = ReturnType<typeof setInterval>;
 
@@ -118,10 +119,6 @@ interface SupervisorInput {
 type AgentFrontmatter = {
   name?: unknown;
   description?: unknown;
-  tools?: unknown;
-  systemPromptMode?: unknown;
-  inheritProjectContext?: unknown;
-  inheritSkills?: unknown;
 };
 
 interface RunHealth {
@@ -152,12 +149,18 @@ interface NotificationDelivery {
   deliveryKey: string;
 }
 
-function parseTools(value: unknown): string[] {
-  const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
-  return raw
-    .filter((tool): tool is string => typeof tool === "string")
-    .map((tool) => tool.trim())
-    .filter(Boolean);
+function normalizeDeniedTools(value: readonly string[]): string[] {
+  const denied: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of value) {
+    const tool = requireString(raw, "denied tool");
+    if (LIFECYCLE_TOOLS.has(tool)) throw new Error(`${tool} is managed by the subagent lifecycle and cannot be denied.`);
+    if (!seen.has(tool)) {
+      seen.add(tool);
+      denied.push(tool);
+    }
+  }
+  return denied;
 }
 
 export function discoverPackageAgents(): Map<SpecialistName, AgentDefinition> {
@@ -176,34 +179,17 @@ export function discoverPackageAgents(): Map<SpecialistName, AgentDefinition> {
       typeof frontmatter.description !== "string"
     ) continue;
     const name = frontmatter.name as SpecialistName;
-    if (
-      frontmatter.systemPromptMode !== "replace" ||
-      frontmatter.inheritProjectContext !== true ||
-      frontmatter.inheritSkills !== true
-    ) {
-      throw new Error(`${filePath} must replace the prompt and inherit project context and skills.`);
-    }
-    const tools = parseTools(frontmatter.tools);
-    if (
-      tools.length === 0 ||
-      !tools.includes("contact_supervisor") ||
-      tools.some((tool) => tool === "subagent" || tool === "subagent_supervisor")
-    ) {
-      throw new Error(`${filePath} has an invalid child tools allowlist.`);
-    }
-    if (["explorer", "librarian", "oracle"].includes(name) && tools.some((tool) => tool === "edit" || tool === "write")) {
-      throw new Error(`${filePath} is read-only and cannot expose edit or write.`);
-    }
     if (definitions.has(name)) throw new Error(`Duplicate package agent: ${name}`);
     definitions.set(name, {
       name,
       description: frontmatter.description,
-      tools,
       systemPrompt: body,
       filePath,
     });
   }
-  if (definitions.size !== SPECIALISTS.size) throw new Error(`Expected exactly five package agents in ${AGENTS_DIR}.`);
+  if (definitions.size !== SPECIALISTS.size) {
+    throw new Error(`Expected exactly ${SPECIALISTS.size} package agents in ${AGENTS_DIR}.`);
+  }
   return definitions;
 }
 
@@ -301,12 +287,12 @@ function stateActivity(state: DetachedRunState): DetachedRunActivity {
 }
 
 export const subagentParameters = Type.Object({
-  agent: Type.Optional(Type.String({ description: "Specialist role for a new asynchronous run" })),
-  task: Type.Optional(Type.String({ description: "Objective for a new asynchronous run" })),
-  cwd: Type.Optional(Type.String({ description: "Working directory for a new asynchronous run" })),
-  action: Type.Optional(Type.Union(SUBAGENT_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "List, steer, interrupt, or resume a run",
-  })),
+  agent: Type.Optional(Type.String({ description: "Specialist role for create" })),
+  task: Type.Optional(Type.String({ description: "Objective for create" })),
+  cwd: Type.Optional(Type.String({ description: "Working directory for create" })),
+  action: Type.Union(SUBAGENT_ACTIONS.map((action) => Type.Literal(action)), {
+    description: "Create, list, steer, interrupt, or resume a run",
+  }),
   id: Type.Optional(Type.String({ description: "Run ID for steer, interrupt, or resume" })),
   message: Type.Optional(Type.String({ description: "Guidance for steer or the continuation objective for resume" })),
 }, { additionalProperties: false });
@@ -355,6 +341,7 @@ export class OmpsSubagentRuntime {
   private ownerSessionId?: string;
   private runRoot?: string;
   private modelResolver?: ModelResolver;
+  private denyResolver?: DenyResolver;
   private poller?: TimerHandle;
   private shuttingDown = false;
 
@@ -383,18 +370,22 @@ export class OmpsSubagentRuntime {
     this.modelResolver = resolver;
   }
 
+  setDenyResolver(resolver?: DenyResolver): void {
+    this.denyResolver = resolver;
+  }
+
   registerTools(): void {
     this.pi.registerMessageRenderer(SUBAGENT_NOTIFICATION_TYPE, renderSubagentNotification);
     this.pi.registerTool({
       name: "subagent",
       label: "Subagent",
-      description: "Start a package specialist asynchronously and receive a new run ID with status starting. Lifecycle notifications use one visible custom message delivered through steer at the next safe model boundary. Use list only for status-only retained run identity, liveness, and waiting request ID/reason; use steer for running work, interrupt for active work, and resume for saved child sessions.",
-      promptSnippet: "Launch a package specialist asynchronously and manage its run by ID.",
+      description: "Create a package specialist asynchronously and receive a new run ID with status starting. Lifecycle notifications deliver waiting requests and terminal results through steer at the next safe model boundary. Use list for retained run status, steer for running work, interrupt for active work, and resume for saved child sessions.",
+      promptSnippet: "Create and manage asynchronous package specialist runs.",
       promptGuidelines: [
-        "A fresh subagent call supplies agent, task, and optional cwd; the result contains the complete new run record with status starting.",
+        "subagent create supplies agent, task, and optional cwd and returns the new run with status starting.",
         "A waiting subagent lifecycle notification is delivered through steer at the next safe model boundary and contains the run ID, request ID, reason, and message.",
         "A completed, failed, or interrupted subagent lifecycle notification is delivered through steer at the next safe model boundary and contains the run ID and every stored output and error field for that transition.",
-        "subagent list returns only retained run ID, agent, current status, liveness, optional source run ID, and waiting request ID/reason; it never returns task, activity, or historical results.",
+        "subagent list reports retained run identity, current status, liveness, optional source run ID, and waiting request ID/reason; it never returns task, activity, or historical results.",
         "subagent steer sends a message to a running run.",
         "subagent interrupt sends an interruption request to a starting, running, or waiting run; its lifecycle notification reports the actual terminal status.",
         "subagent resume accepts a completed, failed, or interrupted run ID with a saved child session.",
@@ -433,6 +424,7 @@ export class OmpsSubagentRuntime {
     this.ownerSessionId = ctx.sessionManager.getSessionId();
     this.runRoot = getRunRoot(ctx.sessionManager.getSessionDir());
     this.modelResolver = undefined;
+    this.denyResolver = undefined;
     this.shuttingDown = false;
     this.widget.setUICtx(ctx.mode === "tui" ? ctx.ui as unknown as SubagentWidgetUI : undefined);
 
@@ -472,6 +464,7 @@ export class OmpsSubagentRuntime {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     this.modelResolver = undefined;
+    this.denyResolver = undefined;
     this.stopPoller();
     this.queuedNotifications.clear();
     const activeIds = this.registry.list().filter((run) => ACTIVE_STATUSES.has(run.status)).map((run) => run.id);
@@ -964,9 +957,9 @@ export class OmpsSubagentRuntime {
       approve ? "--approve" : "--no-approve",
       "--session-dir", this.childSessionDir(),
       "--system-prompt", agent.systemPrompt,
-      "--tools", run.tools.join(","),
-      "--extension", CHILD_EXTENSION,
     ];
+    if (run.deniedTools.length > 0) args.push("--exclude-tools", run.deniedTools.join(","));
+    args.push("--extension", CHILD_EXTENSION);
     if (resumeSessionFile) args.push("--session", resumeSessionFile);
     return {
       v: 1,
@@ -977,7 +970,7 @@ export class OmpsSubagentRuntime {
       task: run.task,
       cwd: run.cwd,
       model: run.model,
-      tools: [...run.tools],
+      deniedTools: [...run.deniedTools],
       systemPrompt: agent.systemPrompt,
       approve,
       childSessionDir: this.childSessionDir(),
@@ -1038,18 +1031,23 @@ export class OmpsSubagentRuntime {
       this.failRun(run.id, error instanceof Error ? error.message : String(error), true, safeToCleanup);
     }
     const retained = this.registry.require(run.id);
-    return toolText(`Started asynchronous run ${run.id} (${run.agent}) with status ${retained.status}.`, {
+    return toolText(`Created asynchronous run ${run.id} (${run.agent}) with status ${retained.status}.`, {
       run: this.formatRun(retained),
     });
   }
 
   private async executeSubagent(input: RuntimeInput) {
     rejectUnknownFields(input, SUBAGENT_PUBLIC_FIELDS, "subagent");
-    const action = input.action === undefined ? undefined : requireString(input.action, "action");
-    if (!action) return this.launchFresh(input);
-    if (!SUBAGENT_ACTIONS.includes(action as (typeof SUBAGENT_ACTIONS)[number])) throw new Error(`Unsupported subagent action: ${action}`);
-    const launchFields = ["agent", "task", "cwd"].filter((field) => input[field as keyof RuntimeInput] !== undefined);
-    if (launchFields.length > 0) throw new Error(`${action} does not accept fresh launch field(s): ${launchFields.join(", ")}.`);
+    const action = requireString(input.action, "action");
+    if (!SUBAGENT_ACTIONS.includes(action as (typeof SUBAGENT_ACTIONS)[number])) {
+      throw new Error(`Unsupported subagent action: ${action}`);
+    }
+    if (action === "create") {
+      if (input.id !== undefined || input.message !== undefined) throw new Error("create does not accept id or message.");
+      return this.launchCreate(input);
+    }
+    const createFields = ["agent", "task", "cwd"].filter((field) => input[field as keyof RuntimeInput] !== undefined);
+    if (createFields.length > 0) throw new Error(`${action} does not accept create field(s): ${createFields.join(", ")}.`);
     if (action === "list" && (input.id !== undefined || input.message !== undefined)) throw new Error("list does not accept id or message.");
     if (action === "interrupt" && input.message !== undefined) throw new Error("interrupt does not accept message.");
 
@@ -1075,12 +1073,14 @@ export class OmpsSubagentRuntime {
     return toolText(`Interrupt requested for ${id}.`, { run: this.formatRun(run) });
   }
 
-  private async launchFresh(input: RuntimeInput) {
+  private async launchCreate(input: RuntimeInput) {
     if (this.shuttingDown) throw new Error("Parent session is shutting down.");
-    if (input.id !== undefined || input.message !== undefined) throw new Error("Fresh runs do not accept id or message.");
-    const launch = validateFreshInput(input);
-    if (!this.modelResolver) throw new Error("oh-my-pi-slim is inactive; enable a preset before launching a subagent.");
+    const launch = validateCreateInput(input);
+    if (!this.modelResolver || !this.denyResolver) {
+      throw new Error("oh-my-pi-slim is inactive; enable a preset before creating a subagent.");
+    }
     const model = requireString(this.modelResolver(launch.agent), `preset model for ${launch.agent}`);
+    const deniedTools = normalizeDeniedTools(this.denyResolver(launch.agent));
     const now = this.now();
     const agent = this.agents.get(launch.agent);
     if (!agent) throw new Error(`Unknown package agent: ${launch.agent}`);
@@ -1090,7 +1090,7 @@ export class OmpsSubagentRuntime {
       task: launch.task,
       cwd: launch.cwd ? resolve(this.ctx?.cwd ?? process.cwd(), launch.cwd) : this.ctx?.cwd ?? process.cwd(),
       model,
-      tools: [...agent.tools],
+      deniedTools,
       status: "starting",
       createdAt: now,
       updatedAt: now,
@@ -1106,6 +1106,7 @@ export class OmpsSubagentRuntime {
     const conflicting = this.registry.list().find((run) =>
       run.sessionFile !== undefined && canonicalSessionFile(run.sessionFile) === sessionFile && ACTIVE_STATUSES.has(run.status));
     if (conflicting) throw new Error(`Session ${source.sessionFile} is already active in run ${conflicting.id}.`);
+    if (!this.denyResolver) throw new Error("oh-my-pi-slim is inactive; enable a preset before resuming a subagent.");
     const now = this.now();
     const run: PersistedRun = {
       id: this.newRunId(),
@@ -1113,7 +1114,7 @@ export class OmpsSubagentRuntime {
       task: message,
       cwd: source.cwd,
       model: source.model,
-      tools: [...source.tools],
+      deniedTools: normalizeDeniedTools(this.denyResolver(source.agent)),
       status: "starting",
       sourceRunId: sourceId,
       sessionFile: source.sessionFile,

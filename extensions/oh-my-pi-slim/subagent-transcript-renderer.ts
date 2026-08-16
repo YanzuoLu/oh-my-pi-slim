@@ -199,12 +199,12 @@ function renderRunList(runs: unknown[], theme: Theme): Container {
 
 export function renderSubagentCall(argsValue: unknown, theme: Theme, context: ToolRenderContextLike = {}): Component {
   const args = asRecord(argsValue) ?? {};
-  const action = asString(args.action) ?? "fresh";
+  const action = asString(args.action) ?? "create";
   const container = new Container();
   container.addChild(styledTitle(theme, "subagent", `· ${action}`));
   addField(container, theme, "Action", action);
 
-  if (action === "fresh") {
+  if (action === "create") {
     addField(container, theme, "Agent", args.agent, "(pending)");
     addField(container, theme, "Cwd", args.cwd ?? context.cwd, "(parent session cwd)");
     if (typeof args.task === "string") addFullSection(container, theme, "Task", args.task);
@@ -240,7 +240,7 @@ export function renderSubagentResult(
   context: ToolRenderContextLike = {},
 ): Component {
   const details = asRecord(result.details);
-  const { action, args } = actionFromContext(context, "fresh");
+  const { action, args } = actionFromContext(context, "create");
   const runs = details?.runs;
   if (action === "list" && Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme));
   const run = asRecord(details?.run);

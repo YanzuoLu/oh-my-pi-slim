@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   getAgentDir,
+  parseFrontmatter,
   SettingsManager,
   shouldCompact,
   type ExtensionAPI,
@@ -11,24 +12,25 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { cleanupLegacySubagentSetup, ensurePackageSetup } from "./bootstrap.js";
 import { removeMainPiDocumentation, removeMainPiIdentity } from "./prompt-context.js";
+import { SPECIALIST_NAMES, type SpecialistName } from "./subagent-core.js";
 import { registerSubagentRuntime } from "./subagent-runtime.js";
 import { SUBAGENT_NOTIFICATION_TYPE } from "./subagent-transcript-renderer.js";
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(EXTENSION_DIR, "../..");
-const ORCHESTRATOR_PROMPT = readFileSync(join(EXTENSION_DIR, "orchestrator.md"), "utf8").trim();
+const ORCHESTRATOR_PROMPT = parseFrontmatter(readFileSync(join(EXTENSION_DIR, "orchestrator.md"), "utf8")).body.trim();
 const CONFIG_FILE = "oh-my-pi-slim.json";
-const SPECIALIST_NAMES = ["explorer", "librarian", "oracle", "designer", "fixer"] as const;
 const ROLE_NAMES = ["orchestrator", ...SPECIALIST_NAMES] as const;
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const FILE_TOOLS = new Set(["read", "edit", "write"]);
 const TRUE_VALUES = /^(1|true|yes|on)$/i;
 const SAFE_PRESET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_MODEL_PART = /^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$/;
+const LIFECYCLE_TOOLS = new Set(["subagent", "subagent_supervisor", "contact_supervisor"]);
 
-const PHASE_REMINDER = `<orchestration-reminder>
-Orchestration workflow: understand the request; map lanes and dependencies; dispatch independent specialists asynchronously; track run IDs and write ownership; rely on automatic completion notifications; reconcile specialist results and supervisor requests; inspect the real changes; verify the result.
-</orchestration-reminder>`;
+const PHASE_REMINDER = `<system-reminder>
+!IMPORTANT! Scheduler workflow: First choose the lightest workflow that fits the work. If direct execution is justified, complete it and verify proportionately. Otherwise: plan lanes/dependencies → dispatch background specialists → track task IDs → wait for hook-driven completion → reconcile terminal results → verify. !END!
+</system-reminder>`;
 
 const RELOAD_PRESET_STORE_KEY = "__ompsActivePresetForReload";
 const CHECKPOINT_RESUME_TEXT = "Resume the user's latest intent. Re-read kept recent messages above the summary to confirm the latest request. If it supersedes earlier plans in the summary, follow it. If no work remains, say so briefly; do not invent work.";
@@ -43,10 +45,13 @@ interface RolePreset {
 }
 
 type Preset = Record<RoleName, RolePreset>;
+type DenyConfig = Record<SpecialistName, string[]>;
 
 interface PresetConfig {
   defaultPreset?: string;
   presets: Record<string, Preset>;
+  deny: DenyConfig;
+  observerFallbackPresets: Set<string>;
 }
 
 interface CheckpointTool {
@@ -88,7 +93,35 @@ function parseRolePreset(value: unknown, field: string): RolePreset {
   };
 }
 
-function parseConfigFile(path: string): PresetConfig {
+function emptyDenyConfig(): DenyConfig {
+  return Object.fromEntries(SPECIALIST_NAMES.map((role) => [role, []])) as DenyConfig;
+}
+
+export function parseDenyConfig(value: unknown, field: string): DenyConfig {
+  const deny = emptyDenyConfig();
+  if (value === undefined) return deny;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${field} must be an object.`);
+  const object = value as Record<string, unknown>;
+  const unknownRoles = Object.keys(object).filter((role) => !SPECIALIST_NAMES.includes(role as SpecialistName));
+  if (unknownRoles.length > 0) throw new Error(`${field} contains unknown role(s): ${unknownRoles.join(", ")}.`);
+  for (const role of SPECIALIST_NAMES) {
+    const raw = object[role];
+    if (raw === undefined) continue;
+    if (!Array.isArray(raw)) throw new Error(`${field}.${role} must be an array of exact tool names.`);
+    const seen = new Set<string>();
+    for (let index = 0; index < raw.length; index += 1) {
+      const tool = nonEmptyString(raw[index], `${field}.${role}[${index}]`);
+      if (tool.includes(",")) throw new Error(`${field}.${role}[${index}] must not contain a comma.`);
+      if (LIFECYCLE_TOOLS.has(tool)) throw new Error(`${field}.${role} cannot deny lifecycle tool "${tool}".`);
+      if (seen.has(tool)) throw new Error(`${field}.${role} contains duplicate tool "${tool}".`);
+      seen.add(tool);
+      deny[role].push(tool);
+    }
+  }
+  return deny;
+}
+
+export function parseConfigFile(path: string): PresetConfig {
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
@@ -103,6 +136,7 @@ function parseConfigFile(path: string): PresetConfig {
   }
 
   const presets: Record<string, Preset> = {};
+  const observerFallbackPresets = new Set<string>();
   for (const [presetName, rawPreset] of Object.entries(rawPresets as Record<string, unknown>)) {
     if (!SAFE_PRESET_NAME.test(presetName)) {
       throw new Error(`${path}.presets contains invalid name "${presetName}". Use letters, numbers, dot, underscore, or hyphen.`);
@@ -113,7 +147,12 @@ function parseConfigFile(path: string): PresetConfig {
     const presetObject = rawPreset as Record<string, unknown>;
     const preset = {} as Preset;
     for (const role of ROLE_NAMES) {
-      preset[role] = parseRolePreset(presetObject[role], `${path}.presets.${presetName}.${role}`);
+      if (role === "observer" && presetObject.observer === undefined) {
+        preset.observer = { ...preset.explorer };
+        observerFallbackPresets.add(presetName);
+      } else {
+        preset[role] = parseRolePreset(presetObject[role], `${path}.presets.${presetName}.${role}`);
+      }
     }
     presets[presetName] = preset;
   }
@@ -121,7 +160,12 @@ function parseConfigFile(path: string): PresetConfig {
   const defaultPreset = object.defaultPreset === undefined
     ? undefined
     : nonEmptyString(object.defaultPreset, `${path}.defaultPreset`);
-  return { defaultPreset, presets };
+  return {
+    defaultPreset,
+    presets,
+    deny: parseDenyConfig(object.deny, `${path}.deny`),
+    observerFallbackPresets,
+  };
 }
 
 function loadPresetConfig(): PresetConfig {
@@ -143,6 +187,10 @@ function fullModelName(role: RolePreset): string {
 
 function launchModelName(role: RolePreset): string {
   return `${fullModelName(role)}:${role.thinking}`;
+}
+
+export function supportsImageInput(model: { input?: readonly string[] }): boolean {
+  return Array.isArray(model.input) && model.input.includes("image");
 }
 
 function availablePresetsMessage(config: PresetConfig): string {
@@ -247,13 +295,37 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     });
   }
 
-  function resolvePresetModels(presetName: string, preset: Preset, ctx: ExtensionContext): void {
+  function resolvePresetModels(config: PresetConfig, presetName: string, preset: Preset, ctx: ExtensionContext): void {
     for (const role of ROLE_NAMES) {
       const rolePreset = preset[role];
       const model = ctx.modelRegistry.find(rolePreset.provider, rolePreset.model);
       if (!model) throw new Error(`Preset "${presetName}" role "${role}" references unknown model ${fullModelName(rolePreset)}. Use \`pi --list-models\` to choose an exact provider/model ID.`);
       if (!ctx.modelRegistry.hasConfiguredAuth(model)) throw new Error(`Preset "${presetName}" role "${role}" has no configured authentication for ${fullModelName(rolePreset)}.`);
+      if (role === "observer" && !supportsImageInput(model) && !config.observerFallbackPresets.has(presetName)) {
+        throw new Error(`Preset "${presetName}" role "observer" requires an image-capable model; ${fullModelName(rolePreset)} does not declare image input.`);
+      }
     }
+    if (config.observerFallbackPresets.has(presetName)) {
+      const fallback = ctx.modelRegistry.find(preset.observer.provider, preset.observer.model);
+      const detail = supportsImageInput(fallback ?? {})
+        ? `using explorer model ${fullModelName(preset.observer)}`
+        : `explorer model ${fullModelName(preset.observer)} is not image-capable`;
+      report(ctx, `Preset "${presetName}" has no observer role; ${detail}. Add an explicit observer entry.`, "warning");
+    }
+  }
+
+  function configureSubagentResolvers(preset: Preset, ctx: ExtensionContext): void {
+    subagents.setModelResolver((role) => {
+      const rolePreset = preset[role];
+      if (role === "observer") {
+        const model = ctx.modelRegistry.find(rolePreset.provider, rolePreset.model);
+        if (!model || !supportsImageInput(model)) {
+          throw new Error(`Observer requires an image-capable model; ${fullModelName(rolePreset)} does not declare image input.`);
+        }
+      }
+      return launchModelName(rolePreset);
+    });
+    subagents.setDenyResolver((role) => loadPresetConfig().deny[role]);
   }
 
   async function activate(ctx: ExtensionContext, requestedPreset?: string): Promise<void> {
@@ -264,7 +336,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     if (!presetName) throw new Error(`No preset selected and no defaultPreset configured. Available presets: ${Object.keys(config.presets).join(", ")}.`);
     const preset = config.presets[presetName];
     if (!preset) throw new Error(`Unknown preset "${presetName}". Available presets: ${Object.keys(config.presets).join(", ")}.`);
-    resolvePresetModels(presetName, preset, ctx);
+    resolvePresetModels(config, presetName, preset, ctx);
     const orchestratorModel = ctx.modelRegistry.find(preset.orchestrator.provider, preset.orchestrator.model);
     if (!orchestratorModel) throw new Error(`Model disappeared while applying preset "${presetName}".`);
     if (!active) {
@@ -276,7 +348,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     active = true;
     activePresetName = presetName;
     activePreset = preset;
-    subagents.setModelResolver((role) => launchModelName(preset[role]));
+    configureSubagentResolvers(preset, ctx);
     nudgeSentThisUserTurn = false;
     (globalThis as Record<string, unknown>)[RELOAD_PRESET_STORE_KEY] = presetName;
     updateStatus(ctx);
@@ -288,6 +360,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     activePresetName = undefined;
     activePreset = undefined;
     subagents.setModelResolver();
+    subagents.setDenyResolver();
     nudgeSentThisUserTurn = false;
     delete (globalThis as Record<string, unknown>)[RELOAD_PRESET_STORE_KEY];
     if (originalModel) await pi.setModel(originalModel);
@@ -393,6 +466,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     activePresetName = undefined;
     activePreset = undefined;
     subagents.setModelResolver();
+    subagents.setDenyResolver();
     originalModel = undefined;
     originalThinking = undefined;
     nudgeSentThisUserTurn = false;
@@ -427,7 +501,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     sessionCtx = ctx;
     try {
       await subagents.restore(ctx);
-      if (activePreset) subagents.setModelResolver((role) => launchModelName(activePreset![role]));
+      if (activePreset) configureSubagentResolvers(activePreset, ctx);
     } catch (error) {
       report(ctx, error instanceof Error ? error.message : String(error), "error");
     }
@@ -531,6 +605,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     activePresetName = undefined;
     activePreset = undefined;
     subagents.setModelResolver();
+    subagents.setDenyResolver();
     originalModel = undefined;
     originalThinking = undefined;
     nudgeSentThisUserTurn = false;

@@ -46,7 +46,7 @@ function run(overrides = {}) {
     task: "implement the widget",
     cwd: "/repo",
     model: "provider/model:high",
-    tools: ["read"],
+    deniedTools: [],
     status: "completed",
     createdAt: "2026-04-16T23:59:55.000Z",
     updatedAt: "2026-04-17T00:00:00.000Z",

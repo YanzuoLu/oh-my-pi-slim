@@ -31,6 +31,11 @@
         "provider": "anthropic",
         "model": "claude-sonnet-4-6",
         "thinking": "high"
+      },
+      "observer": {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5",
+        "thinking": "medium"
       }
     },
     "economy": {
@@ -63,6 +68,11 @@
         "provider": "anthropic",
         "model": "claude-sonnet-4-6",
         "thinking": "medium"
+      },
+      "observer": {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5",
+        "thinking": "low"
       }
     },
     "openai": {
@@ -95,7 +105,20 @@
         "provider": "openai",
         "model": "gpt-5.6-sol",
         "thinking": "high"
+      },
+      "observer": {
+        "provider": "openai",
+        "model": "gpt-5.4-mini",
+        "thinking": "medium"
       }
     }
+  },
+  "deny": {
+    "explorer": [],
+    "librarian": [],
+    "oracle": [],
+    "designer": [],
+    "fixer": [],
+    "observer": []
   }
 }

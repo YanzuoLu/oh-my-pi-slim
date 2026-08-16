@@ -56,7 +56,7 @@ function run(overrides = {}) {
     task: "Low-value task text that results must not repeat",
     cwd: "/workspace/project",
     model: "openai/gpt-5.6-sol:xhigh",
-    tools: ["read", "edit", "contact_supervisor"],
+    deniedTools: ["ask_user_question"],
     status: "completed",
     createdAt: "2026-04-17T00:00:00.000Z",
     updatedAt: "2026-04-17T00:02:03.000Z",
@@ -87,12 +87,13 @@ function run(overrides = {}) {
 }
 
 test("call renderers keep complete action-specific input", () => {
-  const fresh = render(renderSubagentCall({
+  const created = render(renderSubagentCall({
+    action: "create",
     agent: "fixer",
-    task: "Fresh task line one\n<results>fresh task payload</results>\nFresh task line three",
-    cwd: "/full/fresh/cwd",
+    task: "Create task line one\n<results>create task payload</results>\nCreate task line three",
+    cwd: "/full/create/cwd",
   }, theme, { cwd: "/context/cwd" }));
-  assertFull(fresh, ["Action: fresh", "Agent: fixer", "/full/fresh/cwd", "Fresh task line one", "<results>fresh task payload</results>", "Fresh task line three"]);
+  assertFull(created, ["Action: create", "Agent: fixer", "/full/create/cwd", "Create task line one", "<results>create task payload</results>", "Create task line three"]);
 
   const resume = render(renderSubagentCall({
     action: "resume", id: "source-run-full", message: "Continuation line one\nContinuation line two",
@@ -123,7 +124,7 @@ test("call renderers keep complete action-specific input", () => {
 test("tool results start with one blank separator line", () => {
   const subagent = renderLines(renderSubagentResult(
     { details: { run: run({ id: "spacing-run", agent: "explorer", status: "starting", output: undefined, error: undefined }) } },
-    { expanded: false, isPartial: false }, theme, { args: { agent: "explorer", task: "spacing task" } },
+    { expanded: false, isPartial: false }, theme, { args: { action: "create", agent: "explorer", task: "spacing task" } },
   ));
   assert.equal(subagent[0], "");
   assert.equal(subagent[1], "✓ Started explorer [spacing-run] · starting");
@@ -137,12 +138,12 @@ test("tool results start with one blank separator line", () => {
 });
 
 test("subagent immediate results use accurate compact action acknowledgements", () => {
-  const fresh = render(renderSubagentResult(
-    { details: { run: run({ id: "fresh-id", agent: "explorer", status: "starting", output: undefined, error: undefined }) } },
-    { expanded: false, isPartial: false }, theme, { args: { agent: "explorer", task: "full task" } },
+  const created = render(renderSubagentResult(
+    { details: { run: run({ id: "create-id", agent: "explorer", status: "starting", output: undefined, error: undefined }) } },
+    { expanded: false, isPartial: false }, theme, { args: { action: "create", agent: "explorer", task: "full task" } },
   ));
-  assert.equal(fresh, "✓ Started explorer [fresh-id] · starting");
-  assert.doesNotMatch(fresh, /Subagent result|Task|Cwd|Tools|Model|Activity|Response|Session/);
+  assert.equal(created, "✓ Started explorer [create-id] · starting");
+  assert.doesNotMatch(created, /Subagent result|Task|Cwd|Tools|Model|Activity|Response|Session/);
 
   const resume = render(renderSubagentResult(
     { details: { run: run({ id: "resume-id", agent: "explorer", status: "starting", output: undefined, error: undefined }) } },
@@ -186,7 +187,7 @@ test("failed immediate result adds only complete final output and error", () => 
       output: "Failure output\n<results>failure output payload</results>",
       error: "Failure error\n<results>failure error payload</results>",
     }) } },
-    { expanded: false, isPartial: false }, theme, { args: { agent: "fixer", task: "must not repeat" } },
+    { expanded: false, isPartial: false }, theme, { args: { action: "create", agent: "fixer", task: "must not repeat" } },
   ));
   assertFull(failed, ["✗ Started fixer [failed-id] · failed", "<results>failure output payload</results>", "<results>failure error payload</results>"]);
   assert.doesNotMatch(failed, /Task:|Cwd:|Model:|Activity|Response:|Live response|Session:/);
@@ -202,7 +203,7 @@ test("list renders only compact run status and waiting request identity", () => 
           task: "TASK_SENTINEL",
           cwd: "CWD_SENTINEL",
           model: "MODEL_SENTINEL",
-          tools: ["TOOLS_SENTINEL"],
+          deniedTools: ["TOOLS_SENTINEL"],
           createdAt: "CREATED_SENTINEL",
           updatedAt: "UPDATED_SENTINEL",
           sessionFile: "SESSION_SENTINEL",
@@ -333,7 +334,7 @@ test("active notification may show only explicitly labeled live response and act
 test("missing details and partial results keep full content fallback", () => {
   const fallback = render(renderSubagentResult({
     content: [{ type: "text", text: "Fallback line one\n<results>fallback payload</results>\nFallback line three" }],
-  }, { expanded: false, isPartial: true }, theme, { args: { action: "fresh" } }));
+  }, { expanded: false, isPartial: true }, theme, { args: { action: "create" } }));
   assertFull(fallback, ["Fallback line one", "<results>fallback payload</results>", "Fallback line three"]);
 
   const supervisorFallback = render(renderSupervisorResult({
@@ -342,7 +343,7 @@ test("missing details and partial results keep full content fallback", () => {
   assertFull(supervisorFallback, ["Supervisor fallback full", "<results>supervisor fallback payload</results>"]);
 
   const emptyPartial = render(renderSubagentResult(
-    { content: [] }, { expanded: false, isPartial: true }, theme, { args: { action: "fresh" } },
+    { content: [] }, { expanded: false, isPartial: true }, theme, { args: { action: "create" } },
   ));
   assert.match(emptyPartial, /Result pending/);
 });

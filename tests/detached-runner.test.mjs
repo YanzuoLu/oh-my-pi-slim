@@ -54,7 +54,7 @@ function makeRun(scenario, { start = true, extraEnv = {} } = {}) {
     task: `task-${scenario}`,
     cwd: ROOT,
     model: "stub/model:high",
-    tools: ["read", "contact_supervisor"],
+    deniedTools: ["ask_user_question"],
     systemPrompt: "stub system prompt",
     approve: false,
     childSessionDir: join(tempDir, "child-sessions"),

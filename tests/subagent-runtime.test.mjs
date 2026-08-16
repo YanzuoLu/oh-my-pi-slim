@@ -26,7 +26,10 @@ const dependencyMap = {
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
+  "./bootstrap.js": new URL("../extensions/oh-my-pi-slim/bootstrap.ts", import.meta.url).href,
+  "./prompt-context.js": new URL("../extensions/oh-my-pi-slim/prompt-context.ts", import.meta.url).href,
   "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
+  "./subagent-runtime.js": new URL("../extensions/oh-my-pi-slim/subagent-runtime.ts", import.meta.url).href,
   "./subagent-model-display.js": new URL("../extensions/oh-my-pi-slim/subagent-model-display.ts", import.meta.url).href,
   "./subagent-run-files.js": new URL("../extensions/oh-my-pi-slim/subagent-run-files.ts", import.meta.url).href,
   "./subagent-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-transcript-renderer.ts", import.meta.url).href,
@@ -50,7 +53,7 @@ const {
   SubagentRegistry,
   restoreRunJournal,
   runJournalEntry,
-  validateFreshInput,
+  validateCreateInput,
 } = await import("../extensions/oh-my-pi-slim/subagent-core.ts");
 const {
   OmpsSubagentRuntime,
@@ -59,6 +62,11 @@ const {
   subagentParameters,
   supervisorParameters,
 } = await import("../extensions/oh-my-pi-slim/subagent-runtime.ts");
+const {
+  parseConfigFile,
+  parseDenyConfig,
+  supportsImageInput,
+} = await import("../extensions/oh-my-pi-slim/index.ts");
 const {
   atomicWriteJson,
   getProcessIdentity,
@@ -89,7 +97,7 @@ function persistedRun(overrides = {}) {
     task: "fix it",
     cwd: ROOT,
     model: "provider/model:high",
-    tools: ["read", "edit", "write", "contact_supervisor"],
+    deniedTools: [],
     status: "running",
     createdAt: "2026-04-16T23:59:00.000Z",
     updatedAt: "2026-04-16T23:59:00.000Z",
@@ -255,7 +263,8 @@ function controls(harness, id) {
 
 async function fresh(harness, overrides = {}) {
   harness.runtime.setModelResolver((agent) => `preset/${agent}:high`);
-  return harness.tools.get("subagent").execute("call", { agent: "fixer", task: "detached task", ...overrides });
+  harness.runtime.setDenyResolver(() => []);
+  return harness.tools.get("subagent").execute("create", { action: "create", agent: "fixer", task: "detached task", ...overrides });
 }
 
 async function inspect(harness, id) {
@@ -269,7 +278,7 @@ async function inspect(harness, id) {
 }
 
 test("public schemas and package-agent boundaries remain minimal", async () => {
-  assert.deepEqual(SUBAGENT_ACTIONS, ["list", "interrupt", "steer", "resume"]);
+  assert.deepEqual(SUBAGENT_ACTIONS, ["create", "list", "interrupt", "steer", "resume"]);
   assert.deepEqual(SUBAGENT_PUBLIC_FIELDS, ["agent", "task", "cwd", "action", "id", "message"]);
   assert.deepEqual(SUPERVISOR_ACTIONS, ["pending", "reply"]);
   assert.deepEqual(SUPERVISOR_PUBLIC_FIELDS, ["action", "replyTo", "message"]);
@@ -278,10 +287,65 @@ test("public schemas and package-agent boundaries remain minimal", async () => {
   assert.equal(supervisorParameters.additionalProperties, false);
   assert.deepEqual(subagentParameters.properties.action.anyOf.map(({ const: action }) => action), SUBAGENT_ACTIONS);
   assert.deepEqual(supervisorParameters.properties.action.anyOf.map(({ const: action }) => action), SUPERVISOR_ACTIONS);
-  assert.deepEqual(validateFreshInput({ agent: "explorer", task: " map " }), { agent: "explorer", task: "map", cwd: undefined });
-  assert.throws(() => validateFreshInput({ agent: "custom", task: "x" }), /Unknown agent/);
-  assert.equal(discoverPackageAgents().get("explorer").tools.includes("edit"), false);
+  assert.equal(subagentParameters.required.includes("action"), true);
+  assert.deepEqual(validateCreateInput({ agent: "explorer", task: " map " }), { agent: "explorer", task: "map", cwd: undefined });
+  assert.throws(() => validateCreateInput({ agent: "custom", task: "x" }), /Unknown agent/);
+  assert.deepEqual([...discoverPackageAgents().keys()], ["designer", "explorer", "fixer", "librarian", "observer", "oracle"]);
   assert.equal(shouldApproveChildProject(true, ROOT, join(ROOT, "extensions")), true);
+});
+
+test("deny config is partial, exact, portable, and protects lifecycle tools", () => {
+  const parsed = parseDenyConfig({
+    explorer: ["ask_user_question", "FuturePluginTool"],
+    observer: ["write"],
+  }, "config.deny");
+  assert.deepEqual(parsed, {
+    explorer: ["ask_user_question", "FuturePluginTool"],
+    librarian: [],
+    oracle: [],
+    designer: [],
+    fixer: [],
+    observer: ["write"],
+  });
+  assert.throws(() => parseDenyConfig({ custom: [] }, "config.deny"), /unknown role.*custom/i);
+  assert.throws(() => parseDenyConfig({ explorer: "read" }, "config.deny"), /must be an array/i);
+  assert.throws(() => parseDenyConfig({ explorer: ["read", "read"] }, "config.deny"), /duplicate tool "read"/i);
+  assert.throws(() => parseDenyConfig({ explorer: ["read,write"] }, "config.deny"), /must not contain a comma/i);
+  for (const reserved of ["subagent", "subagent_supervisor", "contact_supervisor"]) {
+    assert.throws(() => parseDenyConfig({ fixer: [reserved] }, "config.deny"), new RegExp(`cannot deny lifecycle tool "${reserved}"`));
+  }
+});
+
+test("old presets inherit observer from explorer and explicit observer config is retained", () => {
+  const tempDir = mkdtempSync(join(CACHE, "preset-config-"));
+  try {
+    const role = (provider, model, thinking = "medium") => ({ provider, model, thinking });
+    const oldPreset = {
+      orchestrator: role("provider", "orchestrator"),
+      explorer: role("provider", "explorer", "low"),
+      librarian: role("provider", "librarian"),
+      oracle: role("provider", "oracle", "high"),
+      designer: role("provider", "designer"),
+      fixer: role("provider", "fixer"),
+    };
+    const configFile = join(tempDir, "config.json");
+    writeFileSync(configFile, JSON.stringify({
+      defaultPreset: "legacy",
+      presets: {
+        legacy: oldPreset,
+        explicit: { ...oldPreset, observer: role("vision", "observer", "xhigh") },
+      },
+      deny: { observer: ["ask_user_question"] },
+    }));
+    const config = parseConfigFile(configFile);
+    assert.deepEqual(config.presets.legacy.observer, oldPreset.explorer);
+    assert.equal(config.observerFallbackPresets.has("legacy"), true);
+    assert.deepEqual(config.presets.explicit.observer, role("vision", "observer", "xhigh"));
+    assert.equal(config.observerFallbackPresets.has("explicit"), false);
+    assert.deepEqual(config.deny.observer, ["ask_user_question"]);
+    assert.equal(supportsImageInput({ input: ["text", "image"] }), true);
+    assert.equal(supportsImageInput({ input: ["text"] }), false);
+  } finally { rmSync(tempDir, { recursive: true, force: true }); }
 });
 
 test("approve remains contained by trust, real paths, and the parent project", () => {
@@ -302,13 +366,17 @@ test("approve remains contained by trust, real paths, and the parent project", (
   } finally { rmSync(tempDir, { recursive: true, force: true }); }
 });
 
-test("runtime rejects unknown fresh, action, and supervisor fields", async () => {
+test("runtime requires create and rejects unknown create, action, and supervisor fields", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
     await assert.rejects(
-      harness.tools.get("subagent").execute("fresh", { agent: "fixer", task: "x", model: "override" }),
+      harness.tools.get("subagent").execute("create", { action: "create", agent: "fixer", task: "x", model: "override" }),
       /unknown field.*model/i,
+    );
+    await assert.rejects(
+      harness.tools.get("subagent").execute("missing", { agent: "fixer", task: "x" }),
+      /action must be a non-empty string/i,
     );
     await assert.rejects(
       harness.tools.get("subagent").execute("list", { action: "list", async: true }),
@@ -326,13 +394,13 @@ test("registered tool prompt metadata describes the notification-driven lifecycl
   try {
     const subagent = harness.tools.get("subagent");
     const supervisor = harness.tools.get("subagent_supervisor");
-    assert.equal(subagent.description, "Start a package specialist asynchronously and receive a new run ID with status starting. Lifecycle notifications use one visible custom message delivered through steer at the next safe model boundary. Use list only for status-only retained run identity, liveness, and waiting request ID/reason; use steer for running work, interrupt for active work, and resume for saved child sessions.");
-    assert.equal(subagent.promptSnippet, "Launch a package specialist asynchronously and manage its run by ID.");
+    assert.equal(subagent.description, "Create a package specialist asynchronously and receive a new run ID with status starting. Lifecycle notifications deliver waiting requests and terminal results through steer at the next safe model boundary. Use list for retained run status, steer for running work, interrupt for active work, and resume for saved child sessions.");
+    assert.equal(subagent.promptSnippet, "Create and manage asynchronous package specialist runs.");
     const subagentGuidelines = subagent.promptGuidelines.join("\n");
     for (const phrase of ["run ID", "status starting", "request ID", "reason", "message", "completed", "failed", "interrupted", "stored output", "stored output and error", "list", "retained run ID", "liveness", "historical results", "lifecycle notification", "safe model boundary", "steer", "running run", "interrupt", "resume", "saved child session", "new run ID"]) {
       assert.match(subagentGuidelines, new RegExp(phrase, "i"));
     }
-    assert.equal(subagent.promptGuidelines[0], "A fresh subagent call supplies agent, task, and optional cwd; the result contains the complete new run record with status starting.");
+    assert.equal(subagent.promptGuidelines[0], "subagent create supplies agent, task, and optional cwd and returns the new run with status starting.");
     assert.equal(subagent.promptGuidelines.at(-1), "subagent resume returns a new run ID; subsequent steer, interrupt, and resume actions use the new run ID.");
     assert.doesNotMatch(subagentGuidelines, /\b(can|may|later)\b|as needed|do not|cannot|implementation|protocol/i);
     assert.equal(typeof subagent.renderCall, "function");
@@ -361,7 +429,7 @@ test("subagent list returns only status summaries in model content and details",
       task: "TASK_SENTINEL",
       cwd: "/CWD_SENTINEL",
       model: "MODEL_SENTINEL",
-      tools: ["TOOLS_SENTINEL"],
+      deniedTools: ["TOOLS_SENTINEL"],
       sessionFile: "/SESSION_SENTINEL",
       output: "OUTPUT_SENTINEL",
       error: "ERROR_SENTINEL",
@@ -507,7 +575,7 @@ test("run-directory helpers list safe owner children and remove only contained r
   } finally { rmSync(tempDir, { recursive: true, force: true }); }
 });
 
-test("fresh writes secure detached config, journals once, launches, and returns immediately", async () => {
+test("create writes secure detached config, journals once, launches, and returns immediately", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
@@ -522,7 +590,7 @@ test("fresh writes secure detached config, journals once, launches, and returns 
         task: "detached task",
         cwd: ROOT,
         model: "preset/fixer:high",
-        tools: discoverPackageAgents().get("fixer").tools,
+        deniedTools: [],
         status: "starting",
         createdAt: new Date(NOW_MS).toISOString(),
         updatedAt: new Date(NOW_MS).toISOString(),
@@ -538,8 +606,10 @@ test("fresh writes secure detached config, journals once, launches, and returns 
     assert.deepEqual(config.piInvocation.args.slice(0, 4), ["--mode", "rpc", "--model", "preset/fixer:high"]);
     assert.equal(config.piInvocation.args.includes("--session-dir"), true);
     assert.equal(config.piInvocation.args.includes("--system-prompt"), true);
-    assert.equal(config.piInvocation.args.includes("--tools"), true);
+    assert.equal(config.piInvocation.args.includes("--tools"), false);
+    assert.equal(config.piInvocation.args.includes("--exclude-tools"), false);
     assert.equal(config.piInvocation.args.includes("--extension"), true);
+    assert.deepEqual(config.deniedTools, []);
     assert.equal(config.env.OMPS_PARENT_RUN_ID, id);
     const identity = JSON.parse(readFileSync(harness.paths(id).identityFile, "utf8"));
     assert.deepEqual(identity, {
@@ -554,7 +624,68 @@ test("fresh writes secure detached config, journals once, launches, and returns 
   } finally { harness.cleanup(); }
 });
 
-test("fresh launch waits for the just-spawned PID to exit before cleaning up when process identity is unavailable", async () => {
+test("create persists exact deny entries and emits --exclude-tools without a positive allowlist", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    harness.runtime.setModelResolver((agent) => `preset/${agent}:high`);
+    harness.runtime.setDenyResolver(() => ["ask_user_question", "future_plugin_tool"]);
+    const result = await harness.tools.get("subagent").execute("create", {
+      action: "create",
+      agent: "observer",
+      task: "inspect the screenshot",
+    });
+    const id = result.details.run.id;
+    const config = readConfig(harness, id);
+    assert.equal(result.details.run.agent, "observer");
+    assert.deepEqual(result.details.run.deniedTools, ["ask_user_question", "future_plugin_tool"]);
+    assert.deepEqual(config.deniedTools, ["ask_user_question", "future_plugin_tool"]);
+    assert.equal(config.piInvocation.args.includes("--tools"), false);
+    const denyIndex = config.piInvocation.args.indexOf("--exclude-tools");
+    assert.notEqual(denyIndex, -1);
+    assert.equal(config.piInvocation.args[denyIndex + 1], "ask_user_question,future_plugin_tool");
+  } finally { harness.cleanup(); }
+});
+
+test("each create resolves a fresh deny policy while active runs retain launch-time policy", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    harness.runtime.setModelResolver((agent) => `preset/${agent}:high`);
+    let policy = ["first_tool"];
+    harness.runtime.setDenyResolver(() => policy);
+    const first = await harness.tools.get("subagent").execute("create", {
+      action: "create", agent: "fixer", task: "first",
+    });
+    policy = ["second_tool"];
+    const second = await harness.tools.get("subagent").execute("create", {
+      action: "create", agent: "explorer", task: "second",
+    });
+    assert.deepEqual(harness.runtime.registry.get(first.details.run.id).deniedTools, ["first_tool"]);
+    assert.deepEqual(harness.runtime.registry.get(second.details.run.id).deniedTools, ["second_tool"]);
+    assert.deepEqual(readConfig(harness, first.details.run.id).deniedTools, ["first_tool"]);
+    assert.deepEqual(readConfig(harness, second.details.run.id).deniedTools, ["second_tool"]);
+  } finally { harness.cleanup(); }
+});
+
+test("runtime rejects lifecycle tools from a launch-time deny resolver", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    harness.runtime.setModelResolver((agent) => `preset/${agent}:high`);
+    for (const reserved of ["subagent", "subagent_supervisor", "contact_supervisor"]) {
+      harness.runtime.setDenyResolver(() => [reserved]);
+      await assert.rejects(
+        harness.tools.get("subagent").execute("create", { action: "create", agent: "fixer", task: "x" }),
+        new RegExp(`${reserved}.*cannot be denied`),
+      );
+    }
+    assert.equal(harness.runtime.registry.list().length, 0);
+    assert.equal(harness.launches.length, 0);
+  } finally { harness.cleanup(); }
+});
+
+test("create waits for the just-spawned PID to exit before cleaning up when process identity is unavailable", async () => {
   const sleeps = [];
   let harness;
   harness = createHarness({
@@ -578,7 +709,7 @@ test("fresh launch waits for the just-spawned PID to exit before cleaning up whe
       task: "detached task",
       cwd: ROOT,
       model: "preset/fixer:high",
-      tools: discoverPackageAgents().get("fixer").tools,
+      deniedTools: [],
       status: "failed",
       createdAt: new Date(NOW_MS).toISOString(),
       updatedAt: new Date(NOW_MS).toISOString(),
@@ -595,7 +726,7 @@ test("fresh launch waits for the just-spawned PID to exit before cleaning up whe
   } finally { harness.cleanup(); }
 });
 
-test("fresh launch retains the run directory when the just-spawned PID cannot be confirmed exited", async () => {
+test("create retains the run directory when the just-spawned PID cannot be confirmed exited", async () => {
   const sleeps = [];
   const harness = createHarness({ keepAliveAfterKill: true, sleep: async (ms) => { sleeps.push(ms); } });
   try {
@@ -618,7 +749,7 @@ test("fresh launch retains the run directory when the just-spawned PID cannot be
   } finally { harness.cleanup(); }
 });
 
-test("fresh launch failure returns the complete failed run", async () => {
+test("create failure returns the complete failed run", async () => {
   const harness = createHarness({ launchError: new Error("spawn failed") });
   try {
     await harness.restore();
@@ -631,7 +762,7 @@ test("fresh launch failure returns the complete failed run", async () => {
       task: "detached task",
       cwd: ROOT,
       model: "preset/fixer:high",
-      tools: discoverPackageAgents().get("fixer").tools,
+      deniedTools: [],
       status: "failed",
       createdAt: new Date(NOW_MS).toISOString(),
       updatedAt: new Date(NOW_MS).toISOString(),
@@ -1528,7 +1659,7 @@ test("restore terminates verified live orphans before cleanup and removes termin
     const config = {
       v: 1, runId: orphanId, token: "orphan-token", ownerSessionId: harness.ownerSessionId,
       agent: "fixer", task: "orphan", cwd: ROOT, model: "provider/model:high",
-      tools: ["read"], systemPrompt: "prompt", approve: false,
+      deniedTools: [], systemPrompt: "prompt", approve: false,
       childSessionDir: join(harness.tempDir, "children"),
       piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {},
       createdAt: new Date(NOW_MS).toISOString(),
@@ -1557,7 +1688,7 @@ test("restore GC retains an orphan whose PID was reused", async () => {
     const config = {
       v: 1, runId: orphanId, token: "orphan-token", ownerSessionId: harness.ownerSessionId,
       agent: "fixer", task: "orphan", cwd: ROOT, model: "provider/model:high",
-      tools: ["read"], systemPrompt: "prompt", approve: false,
+      deniedTools: [], systemPrompt: "prompt", approve: false,
       childSessionDir: join(harness.tempDir, "children"),
       piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {},
       createdAt: new Date(NOW_MS).toISOString(),
@@ -1584,7 +1715,7 @@ test("restore keeps offline terminal state but interrupts and kills any prior ac
       mkdirSync(paths.controlDir, { recursive: true, mode: 0o700 });
       const config = {
         v: 1, runId: run.id, token: `token-${run.id}`, ownerSessionId: harness.ownerSessionId,
-        agent: run.agent, task: run.task, cwd: run.cwd, model: run.model, tools: run.tools,
+        agent: run.agent, task: run.task, cwd: run.cwd, model: run.model, deniedTools: run.deniedTools,
         systemPrompt: "prompt", approve: false, childSessionDir: join(harness.tempDir, "children"),
         piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {}, createdAt: run.createdAt,
       };
@@ -1617,7 +1748,7 @@ test("restore kills a prior active runner from verified identity when state is a
     mkdirSync(paths.controlDir, { recursive: true, mode: 0o700 });
     const config = {
       v: 1, runId: activeRun.id, token: "identity-token", ownerSessionId: harness.ownerSessionId,
-      agent: activeRun.agent, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, tools: activeRun.tools,
+      agent: activeRun.agent, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, deniedTools: activeRun.deniedTools,
       systemPrompt: "prompt", approve: false, childSessionDir: join(harness.tempDir, "children"),
       piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {}, createdAt: activeRun.createdAt,
     };
@@ -1641,7 +1772,7 @@ test("restore does not kill an identity whose token does not match launch config
     mkdirSync(paths.controlDir, { recursive: true, mode: 0o700 });
     atomicWriteJson(paths.configFile, {
       v: 1, runId: activeRun.id, token: "config-token", ownerSessionId: harness.ownerSessionId,
-      agent: activeRun.agent, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, tools: activeRun.tools,
+      agent: activeRun.agent, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, deniedTools: activeRun.deniedTools,
       systemPrompt: "prompt", approve: false, childSessionDir: join(harness.tempDir, "children"),
       piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {}, createdAt: activeRun.createdAt,
     });
@@ -1665,7 +1796,7 @@ test("restore does not signal a reused PID whose OS identity changed", async () 
     mkdirSync(paths.controlDir, { recursive: true, mode: 0o700 });
     const config = {
       v: 1, runId: activeRun.id, token: "identity-token", ownerSessionId: harness.ownerSessionId,
-      agent: activeRun.agent, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, tools: activeRun.tools,
+      agent: activeRun.agent, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, deniedTools: activeRun.deniedTools,
       systemPrompt: "prompt", approve: false, childSessionDir: join(harness.tempDir, "children"),
       piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {}, createdAt: activeRun.createdAt,
     };
@@ -1690,7 +1821,7 @@ test("restore treats legacy runner identity without processIdentity as unverifia
     mkdirSync(paths.controlDir, { recursive: true, mode: 0o700 });
     const config = {
       v: 1, runId: activeRun.id, token: "legacy-token", ownerSessionId: harness.ownerSessionId,
-      agent: activeRun.agent, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, tools: activeRun.tools,
+      agent: activeRun.agent, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, deniedTools: activeRun.deniedTools,
       systemPrompt: "prompt", approve: false, childSessionDir: join(harness.tempDir, "children"),
       piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {}, createdAt: activeRun.createdAt,
     };
@@ -1748,6 +1879,7 @@ test("resume creates a new run ID and a complete --session invocation", async ()
     const sessionFile = join(harness.tempDir, "source.jsonl");
     writeFileSync(sessionFile, "session");
     harness.runtime.registry.add(persistedRun({ id: "source", status: "interrupted", sessionFile }));
+    harness.runtime.setDenyResolver(() => ["ask_user_question"]);
     const result = await harness.tools.get("subagent").execute("resume", { action: "resume", id: "source", message: "continue" });
     const id = result.details.run.id;
     const config = readConfig(harness, id);
@@ -1759,7 +1891,7 @@ test("resume creates a new run ID and a complete --session invocation", async ()
       task: "continue",
       cwd: ROOT,
       model: "provider/model:high",
-      tools: ["read", "edit", "write", "contact_supervisor"],
+      deniedTools: ["ask_user_question"],
       status: "starting",
       sourceRunId: "source",
       sessionFile,
@@ -1771,5 +1903,9 @@ test("resume creates a new run ID and a complete --session invocation", async ()
     const sessionIndex = config.piInvocation.args.indexOf("--session");
     assert.equal(config.piInvocation.args[sessionIndex + 1], sessionFile);
     assert.equal(config.runId, id);
+    assert.deepEqual(config.deniedTools, ["ask_user_question"]);
+    const denyIndex = config.piInvocation.args.indexOf("--exclude-tools");
+    assert.notEqual(denyIndex, -1);
+    assert.equal(config.piInvocation.args[denyIndex + 1], "ask_user_question");
   } finally { harness.cleanup(); }
 });

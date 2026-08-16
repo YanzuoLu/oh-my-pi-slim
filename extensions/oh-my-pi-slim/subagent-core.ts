@@ -1,4 +1,4 @@
-export const SPECIALIST_NAMES = ["explorer", "librarian", "oracle", "designer", "fixer"] as const;
+export const SPECIALIST_NAMES = ["explorer", "librarian", "oracle", "designer", "fixer", "observer"] as const;
 
 export const RUN_STATUSES = [
   "starting",
@@ -16,6 +16,7 @@ export const TERMINAL_RUN_STATUSES = new Set<RunStatus>([
 ]);
 
 export const SUBAGENT_ACTIONS = [
+  "create",
   "list",
   "interrupt",
   "steer",
@@ -52,7 +53,7 @@ export interface PersistedRun {
   task: string;
   cwd: string;
   model: string;
-  tools: string[];
+  deniedTools: string[];
   status: RunStatus;
   createdAt: string;
   updatedAt: string;
@@ -103,14 +104,14 @@ export function requireString(value: unknown, field: string): string {
   return value.trim();
 }
 
-export function validateFreshInput(input: SubagentLaunchInput): {
+export function validateCreateInput(input: SubagentLaunchInput): {
   agent: SpecialistName;
   task: string;
   cwd?: string;
 } {
   const agent = requireString(input.agent, "agent");
   if (!SPECIALIST_NAMES.includes(agent as SpecialistName)) {
-    throw new Error(`Unknown agent "${agent}". Use explorer, librarian, oracle, designer, or fixer.`);
+    throw new Error(`Unknown agent "${agent}". Use explorer, librarian, oracle, designer, fixer, or observer.`);
   }
   return {
     agent: agent as SpecialistName,
@@ -159,6 +160,11 @@ export function parsePersistedRun(value: unknown): PersistedRun | undefined {
   const error = optionalString(run.error);
   const request = parseRequest(run.request);
   const notificationPending = optionalString(run.notificationPending);
+  const deniedTools = run.deniedTools === undefined
+    ? []
+    : Array.isArray(run.deniedTools) && run.deniedTools.every((tool) => typeof tool === "string")
+      ? [...run.deniedTools] as string[]
+      : null;
   if (
     typeof run.id !== "string" ||
     !isSafePathSegment(run.id) ||
@@ -167,8 +173,7 @@ export function parsePersistedRun(value: unknown): PersistedRun | undefined {
     typeof run.task !== "string" ||
     typeof run.cwd !== "string" ||
     typeof run.model !== "string" ||
-    !Array.isArray(run.tools) ||
-    run.tools.some((tool) => typeof tool !== "string") ||
+    deniedTools === null ||
     !RUN_STATUSES.includes(run.status as RunStatus) ||
     typeof run.createdAt !== "string" ||
     typeof run.updatedAt !== "string" ||
@@ -188,7 +193,7 @@ export function parsePersistedRun(value: unknown): PersistedRun | undefined {
     task: run.task,
     cwd: run.cwd,
     model: run.model,
-    tools: [...run.tools] as string[],
+    deniedTools,
     status: run.status as RunStatus,
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
@@ -204,7 +209,7 @@ export function parsePersistedRun(value: unknown): PersistedRun | undefined {
 function cloneRun(run: PersistedRun): PersistedRun {
   return {
     ...run,
-    tools: [...run.tools],
+    deniedTools: [...run.deniedTools],
     request: run.request
       ? { ...run.request, interview: run.request.interview ? { ...run.request.interview } : undefined }
       : undefined,
@@ -292,7 +297,11 @@ export class SubagentRegistry {
 
   update(id: string, patch: Partial<PersistedRun>): PersistedRun {
     const current = this.require(id);
-    const next = cloneRun({ ...current, ...patch, tools: patch.tools ? [...patch.tools] : current.tools });
+    const next = cloneRun({
+      ...current,
+      ...patch,
+      deniedTools: patch.deniedTools ? [...patch.deniedTools] : current.deniedTools,
+    });
     this.runs.set(id, next);
     if (isTerminalStatus(next.status)) this.liveIds.delete(id);
     this.emit();
