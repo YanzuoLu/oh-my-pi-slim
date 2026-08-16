@@ -124,7 +124,7 @@ Detached execution 只持续到当前 owner session 结束。所有 `session_shu
 
 ## 后台 agent UI
 
-TUI 会在 editor 上方显示一个适配自 `gotgenes/pi-packages` 中 `packages/pi-subagents` 的 widget。它保留原 UI 的 tree layout、80 ms spinner、最多 12 行、active 优先 overflow、status bar 与 finished 短暂 linger，并从 detached activity overlay 显示 turn、tool use、token/context/compaction、elapsed、active tool 描述与 response 摘要。`starting` 显示为 queued，`running` 使用动画，`waiting` 使用 warning 标记并显示 supervisor request，terminal run 短暂显示结果图标。RPC mode 绝不注册 widget。
+TUI 会在 editor 上方显示一个适配自 `gotgenes/pi-packages` 中 `packages/pi-subagents` 的 widget。它保留原 UI 的 tree layout、80 ms spinner、最多 12 行、active 优先 overflow、status bar 与 finished 短暂 linger。每个 active run 是不可拆分的三行 tree entry：第一行显示 spinner 或 waiting 标记、agent、run ID、waiting 状态与 task；dim 的第二行以 `(provider) model • thinking` 开头，随后显示 turn、tool use、token/context/compaction 与 elapsed；第三行显示当前 activity，或以 warning 色显示 supervisor request。task 只占第一行并随该行截断，不再挤掉优先可见的 model/stats 行。12 行预算绝不显示半个 active entry，因此最多完整显示 3 个 active run，overflow 会准确汇总；`starting` 仍是一行 queued summary，terminal run 仍短暂显示一行 outcome。RPC mode 绝不注册 widget。
 
 ## 有意限制的范围
 

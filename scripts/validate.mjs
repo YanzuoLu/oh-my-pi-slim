@@ -77,7 +77,7 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.8.0", "package version must be 0.8.0");
+check(packageJson.version === "0.8.1", "package version must be 0.8.1");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify(["./extensions/oh-my-pi-slim/index.ts"]), "package must load only the OMPS extension");
 check(packageJson.pi?.subagents === undefined, "package must not expose a pi.subagents manifest");
 check(packageJson.dependencies === undefined || Object.keys(packageJson.dependencies).length === 0, "package must have no runtime dependency on the removed backend");
@@ -257,7 +257,8 @@ hasAll(widget, ["setIntervalFn(() => this.update(), 80)", "requestRender()", 'pl
 check(!/pi\.on\("tool_execution_start"[\s\S]{0,120}subagents\.onTurnStart/.test(extension), "widget turn aging must not bind to tool_execution_start");
 hasAll(widgetRenderer, [
   "MAX_SUBAGENT_WIDGET_LINES = 12", '"├─"', '"└─"', "renderSubagentWidgetLines", "waiting",
-  "formatWidgetTurns", "formatWidgetSessionTokens", "describeWidgetActivity",
+  "formatWidgetModel", "THINKING_LEVELS", "run.model", "formatWidgetTurns", "formatWidgetSessionTokens",
+  "describeWidgetActivity", "activeLines.length * 3", "budget >= 3",
 ], "subagent widget renderer");
 check(existsSync(join(ROOT, "THIRD_PARTY_NOTICES.md")), "third-party notice must exist for the adapted widget");
 

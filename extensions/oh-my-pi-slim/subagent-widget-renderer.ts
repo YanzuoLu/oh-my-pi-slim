@@ -21,11 +21,31 @@ export { SUBAGENT_WIDGET_GLYPHS, SUBAGENT_WIDGET_SPINNER } from "./subagent-widg
 
 export type WidgetRun = Pick<
   PersistedRun,
-  "id" | "agent" | "task" | "status" | "createdAt" | "updatedAt" | "error" | "request"
+  "id" | "agent" | "task" | "model" | "status" | "createdAt" | "updatedAt" | "error" | "request"
 > & { readonly activity?: DetachedRunActivity };
 
 export const MAX_SUBAGENT_WIDGET_LINES = 12;
 const ACTIVE_STATUSES = new Set<RunStatus>(["starting", "running", "waiting"]);
+const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+export function formatWidgetModel(canonicalModel: string): string {
+  const slash = canonicalModel.indexOf("/");
+  if (slash <= 0 || slash >= canonicalModel.length - 1) return canonicalModel;
+  const provider = canonicalModel.slice(0, slash);
+  let model = canonicalModel.slice(slash + 1);
+  if (!provider.trim() || !model.trim()) return canonicalModel;
+
+  let thinking: string | undefined;
+  const colon = model.lastIndexOf(":");
+  if (colon > 0) {
+    const candidate = model.slice(colon + 1);
+    if (THINKING_LEVELS.has(candidate) && model.slice(0, colon).trim()) {
+      thinking = candidate;
+      model = model.slice(0, colon);
+    }
+  }
+  return `(${provider}) ${model}${thinking ? ` • ${thinking}` : ""}`;
+}
 
 function shortTask(task: string): string {
   return task.split("\n").find((line) => line.trim())?.trim() ?? "";
@@ -81,17 +101,18 @@ export function renderActiveRunLines(
   spinnerFrame: number,
   theme: WidgetTheme,
   nowMs = Date.now(),
-): [header: string, activity: string] {
+): [header: string, stats: string, activity: string] {
   const waiting = run.status === "waiting";
   const indicator = waiting
     ? theme.fg("warning", SUBAGENT_WIDGET_GLYPHS.waiting)
     : theme.fg("accent", SUBAGENT_WIDGET_SPINNER[spinnerFrame % SUBAGENT_WIDGET_SPINNER.length]);
   const state = waiting ? ` ${theme.fg("warning", "waiting")}` : "";
-  const header = `${indicator} ${theme.bold(runName(run, theme))}${state}  ${theme.fg("muted", shortTask(run.task))} ${theme.fg("dim", "·")} ${theme.fg("dim", stats(run, theme, nowMs))}`;
+  const header = `${indicator} ${theme.bold(runName(run, theme))}${state}  ${theme.fg("muted", shortTask(run.task))}`;
+  const statsLine = theme.fg("dim", `${formatWidgetModel(run.model)} · ${stats(run, theme, nowMs)}`);
   const activityText = waiting
     ? run.request?.message || "supervisor reply required"
     : describeWidgetActivity(run.activity?.activeTools ?? {}, run.activity?.responseText);
-  return [header, theme.fg(waiting ? "warning" : "dim", `  ${SUBAGENT_WIDGET_GLYPHS.subLine}  ${activityText}`)];
+  return [header, statsLine, theme.fg(waiting ? "warning" : "dim", activityText)];
 }
 
 interface Categories {
@@ -113,8 +134,9 @@ function categorizeRuns(
 
 interface Sections {
   finishedLines: string[];
-  activeLines: [string, string][];
+  activeLines: [header: string, stats: string, activity: string][];
   queuedLine: string | undefined;
+  queuedCount: number;
 }
 
 function buildSections(
@@ -127,29 +149,32 @@ function buildSections(
   const finishedLines = categories.finished.map((run) =>
     truncate(theme.fg("dim", "├─") + " " + renderFinishedRunLine(run, theme, nowMs)));
   const activeLines = categories.active.map((run) => {
-    const [header, activity] = renderActiveRunLines(run, spinnerFrame, theme, nowMs);
+    const [header, statsLine, activity] = renderActiveRunLines(run, spinnerFrame, theme, nowMs);
     return [
       truncate(theme.fg("dim", "├─") + ` ${header}`),
-      truncate(theme.fg("dim", "│  ") + activity),
-    ] as [string, string];
+      truncate(theme.fg("dim", "│  ├─") + ` ${statsLine}`),
+      truncate(theme.fg("dim", "│  └─") + ` ${activity}`),
+    ] as [string, string, string];
   });
   const queuedLine = categories.queued.length > 0
     ? truncate(theme.fg("dim", "├─") + ` ${theme.fg("muted", SUBAGENT_WIDGET_GLYPHS.queued)} ${theme.fg("dim", `${categories.queued.length} queued`)}`)
     : undefined;
-  return { finishedLines, activeLines, queuedLine };
+  return { finishedLines, activeLines, queuedLine, queuedCount: categories.queued.length };
 }
 
 function assembleWithinBudget(heading: string, sections: Sections): string[] {
   const lines = [heading, ...sections.finishedLines];
-  for (const pair of sections.activeLines) lines.push(...pair);
-  if (sections.queuedLine) lines.push(sections.queuedLine);
-  if (lines.length > 1) {
+  for (const entry of sections.activeLines) lines.push(...entry);
+  if (sections.queuedLine) {
+    lines.push(sections.queuedLine.replace("├─", "└─"));
+  } else if (sections.activeLines.length > 0) {
+    const headerIndex = lines.length - 3;
+    lines[headerIndex] = lines[headerIndex].replace("├─", "└─");
+    lines[headerIndex + 1] = lines[headerIndex + 1].replace("│  ", "   ");
+    lines[headerIndex + 2] = lines[headerIndex + 2].replace("│  ", "   ");
+  } else if (sections.finishedLines.length > 0) {
     const last = lines.length - 1;
     lines[last] = lines[last].replace("├─", "└─");
-    if (sections.activeLines.length > 0 && !sections.queuedLine && last >= 2) {
-      lines[last - 1] = lines[last - 1].replace("├─", "└─");
-      lines[last] = lines[last].replace("│  ", "   ");
-    }
   }
   return lines;
 }
@@ -164,16 +189,19 @@ function assembleOverflow(
   const lines = [heading];
   let budget = maxBody - 1;
   let hiddenActive = 0;
+  let hiddenQueued = 0;
   let hiddenFinished = 0;
-  for (const pair of sections.activeLines) {
-    if (budget >= 2) {
-      lines.push(...pair);
-      budget -= 2;
+  for (const entry of sections.activeLines) {
+    if (budget >= 3) {
+      lines.push(...entry);
+      budget -= 3;
     } else hiddenActive += 1;
   }
-  if (sections.queuedLine && budget >= 1) {
-    lines.push(sections.queuedLine);
-    budget -= 1;
+  if (sections.queuedLine) {
+    if (budget >= 1) {
+      lines.push(sections.queuedLine);
+      budget -= 1;
+    } else hiddenQueued = sections.queuedCount;
   }
   for (const line of sections.finishedLines) {
     if (budget >= 1) {
@@ -183,8 +211,10 @@ function assembleOverflow(
   }
   const parts: string[] = [];
   if (hiddenActive > 0) parts.push(`${hiddenActive} active`);
+  if (hiddenQueued > 0) parts.push(`${hiddenQueued} queued`);
   if (hiddenFinished > 0) parts.push(`${hiddenFinished} finished`);
-  lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hiddenActive + hiddenFinished} more (${parts.join(", ")})`)}`));
+  const hiddenTotal = hiddenActive + hiddenQueued + hiddenFinished;
+  lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hiddenTotal} more (${parts.join(", ")})`)}`));
   return lines;
 }
 
@@ -207,7 +237,7 @@ export function renderSubagentWidgetLines(params: {
   const heading = truncate(theme.fg(headingColor, headingIcon) + " " + theme.fg(headingColor, "Agents"));
   const sections = buildSections(categories, spinnerFrame, theme, truncate, nowMs);
   const maxBody = MAX_SUBAGENT_WIDGET_LINES - 1;
-  const totalBody = sections.finishedLines.length + sections.activeLines.length * 2 + (sections.queuedLine ? 1 : 0);
+  const totalBody = sections.finishedLines.length + sections.activeLines.length * 3 + (sections.queuedLine ? 1 : 0);
   return totalBody <= maxBody
     ? assembleWithinBudget(heading, sections)
     : assembleOverflow(heading, sections, maxBody, truncate, theme);

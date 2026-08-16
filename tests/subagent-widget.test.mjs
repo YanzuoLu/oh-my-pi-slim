@@ -26,6 +26,7 @@ registerHooks({
 const { SubagentWidget, assembleSubagentWidgetState } = await import("../extensions/oh-my-pi-slim/subagent-widget.ts");
 const {
   MAX_SUBAGENT_WIDGET_LINES,
+  formatWidgetModel,
   renderActiveRunLines,
   renderFinishedRunLine,
   renderSubagentWidgetLines,
@@ -67,29 +68,48 @@ test("widget state treats starting as queued and waiting as active", () => {
   });
 });
 
-test("pure line renderers show spinner, waiting request, and terminal outcome icons", () => {
-  const [runningHeader, runningActivity] = renderActiveRunLines(
-    run({ status: "running", updatedAt: "2026-04-16T23:59:56.000Z" }), 0, theme, NOW_MS,
-  );
-  assert.match(runningHeader, /⠋/);
-  assert.match(runningHeader, /\*\*fixer \[run-1\]\*\*/);
-  assert.match(runningActivity, /thinking/);
+test("model formatter parses provider and known thinking suffixes with safe fallbacks", () => {
+  for (const thinking of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+    assert.equal(formatWidgetModel(`openai/gpt-5.6-sol:${thinking}`), `(openai) gpt-5.6-sol • ${thinking}`);
+  }
+  assert.equal(formatWidgetModel("provider/model:variant:max"), "(provider) model:variant • max");
+  assert.equal(formatWidgetModel("anthropic/claude-opus-4-6"), "(anthropic) claude-opus-4-6");
+  assert.equal(formatWidgetModel("custom/model:experimental"), "(custom) model:experimental");
+  assert.equal(formatWidgetModel("model-without-provider:high"), "model-without-provider:high");
+  assert.equal(formatWidgetModel("/missing-provider:high"), "/missing-provider:high");
+});
 
-  const [waitingHeader, waitingActivity] = renderActiveRunLines(run({
+test("pure active renderer uses three exact lines and terminal renderers keep outcome icons", () => {
+  const [runningHeader, runningStats, runningActivity] = renderActiveRunLines(
+    run({ status: "running", model: "openai/gpt-5.6-sol:xhigh", updatedAt: "2026-04-16T23:59:56.000Z" }),
+    0,
+    theme,
+    NOW_MS,
+  );
+  assert.equal(runningHeader, "⠋ **fixer [run-1]**  implement the widget");
+  assert.equal(runningStats, "(openai) gpt-5.6-sol • xhigh · ↻0 · 5.0s");
+  assert.equal(runningActivity, "thinking…");
+  assert.doesNotMatch(runningHeader, /↻|tool use|token|5\.0s/);
+  assert.match(runningStats, /^\(openai\) gpt-5\.6-sol • xhigh · ↻0/);
+
+  const [waitingHeader, waitingStats, waitingActivity] = renderActiveRunLines(run({
     status: "waiting",
+    model: "openai/gpt-5.6-sol:xhigh",
     request: { id: "req", runId: "run-1", reason: "need_decision", message: "Choose A or B", createdAt: "now" },
   }), 3, theme, NOW_MS);
-  assert.match(waitingHeader, /!.*waiting/);
-  assert.match(waitingActivity, /Choose A or B/);
+  assert.equal(waitingHeader, "! **fixer [run-1]** waiting  implement the widget");
+  assert.equal(waitingStats, "(openai) gpt-5.6-sol • xhigh · ↻0 · 5.0s");
+  assert.equal(waitingActivity, "Choose A or B");
 
   assert.match(renderFinishedRunLine(run({ status: "completed" }), theme, NOW_MS), /✓/);
   assert.match(renderFinishedRunLine(run({ status: "failed", error: "boom" }), theme, NOW_MS), /✗.*failed: boom/);
   assert.match(renderFinishedRunLine(run({ status: "interrupted" }), theme, NOW_MS), /✗.*interrupted/);
 });
 
-test("activity formatting matches gotgenes stats, tools, response, tokens, context, and compactions", () => {
-  const [toolHeader, toolActivity] = renderActiveRunLines(run({
+test("activity formatting keeps model first, then stats, tools, response, tokens, context, and compactions", () => {
+  const [toolHeader, toolStats, toolActivity] = renderActiveRunLines(run({
     status: "running",
+    model: "openai/gpt-5.6-sol:minimal",
     activity: {
       turnCount: 3,
       toolUses: 2,
@@ -100,10 +120,11 @@ test("activity formatting matches gotgenes stats, tools, response, tokens, conte
       compactionCount: 2,
     },
   }), 0, theme, NOW_MS);
-  assert.match(toolHeader, /↻3 · 2 tool uses · 12\.3k token \(72% · ⇊2\) · 5\.0s/);
-  assert.match(toolActivity, /reading, searching 2 patterns…/);
+  assert.equal(toolHeader, "⠋ **fixer [run-1]**  implement the widget");
+  assert.equal(toolStats, "(openai) gpt-5.6-sol • minimal · ↻3 · 2 tool uses · 12.3k token (72% · ⇊2) · 5.0s");
+  assert.equal(toolActivity, "reading, searching 2 patterns…");
 
-  const [, responseActivity] = renderActiveRunLines(run({
+  const [, responseStats, responseActivity] = renderActiveRunLines(run({
     status: "running",
     activity: {
       turnCount: 1, toolUses: 0, activeTools: {},
@@ -111,14 +132,15 @@ test("activity formatting matches gotgenes stats, tools, response, tokens, conte
       tokens: 0, compactionCount: 0,
     },
   }), 0, theme, NOW_MS);
-  assert.match(responseActivity, /A concise response line that is visible/);
+  assert.equal(responseStats, "(provider) model • high · ↻1 · 5.0s");
+  assert.equal(responseActivity, "A concise response line that is visible");
 });
 
-test("pure widget renderer preserves tree layout and queued summary", () => {
+test("pure widget renderer preserves the three-line active tree and queued summary", () => {
   const lines = renderSubagentWidgetLines({
     runs: [
       run({ id: "done", status: "completed" }),
-      run({ id: "live", status: "running", updatedAt: "2026-04-16T23:59:56.000Z" }),
+      run({ id: "live", status: "running", model: "openai/gpt-5.6-sol:xhigh", updatedAt: "2026-04-16T23:59:56.000Z" }),
       run({ id: "queue", status: "starting" }),
     ],
     spinnerFrame: 0,
@@ -127,20 +149,29 @@ test("pure widget renderer preserves tree layout and queued summary", () => {
     shouldShowFinished: () => true,
     nowMs: NOW_MS,
   });
-  assert.equal(lines.length, 5);
-  assert.match(lines[0], /● Agents/);
-  assert.match(lines[1], /├─ ✓/);
-  assert.match(lines[2], /├─ ⠋/);
-  assert.match(lines[3], /│.*⎿/);
-  assert.match(lines[4], /└─ ◦ 1 queued/);
+  assert.deepEqual(lines, [
+    "● Agents",
+    "├─ ✓ fixer [done]  implement the widget · ↻0 · 5.0s",
+    "├─ ⠋ **fixer [live]**  implement the widget",
+    "│  ├─ (openai) gpt-5.6-sol • xhigh · ↻0 · 5.0s",
+    "│  └─ thinking…",
+    "└─ ◦ 1 queued",
+  ]);
 });
 
-test("pure widget renderer caps at 12 lines and prioritizes active runs over finished runs", () => {
+test("pure widget renderer caps at 12 lines, keeps active entries atomic, and reports overflow exactly", () => {
   const runs = [];
-  for (let index = 0; index < 6; index += 1) {
-    runs.push(run({ id: `active-${index}`, status: index === 0 ? "waiting" : "running" }));
+  for (let index = 0; index < 5; index += 1) {
+    runs.push(run({
+      id: `active-${index}`,
+      status: index === 0 ? "waiting" : "running",
+      model: "openai/gpt-5.6-sol:xhigh",
+    }));
   }
-  runs.push(run({ id: "finished", status: "completed" }));
+  runs.push(run({ id: "queue-0", status: "starting" }));
+  runs.push(run({ id: "queue-1", status: "starting" }));
+  runs.push(run({ id: "finished-0", status: "completed" }));
+  runs.push(run({ id: "finished-1", status: "completed" }));
   const lines = renderSubagentWidgetLines({
     runs,
     spinnerFrame: 0,
@@ -150,9 +181,15 @@ test("pure widget renderer caps at 12 lines and prioritizes active runs over fin
     nowMs: NOW_MS,
   });
   assert.equal(lines.length, MAX_SUBAGENT_WIDGET_LINES);
-  assert.match(lines.at(-1), /\+2 more \(1 active, 1 finished\)/);
-  assert.match(lines.join("\n"), /Choose|supervisor reply required/);
-  assert.doesNotMatch(lines.join("\n"), /finished\]/);
+  assert.match(lines[1], /active-0.*waiting/);
+  assert.match(lines[2], /^│  ├─ \(openai\) gpt-5\.6-sol • xhigh · ↻0/);
+  assert.equal(lines[3], "│  └─ supervisor reply required");
+  assert.match(lines[4], /active-1/);
+  assert.match(lines[7], /active-2/);
+  assert.doesNotMatch(lines.join("\n"), /active-3|active-4/);
+  assert.equal(lines[10], "├─ ◦ 2 queued");
+  assert.equal(lines[11], "└─ +4 more (2 active, 2 finished)");
+  assert.doesNotMatch(lines.join("\n"), /finished-/);
 });
 
 test("widget registers its callback once, ticks at 80ms, then requests render", () => {
