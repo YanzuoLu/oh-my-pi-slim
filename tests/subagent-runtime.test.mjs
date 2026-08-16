@@ -16,6 +16,7 @@ import {
 import { registerHooks } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 import test from "node:test";
 
 const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
@@ -26,7 +27,9 @@ const dependencyMap = {
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
   "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
+  "./subagent-model-display.js": new URL("../extensions/oh-my-pi-slim/subagent-model-display.ts", import.meta.url).href,
   "./subagent-run-files.js": new URL("../extensions/oh-my-pi-slim/subagent-run-files.ts", import.meta.url).href,
+  "./subagent-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-transcript-renderer.ts", import.meta.url).href,
   "./subagent-widget.js": new URL("../extensions/oh-my-pi-slim/subagent-widget.ts", import.meta.url).href,
   "./subagent-widget-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-renderer.ts", import.meta.url).href,
   "./subagent-widget-display.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-display.ts", import.meta.url).href,
@@ -72,6 +75,11 @@ const {
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CACHE = join(ROOT, ".cache");
 const NOW_MS = Date.parse("2026-04-17T00:00:00.000Z");
+const transcriptTheme = {
+  fg: (_color, text) => text,
+  bg: (_color, text) => text,
+  bold: (text) => text,
+};
 mkdirSync(CACHE, { recursive: true });
 
 function persistedRun(overrides = {}) {
@@ -112,6 +120,7 @@ function createHarness({
   mkdirSync(sessionDir, { recursive: true });
   let clock = NOW_MS;
   const tools = new Map();
+  const messageRenderers = new Map();
   const notifications = [];
   const journalWrites = [];
   const launches = [];
@@ -125,6 +134,7 @@ function createHarness({
   const statusCalls = [];
   const pi = {
     registerTool(definition) { tools.set(definition.name, definition); },
+    registerMessageRenderer(type, renderer) { messageRenderers.set(type, renderer); },
     appendEntry(type, data) { journalWrites.push({ type, data }); },
     sendMessage(message, options) {
       if (sendMessageError) throw sendMessageError;
@@ -182,7 +192,7 @@ function createHarness({
     },
   };
   return {
-    tempDir, sessionDir, ownerSessionId, runtime, tools, notifications, journalWrites, launches,
+    tempDir, sessionDir, ownerSessionId, runtime, tools, messageRenderers, notifications, journalWrites, launches,
     intervals, clearedIntervals, alive, killed, controlWrites, widgetCalls, statusCalls, ctx,
     advance(ms) { clock += ms; },
     setProcessIdentity(pid, identity) { processIdentities.set(pid, identity); },
@@ -301,6 +311,11 @@ test("registered tool prompt metadata describes the notification-driven lifecycl
     assert.equal(subagent.promptGuidelines[0], "A fresh subagent call supplies agent, task, and optional cwd; the result contains the complete new run record with status starting.");
     assert.equal(subagent.promptGuidelines.at(-1), "subagent resume returns a new run ID; subsequent steer, interrupt, and resume actions use the new run ID.");
     assert.doesNotMatch(subagentGuidelines, /\b(can|may|later)\b|as needed|do not|cannot|implementation|protocol/i);
+    assert.equal(typeof subagent.renderCall, "function");
+    assert.equal(typeof subagent.renderResult, "function");
+    assert.equal(typeof supervisor.renderCall, "function");
+    assert.equal(typeof supervisor.renderResult, "function");
+    assert.equal(typeof harness.messageRenderers.get("oh-my-pi-slim:subagent-notification"), "function");
     assert.equal(supervisor.promptSnippet, "Inspect waiting child requests and reply by request ID.");
     const supervisorGuidelines = supervisor.promptGuidelines.join("\n");
     for (const phrase of ["pending", "request ID", "reply", "same run ID", "running", "child-session context", "follow-up notification"]) {
@@ -574,8 +589,10 @@ test("waiting notification and supervisor reply use detached control without blo
     }));
     await inspect(harness, id);
     const waitingNotification = harness.notifications.at(-1).message;
+    assert.equal(waitingNotification.display, true);
     assert.equal(waitingNotification.details.status, "waiting");
     assert.equal(waitingNotification.details.reason, "need_decision");
+    assert.equal(waitingNotification.details.run.request.message, "choose");
     assert.equal(waitingNotification.content, `Subagent ${id} (fixer) is waiting.\nRequest req-1 (need_decision): choose`);
     const reply = await harness.tools.get("subagent_supervisor").execute("reply", {
       action: "reply", replyTo: "req-1", message: "option A",
@@ -701,7 +718,7 @@ test("interrupt accepts a waiting non-terminal run", async () => {
   } finally { harness.cleanup(); }
 });
 
-test("terminal state journals once, stops tracking, and sends a hidden notification", async () => {
+test("terminal state journals once, stops tracking, and sends one visible structured notification", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
@@ -721,12 +738,26 @@ test("terminal state journals once, stops tracking, and sends a hidden notificat
     assert.equal(harness.journalWrites.length, 3, "terminal pending and delivery acknowledgement are journaled");
     assert.equal(existsSync(harness.paths(id).runDir), false);
     assert.deepEqual(harness.notifications[0].options, { deliverAs: "followUp", triggerTurn: true });
-    assert.equal(harness.notifications[0].message.display, false);
+    assert.equal(harness.notifications[0].message.display, true);
+    assert.equal(harness.notifications[0].message.details.event, "completed");
     assert.equal(harness.notifications[0].message.details.status, "completed");
+    assert.equal(harness.notifications[0].message.details.run.id, id);
+    assert.equal(harness.notifications[0].message.details.run.task, "detached task");
+    assert.equal(harness.notifications[0].message.details.run.model, "preset/fixer:high");
+    assert.equal(harness.notifications[0].message.details.run.output, "complete output\nsecond output line");
+    assert.equal(harness.notifications[0].message.details.run.error, "complete error\nsecond error line");
     assert.equal(
       harness.notifications[0].message.content,
       `Subagent ${id} (fixer) is completed.\n\nOutput: complete output\nsecond output line\n\nError: complete error\nsecond error line`,
     );
+    const notificationRenderer = harness.messageRenderers.get("oh-my-pi-slim:subagent-notification");
+    const renderedNotification = notificationRenderer(
+      harness.notifications[0].message,
+      { expanded: false, outputPad: 1 },
+      transcriptTheme,
+    ).render(240).map((line) => stripVTControlCharacters(line)).join("\n");
+    assert.match(renderedNotification, /complete output\s*\n\s*second output line/);
+    assert.match(renderedNotification, /complete error\s*\n\s*second error line/);
   } finally { harness.cleanup(); }
 });
 

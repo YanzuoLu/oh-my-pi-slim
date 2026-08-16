@@ -5,6 +5,7 @@
 
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { PersistedRun, RunStatus } from "./subagent-core.js";
+import { formatSubagentModel } from "./subagent-model-display.js";
 import type { DetachedRunActivity } from "./subagent-run-files.js";
 import {
   describeWidgetActivity,
@@ -17,6 +18,7 @@ import { SUBAGENT_WIDGET_GLYPHS, SUBAGENT_WIDGET_SPINNER } from "./subagent-widg
 
 export type { WidgetTheme } from "./subagent-widget-display.js";
 export { formatWidgetMs } from "./subagent-widget-display.js";
+export { formatSubagentModel as formatWidgetModel } from "./subagent-model-display.js";
 export { SUBAGENT_WIDGET_GLYPHS, SUBAGENT_WIDGET_SPINNER } from "./subagent-widget-glyphs.js";
 
 export type WidgetRun = Pick<
@@ -26,26 +28,6 @@ export type WidgetRun = Pick<
 
 export const MAX_SUBAGENT_WIDGET_LINES = 12;
 const ACTIVE_STATUSES = new Set<RunStatus>(["starting", "running", "waiting"]);
-const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-
-export function formatWidgetModel(canonicalModel: string): string {
-  const slash = canonicalModel.indexOf("/");
-  if (slash <= 0 || slash >= canonicalModel.length - 1) return canonicalModel;
-  const provider = canonicalModel.slice(0, slash);
-  let model = canonicalModel.slice(slash + 1);
-  if (!provider.trim() || !model.trim()) return canonicalModel;
-
-  let thinking: string | undefined;
-  const colon = model.lastIndexOf(":");
-  if (colon > 0) {
-    const candidate = model.slice(colon + 1);
-    if (THINKING_LEVELS.has(candidate) && model.slice(0, colon).trim()) {
-      thinking = candidate;
-      model = model.slice(0, colon);
-    }
-  }
-  return `(${provider}) ${model}${thinking ? ` • ${thinking}` : ""}`;
-}
 
 function shortTask(task: string): string {
   return task.split("\n").find((line) => line.trim())?.trim() ?? "";
@@ -108,7 +90,7 @@ export function renderActiveRunLines(
     : theme.fg("accent", SUBAGENT_WIDGET_SPINNER[spinnerFrame % SUBAGENT_WIDGET_SPINNER.length]);
   const state = waiting ? ` ${theme.fg("warning", "waiting")}` : "";
   const header = `${indicator} ${theme.bold(runName(run, theme))}${state}  ${theme.fg("muted", shortTask(run.task))}`;
-  const statsLine = theme.fg("dim", `${formatWidgetModel(run.model)} · ${stats(run, theme, nowMs)}`);
+  const statsLine = theme.fg("dim", `${formatSubagentModel(run.model)} · ${stats(run, theme, nowMs)}`);
   const activityText = waiting
     ? run.request?.message || "supervisor reply required"
     : describeWidgetActivity(run.activity?.activeTools ?? {}, run.activity?.responseText);

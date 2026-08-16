@@ -77,7 +77,7 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.8.1", "package version must be 0.8.1");
+check(packageJson.version === "0.8.2", "package version must be 0.8.2");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify(["./extensions/oh-my-pi-slim/index.ts"]), "package must load only the OMPS extension");
 check(packageJson.pi?.subagents === undefined, "package must not expose a pi.subagents manifest");
 check(packageJson.dependencies === undefined || Object.keys(packageJson.dependencies).length === 0, "package must have no runtime dependency on the removed backend");
@@ -253,13 +253,29 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
 
 const widget = read("extensions/oh-my-pi-slim/subagent-widget.ts");
 const widgetRenderer = read("extensions/oh-my-pi-slim/subagent-widget-renderer.ts");
+const modelDisplay = read("extensions/oh-my-pi-slim/subagent-model-display.ts");
+const transcriptRenderer = read("extensions/oh-my-pi-slim/subagent-transcript-renderer.ts");
 hasAll(widget, ["setIntervalFn(() => this.update(), 80)", "requestRender()", 'placement: "aboveEditor"', "widgetRegistered", "dispose()"], "subagent widget lifecycle");
 check(!/pi\.on\("tool_execution_start"[\s\S]{0,120}subagents\.onTurnStart/.test(extension), "widget turn aging must not bind to tool_execution_start");
 hasAll(widgetRenderer, [
   "MAX_SUBAGENT_WIDGET_LINES = 12", '"├─"', '"└─"', "renderSubagentWidgetLines", "waiting",
-  "formatWidgetModel", "THINKING_LEVELS", "run.model", "formatWidgetTurns", "formatWidgetSessionTokens",
+  "formatWidgetModel", "formatSubagentModel", "run.model", "formatWidgetTurns", "formatWidgetSessionTokens",
   "describeWidgetActivity", "activeLines.length * 3", "budget >= 3",
 ], "subagent widget renderer");
+hasAll(modelDisplay, ["THINKING_LEVELS", "formatSubagentModel", '"xhigh"', '"max"'], "subagent model display formatter");
+hasAll(transcriptRenderer, [
+  "Container", "Box", "Text", "Markdown", "Spacer", "getMarkdownTheme", "RAW_HTML_TAG",
+  "renderSubagentCall", "renderSubagentResult", "renderSupervisorCall", "renderSupervisorResult",
+  "renderSubagentNotification", "details?.run", "details?.runs", "details?.pending",
+], "subagent transcript renderer");
+hasNone(transcriptRenderer, ["gotgenes", "Nico", "preview", "truncated"], "subagent transcript renderer ownership and full-output contract");
+hasAll(runtime, [
+  "registerMessageRenderer(SUBAGENT_NOTIFICATION_TYPE, renderSubagentNotification)",
+  "renderCall: renderSubagentCall", "renderResult: renderSubagentResult",
+  "renderCall: renderSupervisorCall", "renderResult: renderSupervisorResult",
+  "display: true", "run: this.formatRun(run)", "event,",
+], "subagent transcript registration and visible notification contract");
+check(!runtime.includes('renderShell: "self"'), "subagent transcript tools must use the default tool shell");
 check(existsSync(join(ROOT, "THIRD_PARTY_NOTICES.md")), "third-party notice must exist for the adapted widget");
 
 const preset = json("config/oh-my-pi-slim.example.json");
@@ -282,6 +298,8 @@ if (packCheck.status === 0) {
     const files = packed[0]?.files?.map((entry) => entry.path) ?? [];
     check(files.includes("extensions/oh-my-pi-slim/runner/omps-runner.mjs"), "npm pack must include the detached runner");
     check(files.includes("extensions/oh-my-pi-slim/runner/rpc-child.mjs"), "npm pack must include the runner RPC child helper");
+    check(files.includes("extensions/oh-my-pi-slim/subagent-model-display.ts"), "npm pack must include the shared subagent model formatter");
+    check(files.includes("extensions/oh-my-pi-slim/subagent-transcript-renderer.ts"), "npm pack must include the subagent transcript renderer");
   } catch (error) {
     errors.push(`npm pack --dry-run output must be JSON: ${error.message}`);
   }

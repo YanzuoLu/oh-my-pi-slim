@@ -89,20 +89,20 @@ subagent({ action: "steer", id: "run-id", message: "Focus on the parser test." }
 subagent({ action: "interrupt", id: "run-id" })
 ```
 
-Completion, supervisor waiting, failure, and interruption send hidden `followUp` notifications with `triggerTurn: true`, waking the main orchestrator. Notifications contain the complete request, output, or error. `list` returns every retained run, including its status and complete output, and supports one-time inspection and reconciliation. Dependent progress resumes from follow-up notifications rather than repeated `list` calls.
+Completion, supervisor waiting, failure, and interruption send TUI-visible `followUp` notifications with `triggerTurn: true`, waking the main orchestrator. Notifications contain the complete request, output, or error. `list` returns every retained run, including its status and complete output, and supports one-time inspection and reconciliation. Dependent progress resumes from follow-up notifications rather than repeated `list` calls.
 
 `steer`, `interrupt`, and supervisor replies atomically enqueue token-authenticated files under the run's `control/` directory and return without waiting. `steer` is best-effort. `interrupt` sends an interruption request, while the final notification reports the actual terminal status. The runner applies controls it can accept and publishes the actual transition. Before a terminal state is written, the runner captures final metadata, stops timers/watchers, and fully stops its RPC child, so a saved `sessionFile` is safe to resume.
 
 ### Minimal supervisor
 
-A child calls `contact_supervisor` with `need_decision`, `interview_request`, or `progress_update`. Each call yields the child in `waiting`, including progress updates, so the main orchestrator must reply to continue it. Its terminating tool result carries the request in `details`; background runs send a hidden main-session notification.
+A child calls `contact_supervisor` with `need_decision`, `interview_request`, or `progress_update`. Each call yields the child in `waiting`, including progress updates, so the main orchestrator must reply to continue it. Its terminating tool result carries the request in `details`; background runs send a visible main-session notification.
 
 ```js
 subagent_supervisor({ action: "pending" })
 subagent_supervisor({ action: "reply", replyTo: "request-id", message: "Proceed with option A." })
 ```
 
-Reply writes a control message to the still-live detached runner and optimistically returns the journal status to `running`. The runner's next state confirms the transition. A subsequent waiting or terminal transition wakes the orchestrator through another hidden notification.
+Reply writes a control message to the still-live detached runner and optimistically returns the journal status to `running`. The runner's next state confirms the transition. A subsequent waiting or terminal transition wakes the orchestrator through another visible notification.
 
 ### Resume
 
@@ -116,7 +116,7 @@ Resume is allowed only for a terminal retained run with a saved child session fi
 
 OMPS reads legacy custom entries with `customType: "oh-my-pi-slim:subagents"` and `version: 1` full-registry snapshots. It then folds later `version: 2` single-run upserts in branch order, replacing a run by ID and skipping malformed entries. Every new logical state write appends only one complete run as a v2 entry. Heartbeats and UI activity stay in `state.json` and never inflate the journal.
 
-Each run is isolated by owner session at `<parent-session-dir>/omps-subagent-runs/<ownerSessionId>/<runId>/`, containing mode-0600 `launch.json`, `runner.json`, and `state.json`, a mode-0700 `control/` inbox, and `runner.log`. `runner.json` binds the run token and PID to a verifiable OS process identity. The parent polls these files at a short interval, validates owner/run/token/process identity before signaling persisted PIDs, and drives hidden notification-based orchestration without blocking waits.
+Each run is isolated by owner session at `<parent-session-dir>/omps-subagent-runs/<ownerSessionId>/<runId>/`, containing mode-0600 `launch.json`, `runner.json`, and `state.json`, a mode-0700 `control/` inbox, and `runner.log`. `runner.json` binds the run token and PID to a verifiable OS process identity. The parent polls these files at a short interval, validates owner/run/token/process identity before signaling persisted PIDs, and drives notification-based orchestration without blocking waits.
 
 Persisted metadata includes the run ID, role, task, cwd, model contract, tool allowlist, timestamps, status, final output/error, source run ID, supervisor request, and child `sessionFile`. The removed launch-mode field from old v1 data is ignored and not retained.
 
@@ -125,6 +125,8 @@ Detached execution lasts only for the current owner session. Every `session_shut
 ## Background-agent UI
 
 TUI sessions show a widget above the editor adapted from `gotgenes/pi-packages`' `packages/pi-subagents` UI. It uses the same tree layout, 80 ms spinner, 12-line cap, active-first overflow policy, status bar, and short finished-run linger. Each active run is an atomic three-line tree entry: the first line shows its spinner or waiting marker, agent, run ID, waiting state, and task; the dim second line starts with `(provider) model • thinking` and then shows turns, tool uses, token/context/compaction stats, and elapsed time; the third line shows current activity or the warning-colored supervisor request. Keeping task text on the first line prevents it from crowding out the higher-priority model and stats line. The 12-line budget never shows a partial active entry, so at most three complete active runs are visible; overflow remains accurately summarized. `starting` runs still appear as a one-line queued summary, and terminal runs still briefly show one-line outcome entries. The widget is never registered in RPC mode.
+
+The TUI transcript also has package-owned renderers for `subagent` and `subagent_supervisor` calls and results. Calls show the complete action-specific task, continuation, guidance, IDs, and cwd. Structured single-run results, retained-run lists, pending requests, and reply results always show every stored field, including full task, request, activity, output, and error text, regardless of tool expansion state. Waiting and terminal lifecycle notifications are visible as the same custom follow-up message and render the complete structured run; the renderer is display-only and neither creates a duplicate message nor copies display data into model context.
 
 ## Deliberate scope
 

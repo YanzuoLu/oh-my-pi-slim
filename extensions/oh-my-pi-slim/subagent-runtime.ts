@@ -47,6 +47,14 @@ import {
   type InvocationSeams,
   type RunPaths,
 } from "./subagent-run-files.js";
+import {
+  SUBAGENT_NOTIFICATION_TYPE,
+  renderSubagentCall,
+  renderSubagentNotification,
+  renderSubagentResult,
+  renderSupervisorCall,
+  renderSupervisorResult,
+} from "./subagent-transcript-renderer.js";
 import { SubagentWidget, type SubagentWidgetUI } from "./subagent-widget.js";
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
@@ -325,6 +333,7 @@ export class OmpsSubagentRuntime {
   }
 
   registerTools(): void {
+    this.pi.registerMessageRenderer(SUBAGENT_NOTIFICATION_TYPE, renderSubagentNotification);
     this.pi.registerTool({
       name: "subagent",
       label: "Subagent",
@@ -342,6 +351,8 @@ export class OmpsSubagentRuntime {
       ],
       parameters: subagentParameters,
       execute: async (_toolCallId, params) => this.executeSubagent(params as RuntimeInput),
+      renderCall: renderSubagentCall,
+      renderResult: renderSubagentResult,
     });
     this.pi.registerTool({
       name: "subagent_supervisor",
@@ -355,6 +366,8 @@ export class OmpsSubagentRuntime {
       ],
       parameters: supervisorParameters,
       execute: async (_toolCallId, params) => this.executeSupervisor(params as SupervisorInput),
+      renderCall: renderSupervisorCall,
+      renderResult: renderSupervisorResult,
     });
   }
 
@@ -570,10 +583,12 @@ export class OmpsSubagentRuntime {
     const error = run.error !== undefined ? `\n\nError: ${run.error}` : "";
     this.pi.sendMessage(
       {
-        customType: "oh-my-pi-slim:subagent-notification",
+        customType: SUBAGENT_NOTIFICATION_TYPE,
         content: `Subagent ${run.id} (${run.agent}) is ${event}.${request}${output}${error}`,
-        display: false,
+        display: true,
         details: {
+          run: this.formatRun(run),
+          event,
           runId: run.id,
           status: event,
           requestId: run.request?.id,

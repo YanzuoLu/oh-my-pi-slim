@@ -89,20 +89,20 @@ subagent({ action: "steer", id: "run-id", message: "只检查 parser 测试。" 
 subagent({ action: "interrupt", id: "run-id" })
 ```
 
-completed、waiting、failed 与 interrupted 都会发送隐藏 `followUp` 通知并设置 `triggerTurn: true`，从而唤醒主 orchestrator。通知包含完整 request、output 或 error。`list` 会返回全部 retained run（含 status 与完整 output），用于一次性检查与 reconciliation。依赖结果的后续进度由 follow-up 通知恢复，而不是重复调用 `list`。
+completed、waiting、failed 与 interrupted 都会发送在 TUI 中可见的 `followUp` 通知并设置 `triggerTurn: true`，从而唤醒主 orchestrator。通知包含完整 request、output 或 error。`list` 会返回全部 retained run（含 status 与完整 output），用于一次性检查与 reconciliation。依赖结果的后续进度由 follow-up 通知恢复，而不是重复调用 `list`。
 
 `steer`、`interrupt` 与 supervisor reply 都会向 run 的 `control/` 目录原子写入带 token 的控制文件，并立即返回而不等待。`steer` 是 best-effort。`interrupt` 发出 interruption request，最终通知报告实际 terminal status。runner 会应用可接受的控制并发布真实状态。写 terminal state 之前，runner 会先收集最终元数据、停止 timer/watcher，并完整停止 RPC child，因此保存的 `sessionFile` 可安全 resume。
 
 ### 最小 supervisor
 
-child 可通过 `contact_supervisor` 提交 `need_decision`、`interview_request` 或 `progress_update`。每次调用都会让 child 进入 `waiting`，progress update 也一样，因此主 orchestrator 必须 reply 才会继续。terminating tool result 的 `details` 携带 request；后台 run 会向主会话发送隐藏通知。
+child 可通过 `contact_supervisor` 提交 `need_decision`、`interview_request` 或 `progress_update`。每次调用都会让 child 进入 `waiting`，progress update 也一样，因此主 orchestrator 必须 reply 才会继续。terminating tool result 的 `details` 携带 request；后台 run 会向主会话发送可见通知。
 
 ```js
 subagent_supervisor({ action: "pending" })
 subagent_supervisor({ action: "reply", replyTo: "request-id", message: "采用方案 A。" })
 ```
 
-reply 会向仍存活的 detached runner 写 control message，并乐观地把 journal 状态恢复为 `running`；runner 下一次 state 会确认该状态。之后再次 waiting 或进入 terminal 状态时，会用新的隐藏通知唤醒 orchestrator。
+reply 会向仍存活的 detached runner 写 control message，并乐观地把 journal 状态恢复为 `running`；runner 下一次 state 会确认该状态。之后再次 waiting 或进入 terminal 状态时，会用新的可见通知唤醒 orchestrator。
 
 ### Resume
 
@@ -116,7 +116,7 @@ resume 只允许拥有已保存 child session file 的 terminal retained run。�
 
 OMPS 兼容读取 `customType: "oh-my-pi-slim:subagents"`、`version: 1` 的旧全量 registry snapshot，再按当前 branch 顺序 fold 后续 `version: 2` 单 run upsert：相同 ID 以后者覆盖，坏 entry 跳过。每次新的逻辑状态写入只追加一个完整 run 的 v2 entry；heartbeat 与 UI activity 只保存在 `state.json`，不会膨胀 journal。
 
-每个 run 按 owner session 隔离在 `<parent-session-dir>/omps-subagent-runs/<ownerSessionId>/<runId>/`，其中包括 mode-0600 的 `launch.json`、`runner.json`、`state.json`，mode-0700 的 `control/` inbox，以及 `runner.log`。`runner.json` 将 run token 与 PID 绑定到可验证的 OS process identity。parent 以短周期 poll 这些文件，并在 signal 持久化 PID 前验证 owner/run/token/process identity，再通过隐藏通知驱动 orchestration，不做阻塞等待。
+每个 run 按 owner session 隔离在 `<parent-session-dir>/omps-subagent-runs/<ownerSessionId>/<runId>/`，其中包括 mode-0600 的 `launch.json`、`runner.json`、`state.json`，mode-0700 的 `control/` inbox，以及 `runner.log`。`runner.json` 将 run token 与 PID 绑定到可验证的 OS process identity。parent 以短周期 poll 这些文件，并在 signal 持久化 PID 前验证 owner/run/token/process identity，再通过通知驱动 orchestration，不做阻塞等待。
 
 持久化元数据包括 run ID、role、task、cwd、model contract、tool allowlist、时间戳、状态、最终输出/error、source run ID、supervisor request 与 child `sessionFile`。旧 v1 中已存在的 launch-mode 字段会被忽略，不再保留。
 
@@ -125,6 +125,8 @@ Detached execution 只持续到当前 owner session 结束。所有 `session_shu
 ## 后台 agent UI
 
 TUI 会在 editor 上方显示一个适配自 `gotgenes/pi-packages` 中 `packages/pi-subagents` 的 widget。它保留原 UI 的 tree layout、80 ms spinner、最多 12 行、active 优先 overflow、status bar 与 finished 短暂 linger。每个 active run 是不可拆分的三行 tree entry：第一行显示 spinner 或 waiting 标记、agent、run ID、waiting 状态与 task；dim 的第二行以 `(provider) model • thinking` 开头，随后显示 turn、tool use、token/context/compaction 与 elapsed；第三行显示当前 activity，或以 warning 色显示 supervisor request。task 只占第一行并随该行截断，不再挤掉优先可见的 model/stats 行。12 行预算绝不显示半个 active entry，因此最多完整显示 3 个 active run，overflow 会准确汇总；`starting` 仍是一行 queued summary，terminal run 仍短暂显示一行 outcome。RPC mode 绝不注册 widget。
+
+TUI transcript 还为 `subagent` 与 `subagent_supervisor` 的 call/result 提供 package 自有 renderer。call 会完整显示对应 action 的 task、continuation、guidance、ID 与 cwd；结构化单 run 结果、retained run list、pending request 和 reply 结果不受 tool expansion 状态影响，始终显示所有持久化字段，包括完整 task、request、activity、output 与 error。waiting 和 terminal 生命周期通知会把同一条 custom follow-up 显示出来，并渲染完整结构化 run；renderer 只影响显示，不会创建重复消息，也不会把显示数据复制进 model context。
 
 ## 有意限制的范围
 
