@@ -28,6 +28,7 @@ const dependencyMap = {
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
   "./bootstrap.js": new URL("../extensions/oh-my-pi-slim/bootstrap.ts", import.meta.url).href,
   "./prompt-context.js": new URL("../extensions/oh-my-pi-slim/prompt-context.ts", import.meta.url).href,
+  "./subagent-checkpoint.js": new URL("../extensions/oh-my-pi-slim/subagent-checkpoint.ts", import.meta.url).href,
   "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
   "./subagent-runtime.js": new URL("../extensions/oh-my-pi-slim/subagent-runtime.ts", import.meta.url).href,
   "./subagent-model-display.js": new URL("../extensions/oh-my-pi-slim/subagent-model-display.ts", import.meta.url).href,
@@ -46,11 +47,15 @@ registerHooks({
 });
 
 const {
+  CHECKPOINT_RESUME_TEXT,
+  completedToolBatch,
+  contextUsageNeedsCheckpoint,
+} = await import("../extensions/oh-my-pi-slim/subagent-checkpoint.ts");
+const {
   SUBAGENT_ACTIONS,
   SUBAGENT_PUBLIC_FIELDS,
-  SUPERVISOR_ACTIONS,
-  SUPERVISOR_PUBLIC_FIELDS,
   SubagentRegistry,
+  legacyRunAbstract,
   restoreRunJournal,
   runJournalEntry,
   validateCreateInput,
@@ -60,7 +65,6 @@ const {
   discoverPackageAgents,
   shouldApproveChildProject,
   subagentParameters,
-  supervisorParameters,
 } = await import("../extensions/oh-my-pi-slim/subagent-runtime.ts");
 const {
   parseConfigFile,
@@ -75,6 +79,7 @@ const {
   isDetachedLaunchConfig,
   isDetachedRunnerIdentity,
   listOwnerRunIds,
+  readLaunchConfig,
   removeRunFiles,
   safeReadJson,
   writeControl,
@@ -94,6 +99,7 @@ function persistedRun(overrides = {}) {
   return {
     id: "run-1",
     agent: "fixer",
+    abstract: "fix summary",
     task: "fix it",
     cwd: ROOT,
     model: "provider/model:high",
@@ -123,8 +129,8 @@ function deliveredMessage(message, details = message.details) {
   return { role: "custom", customType: message.customType, content: message.content, display: message.display, details };
 }
 
-function expectedDeliveryKey(runId, event, requestId) {
-  const parts = event === "waiting" ? [runId, event, requestId] : [runId, event];
+function expectedDeliveryKey(runId, event, waitingSeq) {
+  const parts = event === "waiting" ? [runId, event, waitingSeq] : [runId, event];
   return `oh-my-pi-slim:subagent-notification:${JSON.stringify(parts)}`;
 }
 
@@ -189,9 +195,9 @@ function createHarness({
       if (rejectGroupSignal && pid < 0) throw new Error("group signaling unavailable");
       if (!keepAliveAfterKill && !(keepAliveAfterTerm && signal === "SIGTERM")) alive.delete(Math.abs(pid));
     },
-    controlWriter(paths, token, type, message, requestId) {
-      controlWrites.push({ runId: paths.runDir.split("/").at(-1), token, type, message, requestId });
-      return writeControl(paths, token, type, message, requestId);
+    controlWriter(paths, token, type, message, waitingSeq) {
+      controlWrites.push({ runId: paths.runDir.split("/").at(-1), token, type, message, waitingSeq });
+      return writeControl(paths, token, type, message, waitingSeq);
     },
     setInterval(callback, ms) {
       const timer = { callback, ms, unref() {} };
@@ -264,7 +270,9 @@ function controls(harness, id) {
 async function createRun(harness, overrides = {}) {
   harness.runtime.setModelResolver((agent) => `preset/${agent}:high`);
   harness.runtime.setDenyResolver(() => []);
-  return harness.tools.get("subagent").execute("create", { action: "create", agent: "fixer", task: "detached task", ...overrides });
+  return harness.tools.get("subagent").execute("create", {
+    action: "create", agent: "fixer", abstract: "detached summary", task: "detached task", ...overrides,
+  });
 }
 
 async function inspect(harness, id) {
@@ -277,21 +285,183 @@ async function inspect(harness, id) {
   };
 }
 
-test("public schemas and package-agent boundaries remain minimal", async () => {
-  assert.deepEqual(SUBAGENT_ACTIONS, ["create", "list", "interrupt", "steer", "resume"]);
-  assert.deepEqual(SUBAGENT_PUBLIC_FIELDS, ["agent", "task", "cwd", "action", "id", "message"]);
-  assert.deepEqual(SUPERVISOR_ACTIONS, ["pending", "reply"]);
-  assert.deepEqual(SUPERVISOR_PUBLIC_FIELDS, ["action", "replyTo", "message"]);
+function completeToolBatchEvent(toolName = "read") {
+  return {
+    message: {
+      role: "assistant",
+      stopReason: "toolUse",
+      content: [
+        { type: "text", text: "working" },
+        { type: "toolCall", id: "tool-1", name: toolName, arguments: {} },
+      ],
+    },
+    toolResults: [{ toolCallId: "tool-1", toolName, content: [], isError: false }],
+  };
+}
+
+async function createChildCheckpointHarness() {
+  const tempDir = mkdtempSync(join(CACHE, "child-checkpoint-"));
+  const projectConfigDir = join(tempDir, ".pi");
+  mkdirSync(projectConfigDir, { recursive: true });
+  writeFileSync(join(projectConfigDir, "settings.json"), JSON.stringify({
+    compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 20 },
+  }));
+  const handlers = new Map();
+  const sent = [];
+  const aborts = [];
+  let pendingMessages = false;
+  let usage = { tokens: 901, contextWindow: 1000, percent: 90.1 };
+  const pi = {
+    registerTool() {},
+    on(event, handler) { handlers.set(event, handler); },
+    getAllTools() { return [{ name: "read" }, { name: "contact_supervisor" }]; },
+    setActiveTools() {},
+    sendUserMessage(text, options) { sent.push({ text, options }); },
+  };
+  const previousChild = process.env.OMPS_SUBAGENT_CHILD;
+  const previousPiChild = process.env.PI_SUBAGENT_CHILD;
+  process.env.OMPS_SUBAGENT_CHILD = "1";
+  process.env.PI_SUBAGENT_CHILD = "1";
+  try {
+    const module = await import(`${new URL("../extensions/oh-my-pi-slim/child-supervisor.ts", import.meta.url).href}?checkpoint=${Date.now()}-${Math.random()}`);
+    module.default(pi);
+  } finally {
+    if (previousChild === undefined) delete process.env.OMPS_SUBAGENT_CHILD;
+    else process.env.OMPS_SUBAGENT_CHILD = previousChild;
+    if (previousPiChild === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = previousPiChild;
+  }
+  const ctx = {
+    cwd: tempDir,
+    getContextUsage: () => usage,
+    hasPendingMessages: () => pendingMessages,
+    isProjectTrusted: () => true,
+    abort() { aborts.push("abort"); },
+  };
+  return {
+    tempDir, handlers, sent, aborts, ctx,
+    setPendingMessages(value) { pendingMessages = value; },
+    setUsage(value) { usage = value; },
+    emit(event, payload = {}) {
+      const handler = handlers.get(event);
+      assert.equal(typeof handler, "function", `missing ${event} handler`);
+      return handler(payload, ctx);
+    },
+    cleanup() { rmSync(tempDir, { recursive: true, force: true }); },
+  };
+}
+
+test("public schema and package-agent boundaries remain minimal", async () => {
+  assert.deepEqual(SUBAGENT_ACTIONS, ["create", "list", "interrupt", "steer", "resume", "reply"]);
+  assert.deepEqual(SUBAGENT_PUBLIC_FIELDS, ["agent", "abstract", "task", "cwd", "action", "id", "message"]);
   assert.deepEqual(Object.keys(subagentParameters.properties).sort(), [...SUBAGENT_PUBLIC_FIELDS].sort());
   assert.equal(subagentParameters.additionalProperties, false);
-  assert.equal(supervisorParameters.additionalProperties, false);
   assert.deepEqual(subagentParameters.properties.action.anyOf.map(({ const: action }) => action), SUBAGENT_ACTIONS);
-  assert.deepEqual(supervisorParameters.properties.action.anyOf.map(({ const: action }) => action), SUPERVISOR_ACTIONS);
   assert.equal(subagentParameters.required.includes("action"), true);
-  assert.deepEqual(validateCreateInput({ agent: "explorer", task: " map " }), { agent: "explorer", task: "map", cwd: undefined });
-  assert.throws(() => validateCreateInput({ agent: "custom", task: "x" }), /Unknown agent/);
+  assert.equal("maxLength" in subagentParameters.properties.abstract, false);
+  assert.deepEqual(validateCreateInput({ agent: "explorer", abstract: " map auth ", task: " map " }), {
+    agent: "explorer", abstract: "map auth", task: "map", cwd: undefined,
+  });
+  assert.throws(() => validateCreateInput({ agent: "explorer", abstract: "  ", task: "x" }), /abstract must be a non-empty string/);
+  assert.throws(() => validateCreateInput({ agent: "custom", abstract: "x", task: "x" }), /Unknown agent/);
   assert.deepEqual([...discoverPackageAgents().keys()], ["designer", "explorer", "fixer", "librarian", "observer", "oracle"]);
   assert.equal(shouldApproveChildProject(true, ROOT, join(ROOT, "extensions")), true);
+});
+
+test("shared checkpoint helpers validate complete tool batches and strict threshold boundaries", () => {
+  const valid = completeToolBatchEvent();
+  assert.equal(completedToolBatch(valid), true);
+  for (const invalid of [
+    { ...valid, message: { ...valid.message, role: "user" } },
+    { ...valid, message: { ...valid.message, stopReason: "stop" } },
+    { ...valid, message: { ...valid.message, content: [{ type: "text", text: "none" }] }, toolResults: [] },
+    { ...valid, toolResults: [] },
+    { ...valid, message: { ...valid.message, content: [...valid.message.content, { type: "toolCall", id: "tool-1", name: "read", arguments: {} }] } },
+    { ...valid, toolResults: [...valid.toolResults, valid.toolResults[0]] },
+    { ...valid, toolResults: [{ ...valid.toolResults[0], toolName: "write" }] },
+    { ...valid, toolResults: [{ ...valid.toolResults[0], toolCallId: "other" }] },
+  ]) assert.equal(completedToolBatch(invalid), false);
+
+  const settings = { enabled: true, reserveTokens: 100, keepRecentTokens: 20 };
+  assert.equal(contextUsageNeedsCheckpoint({ tokens: 900, contextWindow: 1000 }, settings), false);
+  assert.equal(contextUsageNeedsCheckpoint({ tokens: 901, contextWindow: 1000 }, settings), true);
+  assert.equal(contextUsageNeedsCheckpoint({ tokens: null, contextWindow: 1000 }, settings), false);
+  assert.equal(contextUsageNeedsCheckpoint({ tokens: 901, contextWindow: 1000 }, { ...settings, enabled: false }), false);
+});
+
+test("child checkpoint aborts complete batches and queues exactly one synchronous follow-up per threshold cycle", async () => {
+  const harness = await createChildCheckpointHarness();
+  try {
+    harness.emit("session_start");
+    harness.emit("turn_start");
+    harness.emit("turn_end", completeToolBatchEvent());
+    assert.equal(harness.aborts.length, 1);
+    harness.emit("session_compact", { reason: "threshold", willRetry: false });
+    assert.deepEqual(harness.sent, [{ text: CHECKPOINT_RESUME_TEXT, options: { deliverAs: "followUp" } }]);
+    harness.emit("session_compact", { reason: "threshold", willRetry: false });
+    harness.emit("agent_settled");
+    assert.equal(harness.sent.length, 1);
+
+    harness.emit("turn_start");
+    harness.emit("turn_end", completeToolBatchEvent("grep"));
+    assert.equal(harness.aborts.length, 2);
+    harness.emit("session_compact", { reason: "threshold", willRetry: false });
+    assert.deepEqual(harness.sent.map(({ text }) => text), [CHECKPOINT_RESUME_TEXT, CHECKPOINT_RESUME_TEXT]);
+    harness.emit("agent_settled");
+  } finally { harness.cleanup(); }
+});
+
+test("child checkpoint ignores pending/contact batches and resumes only matching threshold compaction", async () => {
+  const harness = await createChildCheckpointHarness();
+  const warnings = [];
+  const originalError = console.error;
+  console.error = (message) => warnings.push(String(message));
+  try {
+    harness.emit("session_start");
+    for (const unknownUsage of [undefined, null]) {
+      harness.setUsage(unknownUsage);
+      harness.emit("turn_start");
+      harness.emit("turn_end", completeToolBatchEvent());
+      assert.equal(harness.aborts.length, 0);
+    }
+    harness.setUsage({ tokens: 901, contextWindow: 1000, percent: 90.1 });
+    harness.setPendingMessages(true);
+    harness.emit("turn_start");
+    harness.emit("turn_end", completeToolBatchEvent());
+    assert.equal(harness.aborts.length, 0);
+    harness.setPendingMessages(false);
+
+    harness.emit("turn_start");
+    harness.emit("tool_execution_end", { toolName: "contact_supervisor" });
+    harness.emit("turn_end", completeToolBatchEvent("contact_supervisor"));
+    harness.emit("session_compact", { reason: "threshold", willRetry: false });
+    harness.emit("agent_settled");
+    assert.equal(harness.aborts.length, 0);
+    assert.equal(harness.sent.length, 0, "a contact_supervisor batch and its later native compaction never resume");
+
+    harness.emit("turn_start");
+    harness.emit("turn_end", completeToolBatchEvent());
+    assert.equal(harness.aborts.length, 1);
+    harness.emit("session_compact", { reason: "manual", willRetry: false });
+    harness.emit("session_compact", { reason: "threshold", willRetry: true });
+    assert.equal(harness.sent.length, 0);
+    harness.emit("agent_settled");
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /automatic resume was not started/);
+
+    harness.emit("session_compact", { reason: "threshold", willRetry: false });
+    assert.equal(harness.sent.length, 0, "settled cleanup prevents a later unrelated compaction from resuming");
+
+    harness.emit("turn_start");
+    harness.emit("turn_end", completeToolBatchEvent());
+    assert.equal(harness.aborts.length, 2);
+    harness.emit("session_shutdown");
+    harness.emit("session_compact", { reason: "threshold", willRetry: false });
+    assert.equal(harness.sent.length, 0);
+  } finally {
+    console.error = originalError;
+    harness.cleanup();
+  }
 });
 
 test("deny config is partial, exact, portable, and protects lifecycle tools", () => {
@@ -311,9 +481,10 @@ test("deny config is partial, exact, portable, and protects lifecycle tools", ()
   assert.throws(() => parseDenyConfig({ explorer: "read" }, "config.deny"), /must be an array/i);
   assert.throws(() => parseDenyConfig({ explorer: ["read", "read"] }, "config.deny"), /duplicate tool "read"/i);
   assert.throws(() => parseDenyConfig({ explorer: ["read,write"] }, "config.deny"), /must not contain a comma/i);
-  for (const reserved of ["subagent", "subagent_supervisor", "contact_supervisor"]) {
+  for (const reserved of ["subagent", "contact_supervisor"]) {
     assert.throws(() => parseDenyConfig({ fixer: [reserved] }, "config.deny"), new RegExp(`cannot deny lifecycle tool "${reserved}"`));
   }
+  assert.deepEqual(parseDenyConfig({ fixer: ["subagent_supervisor"] }, "config.deny").fixer, ["subagent_supervisor"]);
 });
 
 test("old presets inherit observer from explorer and explicit observer config is retained", () => {
@@ -366,132 +537,125 @@ test("approve remains contained by trust, real paths, and the parent project", (
   } finally { rmSync(tempDir, { recursive: true, force: true }); }
 });
 
-test("runtime requires create and rejects unknown create, action, and supervisor fields", async () => {
+test("runtime requires explicit create fields and rejects unknown fields", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
     await assert.rejects(
-      harness.tools.get("subagent").execute("create", { action: "create", agent: "fixer", task: "x", model: "override" }),
+      harness.tools.get("subagent").execute("create", { action: "create", agent: "fixer", abstract: "x", task: "x", model: "override" }),
       /unknown field.*model/i,
     );
     await assert.rejects(
-      harness.tools.get("subagent").execute("missing", { agent: "fixer", task: "x" }),
+      harness.tools.get("subagent").execute("create", { action: "create", agent: "fixer", task: "x" }),
+      /abstract must be a non-empty string/i,
+    );
+    await assert.rejects(
+      harness.tools.get("subagent").execute("missing", { agent: "fixer", abstract: "x", task: "x" }),
       /action must be a non-empty string/i,
     );
     await assert.rejects(
       harness.tools.get("subagent").execute("list", { action: "list", async: true }),
       /unknown field.*async/i,
     );
+    for (const action of ["list", "steer", "interrupt", "reply"]) {
+      await assert.rejects(
+        harness.tools.get("subagent").execute(action, { action, abstract: "forbidden" }),
+        new RegExp(`${action} does not accept create field\\(s\\): abstract`, "i"),
+      );
+    }
     await assert.rejects(
-      harness.tools.get("subagent_supervisor").execute("pending", { action: "pending", thinking: "high" }),
-      /unknown field.*thinking/i,
+      harness.tools.get("subagent").execute("resume-missing-abstract", { action: "resume", id: "source", message: "continue" }),
+      /abstract must be a non-empty string/i,
     );
+    await assert.rejects(
+      harness.tools.get("subagent").execute("resume-blank-abstract", { action: "resume", id: "source", abstract: "   ", message: "continue" }),
+      /abstract must be a non-empty string/i,
+    );
+    await assert.rejects(
+      harness.tools.get("subagent").execute("resume-missing-message", { action: "resume", id: "source", abstract: "new summary" }),
+      /message must be a non-empty string/i,
+    );
+    await assert.rejects(
+      harness.tools.get("subagent").execute("resume-extra-create-field", {
+        action: "resume", id: "source", abstract: "new summary", message: "continue", task: "forbidden",
+      }),
+      /resume does not accept field\(s\): task/i,
+    );
+    assert.equal(harness.tools.has("subagent_supervisor"), false);
   } finally { harness.cleanup(); }
 });
 
-test("registered tool prompt metadata describes the notification-driven lifecycle", () => {
+test("registered subagent metadata describes the unified lifecycle", () => {
   const harness = createHarness();
   try {
     const subagent = harness.tools.get("subagent");
-    const supervisor = harness.tools.get("subagent_supervisor");
-    assert.equal(subagent.description, "Create a package specialist asynchronously and receive a new run ID with status starting. Lifecycle notifications deliver waiting requests and terminal results through steer at the next safe model boundary. Use list for retained run status, steer for running work, interrupt for active work, and resume for saved child sessions.");
-    assert.equal(subagent.promptSnippet, "Create and manage asynchronous package specialist runs.");
-    const subagentGuidelines = subagent.promptGuidelines.join("\n");
-    for (const phrase of ["run ID", "status starting", "request ID", "reason", "message", "completed", "failed", "interrupted", "stored output", "stored output and error", "list", "retained run ID", "liveness", "historical results", "lifecycle notification", "safe model boundary", "steer", "running run", "interrupt", "resume", "saved child session", "new run ID"]) {
-      assert.match(subagentGuidelines, new RegExp(phrase, "i"));
+    assert.match(subagent.description, /required agent, abstract, and task/i);
+    assert.match(subagent.description, /resume requires a terminal source run ID, a new abstract, and a continuation message/i);
+    assert.match(subagent.description, /list returns active run status with abstract/i);
+    assert.match(subagent.description, /reply continues a waiting run by ID/i);
+    assert.match(subagent.promptSnippet, /resume terminal runs with a new abstract/i);
+    const guidelines = subagent.promptGuidelines.join("\n");
+    for (const phrase of ["create requires agent, abstract, and task", "resume requires a completed, failed, or interrupted source run ID", "new non-empty abstract", "starting, running, and waiting", "complete request", "optional interview", "reply accepts a waiting run ID", "terminal results"]) {
+      assert.match(`${subagent.description}\n${guidelines}`, new RegExp(phrase, "i"));
     }
-    assert.equal(subagent.promptGuidelines[0], "subagent create supplies agent, task, and optional cwd and returns the new run with status starting.");
-    assert.equal(subagent.promptGuidelines.at(-1), "subagent resume returns a new run ID; subsequent steer, interrupt, and resume actions use the new run ID.");
-    assert.doesNotMatch(subagentGuidelines, /\b(can|may|later)\b|as needed|do not|cannot|implementation|protocol/i);
+    assert.doesNotMatch(`${subagent.description}\n${subagent.promptSnippet}\n${guidelines}`, /subagent_supervisor|pending query|replyTo|request ID/i);
     assert.equal(typeof subagent.renderCall, "function");
     assert.equal(typeof subagent.renderResult, "function");
-    assert.equal(typeof supervisor.renderCall, "function");
-    assert.equal(typeof supervisor.renderResult, "function");
     assert.equal(typeof harness.messageRenderers.get("oh-my-pi-slim:subagent-notification"), "function");
-    assert.equal(supervisor.description, "View waiting specialist requests and reply to continue a specialist. The next waiting or terminal transition uses one visible custom message delivered through steer at the next safe model boundary.");
-    assert.equal(supervisor.promptSnippet, "Inspect waiting child requests and reply by request ID.");
-    const supervisorGuidelines = supervisor.promptGuidelines.join("\n");
-    for (const phrase of ["pending", "request ID", "reply", "same run ID", "running", "child-session context", "visible custom message", "steer", "safe model boundary"]) {
-      assert.match(supervisorGuidelines, new RegExp(phrase, "i"));
-    }
-    assert.doesNotMatch(supervisorGuidelines, /\b(can|may|later)\b|as needed|do not|cannot|implementation|protocol/i);
+    assert.deepEqual([...harness.tools.keys()], ["subagent"]);
   } finally { harness.cleanup(); }
 });
 
-test("subagent list returns only status summaries in model content and details", async () => {
+test("subagent list is active-only status data with abstract", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
-    const completed = persistedRun({
-      id: "status-completed",
-      status: "completed",
-      sourceRunId: "source-status",
-      task: "TASK_SENTINEL",
-      cwd: "/CWD_SENTINEL",
-      model: "MODEL_SENTINEL",
-      deniedTools: ["TOOLS_SENTINEL"],
-      sessionFile: "/SESSION_SENTINEL",
-      output: "OUTPUT_SENTINEL",
-      error: "ERROR_SENTINEL",
-      notificationPending: "completed",
-    });
-    harness.runtime.registry.add(completed, false);
-    harness.runtime.activity.set(completed.id, { responseText: "ACTIVITY_SENTINEL" });
-    const started = await createRun(harness, { task: "WAITING_TASK_SENTINEL" });
-    const waitingId = started.details.run.id;
-    const config = readConfig(harness, waitingId);
+    harness.runtime.registry.add(persistedRun({
+      id: "status-completed", abstract: "completed abstract", status: "completed",
+      task: "TASK_SENTINEL", output: "OUTPUT_SENTINEL", error: "ERROR_SENTINEL",
+    }), false);
+    const running = await createRun(harness, { abstract: "running abstract", task: "RUNNING_TASK_SENTINEL" });
+    const runningId = running.details.run.id;
+    const runningConfig = readConfig(harness, runningId);
     harness.alive.add(999);
-    atomicWriteJson(harness.paths(waitingId).stateFile, stateFor(waitingId, config.token, {
-      status: "waiting",
-      sessionFile: "/WAITING_SESSION_SENTINEL",
-      output: "WAITING_OUTPUT_SENTINEL",
-      error: "WAITING_ERROR_SENTINEL",
-      responseText: "WAITING_ACTIVITY_SENTINEL",
+    atomicWriteJson(harness.paths(runningId).stateFile, stateFor(runningId, runningConfig.token));
+    await inspect(harness, runningId);
+    const waiting = await createRun(harness, { abstract: "waiting abstract", task: "WAITING_TASK_SENTINEL" });
+    const waitingId = waiting.details.run.id;
+    const waitingConfig = readConfig(harness, waitingId);
+    harness.alive.add(999);
+    atomicWriteJson(harness.paths(waitingId).stateFile, stateFor(waitingId, waitingConfig.token, {
+      status: "waiting", waitingSeq: 1,
       request: {
-        id: "request-status",
-        runId: waitingId,
-        reason: "need_decision",
-        message: "REQUEST_MESSAGE_SENTINEL",
-        interview: { title: "INTERVIEW_SENTINEL" },
-        createdAt: "REQUEST_TIMESTAMP_SENTINEL",
+        runId: waitingId, reason: "need_decision", message: "REQUEST_MESSAGE_SENTINEL",
+        interview: { title: "INTERVIEW_SENTINEL" }, createdAt: "REQUEST_TIMESTAMP_SENTINEL",
       },
     }));
+    await inspect(harness, waitingId);
+    const starting = await createRun(harness, { abstract: "starting abstract", task: "STARTING_TASK_SENTINEL" });
 
     const result = await harness.tools.get("subagent").execute("list", { action: "list" });
-    const expected = [
-      {
-        id: "status-completed",
-        agent: "fixer",
-        status: "completed",
-        live: false,
-        sourceRunId: "source-status",
-      },
-      {
-        id: waitingId,
-        agent: "fixer",
-        status: "waiting",
-        live: true,
-        requestId: "request-status",
-        reason: "need_decision",
-      },
-    ];
-    assert.deepEqual(result.details, { runs: expected });
-    assert.deepEqual(JSON.parse(result.content[0].text), expected);
-    assert.equal(result.content[0].text, JSON.stringify(result.details.runs, null, 2));
+    const byId = new Map(result.details.runs.map((run) => [run.id, run]));
+    assert.equal(byId.has("status-completed"), false);
+    assert.deepEqual(byId.get(runningId), {
+      id: runningId, agent: "fixer", abstract: "running abstract", status: "running", live: true,
+    });
+    assert.deepEqual(byId.get(waitingId), {
+      id: waitingId, agent: "fixer", abstract: "waiting abstract", status: "waiting", live: true, reason: "need_decision",
+    });
+    assert.deepEqual(byId.get(starting.details.run.id), {
+      id: starting.details.run.id, agent: "fixer", abstract: "starting abstract", status: "starting", live: false,
+    });
+    assert.deepEqual(JSON.parse(result.content[0].text), result.details.runs);
     const exposed = JSON.stringify({ content: result.content, details: result.details });
     for (const field of [
       "task", "cwd", "model", "deniedTools", "createdAt", "updatedAt", "sessionFile", "activity",
-      "output", "error", "notificationPending", "request", "message", "interview",
+      "output", "error", "notificationPending", "request", "message", "interview", "requestId", "waitingSeq",
     ]) {
       assert.equal(exposed.includes(`\"${field}\"`), false, `${field} must not enter list output`);
     }
-    for (const sentinel of [
-      "TASK_SENTINEL", "CWD_SENTINEL", "MODEL_SENTINEL", "TOOLS_SENTINEL", "SESSION_SENTINEL",
-      "OUTPUT_SENTINEL", "ERROR_SENTINEL", "ACTIVITY_SENTINEL", "WAITING_SESSION_SENTINEL",
-      "WAITING_OUTPUT_SENTINEL", "WAITING_ERROR_SENTINEL", "WAITING_ACTIVITY_SENTINEL",
-      "REQUEST_MESSAGE_SENTINEL", "INTERVIEW_SENTINEL", "REQUEST_TIMESTAMP_SENTINEL",
-    ]) {
-      assert.equal(exposed.includes(sentinel), false, `${sentinel} must not enter list output`);
+    for (const sentinel of ["TASK_SENTINEL", "RUNNING_TASK_SENTINEL", "WAITING_TASK_SENTINEL", "STARTING_TASK_SENTINEL", "REQUEST_MESSAGE_SENTINEL", "INTERVIEW_SENTINEL"]) {
+      assert.equal(exposed.includes(sentinel), false);
     }
   } finally { harness.cleanup(); }
 });
@@ -499,8 +663,10 @@ test("subagent list returns only status summaries in model content and details",
 test("contact_supervisor prompt metadata describes persistent reply-to-continue requests", async () => {
   const previousChild = process.env.OMPS_SUBAGENT_CHILD;
   const previousPiChild = process.env.PI_SUBAGENT_CHILD;
+  const previousParentRun = process.env.OMPS_PARENT_RUN_ID;
   process.env.OMPS_SUBAGENT_CHILD = "1";
   process.env.PI_SUBAGENT_CHILD = "1";
+  process.env.OMPS_PARENT_RUN_ID = "child-run";
   try {
     let definition;
     let sessionStart;
@@ -520,15 +686,26 @@ test("contact_supervisor prompt metadata describes persistent reply-to-continue 
     assert.equal(definition.promptGuidelines[0], "A call includes reason; optional message adds request context; optional interview carries structured questions.");
     assert.equal(definition.parameters.required.includes("message"), false);
     const guidelines = definition.promptGuidelines.join("\n");
-    for (const phrase of ["reason", "message", "interview", "request ID", "waiting", "need_decision", "interview_request", "progress_update", "same run ID", "reply"]) {
+    for (const phrase of ["reason", "message", "interview", "waiting", "need_decision", "interview_request", "progress_update", "same run ID", "reply"]) {
       assert.match(guidelines, new RegExp(phrase, "i"));
     }
-    assert.doesNotMatch(guidelines, /\b(can|may|later)\b|as needed|do not|cannot|implementation|protocol/i);
+    assert.doesNotMatch(`${definition.description}\n${definition.promptSnippet}\n${guidelines}`, /request ID|UUID/i);
+    const result = await definition.execute("call", { reason: "interview_request", message: "choose", interview: { title: "Choice" } });
+    assert.deepEqual(result.details.request, {
+      runId: process.env.OMPS_PARENT_RUN_ID,
+      reason: "interview_request",
+      message: "choose",
+      interview: { title: "Choice" },
+      createdAt: result.details.request.createdAt,
+    });
+    assert.equal("id" in result.details.request, false);
   } finally {
     if (previousChild === undefined) delete process.env.OMPS_SUBAGENT_CHILD;
     else process.env.OMPS_SUBAGENT_CHILD = previousChild;
     if (previousPiChild === undefined) delete process.env.PI_SUBAGENT_CHILD;
     else process.env.PI_SUBAGENT_CHILD = previousPiChild;
+    if (previousParentRun === undefined) delete process.env.OMPS_PARENT_RUN_ID;
+    else process.env.OMPS_PARENT_RUN_ID = previousParentRun;
   }
 });
 
@@ -556,6 +733,27 @@ test("journal restore preserves folded active status and reports active IDs", ()
   assert.deepEqual(runJournalEntry(restored.runs[0]), { version: 2, run: restored.runs[0] });
 });
 
+test("legacy journal normalizes abstract by Unicode code points and strips request id", () => {
+  const longTask = `${"中".repeat(98)}😀🚀tail`;
+  const legacy = persistedRun({
+    id: "legacy-normalized",
+    abstract: undefined,
+    task: longTask,
+    status: "waiting",
+    request: {
+      id: "legacy-request-id",
+      runId: "legacy-normalized",
+      reason: "need_decision",
+      message: "choose",
+      createdAt: "2026-04-16T23:59:30.000Z",
+    },
+  });
+  const restored = restoreRunJournal([{ version: 2, run: legacy }]).runs[0];
+  assert.equal(restored.abstract, `${"中".repeat(98)}😀🚀...`);
+  assert.equal("id" in restored.request, false);
+  assert.equal(legacyRunAbstract("short"), "short...");
+});
+
 test("journal restore skips run IDs that are unsafe path segments", () => {
   const restored = restoreRunJournal([
     { version: 1, runs: [persistedRun(), persistedRun({ id: "../escape" })] },
@@ -563,6 +761,28 @@ test("journal restore skips run IDs that are unsafe path segments", () => {
   ]);
   assert.deepEqual(restored.runs.map(({ id }) => id), ["run-1"]);
   assert.deepEqual(restored.activeRunIds, ["run-1"]);
+});
+
+test("parent launch reader normalizes legacy missing abstract and rejects blank new abstract", () => {
+  const tempDir = mkdtempSync(join(CACHE, "legacy-launch-parent-"));
+  try {
+    const paths = getRunPaths(join(tempDir, "runs"), "owner", "legacy-run");
+    mkdirSync(paths.controlDir, { recursive: true });
+    const task = `${"界".repeat(98)}😀🚀tail`;
+    const base = {
+      v: 1, runId: "legacy-run", token: "token", ownerSessionId: "owner", agent: "fixer",
+      task, cwd: ROOT, model: "provider/model:high", deniedTools: [], systemPrompt: "prompt",
+      approve: false, childSessionDir: join(tempDir, "children"),
+      piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {}, createdAt: new Date().toISOString(),
+    };
+    atomicWriteJson(paths.configFile, base);
+    assert.equal(readLaunchConfig(paths).abstract, `${"界".repeat(98)}😀🚀...`);
+    atomicWriteJson(paths.configFile, { ...base, abstract: "  concise summary  " });
+    assert.equal(readLaunchConfig(paths).abstract, "concise summary");
+    atomicWriteJson(paths.configFile, { ...base, abstract: "   " });
+    assert.equal(readLaunchConfig(paths), undefined);
+    assert.equal(isDetachedLaunchConfig(base), false, "the strict type guard remains canonical for newly written configs");
+  } finally { rmSync(tempDir, { recursive: true, force: true }); }
 });
 
 test("process identity is non-empty and runner identity validation rejects legacy or extra fields", () => {
@@ -598,6 +818,7 @@ test("create writes secure detached config, journals once, launches, and returns
       run: {
         id,
         agent: "fixer",
+        abstract: "detached summary",
         task: "detached task",
         cwd: ROOT,
         model: "preset/fixer:high",
@@ -613,6 +834,7 @@ test("create writes secure detached config, journals once, launches, and returns
     assert.equal(harness.journalWrites.length, 1);
     assert.equal(config.ownerSessionId, "owner-a");
     assert.equal(config.model, "preset/fixer:high");
+    assert.equal(config.abstract, "detached summary");
     assert.deepEqual(config.piInvocation.command, "pi");
     assert.deepEqual(config.piInvocation.args.slice(0, 4), ["--mode", "rpc", "--model", "preset/fixer:high"]);
     assert.equal(config.piInvocation.args.includes("--session-dir"), true);
@@ -644,6 +866,7 @@ test("create persists exact deny entries and emits --exclude-tools without a pos
     const result = await harness.tools.get("subagent").execute("create", {
       action: "create",
       agent: "observer",
+      abstract: "inspect screenshot",
       task: "inspect the screenshot",
     });
     const id = result.details.run.id;
@@ -666,11 +889,11 @@ test("each create resolves the current deny policy while active runs retain laun
     let policy = ["first_tool"];
     harness.runtime.setDenyResolver(() => policy);
     const first = await harness.tools.get("subagent").execute("create", {
-      action: "create", agent: "fixer", task: "first",
+      action: "create", agent: "fixer", abstract: "first summary", task: "first",
     });
     policy = ["second_tool"];
     const second = await harness.tools.get("subagent").execute("create", {
-      action: "create", agent: "explorer", task: "second",
+      action: "create", agent: "explorer", abstract: "second summary", task: "second",
     });
     assert.deepEqual(harness.runtime.registry.get(first.details.run.id).deniedTools, ["first_tool"]);
     assert.deepEqual(harness.runtime.registry.get(second.details.run.id).deniedTools, ["second_tool"]);
@@ -684,10 +907,10 @@ test("runtime rejects lifecycle tools from a launch-time deny resolver", async (
   try {
     await harness.restore();
     harness.runtime.setModelResolver((agent) => `preset/${agent}:high`);
-    for (const reserved of ["subagent", "subagent_supervisor", "contact_supervisor"]) {
+    for (const reserved of ["subagent", "contact_supervisor"]) {
       harness.runtime.setDenyResolver(() => [reserved]);
       await assert.rejects(
-        harness.tools.get("subagent").execute("create", { action: "create", agent: "fixer", task: "x" }),
+        harness.tools.get("subagent").execute("create", { action: "create", agent: "fixer", abstract: "x", task: "x" }),
         new RegExp(`${reserved}.*cannot be denied`),
       );
     }
@@ -717,6 +940,7 @@ test("create waits for the just-spawned PID to exit before cleaning up when proc
     assert.deepEqual(run, {
       id: run.id,
       agent: "fixer",
+      abstract: "detached summary",
       task: "detached task",
       cwd: ROOT,
       model: "preset/fixer:high",
@@ -770,6 +994,7 @@ test("create failure returns the complete failed run", async () => {
     assert.deepEqual(run, {
       id: run.id,
       agent: "fixer",
+      abstract: "detached summary",
       task: "detached task",
       cwd: ROOT,
       model: "preset/fixer:high",
@@ -822,7 +1047,7 @@ test("poll folds logical state but activity and heartbeat changes do not journal
   } finally { harness.cleanup(); }
 });
 
-test("waiting notification and supervisor reply use detached control without blocking", async () => {
+test("waiting notification and subagent reply use run ID and waiting sequence", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
@@ -831,8 +1056,12 @@ test("waiting notification and supervisor reply use detached control without blo
     const config = readConfig(harness, id);
     harness.alive.add(999);
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
-      status: "waiting",
-      request: { id: "req-1", runId: id, reason: "need_decision", message: "choose", createdAt: new Date(NOW_MS).toISOString() },
+      status: "waiting", waitingSeq: 1,
+      request: {
+        runId: id, reason: "need_decision", message: "choose",
+        interview: { title: "Choose", questions: [{ prompt: "A or B?" }] },
+        createdAt: new Date(NOW_MS).toISOString(),
+      },
     }));
     await inspect(harness, id);
     const waitingDelivery = harness.notifications.at(-1);
@@ -841,18 +1070,23 @@ test("waiting notification and supervisor reply use detached control without blo
     assert.equal(waitingNotification.display, true);
     assert.equal(waitingNotification.details.status, "waiting");
     assert.equal(waitingNotification.details.reason, "need_decision");
-    assert.equal(waitingNotification.details.deliveryKey, expectedDeliveryKey(id, "waiting", "req-1"));
-    assert.equal(waitingNotification.details.run.request.message, "choose");
+    assert.equal(waitingNotification.details.deliveryKey, expectedDeliveryKey(id, "waiting", 1));
+    assert.equal(waitingNotification.details.waitingSeq, 1);
+    assert.equal(waitingNotification.details.request.message, "choose");
+    assert.match(waitingNotification.content, new RegExp(`"runId": "${id}"`));
+    assert.match(waitingNotification.content, /"reason": "need_decision"/);
+    assert.match(waitingNotification.content, /"interview"/);
+    assert.match(waitingNotification.content, /"createdAt"/);
+    assert.doesNotMatch(waitingNotification.content, /waitingSeq|request ID|req-1/);
     assert.equal(harness.runtime.registry.get(id).notificationPending, "waiting", "sendMessage does not acknowledge delivery");
     harness.runtime.deliverPendingNotification(id);
     assert.equal(harness.notifications.length, 1, "waiting delivery is queued only once before message_end");
-    assert.equal(waitingNotification.content, `Subagent ${id} (fixer) is waiting.\nRequest req-1 (need_decision): choose`);
-    const reply = await harness.tools.get("subagent_supervisor").execute("reply", {
-      action: "reply", replyTo: "req-1", message: "option A",
+    const reply = await harness.tools.get("subagent").execute("reply", {
+      action: "reply", id, message: "option A",
     });
     assert.match(reply.content[0].text, /is running/);
     assert.deepEqual(controls(harness, id).at(-1), {
-      v: 1, token: config.token, type: "reply", message: "option A", requestId: "req-1",
+      v: 1, token: config.token, type: "reply", message: "option A", waitingSeq: 1,
     });
     assert.equal(harness.runtime.registry.get(id).request, undefined);
     assert.equal(harness.runtime.registry.get(id).notificationPending, undefined, "reply keeps the existing waiting-marker clear semantics");
@@ -863,7 +1097,8 @@ test("waiting notification and supervisor reply use detached control without blo
       heartbeatAt: new Date(NOW_MS + 100).toISOString(),
       turnCount: 7,
       responseText: "runner has not consumed reply yet",
-      request: { id: "req-1", runId: id, reason: "need_decision", message: "choose", createdAt: new Date(NOW_MS).toISOString() },
+      waitingSeq: 1,
+      request: { runId: id, reason: "need_decision", message: "choose", createdAt: new Date(NOW_MS).toISOString() },
     }));
     const stalePoll = await inspect(harness, id);
     assert.equal(harness.runtime.registry.get(id).status, "running", "stale waiting state is suppressed during reply grace");
@@ -885,7 +1120,32 @@ test("waiting notification and supervisor reply use detached control without blo
   } finally { harness.cleanup(); }
 });
 
-test("waiting delivery keys isolate request cycles and stale acknowledgements", async () => {
+test("subagent reply validation is strict", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    await assert.rejects(harness.tools.get("subagent").execute("unknown", {
+      action: "reply", id: "missing", message: "continue",
+    }), /Unknown subagent run/);
+    const started = await createRun(harness);
+    const id = started.details.run.id;
+    const config = readConfig(harness, id);
+    harness.alive.add(999);
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token));
+    await inspect(harness, id);
+    await assert.rejects(harness.tools.get("subagent").execute("running", {
+      action: "reply", id, message: "continue",
+    }), /reply requires a waiting run/);
+    await assert.rejects(harness.tools.get("subagent").execute("missing-message", {
+      action: "reply", id,
+    }), /message must be a non-empty string/);
+    await assert.rejects(harness.tools.get("subagent").execute("extra", {
+      action: "reply", id, message: "continue", abstract: "forbidden",
+    }), /reply does not accept create field.*abstract/i);
+  } finally { harness.cleanup(); }
+});
+
+test("legacy waiting state without waitingSeq is not replyable and writes no control", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
@@ -895,50 +1155,78 @@ test("waiting delivery keys isolate request cycles and stale acknowledgements", 
     harness.alive.add(999);
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
       status: "waiting",
-      request: { id: "req-old", runId: id, reason: "need_decision", message: "old", createdAt: new Date(NOW_MS).toISOString() },
+      request: {
+        id: "legacy-request-id",
+        runId: id,
+        reason: "need_decision",
+        message: "legacy runner request",
+        createdAt: new Date(NOW_MS).toISOString(),
+      },
+    }));
+    await inspect(harness, id);
+    assert.equal(harness.runtime.registry.get(id).status, "waiting");
+    assert.equal(harness.runtime.registry.get(id).waitingSeq, undefined);
+    const controlsBefore = harness.controlWrites.length;
+    await assert.rejects(
+      harness.tools.get("subagent").execute("legacy-reply", { action: "reply", id, message: "continue" }),
+      /no replyable waiting sequence/,
+    );
+    assert.equal(harness.controlWrites.length, controlsBefore);
+    assert.deepEqual(controls(harness, id), []);
+  } finally { harness.cleanup(); }
+});
+
+test("waiting delivery keys isolate sequence cycles and stale acknowledgements", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const started = await createRun(harness);
+    const id = started.details.run.id;
+    const config = readConfig(harness, id);
+    harness.alive.add(999);
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "waiting", waitingSeq: 1,
+      request: { runId: id, reason: "need_decision", message: "old", createdAt: new Date(NOW_MS).toISOString() },
     }));
     await inspect(harness, id);
     const oldMessage = harness.notifications.at(-1).message;
-    await harness.tools.get("subagent_supervisor").execute("reply-old", {
-      action: "reply", replyTo: "req-old", message: "continue",
-    });
+    await harness.tools.get("subagent").execute("reply-old", { action: "reply", id, message: "continue" });
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
-      status: "running",
-      heartbeatAt: new Date(NOW_MS + 100).toISOString(),
+      status: "running", waitingSeq: 1, heartbeatAt: new Date(NOW_MS + 100).toISOString(),
     }));
     await inspect(harness, id);
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
-      status: "waiting",
-      heartbeatAt: new Date(NOW_MS + 200).toISOString(),
-      request: { id: "req-new", runId: id, reason: "interview_request", message: "new", createdAt: new Date(NOW_MS + 200).toISOString() },
+      status: "waiting", waitingSeq: 2, heartbeatAt: new Date(NOW_MS + 200).toISOString(),
+      request: { runId: id, reason: "interview_request", message: "new", createdAt: new Date(NOW_MS + 200).toISOString() },
     }));
     await inspect(harness, id);
     const newMessage = harness.notifications.at(-1).message;
-    assert.equal(newMessage.details.deliveryKey, expectedDeliveryKey(id, "waiting", "req-new"));
+    assert.equal(newMessage.details.deliveryKey, expectedDeliveryKey(id, "waiting", 2));
     assert.notEqual(newMessage.details.deliveryKey, oldMessage.details.deliveryKey);
     assert.equal(harness.runtime.registry.get(id).notificationPending, "waiting");
-    assert.equal(harness.runtime.registry.get(id).request.id, "req-new");
+    assert.equal(harness.runtime.registry.get(id).waitingSeq, 2);
 
     assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(oldMessage)), false);
-    assert.equal(harness.runtime.queuedNotifications.has(oldMessage.details.deliveryKey), false,
-      "stale acknowledgement removes only its old queued key");
+    assert.equal(harness.runtime.queuedNotifications.has(oldMessage.details.deliveryKey), false);
     assert.equal(harness.runtime.queuedNotifications.has(newMessage.details.deliveryKey), true);
+    assert.equal(harness.runtime.registry.get(id).notificationPending, "waiting");
     assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(newMessage, {
-      ...newMessage.details,
-      requestId: "req-old",
-      deliveryKey: expectedDeliveryKey(id, "waiting", "req-old"),
+      runId: id,
+      event: "waiting",
+      status: "waiting",
+      requestId: "legacy-request-id",
+      deliveryKey: `oh-my-pi-slim:subagent-notification:${JSON.stringify([id, "waiting", "legacy-request-id"])}`,
     })), false);
     assert.equal(harness.runtime.registry.get(id).notificationPending, "waiting");
-    assert.equal(harness.runtime.registry.get(id).request.id, "req-new");
-
-    const { deliveryKey: _deliveryKey, ...legacyWaitingDetails } = newMessage.details;
-    assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(newMessage, legacyWaitingDetails)), true,
-      "legacy waiting details derive the delivery key from runId/status/requestId");
+    assert.equal(harness.runtime.queuedNotifications.has(newMessage.details.deliveryKey), true,
+      "a legacy requestId acknowledgement cannot clear the current waiting sequence");
+    const { deliveryKey: _deliveryKey, ...matchingWaitingDetails } = newMessage.details;
+    assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(newMessage, matchingWaitingDetails)), true);
     assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
   } finally { harness.cleanup(); }
 });
 
-test("waiting-to-waiting request replacement creates a new notification after prior acknowledgement", async () => {
+test("waiting-to-waiting sequence replacement creates a new notification after prior acknowledgement", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
@@ -947,30 +1235,25 @@ test("waiting-to-waiting request replacement creates a new notification after pr
     const config = readConfig(harness, id);
     harness.alive.add(999);
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
-      status: "waiting",
-      request: { id: "req-direct-1", runId: id, reason: "need_decision", message: "first", createdAt: new Date(NOW_MS).toISOString() },
+      status: "waiting", waitingSeq: 1,
+      request: { runId: id, reason: "need_decision", message: "first", createdAt: new Date(NOW_MS).toISOString() },
     }));
     await inspect(harness, id);
     const firstMessage = harness.notifications.at(-1).message;
     assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(firstMessage)), true);
-    assert.equal(harness.runtime.registry.get(id).status, "waiting");
-    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
 
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
-      status: "waiting",
-      heartbeatAt: new Date(NOW_MS + 100).toISOString(),
-      request: { id: "req-direct-2", runId: id, reason: "interview_request", message: "second", createdAt: new Date(NOW_MS + 100).toISOString() },
+      status: "waiting", waitingSeq: 2, heartbeatAt: new Date(NOW_MS + 100).toISOString(),
+      request: { runId: id, reason: "interview_request", message: "second", createdAt: new Date(NOW_MS + 100).toISOString() },
     }));
     await inspect(harness, id);
     const secondMessage = harness.notifications.at(-1).message;
     assert.equal(harness.notifications.length, 2);
-    assert.equal(secondMessage.details.deliveryKey, expectedDeliveryKey(id, "waiting", "req-direct-2"));
+    assert.equal(secondMessage.details.deliveryKey, expectedDeliveryKey(id, "waiting", 2));
     assert.equal(harness.runtime.registry.get(id).notificationPending, "waiting");
-    assert.equal(harness.runtime.registry.get(id).request.id, "req-direct-2");
-
+    assert.equal(harness.runtime.registry.get(id).waitingSeq, 2);
     assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(firstMessage)), false);
     assert.equal(harness.runtime.registry.get(id).notificationPending, "waiting");
-    assert.equal(harness.runtime.registry.get(id).request.id, "req-direct-2");
   } finally { harness.cleanup(); }
 });
 
@@ -983,13 +1266,11 @@ test("reply grace suppression still fails a stale waiting runner whose PID dies"
     const config = readConfig(harness, id);
     harness.alive.add(999);
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
-      status: "waiting",
-      request: { id: "req-dead", runId: id, reason: "need_decision", message: "choose", createdAt: new Date(NOW_MS).toISOString() },
+      status: "waiting", waitingSeq: 1,
+      request: { runId: id, reason: "need_decision", message: "choose", createdAt: new Date(NOW_MS).toISOString() },
     }));
     await inspect(harness, id);
-    await harness.tools.get("subagent_supervisor").execute("reply", {
-      action: "reply", replyTo: "req-dead", message: "option A",
-    });
+    await harness.tools.get("subagent").execute("reply", { action: "reply", id, message: "option A" });
     harness.alive.delete(999);
     await inspect(harness, id);
     assert.equal(harness.runtime.registry.get(id).status, "failed");
@@ -1006,19 +1287,17 @@ test("stale waiting state is restored after the supervisor reply grace expires",
     const config = readConfig(harness, id);
     harness.alive.add(999);
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
-      status: "waiting",
-      request: { id: "req-grace", runId: id, reason: "need_decision", message: "choose", createdAt: new Date(NOW_MS).toISOString() },
+      status: "waiting", waitingSeq: 1,
+      request: { runId: id, reason: "need_decision", message: "choose", createdAt: new Date(NOW_MS).toISOString() },
     }));
     await inspect(harness, id);
-    await harness.tools.get("subagent_supervisor").execute("reply", {
-      action: "reply", replyTo: "req-grace", message: "option A",
-    });
+    await harness.tools.get("subagent").execute("reply", { action: "reply", id, message: "option A" });
     harness.advance(5001);
     await inspect(harness, id);
     assert.equal(harness.runtime.registry.get(id).status, "waiting");
-    assert.equal(harness.runtime.registry.get(id).request.id, "req-grace");
+    assert.equal(harness.runtime.registry.get(id).waitingSeq, 1);
     assert.equal(harness.notifications.filter(({ message }) => message.details.status === "waiting").length, 1,
-      "the same waiting request ID is not enqueued twice in one session");
+      "the same waiting sequence is not enqueued twice in one session");
   } finally { harness.cleanup(); }
 });
 
@@ -1052,8 +1331,8 @@ test("interrupt accepts a waiting non-terminal run", async () => {
     const config = readConfig(harness, id);
     harness.alive.add(999);
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
-      status: "waiting",
-      request: { id: "req-interrupt", runId: id, reason: "need_decision", message: "choose", createdAt: new Date(NOW_MS).toISOString() },
+      status: "waiting", waitingSeq: 1,
+      request: { runId: id, reason: "need_decision", message: "choose", createdAt: new Date(NOW_MS).toISOString() },
     }));
     await inspect(harness, id);
     const result = await harness.tools.get("subagent").execute("interrupt", { action: "interrupt", id });
@@ -1254,8 +1533,8 @@ test("restore and shutdown clear runtime notification queue state", async () => 
     const config = readConfig(harness, id);
     harness.alive.add(999);
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
-      status: "waiting",
-      request: { id: "req-shutdown-queue", runId: id, reason: "progress_update", message: "pause", createdAt: new Date(NOW_MS).toISOString() },
+      status: "waiting", waitingSeq: 1,
+      request: { runId: id, reason: "progress_update", message: "pause", createdAt: new Date(NOW_MS).toISOString() },
     }));
     await inspect(harness, id);
     assert.equal(harness.runtime.queuedNotifications.size, 1);
@@ -1419,12 +1698,12 @@ test("missing run directories clear health and pending reply bookkeeping", async
     const started = await createRun(harness);
     const id = started.details.run.id;
     harness.runtime.health.set(id, { trackedAt: NOW_MS });
-    harness.runtime.pendingReplies.set(id, { requestId: "stale", sentAt: NOW_MS });
+    harness.runtime.repliedSeqs.set(id, { waitingSeq: 1, sentAt: NOW_MS });
     rmSync(harness.paths(id).runDir, { recursive: true, force: true });
     await inspect(harness, id);
     assert.equal(harness.runtime.registry.get(id).status, "interrupted");
     assert.equal(harness.runtime.health.has(id), false);
-    assert.equal(harness.runtime.pendingReplies.has(id), false);
+    assert.equal(harness.runtime.repliedSeqs.has(id), false);
   } finally { harness.cleanup(); }
 });
 
@@ -1621,7 +1900,8 @@ test("shutdown journals a pending interruption and the next runtime delivers it 
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
       status: "waiting",
       sessionFile,
-      request: { id: "req-shutdown", runId: id, reason: "progress_update", message: "checkpoint", createdAt: new Date(NOW_MS).toISOString() },
+      waitingSeq: 1,
+      request: { runId: id, reason: "progress_update", message: "checkpoint", createdAt: new Date(NOW_MS).toISOString() },
     }));
     await inspect(harness, id);
     assert.equal(harness.runtime.registry.get(id).notificationPending, "waiting");
@@ -1669,7 +1949,7 @@ test("restore terminates verified live orphans before cleanup and removes termin
     mkdirSync(orphanPaths.controlDir, { recursive: true, mode: 0o700 });
     const config = {
       v: 1, runId: orphanId, token: "orphan-token", ownerSessionId: harness.ownerSessionId,
-      agent: "fixer", task: "orphan", cwd: ROOT, model: "provider/model:high",
+      agent: "fixer", abstract: "orphan summary", task: "orphan", cwd: ROOT, model: "provider/model:high",
       deniedTools: [], systemPrompt: "prompt", approve: false,
       childSessionDir: join(harness.tempDir, "children"),
       piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {},
@@ -1698,7 +1978,7 @@ test("restore GC retains an orphan whose PID was reused", async () => {
     mkdirSync(paths.controlDir, { recursive: true, mode: 0o700 });
     const config = {
       v: 1, runId: orphanId, token: "orphan-token", ownerSessionId: harness.ownerSessionId,
-      agent: "fixer", task: "orphan", cwd: ROOT, model: "provider/model:high",
+      agent: "fixer", abstract: "orphan summary", task: "orphan", cwd: ROOT, model: "provider/model:high",
       deniedTools: [], systemPrompt: "prompt", approve: false,
       childSessionDir: join(harness.tempDir, "children"),
       piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {},
@@ -1726,7 +2006,7 @@ test("restore keeps offline terminal state but interrupts and kills any prior ac
       mkdirSync(paths.controlDir, { recursive: true, mode: 0o700 });
       const config = {
         v: 1, runId: run.id, token: `token-${run.id}`, ownerSessionId: harness.ownerSessionId,
-        agent: run.agent, task: run.task, cwd: run.cwd, model: run.model, deniedTools: run.deniedTools,
+        agent: run.agent, abstract: run.abstract, task: run.task, cwd: run.cwd, model: run.model, deniedTools: run.deniedTools,
         systemPrompt: "prompt", approve: false, childSessionDir: join(harness.tempDir, "children"),
         piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {}, createdAt: run.createdAt,
       };
@@ -1759,7 +2039,7 @@ test("restore kills a prior active runner from verified identity when state is a
     mkdirSync(paths.controlDir, { recursive: true, mode: 0o700 });
     const config = {
       v: 1, runId: activeRun.id, token: "identity-token", ownerSessionId: harness.ownerSessionId,
-      agent: activeRun.agent, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, deniedTools: activeRun.deniedTools,
+      agent: activeRun.agent, abstract: activeRun.abstract, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, deniedTools: activeRun.deniedTools,
       systemPrompt: "prompt", approve: false, childSessionDir: join(harness.tempDir, "children"),
       piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {}, createdAt: activeRun.createdAt,
     };
@@ -1775,6 +2055,40 @@ test("restore kills a prior active runner from verified identity when state is a
   } finally { harness.cleanup(); }
 });
 
+test("legacy active waiting launch without abstract remains verifiable and is interrupted on restore", async () => {
+  const activeRun = persistedRun({ id: "legacy-waiting-launch", abstract: undefined, status: "waiting" });
+  const harness = createHarness({ branch: [branchEntry({ version: 1, runs: [activeRun] })] });
+  try {
+    const paths = harness.paths(activeRun.id);
+    mkdirSync(paths.controlDir, { recursive: true, mode: 0o700 });
+    const config = {
+      v: 1, runId: activeRun.id, token: "legacy-waiting-token", ownerSessionId: harness.ownerSessionId,
+      agent: activeRun.agent, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, deniedTools: activeRun.deniedTools,
+      systemPrompt: "prompt", approve: false, childSessionDir: join(harness.tempDir, "children"),
+      piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {}, createdAt: activeRun.createdAt,
+    };
+    atomicWriteJson(paths.configFile, config);
+    atomicWriteJson(paths.stateFile, stateFor(activeRun.id, config.token, {
+      pid: 776,
+      status: "waiting",
+      request: {
+        id: "legacy-request-id", runId: activeRun.id, reason: "need_decision",
+        message: "legacy wait", createdAt: activeRun.createdAt,
+      },
+    }));
+    atomicWriteJson(paths.identityFile, {
+      v: 1, token: config.token, runId: activeRun.id, pid: 776, processIdentity: "process-776",
+    });
+    harness.alive.add(776);
+    await harness.restore();
+    assert.equal(harness.runtime.registry.get(activeRun.id).abstract, legacyRunAbstract(activeRun.task));
+    assert.equal(harness.runtime.registry.get(activeRun.id).status, "interrupted");
+    assert.equal(harness.controlWrites.at(-1).type, "interrupt");
+    assert.deepEqual(harness.killed, [{ pid: -776, signal: "SIGTERM" }]);
+    assert.equal(existsSync(paths.runDir), false);
+  } finally { harness.cleanup(); }
+});
+
 test("restore does not kill an identity whose token does not match launch config", async () => {
   const activeRun = persistedRun({ id: "bad-identity" });
   const harness = createHarness({ branch: [branchEntry({ version: 1, runs: [activeRun] })] });
@@ -1783,7 +2097,7 @@ test("restore does not kill an identity whose token does not match launch config
     mkdirSync(paths.controlDir, { recursive: true, mode: 0o700 });
     atomicWriteJson(paths.configFile, {
       v: 1, runId: activeRun.id, token: "config-token", ownerSessionId: harness.ownerSessionId,
-      agent: activeRun.agent, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, deniedTools: activeRun.deniedTools,
+      agent: activeRun.agent, abstract: activeRun.abstract, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, deniedTools: activeRun.deniedTools,
       systemPrompt: "prompt", approve: false, childSessionDir: join(harness.tempDir, "children"),
       piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {}, createdAt: activeRun.createdAt,
     });
@@ -1807,7 +2121,7 @@ test("restore does not signal a reused PID whose OS identity changed", async () 
     mkdirSync(paths.controlDir, { recursive: true, mode: 0o700 });
     const config = {
       v: 1, runId: activeRun.id, token: "identity-token", ownerSessionId: harness.ownerSessionId,
-      agent: activeRun.agent, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, deniedTools: activeRun.deniedTools,
+      agent: activeRun.agent, abstract: activeRun.abstract, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, deniedTools: activeRun.deniedTools,
       systemPrompt: "prompt", approve: false, childSessionDir: join(harness.tempDir, "children"),
       piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {}, createdAt: activeRun.createdAt,
     };
@@ -1832,7 +2146,7 @@ test("restore treats legacy runner identity without processIdentity as unverifia
     mkdirSync(paths.controlDir, { recursive: true, mode: 0o700 });
     const config = {
       v: 1, runId: activeRun.id, token: "legacy-token", ownerSessionId: harness.ownerSessionId,
-      agent: activeRun.agent, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, deniedTools: activeRun.deniedTools,
+      agent: activeRun.agent, abstract: activeRun.abstract, task: activeRun.task, cwd: activeRun.cwd, model: activeRun.model, deniedTools: activeRun.deniedTools,
       systemPrompt: "prompt", approve: false, childSessionDir: join(harness.tempDir, "children"),
       piInvocation: { command: "pi", args: ["--mode", "rpc"] }, env: {}, createdAt: activeRun.createdAt,
     };
@@ -1867,8 +2181,10 @@ test("owner session paths are isolated and RPC mode never registers a widget", a
   } finally { harness.cleanup(); }
 });
 
-test("index tree lifecycle, widget turn binding, and fixed checkpoint resume prompt stay exact", () => {
+test("main and child share the fixed checkpoint helpers while main keeps settled follow-up scheduling", () => {
   const source = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/index.ts"), "utf8");
+  const childSource = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/child-supervisor.ts"), "utf8");
+  const checkpointSource = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent-checkpoint.ts"), "utf8");
   const resumeText = "Resume the user's latest intent. Re-read kept recent messages above the summary to confirm the latest request. If it supersedes earlier plans in the summary, follow it. If no work remains, say so briefly; do not invent work.";
   assert.match(source, /pi\.on\("session_before_tree", async[\s\S]*await subagents\.shutdown\(\)/);
   assert.match(source, /pi\.on\("session_tree", async[\s\S]*await subagents\.restore\(ctx\)[\s\S]*subagents\.setModelResolver/);
@@ -1878,9 +2194,14 @@ test("index tree lifecycle, widget turn binding, and fixed checkpoint resume pro
   assert.match(source, /pi\.on\("agent_settled", \(_event, ctx\) => \{[\s\S]*deliveryEpoch = sessionEpoch[\s\S]*deliverySessionId = ctx\.sessionManager\.getSessionId\(\)[\s\S]*setImmediate\(\(\) => \{[\s\S]*deliveryEpoch !== sessionEpoch[\s\S]*sessionCtx\?\.sessionManager\.getSessionId\(\) !== deliverySessionId[\s\S]*retryQueuedNotificationsAfterAgentSettled\(\)[\s\S]*const checkpoint = pendingCheckpoint[\s\S]*scheduleCheckpointResume/);
   assert.equal(source.indexOf('pi.on("message_end"') < source.indexOf('pi.on("agent_settled"'), true,
     "Pi message_end binding is registered before agent_settled retry so its ack immediate is queued first");
-  assert.equal(source.includes(`const CHECKPOINT_RESUME_TEXT = ${JSON.stringify(resumeText)};`), true);
-  assert.match(source, /pi\.sendUserMessage\(CHECKPOINT_RESUME_TEXT, \{ deliverAs: "followUp" \}\)/);
-  assert.doesNotMatch(source, /checkpoint\.tools|Completed tool calls at the checkpoint|Re-fetch/);
+  assert.equal(checkpointSource.includes(`export const CHECKPOINT_RESUME_TEXT = ${JSON.stringify(resumeText)};`), true);
+  for (const helper of ["CHECKPOINT_RESUME_TEXT", "completedToolBatch", "contextUsageNeedsCheckpoint"]) {
+    assert.match(source, new RegExp(helper));
+    assert.match(childSource, new RegExp(helper));
+  }
+  assert.match(source, /setImmediate\(\(\) => \{[\s\S]*pi\.sendUserMessage\(CHECKPOINT_RESUME_TEXT, \{ deliverAs: "followUp" \}\)/);
+  assert.match(childSource, /pi\.on\("session_compact"[\s\S]*pi\.sendUserMessage\(CHECKPOINT_RESUME_TEXT, \{ deliverAs: "followUp" \}\)[\s\S]*pendingCheckpoint = undefined/);
+  assert.doesNotMatch(`${source}\n${childSource}`, /checkpoint\.tools|Completed tool calls at the checkpoint|Re-fetch/);
 });
 
 test("resume creates a new run ID and a complete --session invocation", async () => {
@@ -1891,7 +2212,9 @@ test("resume creates a new run ID and a complete --session invocation", async ()
     writeFileSync(sessionFile, "session");
     harness.runtime.registry.add(persistedRun({ id: "source", status: "interrupted", sessionFile }));
     harness.runtime.setDenyResolver(() => ["ask_user_question"]);
-    const result = await harness.tools.get("subagent").execute("resume", { action: "resume", id: "source", message: "continue" });
+    const result = await harness.tools.get("subagent").execute("resume", {
+      action: "resume", id: "source", abstract: "  new resume summary  ", message: "continue",
+    });
     const id = result.details.run.id;
     const config = readConfig(harness, id);
     assert.match(result.content[0].text, new RegExp(`${id}.*status starting`));
@@ -1899,6 +2222,7 @@ test("resume creates a new run ID and a complete --session invocation", async ()
     assert.deepEqual(result.details.run, {
       id,
       agent: "fixer",
+      abstract: "new resume summary",
       task: "continue",
       cwd: ROOT,
       model: "provider/model:high",
@@ -1910,6 +2234,8 @@ test("resume creates a new run ID and a complete --session invocation", async ()
       updatedAt: new Date(NOW_MS).toISOString(),
       live: true,
     });
+    assert.equal(config.abstract, "new resume summary");
+    assert.notEqual(config.abstract, harness.runtime.registry.get("source").abstract);
     assert.equal(config.resumeSessionFile, sessionFile);
     const sessionIndex = config.piInvocation.args.indexOf("--session");
     assert.equal(config.piInvocation.args[sessionIndex + 1], sessionFile);

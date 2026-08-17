@@ -12,6 +12,7 @@ const piRoot = dirname(dirname(piEntry));
 const dependencyMap = {
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
+  "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -24,8 +25,6 @@ const {
   renderSubagentCall,
   renderSubagentNotification,
   renderSubagentResult,
-  renderSupervisorCall,
-  renderSupervisorResult,
 } = await import("../extensions/oh-my-pi-slim/subagent-transcript-renderer.ts");
 
 const theme = {
@@ -53,6 +52,7 @@ function run(overrides = {}) {
   return {
     id: "run-1",
     agent: "fixer",
+    abstract: "Concise run abstract",
     task: "Low-value task text that results must not repeat",
     cwd: "/workspace/project",
     model: "openai/gpt-5.6-sol:xhigh",
@@ -63,8 +63,8 @@ function run(overrides = {}) {
     sourceRunId: "source-run-0",
     sessionFile: "/sessions/child.jsonl",
     live: false,
+    waitingSeq: 1,
     request: {
-      id: "req-1",
       runId: "run-1",
       reason: "need_decision",
       message: "Full request message\n<results>request payload</results>",
@@ -90,15 +90,17 @@ test("call renderers keep complete action-specific input", () => {
   const created = render(renderSubagentCall({
     action: "create",
     agent: "fixer",
+    abstract: "Create concise abstract",
     task: "Create task line one\n<results>create task payload</results>\nCreate task line three",
     cwd: "/full/create/cwd",
   }, theme, { cwd: "/context/cwd" }));
-  assertFull(created, ["Action: create", "Agent: fixer", "/full/create/cwd", "Create task line one", "<results>create task payload</results>", "Create task line three"]);
+  assertFull(created, ["Action: create", "Agent: fixer", "Abstract: Create concise abstract", "/full/create/cwd", "Create task line one", "<results>create task payload</results>", "Create task line three"]);
 
   const resume = render(renderSubagentCall({
-    action: "resume", id: "source-run-full", message: "Continuation line one\nContinuation line two",
+    action: "resume", id: "source-run-full", abstract: "Fresh continuation abstract",
+    message: "Continuation line one\nContinuation line two",
   }, theme));
-  assertFull(resume, ["Action: resume", "Source run: source-run-full", "Continuation line one", "Continuation line two"]);
+  assertFull(resume, ["Action: resume", "Source run: source-run-full", "Abstract: Fresh continuation abstract", "Continuation line one", "Continuation line two"]);
 
   const steer = render(renderSubagentCall({
     action: "steer", id: "run-steer-full", message: "Guidance line one\n<results>guidance payload</results>",
@@ -109,16 +111,13 @@ test("call renderers keep complete action-specific input", () => {
   assertFull(interrupt, ["Action: interrupt", "Run: run-interrupt-full"]);
 
   const list = render(renderSubagentCall({ action: "list" }, theme));
-  assertFull(list, ["Action: list", "retained run identity and current status", "waiting request identity"]);
+  assertFull(list, ["Action: list", "starting, running, and waiting", "abstract", "waiting reason"]);
   assert.doesNotMatch(list, /output|error|activity|task/i);
 
-  const pending = render(renderSupervisorCall({ action: "pending" }, theme));
-  assertFull(pending, ["Action: pending", "every pending supervisor request in full"]);
-
-  const reply = render(renderSupervisorCall({
-    action: "reply", replyTo: "req-full", message: "Reply line one\n<results>reply payload</results>\nReply line three",
+  const reply = render(renderSubagentCall({
+    action: "reply", id: "run-full", message: "Reply line one\n<results>reply payload</results>\nReply line three",
   }, theme));
-  assertFull(reply, ["Action: reply", "Request: req-full", "Reply line one", "<results>reply payload</results>", "Reply line three"]);
+  assertFull(reply, ["Action: reply", "Run: run-full", "Reply line one", "<results>reply payload</results>", "Reply line three"]);
 });
 
 test("tool results start with one blank separator line", () => {
@@ -129,12 +128,12 @@ test("tool results start with one blank separator line", () => {
   assert.equal(subagent[0], "");
   assert.equal(subagent[1], "✓ Started explorer [spacing-run] · starting");
 
-  const supervisor = renderLines(renderSupervisorResult(
+  const reply = renderLines(renderSubagentResult(
     { details: { run: run({ id: "spacing-reply", agent: "fixer", status: "running" }) } },
-    { expanded: false, isPartial: false }, theme, { args: { action: "reply", replyTo: "spacing-request", message: "continue" } },
+    { expanded: false, isPartial: false }, theme, { args: { action: "reply", id: "spacing-reply", message: "continue" } },
   ));
-  assert.equal(supervisor[0], "");
-  assert.equal(supervisor[1], "✓ Replied [spacing-request] · fixer [spacing-reply] · running");
+  assert.equal(reply[0], "");
+  assert.equal(reply[1], "✓ Replied · fixer [spacing-reply] · running");
 });
 
 test("subagent immediate results use accurate compact action acknowledgements", () => {
@@ -147,7 +146,7 @@ test("subagent immediate results use accurate compact action acknowledgements", 
 
   const resume = render(renderSubagentResult(
     { details: { run: run({ id: "resume-id", agent: "explorer", status: "starting", output: undefined, error: undefined }) } },
-    { expanded: false, isPartial: false }, theme, { args: { action: "resume", id: "source-id", message: "continue" } },
+    { expanded: false, isPartial: false }, theme, { args: { action: "resume", id: "source-id", abstract: "new summary", message: "continue" } },
   ));
   assert.equal(resume, "✓ Resumed [source-id] → explorer [resume-id] · starting");
 
@@ -156,6 +155,12 @@ test("subagent immediate results use accurate compact action acknowledgements", 
     { expanded: false, isPartial: false }, theme, { args: { action: "steer", id: "steer-id", message: "focus" } },
   ));
   assert.equal(steer, "✓ Steer requested · explorer [steer-id] · running");
+
+  const reply = render(renderSubagentResult(
+    { details: { run: run({ id: "reply-id", agent: "fixer", status: "running", output: undefined, error: undefined }) } },
+    { expanded: false, isPartial: false }, theme, { args: { action: "reply", id: "reply-id", message: "continue" } },
+  ));
+  assert.equal(reply, "✓ Replied · fixer [reply-id] · running");
 
   const interrupt = render(renderSubagentResult(
     { details: { run: run({ id: "interrupt-id", agent: "explorer", status: "running", output: undefined, error: undefined }) } },
@@ -199,6 +204,7 @@ test("list renders only compact run status and waiting request identity", () => 
       runs: [
         run({
           id: "terminal-id",
+          abstract: "TERMINAL_ABSTRACT_SENTINEL",
           status: "completed",
           task: "TASK_SENTINEL",
           cwd: "CWD_SENTINEL",
@@ -216,6 +222,7 @@ test("list renders only compact run status and waiting request identity", () => 
         run({
           id: "active-id",
           agent: "explorer",
+          abstract: "active abstract",
           status: "running",
           task: "ACTIVE_TASK_SENTINEL",
           activity: { responseText: "ACTIVE_ACTIVITY_SENTINEL" },
@@ -224,15 +231,14 @@ test("list renders only compact run status and waiting request identity", () => 
         }),
         run({
           id: "waiting-id",
+          abstract: "waiting abstract",
           status: "waiting",
-          requestId: "req-waiting",
           reason: "interview_request",
           task: "WAITING_TASK_SENTINEL",
           activity: { responseText: "WAITING_ACTIVITY_SENTINEL" },
           output: "WAITING_OUTPUT_SENTINEL",
           error: "WAITING_ERROR_SENTINEL",
           request: {
-            id: "NESTED_REQUEST_ID_SENTINEL",
             runId: "waiting-id",
             reason: "progress_update",
             message: "REQUEST_MESSAGE_SENTINEL",
@@ -245,18 +251,17 @@ test("list renders only compact run status and waiting request identity", () => 
   }, { expanded: false, isPartial: false }, theme, { args: { action: "list" } }));
 
   assertFull(listText, [
-    "Retained subagent run status · 3",
-    "✓ fixer [terminal-id] · completed",
-    "● explorer [active-id] · running",
-    "! fixer [waiting-id] · waiting",
-    "Request [req-waiting] · interview_request",
+    "Active subagent run status · 2",
+    "● explorer [active-id] · running  active abstract",
+    "! fixer [waiting-id] · waiting  waiting abstract",
+    "Request · interview_request",
   ]);
   for (const sentinel of [
     "TASK_SENTINEL", "CWD_SENTINEL", "MODEL_SENTINEL", "TOOLS_SENTINEL", "CREATED_SENTINEL",
     "UPDATED_SENTINEL", "SESSION_SENTINEL", "SOURCE_SENTINEL", "ACTIVITY_SENTINEL", "ACTIVITY_TOOL_SENTINEL",
     "OUTPUT_SENTINEL", "ERROR_SENTINEL", "NOTIFICATION_SENTINEL", "ACTIVE_TASK_SENTINEL",
     "ACTIVE_ACTIVITY_SENTINEL", "ACTIVE_OUTPUT_SENTINEL", "ACTIVE_ERROR_SENTINEL", "WAITING_TASK_SENTINEL",
-    "WAITING_ACTIVITY_SENTINEL", "WAITING_OUTPUT_SENTINEL", "WAITING_ERROR_SENTINEL", "NESTED_REQUEST_ID_SENTINEL",
+    "WAITING_ACTIVITY_SENTINEL", "WAITING_OUTPUT_SENTINEL", "WAITING_ERROR_SENTINEL", "TERMINAL_ABSTRACT_SENTINEL",
     "REQUEST_MESSAGE_SENTINEL", "INTERVIEW_SENTINEL", "QUESTION_SENTINEL", "REQUEST_CREATED_SENTINEL",
   ]) {
     assert.doesNotMatch(listText, new RegExp(sentinel));
@@ -264,28 +269,19 @@ test("list renders only compact run status and waiting request identity", () => 
   assert.doesNotMatch(listText, /Task:|Cwd:|Tools:|Model:|Created:|Updated:|Session:|Source run:|Live response:|Output:|Error:|Message:|Interview:/);
 });
 
-test("supervisor pending keeps the full request while reply is one compact line", () => {
-  const pending = render(renderSupervisorResult({
+test("legacy transcript list derives a Unicode-safe abstract or shows an explicit unavailable placeholder", () => {
+  const task = `${"文".repeat(98)}😀🚀tail`;
+  const listText = render(renderSubagentResult({
     details: {
-      pending: [{
-        id: "req-pending",
-        runId: "run-waiting",
-        reason: "interview_request",
-        message: "Pending message full\n<results>pending payload</results>",
-        interview: { title: "Decision", questions: [{ prompt: "Choose now" }] },
-        createdAt: "must not render",
-      }],
+      runs: [
+        run({ id: "legacy-task", status: "running", abstract: undefined, task }),
+        run({ id: "legacy-empty", status: "waiting", abstract: undefined, task: undefined, reason: "need_decision" }),
+      ],
     },
-  }, { expanded: false, isPartial: false }, theme, { args: { action: "pending" } }));
-  assertFull(pending, ["req-pending", "run-waiting", "interview_request", "<results>pending payload</results>", "Decision", "Choose now"]);
-  assert.doesNotMatch(pending, /Created:|must not render/);
-
-  const reply = render(renderSupervisorResult(
-    { details: { run: run({ id: "reply-run", agent: "fixer", status: "running" }) } },
-    { expanded: false, isPartial: false }, theme, { args: { action: "reply", replyTo: "req-pending", message: "continue" } },
-  ));
-  assert.equal(reply, "✓ Replied [req-pending] · fixer [reply-run] · running");
-  assert.doesNotMatch(reply, /Task|Output|Error|Activity|Response|Model|Cwd|Status:/);
+  }, { expanded: false, isPartial: false }, theme, { args: { action: "list" } }));
+  assert.match(listText, new RegExp(`${"文".repeat(98)}😀🚀\\.\\.\\.`));
+  assert.match(listText, /Legacy run summary unavailable/);
+  assert.doesNotMatch(listText, /tail/);
 });
 
 test("terminal notifications contain only compact status and complete output or error", () => {
@@ -308,17 +304,18 @@ test("waiting notification contains only the complete request", () => {
   const notification = render(renderSubagentNotification({
     content: "Model-facing waiting content.",
     display: true,
-    details: { event: "waiting", status: "waiting", run: run({ status: "waiting" }) },
+    details: { event: "waiting", status: "waiting", request: run({ status: "waiting" }).request, run: run({ status: "waiting" }) },
   }, { expanded: false, outputPad: 1 }, theme));
   assertFull(notification, [
     "! fixer [run-1] · waiting",
-    "Request [req-1]",
+    "Request",
     "need_decision",
     "<results>request payload</results>",
     "Choose",
     "A or B?",
+    "Created: 2026-04-17T00:01:00.000Z",
   ]);
-  assert.doesNotMatch(notification, /Task:|Low-value task|Response:|Live response|activity payload|Output:|stored output|Error:|stored error|Model:|Cwd:|Tools:|Created:|Session:/);
+  assert.doesNotMatch(notification, /Task:|Low-value task|Response:|Live response|activity payload|Output:|stored output|Error:|stored error|Model:|Cwd:|Tools:|Session:|req-1|waitingSeq/);
 });
 
 test("active notification may show only explicitly labeled live response and active tools", () => {
@@ -336,11 +333,6 @@ test("missing details and partial results keep full content fallback", () => {
     content: [{ type: "text", text: "Fallback line one\n<results>fallback payload</results>\nFallback line three" }],
   }, { expanded: false, isPartial: true }, theme, { args: { action: "create" } }));
   assertFull(fallback, ["Fallback line one", "<results>fallback payload</results>", "Fallback line three"]);
-
-  const supervisorFallback = render(renderSupervisorResult({
-    content: [{ type: "text", text: "Supervisor fallback full\n<results>supervisor fallback payload</results>" }],
-  }, { expanded: false, isPartial: true }, theme, { args: { action: "reply", replyTo: "missing" } }));
-  assertFull(supervisorFallback, ["Supervisor fallback full", "<results>supervisor fallback payload</results>"]);
 
   const emptyPartial = render(renderSubagentResult(
     { content: [] }, { expanded: false, isPartial: true }, theme, { args: { action: "create" } },

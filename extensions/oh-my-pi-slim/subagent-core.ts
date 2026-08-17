@@ -21,10 +21,12 @@ export const SUBAGENT_ACTIONS = [
   "interrupt",
   "steer",
   "resume",
+  "reply",
 ] as const;
 
 export const SUBAGENT_PUBLIC_FIELDS = [
   "agent",
+  "abstract",
   "task",
   "cwd",
   "action",
@@ -32,14 +34,10 @@ export const SUBAGENT_PUBLIC_FIELDS = [
   "message",
 ] as const;
 
-export const SUPERVISOR_ACTIONS = ["pending", "reply"] as const;
-export const SUPERVISOR_PUBLIC_FIELDS = ["action", "replyTo", "message"] as const;
-
 export type RunStatus = (typeof RUN_STATUSES)[number];
 export type SpecialistName = (typeof SPECIALIST_NAMES)[number];
 
 export interface SupervisorRequest {
-  id: string;
   runId: string;
   reason: "need_decision" | "interview_request" | "progress_update";
   message: string;
@@ -50,6 +48,7 @@ export interface SupervisorRequest {
 export interface PersistedRun {
   id: string;
   agent: SpecialistName;
+  abstract: string;
   task: string;
   cwd: string;
   model: string;
@@ -62,6 +61,7 @@ export interface PersistedRun {
   output?: string;
   error?: string;
   request?: SupervisorRequest;
+  waitingSeq?: number;
   notificationPending?: RunStatus;
 }
 
@@ -86,6 +86,7 @@ export interface RunSummary extends PersistedRun {
 
 export interface SubagentLaunchInput {
   agent?: unknown;
+  abstract?: unknown;
   task?: unknown;
   cwd?: unknown;
   action?: unknown;
@@ -106,6 +107,7 @@ export function requireString(value: unknown, field: string): string {
 
 export function validateCreateInput(input: SubagentLaunchInput): {
   agent: SpecialistName;
+  abstract: string;
   task: string;
   cwd?: string;
 } {
@@ -115,9 +117,14 @@ export function validateCreateInput(input: SubagentLaunchInput): {
   }
   return {
     agent: agent as SpecialistName,
+    abstract: requireString(input.abstract, "abstract"),
     task: requireString(input.task, "task"),
     cwd: input.cwd === undefined ? undefined : requireString(input.cwd, "cwd"),
   };
+}
+
+export function legacyRunAbstract(task: string): string {
+  return `${Array.from(task).slice(0, 100).join("")}...`;
 }
 
 function isSafePathSegment(value: string): boolean {
@@ -134,7 +141,6 @@ function parseRequest(value: unknown): SupervisorRequest | undefined | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const request = value as Record<string, unknown>;
   if (
-    typeof request.id !== "string" ||
     typeof request.runId !== "string" ||
     !["need_decision", "interview_request", "progress_update"].includes(String(request.reason)) ||
     typeof request.message !== "string" ||
@@ -142,7 +148,6 @@ function parseRequest(value: unknown): SupervisorRequest | undefined | null {
     (request.interview !== undefined && (!request.interview || typeof request.interview !== "object" || Array.isArray(request.interview)))
   ) return null;
   return {
-    id: request.id,
     runId: request.runId,
     reason: request.reason as SupervisorRequest["reason"],
     message: request.message,
@@ -155,11 +160,17 @@ export function parsePersistedRun(value: unknown): PersistedRun | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const run = value as Record<string, unknown>;
   const sourceRunId = optionalString(run.sourceRunId);
+  const abstract = run.abstract === undefined
+    ? typeof run.task === "string" ? legacyRunAbstract(run.task) : null
+    : typeof run.abstract === "string" && run.abstract.trim() ? run.abstract.trim() : null;
   const sessionFile = optionalString(run.sessionFile);
   const output = optionalString(run.output);
   const error = optionalString(run.error);
   const request = parseRequest(run.request);
   const notificationPending = optionalString(run.notificationPending);
+  const waitingSeq = run.waitingSeq === undefined
+    ? undefined
+    : Number.isInteger(run.waitingSeq) && Number(run.waitingSeq) >= 1 ? Number(run.waitingSeq) : null;
   const deniedTools = run.deniedTools === undefined
     ? []
     : Array.isArray(run.deniedTools) && run.deniedTools.every((tool) => typeof tool === "string")
@@ -170,6 +181,7 @@ export function parsePersistedRun(value: unknown): PersistedRun | undefined {
     !isSafePathSegment(run.id) ||
     typeof run.agent !== "string" ||
     !SPECIALIST_NAMES.includes(run.agent as SpecialistName) ||
+    abstract === null ||
     typeof run.task !== "string" ||
     typeof run.cwd !== "string" ||
     typeof run.model !== "string" ||
@@ -182,6 +194,7 @@ export function parsePersistedRun(value: unknown): PersistedRun | undefined {
     output === null ||
     error === null ||
     request === null ||
+    waitingSeq === null ||
     notificationPending === null ||
     (notificationPending !== undefined &&
       notificationPending !== "waiting" && !isTerminalStatus(notificationPending as RunStatus))
@@ -190,6 +203,7 @@ export function parsePersistedRun(value: unknown): PersistedRun | undefined {
   return {
     id: run.id,
     agent: run.agent as SpecialistName,
+    abstract,
     task: run.task,
     cwd: run.cwd,
     model: run.model,
@@ -202,6 +216,7 @@ export function parsePersistedRun(value: unknown): PersistedRun | undefined {
     output,
     error,
     request,
+    waitingSeq,
     notificationPending: notificationPending as RunStatus | undefined,
   };
 }
@@ -324,12 +339,6 @@ export class SubagentRegistry {
     return [...this.runs.values()]
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .map((run) => ({ ...cloneRun(run), live: this.liveIds.has(run.id) }));
-  }
-
-  pending(): SupervisorRequest[] {
-    return this.list()
-      .filter((run) => run.status === "waiting" && run.request)
-      .map((run) => ({ ...run.request!, interview: run.request!.interview ? { ...run.request!.interview } : undefined }));
   }
 
   subscribe(listener: () => void): () => void {

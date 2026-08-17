@@ -5,13 +5,16 @@ import {
   getAgentDir,
   parseFrontmatter,
   SettingsManager,
-  shouldCompact,
   type ExtensionAPI,
   type ExtensionContext,
-  type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import { cleanupLegacySubagentSetup, ensurePackageSetup } from "./bootstrap.js";
 import { removeMainPiDocumentation, removeMainPiIdentity } from "./prompt-context.js";
+import {
+  CHECKPOINT_RESUME_TEXT,
+  completedToolBatch,
+  contextUsageNeedsCheckpoint,
+} from "./subagent-checkpoint.js";
 import { SPECIALIST_NAMES, type SpecialistName } from "./subagent-core.js";
 import { registerSubagentRuntime } from "./subagent-runtime.js";
 import { SUBAGENT_NOTIFICATION_TYPE } from "./subagent-transcript-renderer.js";
@@ -26,14 +29,13 @@ const FILE_TOOLS = new Set(["read", "edit", "write"]);
 const TRUE_VALUES = /^(1|true|yes|on)$/i;
 const SAFE_PRESET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_MODEL_PART = /^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$/;
-const LIFECYCLE_TOOLS = new Set(["subagent", "subagent_supervisor", "contact_supervisor"]);
+const LIFECYCLE_TOOLS = new Set(["subagent", "contact_supervisor"]);
 
 const PHASE_REMINDER = `<system-reminder>
 !IMPORTANT! Scheduler workflow: First choose the lightest workflow that fits the work. If direct execution is justified, complete it and verify proportionately. Otherwise: plan lanes/dependencies → dispatch background specialists → track task IDs → wait for hook-driven completion → reconcile terminal results → verify. !END!
 </system-reminder>`;
 
 const RELOAD_PRESET_STORE_KEY = "__ompsActivePresetForReload";
-const CHECKPOINT_RESUME_TEXT = "Resume the user's latest intent. Re-read kept recent messages above the summary to confirm the latest request. If it supersedes earlier plans in the summary, follow it. If no work remains, say so briefly; do not invent work.";
 
 type RoleName = (typeof ROLE_NAMES)[number];
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -52,11 +54,6 @@ interface PresetConfig {
   presets: Record<string, Preset>;
   deny: DenyConfig;
   observerFallbackPresets: Set<string>;
-}
-
-interface CheckpointTool {
-  id: string;
-  name: string;
 }
 
 function envEnabled(): boolean {
@@ -216,26 +213,6 @@ function assertNoLegacyBackend(pi: ExtensionAPI): void {
   if (legacy) {
     throw new Error(`oh-my-pi-slim refuses legacy pi-subagents tool "${legacy.name}" from ${toolSourceText(legacy) || "unknown source"}. Remove the old package before starting Pi.`);
   }
-}
-
-function completedToolBatch(event: TurnEndEvent): boolean {
-  if (event.message.role !== "assistant" || event.message.stopReason !== "toolUse") return false;
-  const tools: CheckpointTool[] = [];
-  const callsById = new Map<string, string>();
-  for (const content of event.message.content) {
-    if (content.type !== "toolCall") continue;
-    if (callsById.has(content.id)) return false;
-    callsById.set(content.id, content.name);
-    tools.push({ id: content.id, name: content.name });
-  }
-  if (tools.length === 0 || event.toolResults.length !== tools.length) return false;
-  const resultIds = new Set<string>();
-  for (const result of event.toolResults) {
-    if (resultIds.has(result.toolCallId)) return false;
-    resultIds.add(result.toolCallId);
-    if (callsById.get(result.toolCallId) !== result.toolName) return false;
-  }
-  return true;
 }
 
 export default function ohMyPiSlim(pi: ExtensionAPI): void {
@@ -553,7 +530,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       const usage = ctx.getContextUsage();
       if (usage && usage.tokens !== null && usage.contextWindow !== null) {
         const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() }).getCompactionSettings();
-        if (shouldCompact(usage.tokens, usage.contextWindow, settings)) {
+        if (contextUsageNeedsCheckpoint(usage, settings)) {
           pendingCheckpoint = { epoch: sessionEpoch, sawThresholdCompaction: false, resumeScheduled: false };
           report(ctx, "Context reached Pi's native compaction threshold; checkpointing after the completed tool batch.", "info");
           ctx.abort();

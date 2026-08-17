@@ -16,6 +16,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { legacyRunAbstract } from "./subagent-core.js";
 
 export const RUN_FILE_VERSION = 1 as const;
 export const RUN_STATUSES = [
@@ -44,6 +45,7 @@ export interface DetachedLaunchConfig {
   token: string;
   ownerSessionId: string;
   agent: string;
+  abstract: string;
   task: string;
   cwd: string;
   model: string;
@@ -84,6 +86,7 @@ export interface DetachedRunState extends DetachedRunActivity {
   status: DetachedRunStatus;
   sessionFile?: string;
   request?: Record<string, unknown>;
+  waitingSeq?: number;
   output?: string;
   error?: string;
   updatedAt: string;
@@ -94,7 +97,7 @@ export interface DetachedControlMessage {
   token: string;
   type: ControlType;
   message?: string;
-  requestId?: string;
+  waitingSeq?: number;
 }
 
 export interface RunPaths {
@@ -128,6 +131,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function isSafePathSegment(value: string): boolean {
@@ -275,8 +282,8 @@ export function getProcessIdentity(pid: number): string | undefined {
   }
 }
 
-export function isDetachedLaunchConfig(value: unknown): value is DetachedLaunchConfig {
-  if (!isRecord(value) || value.v !== RUN_FILE_VERSION) return false;
+function normalizeDetachedLaunchConfig(value: unknown): DetachedLaunchConfig | undefined {
+  if (!isRecord(value) || value.v !== RUN_FILE_VERSION) return;
   if (
     !isNonEmptyString(value.runId) ||
     !isNonEmptyString(value.token) ||
@@ -294,9 +301,23 @@ export function isDetachedLaunchConfig(value: unknown): value is DetachedLaunchC
     !isNonEmptyString(value.piInvocation.command) ||
     !Array.isArray(value.piInvocation.args) || value.piInvocation.args.some((arg) => typeof arg !== "string") ||
     !isRecord(value.env) || Object.values(value.env).some((entry) => typeof entry !== "string") ||
-    !isNonEmptyString(value.createdAt)
-  ) return false;
-  return isSafePathSegment(value.runId) && isSafePathSegment(value.ownerSessionId);
+    !isNonEmptyString(value.createdAt) ||
+    !isSafePathSegment(value.runId) ||
+    !isSafePathSegment(value.ownerSessionId)
+  ) return;
+  const abstract = value.abstract === undefined
+    ? legacyRunAbstract(value.task)
+    : isNonBlankString(value.abstract) ? value.abstract.trim() : undefined;
+  if (!abstract) return;
+  return { ...value, abstract } as unknown as DetachedLaunchConfig;
+}
+
+/**
+ * Canonical predicate for newly written launch.json files.
+ * Legacy files without abstract intentionally fail this type guard and are normalized only by readLaunchConfig().
+ */
+export function isDetachedLaunchConfig(value: unknown): value is DetachedLaunchConfig {
+  return isRecord(value) && isNonBlankString(value.abstract) && normalizeDetachedLaunchConfig(value) !== undefined;
 }
 
 export function isDetachedRunnerIdentity(value: unknown): value is DetachedRunnerIdentity {
@@ -318,6 +339,7 @@ export function isDetachedRunState(value: unknown): value is DetachedRunState {
     !RUN_STATUSES.includes(value.status as DetachedRunStatus) ||
     (value.sessionFile !== undefined && typeof value.sessionFile !== "string") ||
     (value.request !== undefined && !isRecord(value.request)) ||
+    (value.waitingSeq !== undefined && (!Number.isInteger(value.waitingSeq) || Number(value.waitingSeq) < 1)) ||
     (value.output !== undefined && typeof value.output !== "string") ||
     (value.error !== undefined && typeof value.error !== "string") ||
     !isNonEmptyString(value.updatedAt) ||
@@ -336,14 +358,19 @@ export function isDetachedRunState(value: unknown): value is DetachedRunState {
 export function isDetachedControlMessage(value: unknown): value is DetachedControlMessage {
   if (!isRecord(value) || value.v !== RUN_FILE_VERSION || !isNonEmptyString(value.token)) return false;
   if (!CONTROL_TYPES.includes(value.type as ControlType)) return false;
+  if ("requestId" in value) return false;
   if (value.message !== undefined && typeof value.message !== "string") return false;
-  if (value.requestId !== undefined && typeof value.requestId !== "string") return false;
+  if (value.waitingSeq !== undefined && (!Number.isInteger(value.waitingSeq) || Number(value.waitingSeq) < 1)) return false;
   if ((value.type === "steer" || value.type === "reply") && !isNonEmptyString(value.message)) return false;
-  return value.type !== "reply" || isNonEmptyString(value.requestId);
+  return value.type !== "reply" || (Number.isInteger(value.waitingSeq) && Number(value.waitingSeq) >= 1);
 }
 
 export function readLaunchConfig(paths: RunPaths): DetachedLaunchConfig | undefined {
-  return safeReadJson(paths.configFile, isDetachedLaunchConfig);
+  try {
+    return normalizeDetachedLaunchConfig(JSON.parse(readFileSync(paths.configFile, "utf8")));
+  } catch {
+    return;
+  }
 }
 
 export function readRunState(paths: RunPaths): DetachedRunState | undefined {
@@ -359,9 +386,9 @@ export function writeControl(
   token: string,
   type: ControlType,
   message?: string,
-  requestId?: string,
+  waitingSeq?: number,
 ): string {
-  const control: DetachedControlMessage = { v: RUN_FILE_VERSION, token, type, message, requestId };
+  const control: DetachedControlMessage = { v: RUN_FILE_VERSION, token, type, message, waitingSeq };
   if (!isDetachedControlMessage(control)) throw new Error(`Invalid ${type} control message.`);
   mkdirSync(paths.controlDir, { recursive: true, mode: 0o700 });
   chmodSync(paths.controlDir, 0o700);

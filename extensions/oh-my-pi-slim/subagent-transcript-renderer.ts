@@ -1,5 +1,6 @@
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Markdown, Spacer, Text, type Component } from "@earendil-works/pi-tui";
+import { legacyRunAbstract } from "./subagent-core.js";
 
 export const SUBAGENT_NOTIFICATION_TYPE = "oh-my-pi-slim:subagent-notification";
 
@@ -88,23 +89,30 @@ function runIdentity(run: UnknownRecord): { agent: string; id: string; status: s
   };
 }
 
-function compactRunHeader(run: UnknownRecord, theme: Theme, statusOverride?: string): Text {
+function transcriptRunAbstract(run: UnknownRecord): string | undefined {
+  if (typeof run.abstract === "string" && run.abstract.trim()) return run.abstract.trim();
+  if (typeof run.task === "string") return legacyRunAbstract(run.task);
+  return "Legacy run summary unavailable";
+}
+
+function compactRunHeader(run: UnknownRecord, theme: Theme, statusOverride?: string, includeAbstract = false): Text {
   const identity = runIdentity(run);
   const status = statusOverride ?? identity.status;
+  const abstractText = includeAbstract ? transcriptRunAbstract(run) : undefined;
+  const abstract = abstractText ? `  ${abstractText}` : "";
   return new Text(
-    `${statusGlyph(status, theme)} ${theme.fg("toolTitle", theme.bold(identity.agent))} ${theme.fg("accent", `[${identity.id}]`)} ${theme.fg("muted", `· ${status}`)}`,
+    `${statusGlyph(status, theme)} ${theme.fg("toolTitle", theme.bold(identity.agent))} ${theme.fg("accent", `[${identity.id}]`)} ${theme.fg("muted", `· ${status}`)}${abstract}`,
     0,
     0,
   );
 }
 
-function addRequest(container: Container, theme: Theme, value: unknown, numberedLabel?: string): void {
+function addRequest(container: Container, theme: Theme, value: unknown): void {
   const request = asRecord(value);
   if (!request) return;
   container.addChild(new Spacer(1));
-  const label = numberedLabel ?? "Request";
   container.addChild(new Text(
-    `${theme.fg("warning", "!")} ${theme.fg("toolTitle", theme.bold(label))} ${theme.fg("accent", `[${displayValue(request.id)}]`)}`,
+    `${theme.fg("warning", "!")} ${theme.fg("toolTitle", theme.bold("Request"))}`,
     0,
     0,
   ));
@@ -112,6 +120,7 @@ function addRequest(container: Container, theme: Theme, value: unknown, numbered
   addField(container, theme, "Reason", request.reason);
   if (typeof request.message === "string") addFullSection(container, theme, "Message", request.message);
   if (request.interview !== undefined) addFullSection(container, theme, "Interview", displayValue(request.interview));
+  addField(container, theme, "Created", request.createdAt);
 }
 
 function addFinalOutput(container: Container, theme: Theme, run: UnknownRecord): void {
@@ -159,6 +168,8 @@ function immediateAck(run: UnknownRecord, action: string, args: UnknownRecord, t
   } else if (action === "resume") {
     const source = asString(args.id) ?? asString(run.sourceRunId) ?? "unknown source";
     text = `Resumed [${source}] → ${agent} [${id}] · ${status}`;
+  } else if (action === "reply") {
+    text = `Replied · ${agent} [${id}] · ${status}`;
   } else if (action === "steer") {
     text = `Steer requested · ${agent} [${id}] · ${status}`;
   } else if (action === "interrupt") {
@@ -174,25 +185,24 @@ function immediateAck(run: UnknownRecord, action: string, args: UnknownRecord, t
 }
 
 function renderRunList(runs: unknown[], theme: Theme): Container {
+  const activeRuns = runs.filter((value) => {
+    const status = runIdentity(asRecord(value) ?? {}).status;
+    return status === "starting" || status === "running" || status === "waiting";
+  });
   const container = new Container();
-  container.addChild(styledTitle(theme, "Retained subagent run status", `· ${runs.length}`));
-  if (runs.length === 0) {
+  container.addChild(styledTitle(theme, "Active subagent run status", `· ${activeRuns.length}`));
+  if (activeRuns.length === 0) {
     container.addChild(new Text(theme.fg("dim", "No retained runs."), 0, 0));
     return container;
   }
-  runs.forEach((value) => {
+  activeRuns.forEach((value) => {
     const run = asRecord(value) ?? {};
     const { status } = runIdentity(run);
     container.addChild(new Spacer(1));
-    container.addChild(compactRunHeader(run, theme));
+    container.addChild(compactRunHeader(run, theme, undefined, true));
     if (status !== "waiting") return;
-    const requestId = asString(run.requestId);
     const reason = asString(run.reason);
-    if (requestId || reason) {
-      const identity = requestId ? ` [${requestId}]` : "";
-      const detail = reason ? ` · ${reason}` : "";
-      container.addChild(new Text(theme.fg("dim", `Request${identity}${detail}`), 0, 0));
-    }
+    if (reason) container.addChild(new Text(theme.fg("dim", `Request · ${reason}`), 0, 0));
   });
   return container;
 }
@@ -206,11 +216,13 @@ export function renderSubagentCall(argsValue: unknown, theme: Theme, context: To
 
   if (action === "create") {
     addField(container, theme, "Agent", args.agent, "(pending)");
+    addField(container, theme, "Abstract", args.abstract, "(pending)");
     addField(container, theme, "Cwd", args.cwd ?? context.cwd, "(parent session cwd)");
     if (typeof args.task === "string") addFullSection(container, theme, "Task", args.task);
     else addField(container, theme, "Task", undefined, "(pending)");
   } else if (action === "resume") {
     addField(container, theme, "Source run", args.id, "(pending)");
+    addField(container, theme, "Abstract", args.abstract, "(pending)");
     if (typeof args.message === "string") addFullSection(container, theme, "Continuation task", args.message);
     else addField(container, theme, "Continuation task", undefined, "(pending)");
   } else if (action === "steer") {
@@ -219,10 +231,14 @@ export function renderSubagentCall(argsValue: unknown, theme: Theme, context: To
     else addField(container, theme, "Guidance", undefined, "(pending)");
   } else if (action === "interrupt") {
     addField(container, theme, "Run", args.id, "(pending)");
+  } else if (action === "reply") {
+    addField(container, theme, "Run", args.id, "(pending)");
+    if (typeof args.message === "string") addFullSection(container, theme, "Reply", args.message);
+    else addField(container, theme, "Reply", undefined, "(pending)");
   } else if (action === "list") {
     container.addChild(new Spacer(1));
     container.addChild(new Text(
-      theme.fg("toolOutput", "Returns retained run identity and current status, plus waiting request identity when present."),
+      theme.fg("toolOutput", "Returns only starting, running, and waiting run status with abstract and optional waiting reason."),
       0,
       0,
     ));
@@ -249,62 +265,6 @@ export function renderSubagentResult(
   return spacedToolResult(fallbackResult(result, theme, options.isPartial === true));
 }
 
-export function renderSupervisorCall(argsValue: unknown, theme: Theme): Component {
-  const args = asRecord(argsValue) ?? {};
-  const action = asString(args.action) ?? "pending";
-  const container = new Container();
-  container.addChild(styledTitle(theme, "subagent_supervisor", `· ${action}`));
-  addField(container, theme, "Action", action);
-  if (action === "pending") {
-    container.addChild(new Spacer(1));
-    container.addChild(new Text(theme.fg("toolOutput", "Returns every pending supervisor request in full."), 0, 0));
-  } else if (action === "reply") {
-    addField(container, theme, "Request", args.replyTo, "(pending)");
-    if (typeof args.message === "string") addFullSection(container, theme, "Reply", args.message);
-    else addField(container, theme, "Reply", undefined, "(pending)");
-  }
-  return container;
-}
-
-export function renderSupervisorResult(
-  result: ToolResultLike,
-  options: { isPartial?: boolean } = {},
-  theme: Theme,
-  context: ToolRenderContextLike = {},
-): Component {
-  const details = asRecord(result.details);
-  const { action, args } = actionFromContext(context, "pending");
-  const pending = details?.pending;
-  if (action === "pending" && Array.isArray(pending)) {
-    const container = new Container();
-    container.addChild(styledTitle(theme, "Pending supervisor requests", `· ${pending.length}`));
-    if (pending.length === 0) {
-      container.addChild(new Text(theme.fg("dim", "No pending requests."), 0, 0));
-      return spacedToolResult(container);
-    }
-    pending.forEach((request, index) => addRequest(container, theme, request, `Request ${index + 1}`));
-    return spacedToolResult(container);
-  }
-  const run = asRecord(details?.run);
-  if (action === "reply" && run) {
-    const { agent, id, status } = runIdentity(run);
-    const request = asString(args.replyTo) ?? "unknown request";
-    const glyph = TERMINAL_STATUSES.has(status) ? statusGlyph(status, theme) : theme.fg("success", "✓");
-    return spacedToolResult(new Text(
-      `${glyph} ${theme.fg("toolOutput", `Replied [${request}] · ${agent} [${id}] · ${status}`)}`,
-      0,
-      0,
-    ));
-  }
-  if (Array.isArray(pending)) {
-    const container = new Container();
-    container.addChild(styledTitle(theme, "Pending supervisor requests", `· ${pending.length}`));
-    pending.forEach((request, index) => addRequest(container, theme, request, `Request ${index + 1}`));
-    return spacedToolResult(container);
-  }
-  return spacedToolResult(fallbackResult(result, theme, options.isPartial === true));
-}
-
 export function renderSubagentNotification(
   message: MessageLike,
   options: MessageRenderOptionsLike,
@@ -324,7 +284,7 @@ export function renderSubagentNotification(
   if (TERMINAL_STATUSES.has(event)) {
     addFinalOutput(container, theme, run);
   } else if (event === "waiting") {
-    addRequest(container, theme, run.request);
+    addRequest(container, theme, details?.request ?? run.request);
   } else if (LIVE_STATUSES.has(event) && run.output === undefined) {
     addLiveActivity(container, theme, run.activity);
   }

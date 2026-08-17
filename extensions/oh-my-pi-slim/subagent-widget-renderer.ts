@@ -23,14 +23,14 @@ export { SUBAGENT_WIDGET_GLYPHS, SUBAGENT_WIDGET_SPINNER } from "./subagent-widg
 
 export type WidgetRun = Pick<
   PersistedRun,
-  "id" | "agent" | "task" | "model" | "status" | "createdAt" | "updatedAt" | "error" | "request"
+  "id" | "agent" | "abstract" | "model" | "status" | "createdAt" | "updatedAt" | "error" | "request"
 > & { readonly activity?: DetachedRunActivity };
 
 export const MAX_SUBAGENT_WIDGET_LINES = 12;
 const ACTIVE_STATUSES = new Set<RunStatus>(["starting", "running", "waiting"]);
 
-function shortTask(task: string): string {
-  return task.split("\n").find((line) => line.trim())?.trim() ?? "";
+function shortAbstract(abstract: string): string {
+  return abstract.split("\n").find((line) => line.trim())?.trim() ?? "";
 }
 
 function elapsed(run: WidgetRun, nowMs: number): string {
@@ -75,7 +75,7 @@ export function renderFinishedRunLine(run: WidgetRun, theme: WidgetTheme, nowMs 
     const message = run.error ? `: ${run.error.slice(0, 60)}` : "";
     statusText = theme.fg("error", ` failed${message}`);
   }
-  return `${icon} ${theme.fg("dim", runName(run, theme))}  ${theme.fg("dim", shortTask(run.task))} ${theme.fg("dim", "·")} ${theme.fg("dim", stats(run, theme, nowMs))}${statusText}`;
+  return `${icon} ${theme.fg("dim", runName(run, theme))}  ${theme.fg("dim", shortAbstract(run.abstract))} ${theme.fg("dim", "·")} ${theme.fg("dim", stats(run, theme, nowMs))}${statusText}`;
 }
 
 export function renderActiveRunLines(
@@ -89,7 +89,7 @@ export function renderActiveRunLines(
     ? theme.fg("warning", SUBAGENT_WIDGET_GLYPHS.waiting)
     : theme.fg("accent", SUBAGENT_WIDGET_SPINNER[spinnerFrame % SUBAGENT_WIDGET_SPINNER.length]);
   const state = waiting ? ` ${theme.fg("warning", "waiting")}` : "";
-  const header = `${indicator} ${theme.bold(runName(run, theme))}${state}  ${theme.fg("muted", shortTask(run.task))}`;
+  const header = `${indicator} ${theme.bold(runName(run, theme))}${state}  ${theme.fg("muted", shortAbstract(run.abstract))}`;
   const statsLine = theme.fg("dim", `${formatSubagentModel(run.model)} · ${stats(run, theme, nowMs)}`);
   const activityText = waiting
     ? run.request?.message || "supervisor reply required"

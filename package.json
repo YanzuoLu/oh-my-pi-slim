@@ -1,6 +1,6 @@
 {
   "name": "oh-my-pi-slim",
-  "version": "0.8.5",
+  "version": "0.9.0",
   "private": true,
   "description": "Preset-driven main-session orchestration for Pi with a built-in background-subagent runtime.",
   "type": "module",

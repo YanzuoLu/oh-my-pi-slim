@@ -1,11 +1,28 @@
-import { randomUUID } from "node:crypto";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  getAgentDir,
+  SettingsManager,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+  CHECKPOINT_RESUME_TEXT,
+  completedToolBatch,
+  contextUsageNeedsCheckpoint,
+} from "./subagent-checkpoint.js";
 
 const REASONS = ["need_decision", "interview_request", "progress_update"] as const;
 
 export default function childSupervisor(pi: ExtensionAPI): void {
   if (process.env.OMPS_SUBAGENT_CHILD !== "1" || process.env.PI_SUBAGENT_CHILD !== "1") return;
+
+  let pendingCheckpoint: { cycle: number } | undefined;
+  let checkpointCycle = 0;
+  let contactedSupervisorThisTurn = false;
+
+  function clearCheckpointState(): void {
+    pendingCheckpoint = undefined;
+    contactedSupervisorThisTurn = false;
+  }
 
   pi.registerTool({
     name: "contact_supervisor",
@@ -14,7 +31,7 @@ export default function childSupervisor(pi: ExtensionAPI): void {
     promptSnippet: "Create a supervisor request and pause until reply.",
     promptGuidelines: [
       "A call includes reason; optional message adds request context; optional interview carries structured questions.",
-      "contact_supervisor returns a request ID and moves the run to waiting; a reply continues the same run ID with saved child-session context.",
+      "contact_supervisor moves the run to waiting; the main orchestrator replies through subagent using the same run ID and saved child-session context.",
       "contact_supervisor reason is need_decision, interview_request, or progress_update; every reason, including progress_update, follows the waiting and reply flow.",
     ],
     parameters: Type.Object({
@@ -36,7 +53,6 @@ export default function childSupervisor(pi: ExtensionAPI): void {
       const runId = process.env.OMPS_PARENT_RUN_ID;
       if (!runId) throw new Error("OMPS parent run identity is missing.");
       const request = {
-        id: randomUUID().slice(0, 8),
         runId,
         reason: params.reason,
         message: params.message?.trim() || params.reason,
@@ -44,7 +60,7 @@ export default function childSupervisor(pi: ExtensionAPI): void {
         createdAt: new Date().toISOString(),
       };
       return {
-        content: [{ type: "text", text: `Yielded to supervisor request ${request.id}.` }],
+        content: [{ type: "text", text: `Yielded to supervisor for run ${runId}.` }],
         details: { request },
         terminate: true,
       };
@@ -52,6 +68,44 @@ export default function childSupervisor(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", () => {
+    clearCheckpointState();
     pi.setActiveTools(pi.getAllTools().map((tool) => tool.name));
   });
+
+  pi.on("turn_start", () => {
+    contactedSupervisorThisTurn = false;
+  });
+
+  pi.on("tool_execution_end", (event) => {
+    if (event.toolName === "contact_supervisor") contactedSupervisorThisTurn = true;
+  });
+
+  pi.on("turn_end", (event, ctx) => {
+    if (
+      !completedToolBatch(event) || pendingCheckpoint || ctx.hasPendingMessages() ||
+      contactedSupervisorThisTurn
+    ) return;
+    const usage = ctx.getContextUsage();
+    const settings = SettingsManager.create(ctx.cwd, getAgentDir(), {
+      projectTrusted: ctx.isProjectTrusted(),
+    }).getCompactionSettings();
+    if (!contextUsageNeedsCheckpoint(usage, settings)) return;
+    pendingCheckpoint = { cycle: ++checkpointCycle };
+    ctx.abort();
+  });
+
+  pi.on("session_compact", (event) => {
+    if (!pendingCheckpoint || event.reason !== "threshold" || event.willRetry !== false) return;
+    pi.sendUserMessage(CHECKPOINT_RESUME_TEXT, { deliverAs: "followUp" });
+    pendingCheckpoint = undefined;
+  });
+
+  pi.on("agent_settled", () => {
+    if (!pendingCheckpoint) return;
+    const cycle = pendingCheckpoint.cycle;
+    pendingCheckpoint = undefined;
+    console.error(`[oh-my-pi-slim] Child checkpoint cycle ${cycle} ended before Pi completed threshold compaction; automatic resume was not started.`);
+  });
+
+  pi.on("session_shutdown", clearCheckpointState);
 }

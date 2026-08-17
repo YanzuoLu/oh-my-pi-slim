@@ -34,10 +34,20 @@ function nonEmpty(value) {
   return typeof value === "string" && value.length > 0;
 }
 
-function validConfig(value) {
-  return isRecord(value) && value.v === 1 &&
+function nonBlank(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+// Execution-boundary mirror; keep this exactly aligned with subagent-core.ts legacyRunAbstract().
+function legacyAbstract(task) {
+  return `${Array.from(task).slice(0, 100).join("")}...`;
+}
+
+function normalizeConfig(value) {
+  if (!(isRecord(value) && value.v === 1 &&
     nonEmpty(value.runId) && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.runId) &&
-    nonEmpty(value.token) && nonEmpty(value.ownerSessionId) && nonEmpty(value.agent) &&
+    nonEmpty(value.token) && nonEmpty(value.ownerSessionId) &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.ownerSessionId) && nonEmpty(value.agent) &&
     nonEmpty(value.task) && nonEmpty(value.cwd) && nonEmpty(value.model) &&
     Array.isArray(value.deniedTools) && value.deniedTools.every(nonEmpty) &&
     typeof value.systemPrompt === "string" &&
@@ -46,7 +56,11 @@ function validConfig(value) {
     isRecord(value.piInvocation) && nonEmpty(value.piInvocation.command) &&
     Array.isArray(value.piInvocation.args) && value.piInvocation.args.every((arg) => typeof arg === "string") &&
     isRecord(value.env) && Object.values(value.env).every((entry) => typeof entry === "string") &&
-    nonEmpty(value.createdAt);
+    nonEmpty(value.createdAt))) return undefined;
+  const abstract = value.abstract === undefined
+    ? legacyAbstract(value.task)
+    : nonBlank(value.abstract) ? value.abstract.trim() : undefined;
+  return abstract ? { ...value, abstract } : undefined;
 }
 
 function atomicWriteJson(filePath, value) {
@@ -110,8 +124,8 @@ if (!configPath) {
   process.exit(2);
 }
 
-const config = readJson(configPath);
-if (!validConfig(config)) {
+const config = normalizeConfig(readJson(configPath));
+if (!config) {
   process.stderr.write("Invalid detached subagent launch config.\n");
   process.exit(2);
 }
@@ -321,8 +335,13 @@ function handleEvent(event) {
     if (typeof event.toolCallId === "string") delete activeTools[event.toolCallId];
     if (event.toolName === "contact_supervisor") {
       const request = event.result?.details?.request;
-      if (isRecord(request) && request.runId === config.runId && nonEmpty(request.id)) {
-        transition("waiting", { activeTools, request });
+      if (
+        isRecord(request) && request.runId === config.runId &&
+        ["need_decision", "interview_request", "progress_update"].includes(request.reason) &&
+        typeof request.message === "string" && typeof request.createdAt === "string"
+      ) {
+        const waitingSeq = (Number.isInteger(state.waitingSeq) ? state.waitingSeq : 0) + 1;
+        transition("waiting", { activeTools, request, waitingSeq });
         return;
       }
     }
@@ -340,10 +359,11 @@ function handleEvent(event) {
 }
 
 function validControl(value) {
-  return isRecord(value) && value.v === 1 && nonEmpty(value.token) &&
+  return isRecord(value) && value.v === 1 && nonEmpty(value.token) && !("requestId" in value) &&
     ["interrupt", "steer", "reply"].includes(value.type) &&
     (value.message === undefined || typeof value.message === "string") &&
-    (value.requestId === undefined || typeof value.requestId === "string");
+    (value.waitingSeq === undefined || (Number.isInteger(value.waitingSeq) && value.waitingSeq >= 1)) &&
+    (value.type !== "reply" || (nonEmpty(value.message) && Number.isInteger(value.waitingSeq) && value.waitingSeq >= 1));
 }
 
 async function applyControl(control) {
@@ -354,12 +374,13 @@ async function applyControl(control) {
   }
   if (control.type === "reply") {
     if (
-      state.status === "waiting" && nonEmpty(control.message) && nonEmpty(control.requestId) &&
-      isRecord(state.request) && state.request.id === control.requestId
+      state.status === "waiting" && nonEmpty(control.message) &&
+      Number.isInteger(control.waitingSeq) && control.waitingSeq === state.waitingSeq &&
+      isRecord(state.request)
     ) {
       transition("running", { request: undefined });
       void withTimeout(
-        client.prompt(`Supervisor reply to request ${control.requestId}:\n\n${control.message}`),
+        client.prompt(`Supervisor reply for run ${config.runId}:\n\n${control.message}`),
         REPLY_PROMPT_TIMEOUT_MS,
         "supervisor reply prompt",
       ).catch((error) => finish("failed", { error: errorText(error) }));

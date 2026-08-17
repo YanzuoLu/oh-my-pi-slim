@@ -12,8 +12,6 @@ import {
   SPECIALIST_NAMES,
   SUBAGENT_ACTIONS,
   SUBAGENT_PUBLIC_FIELDS,
-  SUPERVISOR_ACTIONS,
-  SUPERVISOR_PUBLIC_FIELDS,
   SubagentRegistry,
   isTerminalStatus,
   requireString,
@@ -52,8 +50,6 @@ import {
   renderSubagentCall,
   renderSubagentNotification,
   renderSubagentResult,
-  renderSupervisorCall,
-  renderSupervisorResult,
 } from "./subagent-transcript-renderer.js";
 import { SubagentWidget, type SubagentWidgetUI } from "./subagent-widget.js";
 
@@ -70,7 +66,7 @@ const DEFAULT_POLL_MS = 250;
 const DEFAULT_GRACE_MS = 5000;
 const DEFAULT_SHUTDOWN_WAIT_MS = 3500;
 const POST_TERM_GRACE_MS = 1500;
-const LIFECYCLE_TOOLS = new Set(["subagent", "subagent_supervisor", "contact_supervisor"]);
+const LIFECYCLE_TOOLS = new Set(["subagent", "contact_supervisor"]);
 
 interface AgentDefinition {
   name: SpecialistName;
@@ -103,16 +99,11 @@ interface RuntimeOptions {
 
 interface RuntimeInput {
   agent?: unknown;
+  abstract?: unknown;
   task?: unknown;
   cwd?: unknown;
   action?: unknown;
   id?: unknown;
-  message?: unknown;
-}
-
-interface SupervisorInput {
-  action?: unknown;
-  replyTo?: unknown;
   message?: unknown;
 }
 
@@ -127,25 +118,25 @@ interface RunHealth {
   staleSince?: number;
 }
 
-interface PendingReply {
-  requestId: string;
+interface RepliedSeq {
+  waitingSeq: number;
   sentAt: number;
 }
 
 interface RunStatusSummary {
   id: string;
   agent: SpecialistName;
+  abstract: string;
   status: RunStatus;
   live: boolean;
   sourceRunId?: string;
-  requestId?: string;
   reason?: SupervisorRequest["reason"];
 }
 
 interface NotificationDelivery {
   runId: string;
   event: RunStatus;
-  requestId?: string;
+  waitingSeq?: number;
   deliveryKey: string;
 }
 
@@ -230,10 +221,10 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function notificationDeliveryKey(runId: string, event: RunStatus, requestId?: string): string | undefined {
+function notificationDeliveryKey(runId: string, event: RunStatus, waitingSeq?: number): string | undefined {
   if (event === "waiting") {
-    if (!requestId) return;
-    return `oh-my-pi-slim:subagent-notification:${JSON.stringify([runId, event, requestId])}`;
+    if (!Number.isInteger(waitingSeq) || Number(waitingSeq) < 1) return;
+    return `oh-my-pi-slim:subagent-notification:${JSON.stringify([runId, event, waitingSeq])}`;
   }
   if (!isTerminalStatus(event)) return;
   return `oh-my-pi-slim:subagent-notification:${JSON.stringify([runId, event])}`;
@@ -249,23 +240,24 @@ function notificationDeliveryFromDetails(value: unknown): NotificationDelivery |
   const eventValue = typeof details.event === "string" ? details.event : details.status;
   if (!runId || typeof eventValue !== "string" || !RUN_STATUSES_FOR_NOTIFICATIONS.has(eventValue)) return;
   const event = eventValue as RunStatus;
-  const requestId = typeof details.requestId === "string" ? details.requestId : undefined;
-  const derivedKey = notificationDeliveryKey(runId, event, requestId);
+  const waitingSeq = Number.isInteger(details.waitingSeq) && Number(details.waitingSeq) >= 1
+    ? Number(details.waitingSeq)
+    : undefined;
+  const derivedKey = notificationDeliveryKey(runId, event, waitingSeq);
   if (!derivedKey) return;
   if (details.deliveryKey !== undefined && details.deliveryKey !== derivedKey) return;
-  return { runId, event, requestId, deliveryKey: derivedKey };
+  return { runId, event, waitingSeq, deliveryKey: derivedKey };
 }
 
 function stateRequest(value: Record<string, unknown> | undefined, runId: string): SupervisorRequest | undefined {
   if (!value) return;
   if (
-    typeof value.id !== "string" || value.runId !== runId ||
+    value.runId !== runId ||
     !["need_decision", "interview_request", "progress_update"].includes(String(value.reason)) ||
     typeof value.message !== "string" || typeof value.createdAt !== "string" ||
     (value.interview !== undefined && (!value.interview || typeof value.interview !== "object" || Array.isArray(value.interview)))
   ) return;
   return {
-    id: value.id,
     runId,
     reason: value.reason as SupervisorRequest["reason"],
     message: value.message,
@@ -288,28 +280,18 @@ function stateActivity(state: DetachedRunState): DetachedRunActivity {
 
 export const subagentParameters = Type.Object({
   agent: Type.Optional(Type.String({ description: "Specialist role for create" })),
+  abstract: Type.Optional(Type.String({ description: "Concise run summary for create or resume; required and non-empty after trimming" })),
   task: Type.Optional(Type.String({ description: "Objective for create" })),
   cwd: Type.Optional(Type.String({ description: "Working directory for create" })),
   action: Type.Union(SUBAGENT_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Create, list, steer, interrupt, or resume a run",
+    description: "Create, list, steer, interrupt, resume, or reply to a run",
   }),
-  id: Type.Optional(Type.String({ description: "Run ID for steer, interrupt, or resume" })),
-  message: Type.Optional(Type.String({ description: "Guidance for steer or the continuation objective for resume" })),
+  id: Type.Optional(Type.String({ description: "Run ID for steer, interrupt, resume, or reply; resume uses the terminal source run ID" })),
+  message: Type.Optional(Type.String({ description: "Guidance for steer, continuation objective for resume, or waiting-run reply" })),
 }, { additionalProperties: false });
 
-export const supervisorParameters = Type.Object({
-  action: Type.Union(SUPERVISOR_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "View pending requests or reply",
-  }),
-  replyTo: Type.Optional(Type.String({ description: "Pending supervisor request ID to answer" })),
-  message: Type.Optional(Type.String({ description: "Reply that continues the waiting specialist" })),
-}, { additionalProperties: false });
-
-if (
-  JSON.stringify(publicSchemaKeys(subagentParameters)) !== JSON.stringify([...SUBAGENT_PUBLIC_FIELDS].sort()) ||
-  JSON.stringify(publicSchemaKeys(supervisorParameters)) !== JSON.stringify([...SUPERVISOR_PUBLIC_FIELDS].sort())
-) {
-  throw new Error("OMPS subagent tool schemas drifted from their public field contracts.");
+if (JSON.stringify(publicSchemaKeys(subagentParameters)) !== JSON.stringify([...SUBAGENT_PUBLIC_FIELDS].sort())) {
+  throw new Error("OMPS subagent tool schema drifted from its public field contract.");
 }
 
 export class OmpsSubagentRuntime {
@@ -333,7 +315,7 @@ export class OmpsSubagentRuntime {
   private readonly widget: SubagentWidget;
   private readonly activity = new Map<string, DetachedRunActivity>();
   private readonly health = new Map<string, RunHealth>();
-  private readonly pendingReplies = new Map<string, PendingReply>();
+  private readonly repliedSeqs = new Map<string, RepliedSeq>();
   private readonly queuedNotifications = new Set<string>();
   private readonly reconciling = new Set<string>();
   private readonly unsubscribeRegistry: () => void;
@@ -379,37 +361,23 @@ export class OmpsSubagentRuntime {
     this.pi.registerTool({
       name: "subagent",
       label: "Subagent",
-      description: "Create a package specialist asynchronously and receive a new run ID with status starting. Lifecycle notifications deliver waiting requests and terminal results through steer at the next safe model boundary. Use list for retained run status, steer for running work, interrupt for active work, and resume for saved child sessions.",
-      promptSnippet: "Create and manage asynchronous package specialist runs.",
+      description: "Create a package specialist asynchronously with required agent, abstract, and task, then manage it by run ID. Resume requires a terminal source run ID, a new abstract, and a continuation message. List returns active run status with abstract. Lifecycle notifications deliver complete waiting requests and terminal results through steer; reply continues a waiting run by ID.",
+      promptSnippet: "Create specialists with an abstract; resume terminal runs with a new abstract; list, steer, interrupt, or reply by run ID.",
       promptGuidelines: [
-        "subagent create supplies agent, task, and optional cwd and returns the new run with status starting.",
-        "A waiting subagent lifecycle notification is delivered through steer at the next safe model boundary and contains the run ID, request ID, reason, and message.",
+        "subagent create requires agent, abstract, and task, accepts optional cwd, and returns the new run with status starting.",
+        "A waiting subagent lifecycle notification is delivered through steer at the next safe model boundary and contains the complete request with run ID, reason, message, optional interview, and creation time.",
         "A completed, failed, or interrupted subagent lifecycle notification is delivered through steer at the next safe model boundary and contains the run ID and every stored output and error field for that transition.",
-        "subagent list reports retained run identity, current status, liveness, optional source run ID, and waiting request ID/reason; it never returns task, activity, or historical results.",
+        "subagent list reports only starting, running, and waiting runs with ID, agent, abstract, status, liveness, optional source run ID, and waiting reason; it never returns the complete request, activity, or historical results.",
         "subagent steer sends a message to a running run.",
         "subagent interrupt sends an interruption request to a starting, running, or waiting run; its lifecycle notification reports the actual terminal status.",
-        "subagent resume accepts a completed, failed, or interrupted run ID with a saved child session.",
-        "subagent resume returns a new run ID; subsequent steer, interrupt, and resume actions use the new run ID.",
+        "subagent resume requires a completed, failed, or interrupted source run ID with a saved child session, a new non-empty abstract, and a continuation message.",
+        "subagent resume returns a new run ID carrying the supplied new abstract; subsequent steer, interrupt, reply, and resume actions use the new run ID.",
+        "subagent reply accepts a waiting run ID and message, then continues that live run with saved child-session context.",
       ],
       parameters: subagentParameters,
       execute: async (_toolCallId, params) => this.executeSubagent(params as RuntimeInput),
       renderCall: renderSubagentCall,
       renderResult: renderSubagentResult,
-    });
-    this.pi.registerTool({
-      name: "subagent_supervisor",
-      label: "Subagent Supervisor",
-      description: "View waiting specialist requests and reply to continue a specialist. The next waiting or terminal transition uses one visible custom message delivered through steer at the next safe model boundary.",
-      promptSnippet: "Inspect waiting child requests and reply by request ID.",
-      promptGuidelines: [
-        "subagent_supervisor pending returns each waiting request with its request ID and run ID.",
-        "subagent_supervisor reply accepts a request ID and message.",
-        "After subagent_supervisor reply, the same run ID returns to running with saved child-session context; its next waiting, completed, failed, or interrupted transition sends one visible custom message through steer at the next safe model boundary.",
-      ],
-      parameters: supervisorParameters,
-      execute: async (_toolCallId, params) => this.executeSupervisor(params as SupervisorInput),
-      renderCall: renderSupervisorCall,
-      renderResult: renderSupervisorResult,
     });
   }
 
@@ -418,7 +386,7 @@ export class OmpsSubagentRuntime {
     this.widget.dispose();
     this.activity.clear();
     this.health.clear();
-    this.pendingReplies.clear();
+    this.repliedSeqs.clear();
     this.queuedNotifications.clear();
     this.ctx = ctx;
     this.ownerSessionId = ctx.sessionManager.getSessionId();
@@ -472,7 +440,7 @@ export class OmpsSubagentRuntime {
     this.widget.dispose();
     this.activity.clear();
     this.health.clear();
-    this.pendingReplies.clear();
+    this.repliedSeqs.clear();
     this.queuedNotifications.clear();
     this.ctx = undefined;
     this.ownerSessionId = undefined;
@@ -632,9 +600,9 @@ export class OmpsSubagentRuntime {
     const event = run.notificationPending;
     if (!event) return;
     if (event === "waiting") {
-      if (run.status !== "waiting" || !run.request) return;
-      const deliveryKey = notificationDeliveryKey(run.id, event, run.request.id);
-      return deliveryKey ? { runId: run.id, event, requestId: run.request.id, deliveryKey } : undefined;
+      if (run.status !== "waiting" || !run.request || !run.waitingSeq) return;
+      const deliveryKey = notificationDeliveryKey(run.id, event, run.waitingSeq);
+      return deliveryKey ? { runId: run.id, event, waitingSeq: run.waitingSeq, deliveryKey } : undefined;
     }
     if (run.status !== event || !isTerminalStatus(event)) return;
     const deliveryKey = notificationDeliveryKey(run.id, event);
@@ -660,7 +628,7 @@ export class OmpsSubagentRuntime {
 
   private sendNotification(run: PersistedRun, delivery: NotificationDelivery): void {
     const request = run.request
-      ? `\nRequest ${run.request.id} (${run.request.reason}): ${run.request.message}`
+      ? `\n\nRequest:\n${JSON.stringify(run.request, null, 2)}`
       : "";
     const output = run.output !== undefined ? `\n\nOutput: ${run.output}` : "";
     const error = run.error !== undefined ? `\n\nError: ${run.error}` : "";
@@ -674,7 +642,8 @@ export class OmpsSubagentRuntime {
           event: delivery.event,
           runId: run.id,
           status: delivery.event,
-          requestId: delivery.requestId,
+          request: run.request,
+          waitingSeq: delivery.waitingSeq,
           reason: run.request?.reason,
           deliveryKey: delivery.deliveryKey,
         },
@@ -712,7 +681,7 @@ export class OmpsSubagentRuntime {
     if (isTerminalStatus(current.status)) return current;
     this.registry.markLive(id, false);
     this.health.delete(id);
-    this.pendingReplies.delete(id);
+    this.repliedSeqs.delete(id);
     const failed = this.updateRun(id, {
       status: "failed",
       error,
@@ -729,8 +698,9 @@ export class OmpsSubagentRuntime {
     const current = this.registry.require(id);
     this.activity.set(id, stateActivity(state));
     const request = stateRequest(state.request, id);
+    const waitingSeq = state.waitingSeq;
     const waitingRequestChanged = current.status === "waiting" && state.status === "waiting" &&
-      !sameRequest(current.request, request);
+      (current.waitingSeq !== waitingSeq || !sameRequest(current.request, request));
     const enteredWaiting = current.status !== "waiting" && state.status === "waiting";
     const enteredTerminal = !isTerminalStatus(current.status) && isTerminalStatus(state.status);
     const clearWaitingPending = state.status === "running" && current.notificationPending === "waiting";
@@ -740,7 +710,8 @@ export class OmpsSubagentRuntime {
         ? "waiting"
         : clearWaitingPending ? undefined : current.notificationPending;
     const logicalChange = current.status !== state.status || current.sessionFile !== state.sessionFile ||
-      current.output !== state.output || current.error !== state.error || !sameRequest(current.request, request) ||
+      current.waitingSeq !== waitingSeq || current.output !== state.output || current.error !== state.error ||
+      !sameRequest(current.request, request) ||
       current.notificationPending !== notificationPending;
     let next = current;
     if (logicalChange) {
@@ -748,6 +719,7 @@ export class OmpsSubagentRuntime {
         status: state.status,
         sessionFile: state.sessionFile,
         request,
+        waitingSeq,
         output: state.output,
         error: state.error,
         notificationPending,
@@ -759,7 +731,7 @@ export class OmpsSubagentRuntime {
     if (isTerminalStatus(next.status)) {
       this.registry.markLive(id, false);
       this.health.delete(id);
-      this.pendingReplies.delete(id);
+      this.repliedSeqs.delete(id);
       if (cleanup) this.cleanupRun(id);
     }
     this.widget.update();
@@ -799,7 +771,7 @@ export class OmpsSubagentRuntime {
           });
           this.registry.markLive(id, false);
           this.health.delete(id);
-          this.pendingReplies.delete(id);
+          this.repliedSeqs.delete(id);
           this.cleanupRun(id);
           this.deliverPendingNotification(id);
         } else {
@@ -821,16 +793,15 @@ export class OmpsSubagentRuntime {
         return;
       }
 
-      const pendingReply = this.pendingReplies.get(id);
-      const request = stateRequest(state.request, id);
+      const repliedSeq = this.repliedSeqs.get(id);
       let suppressWaitingReply = false;
-      if (pendingReply) {
-        if (state.status === "running" || isTerminalStatus(state.status) || request?.id !== pendingReply.requestId) {
-          this.pendingReplies.delete(id);
-        } else if (state.status === "waiting" && this.nowMs() - pendingReply.sentAt < this.graceMs) {
+      if (repliedSeq) {
+        if (state.status === "running" || isTerminalStatus(state.status) || state.waitingSeq !== repliedSeq.waitingSeq) {
+          this.repliedSeqs.delete(id);
+        } else if (state.status === "waiting" && this.nowMs() - repliedSeq.sentAt < this.graceMs) {
           suppressWaitingReply = true;
-        } else if (this.nowMs() - pendingReply.sentAt >= this.graceMs) {
-          this.pendingReplies.delete(id);
+        } else if (this.nowMs() - repliedSeq.sentAt >= this.graceMs) {
+          this.repliedSeqs.delete(id);
         }
       }
 
@@ -923,7 +894,7 @@ export class OmpsSubagentRuntime {
     });
     this.registry.markLive(id, false);
     this.health.delete(id);
-    this.pendingReplies.delete(id);
+    this.repliedSeqs.delete(id);
     if (notify) this.deliverPendingNotification(id);
     if (safeToCleanup) this.cleanupRun(id);
   }
@@ -933,10 +904,11 @@ export class OmpsSubagentRuntime {
     return {
       id: run.id,
       agent: run.agent,
+      abstract: run.abstract,
       status: run.status,
       live: this.registry.isLive(run.id),
       ...(run.sourceRunId !== undefined ? { sourceRunId: run.sourceRunId } : {}),
-      ...(request !== undefined ? { requestId: request.id, reason: request.reason } : {}),
+      ...(request !== undefined ? { reason: request.reason } : {}),
     };
   }
 
@@ -967,6 +939,7 @@ export class OmpsSubagentRuntime {
       token: randomUUID(),
       ownerSessionId: this.ownerSessionId,
       agent: run.agent,
+      abstract: run.abstract,
       task: run.task,
       cwd: run.cwd,
       model: run.model,
@@ -1046,20 +1019,31 @@ export class OmpsSubagentRuntime {
       if (input.id !== undefined || input.message !== undefined) throw new Error("create does not accept id or message.");
       return this.launchCreate(input);
     }
-    const createFields = ["agent", "task", "cwd"].filter((field) => input[field as keyof RuntimeInput] !== undefined);
+    if (action === "resume") {
+      const invalidFields = ["agent", "task", "cwd"].filter((field) => input[field as keyof RuntimeInput] !== undefined);
+      if (invalidFields.length > 0) throw new Error(`resume does not accept field(s): ${invalidFields.join(", ")}.`);
+      const id = requireString(input.id, "id");
+      const abstract = requireString(input.abstract, "abstract");
+      const message = requireString(input.message, "message");
+      await this.reconcileRun(id);
+      return this.resume(id, abstract, message);
+    }
+    const createFields = ["agent", "abstract", "task", "cwd"].filter((field) => input[field as keyof RuntimeInput] !== undefined);
     if (createFields.length > 0) throw new Error(`${action} does not accept create field(s): ${createFields.join(", ")}.`);
     if (action === "list" && (input.id !== undefined || input.message !== undefined)) throw new Error("list does not accept id or message.");
     if (action === "interrupt" && input.message !== undefined) throw new Error("interrupt does not accept message.");
 
     if (action === "list") {
       await this.reconcileAll();
-      const runs = this.registry.list().map((run) => this.formatRunStatus(run));
+      const runs = this.registry.list()
+        .filter((run) => ACTIVE_STATUSES.has(run.status))
+        .map((run) => this.formatRunStatus(run));
       return toolText(JSON.stringify(runs, null, 2), { runs });
     }
 
     const id = requireString(input.id, "id");
     await this.reconcileRun(id);
-    if (action === "resume") return this.resume(id, requireString(input.message, "message"));
+    if (action === "reply") return this.reply(id, requireString(input.message, "message"));
     const run = this.registry.require(id);
     if (isTerminalStatus(run.status)) return toolText(`${id} is already ${run.status}.`, { run: this.formatRun(run) });
     const target = this.validConfig(id);
@@ -1087,6 +1071,7 @@ export class OmpsSubagentRuntime {
     const run: PersistedRun = {
       id: this.newRunId(),
       agent: launch.agent,
+      abstract: launch.abstract,
       task: launch.task,
       cwd: launch.cwd ? resolve(this.ctx?.cwd ?? process.cwd(), launch.cwd) : this.ctx?.cwd ?? process.cwd(),
       model,
@@ -1098,7 +1083,7 @@ export class OmpsSubagentRuntime {
     return this.launchRun(run);
   }
 
-  private async resume(sourceId: string, message: string) {
+  private async resume(sourceId: string, abstract: string, message: string) {
     const source = this.registry.require(sourceId);
     if (!isTerminalStatus(source.status)) throw new Error(`resume requires a terminal source run; ${sourceId} is ${source.status}.`);
     if (!source.sessionFile || !existsSync(source.sessionFile)) throw new Error(`Run ${sourceId} has no recoverable child session file.`);
@@ -1111,6 +1096,7 @@ export class OmpsSubagentRuntime {
     const run: PersistedRun = {
       id: this.newRunId(),
       agent: source.agent,
+      abstract,
       task: message,
       cwd: source.cwd,
       model: source.model,
@@ -1127,36 +1113,25 @@ export class OmpsSubagentRuntime {
     return result;
   }
 
-  private async executeSupervisor(input: SupervisorInput) {
-    rejectUnknownFields(input, SUPERVISOR_PUBLIC_FIELDS, "subagent_supervisor");
-    const action = requireString(input.action, "action");
-    if (!SUPERVISOR_ACTIONS.includes(action as (typeof SUPERVISOR_ACTIONS)[number])) throw new Error(`Unsupported supervisor action: ${action}`);
-    if (action !== "reply" && (input.replyTo !== undefined || input.message !== undefined)) throw new Error(`${action} does not accept replyTo or message.`);
-    await this.reconcileAll();
-    if (action === "pending") {
-      const pending = this.registry.pending();
-      return toolText(JSON.stringify(pending, null, 2), { pending });
+  private reply(id: string, message: string) {
+    const current = this.registry.require(id);
+    if (current.status !== "waiting") throw new Error(`reply requires a waiting run; ${id} is ${current.status}.`);
+    if (!this.registry.isLive(id)) throw new Error(`reply requires a live waiting run; ${id} is not live.`);
+    if (!current.request) throw new Error(`Run ${id} has no waiting request.`);
+    if (!Number.isInteger(current.waitingSeq) || Number(current.waitingSeq) < 1) {
+      throw new Error(`Run ${id} has no replyable waiting sequence.`);
     }
-    const replyTo = requireString(input.replyTo, "replyTo");
-    const message = requireString(input.message, "message");
-    const request = this.registry.pending().find((item) => item.id === replyTo);
-    if (!request) throw new Error(`Unknown pending supervisor request: ${replyTo}`);
-    await this.reconcileRun(request.runId);
-    const current = this.registry.require(request.runId);
-    if (current.status !== "waiting" || current.request?.id !== replyTo || !this.registry.isLive(request.runId)) {
-      throw new Error(`Supervisor request ${replyTo} is no longer attached to a live runner.`);
-    }
-    const target = this.validConfig(request.runId);
-    if (!target) throw new Error(`Run ${request.runId} has no valid detached control target.`);
-    this.controlWriter(target.paths, target.config.token, "reply", message, replyTo);
-    this.pendingReplies.set(request.runId, { requestId: replyTo, sentAt: this.nowMs() });
-    const running = this.updateRun(request.runId, {
+    const target = this.validConfig(id);
+    if (!target) throw new Error(`Run ${id} has no valid detached control target.`);
+    this.controlWriter(target.paths, target.config.token, "reply", message, current.waitingSeq);
+    this.repliedSeqs.set(id, { waitingSeq: current.waitingSeq, sentAt: this.nowMs() });
+    const running = this.updateRun(id, {
       status: "running",
       request: undefined,
       notificationPending: current.notificationPending === "waiting" ? undefined : current.notificationPending,
       updatedAt: this.now(),
     });
-    return toolText(`Replied to ${replyTo}; run ${request.runId} is running.`, { run: this.formatRun(running) });
+    return toolText(`Replied to run ${id}; it is running.`, { run: this.formatRun(running) });
   }
 }
 

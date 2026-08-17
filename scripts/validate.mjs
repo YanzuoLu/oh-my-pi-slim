@@ -65,8 +65,8 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.8.5", "package version must be 0.8.5");
-check(lock.version === "0.8.5" && lock.packages?.[""]?.version === "0.8.5", "package-lock version must be 0.8.5");
+check(packageJson.version === "0.9.0", "package version must be 0.9.0");
+check(lock.version === "0.9.0" && lock.packages?.[""]?.version === "0.9.0", "package-lock version must be 0.9.0");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify(["./extensions/oh-my-pi-slim/index.ts"]), "package must load only the OMPS extension");
 check(packageJson.pi?.subagents === undefined, "package must not expose a pi.subagents manifest");
 check(packageJson.dependencies === undefined || Object.keys(packageJson.dependencies).length === 0, "package must have no runtime dependency on the removed backend");
@@ -85,11 +85,12 @@ for (const name of AGENTS) {
   check(parsed.fields.get("name") === name, `${file} name must match filename`);
   check(parsed.fields.get("description"), `${file} must define a description`);
   check(parsed.body.trim().length > 0, `${file} must contain a role prompt body`);
-  hasAll(parsed.body, ["**Supervisor Rules**:", "Do not ask the user directly.", "contact_supervisor", "Do not attempt to create, steer, interrupt, resume, or supervise other specialist runs."], `${file} child lifecycle boundary`);
+  hasAll(parsed.body, ["**Supervisor Rules**:", "Do not ask the user directly.", "contact_supervisor", "creates a waiting request and pauses this run", "Do not call subagent create, list, steer, interrupt, resume, or reply actions"], `${file} child lifecycle boundary`);
   hasNone(parsed.body, ["ast_grep_search", "context7", "gh_grep", "apply_patch"], `${file} removed OpenCode tools`);
 }
 
 const extension = read("extensions/oh-my-pi-slim/index.ts");
+const checkpoint = read("extensions/oh-my-pi-slim/subagent-checkpoint.ts");
 const runtime = read("extensions/oh-my-pi-slim/subagent-runtime.ts");
 const core = read("extensions/oh-my-pi-slim/subagent-core.ts");
 const child = read("extensions/oh-my-pi-slim/child-supervisor.ts");
@@ -118,7 +119,7 @@ hasAll(extension, [
   "setImmediate(() =>",
   "subagents.acknowledgeNotificationMessage(message)",
   "SettingsManager.create(",
-  "shouldCompact(",
+  "contextUsageNeedsCheckpoint(",
 ], "main extension contract");
 hasNone(extension, REMOVED_CAPABILITIES, "main extension");
 const notificationMessageEndStart = extension.indexOf('pi.on("message_end"');
@@ -171,12 +172,13 @@ hasAll(runtime, [
   "acknowledgeNotificationMessage",
   "retryQueuedNotificationsAfterAgentSettled",
   "collectRunDirectoryGarbage",
-  "Create and manage asynchronous package specialist runs.",
-  "Inspect waiting child requests and reply by request ID.",
+  "Create specialists with an abstract; resume terminal runs with a new abstract; list, steer, interrupt, or reply by run ID.",
+  "subagent resume requires a completed, failed, or interrupted source run ID",
+  "subagent reply accepts a waiting run ID and message",
   "PI_SUBAGENT_CHILD: \"1\"",
   "OMPS_SUBAGENT_CHILD: \"1\"",
 ], "built-in detached runtime");
-hasNone(runtime, ["RpcClient", "getPackageDir", "promptLive", "watchClientLiveness", "closingSessions", 'deliverAs: "followUp"'], "built-in detached runtime");
+hasNone(runtime, ["RpcClient", "getPackageDir", "promptLive", "watchClientLiveness", "closingSessions", 'deliverAs: "followUp"', 'name: "subagent_supervisor"', "supervisorParameters", "executeSupervisor", "replyTo"], "built-in detached runtime");
 const sendNotificationStart = runtime.indexOf("private sendNotification(run: PersistedRun");
 const deliverNotificationStart = runtime.indexOf("private deliverPendingNotification", sendNotificationStart);
 const deliverNotificationEnd = runtime.indexOf("private failRun", deliverNotificationStart);
@@ -230,23 +232,27 @@ const listActionStart = runtime.indexOf('if (action === "list") {', fullFormatte
 const listActionEnd = runtime.indexOf("const id = requireString", listActionStart);
 check(statusFormatterStart >= 0 && fullFormatterStart > statusFormatterStart, "runtime must define a dedicated list status formatter before formatRun");
 const statusFormatter = runtime.slice(statusFormatterStart, fullFormatterStart);
-hasAll(statusFormatter, ["id: run.id", "agent: run.agent", "status: run.status", "live:", "sourceRunId", "requestId", "reason"], "list status formatter");
+hasAll(statusFormatter, ["id: run.id", "agent: run.agent", "abstract: run.abstract", "status: run.status", "live:", "sourceRunId", "reason"], "list status formatter");
 hasNone(statusFormatter, ["...run", "task:", "cwd:", "model:", "deniedTools:", "createdAt:", "updatedAt:", "sessionFile:", "activity:", "output:", "error:", "notificationPending:"], "list status formatter");
 const listAction = runtime.slice(listActionStart, listActionEnd);
-hasAll(listAction, ["reconcileAll", "formatRunStatus", "JSON.stringify(runs, null, 2)", "{ runs }"], "list status action");
+hasAll(listAction, ["reconcileAll", "ACTIVE_STATUSES.has(run.status)", "formatRunStatus", "JSON.stringify(runs, null, 2)", "{ runs }"], "active-only list status action");
 hasNone(listAction, [".formatRun(", "this.activity", ".output", ".error", ".task"], "list status action");
-const publicSchema = runtime.slice(runtime.indexOf("export const subagentParameters"), runtime.indexOf("export const supervisorParameters"));
+const publicSchema = runtime.slice(runtime.indexOf("export const subagentParameters"), runtime.indexOf("export class OmpsSubagentRuntime"));
 hasNone(publicSchema, REMOVED_CAPABILITIES, "public tool schemas");
 check(!runtime.includes(REMOVED_WAIT_TOOL), "runtime must not register or mention the removed wait tool");
 hasAll(core, [
-  '"create"', '"list"', '"interrupt"', '"steer"', '"resume"',
-  '"pending"', '"reply"',
+  '"create"', '"list"', '"interrupt"', '"steer"', '"resume"', '"reply"',
   '"starting"', '"running"', '"waiting"', '"completed"', '"failed"', '"interrupted"',
   "restoreSnapshot",
-  "SubagentRegistry",
+  "SubagentRegistry", "legacyRunAbstract", "waitingSeq", "abstract",
 ], "runtime core");
-hasNone(core, REMOVED_CAPABILITIES, "runtime core");
+hasNone(core, [...REMOVED_CAPABILITIES, "SUPERVISOR_ACTIONS", "SUPERVISOR_PUBLIC_FIELDS", "pending(): SupervisorRequest", "replyTo"], "runtime core");
+check(/SUBAGENT_ACTIONS = \[\s*"create",\s*"list",\s*"interrupt",\s*"steer",\s*"resume",\s*"reply",\s*\] as const/.test(core), "SUBAGENT_ACTIONS must keep the exact unified action order");
 
+hasAll(checkpoint, [
+  "export const CHECKPOINT_RESUME_TEXT", "export function completedToolBatch",
+  "export function contextUsageNeedsCheckpoint", "shouldCompact(",
+], "shared checkpoint contract");
 hasAll(child, [
   'process.env.OMPS_SUBAGENT_CHILD !== "1"',
   'name: "contact_supervisor"',
@@ -255,14 +261,25 @@ hasAll(child, [
   '"progress_update"',
   "details: { request }",
   "terminate: true",
+  "Yielded to supervisor for run",
   'pi.on("session_start"',
   "pi.setActiveTools(pi.getAllTools().map((tool) => tool.name))",
+  'pi.on("turn_start"', 'pi.on("tool_execution_end"', 'pi.on("turn_end"',
+  'pi.on("session_compact"', 'pi.on("agent_settled"', 'pi.on("session_shutdown"',
+  "completedToolBatch(event)", "contactedSupervisorThisTurn", "ctx.hasPendingMessages()",
+  "SettingsManager.create(ctx.cwd, getAgentDir()", "contextUsageNeedsCheckpoint(usage, settings)",
+  "ctx.abort()", 'event.reason !== "threshold"', "event.willRetry !== false",
+  'pi.sendUserMessage(CHECKPOINT_RESUME_TEXT, { deliverAs: "followUp" })',
+  "pendingCheckpoint = undefined",
 ], "child supervisor extension");
+hasNone(child, ["randomUUID", "request ID", "request.id"], "ID-free child supervisor request");
 
 hasAll(runFiles, [
   "getRunPaths", "ensureRunPaths", "listOwnerRunIds", "removeRunFiles", "atomicWriteJson", "safeReadJson", "tailLog", "isPidAlive", "getProcessIdentity",
   "getPiInvocation", "getDetachedRunnerInvocation", "launchDetachedRunner", "readLaunchConfig", "readRunState",
-  "writeControl", "readControlInbox", "DetachedLaunchConfig", "DetachedRunState",
+  "writeControl", "readControlInbox", "DetachedLaunchConfig", "DetachedRunState", "waitingSeq", '"requestId" in value',
+  "normalizeDetachedLaunchConfig", "legacyRunAbstract(value.task)", "value.abstract.trim()",
+  "Canonical predicate for newly written launch.json files", "normalized only by readLaunchConfig()",
 ], "detached run files");
 hasAll(rpcChild, [
   "export class RpcChild", 'stdio: ["pipe", "pipe", "pipe"]', "pending", "getLastAssistantText", "getSessionStats",
@@ -272,7 +289,8 @@ hasAll(detachedRunner, [
   'status: "starting"', 'transition("running"', 'transition("waiting"', "heartbeatAt", "updatedAt",
   "tool_execution_start", "tool_execution_end", "compaction_end", "processControls", "watch(controlDir",
   'finish("failed"', 'client.prompt(config.task)', 'process.on(signal', 'REPLY_PROMPT_TIMEOUT_MS',
-  "updateContextTokens", "let tokenResetPending = false",
+  "updateContextTokens", "let tokenResetPending = false", "normalizeConfig", "legacyAbstract(value.task)",
+  "keep this exactly aligned with subagent-core.ts legacyRunAbstract()",
 ], "detached runner");
 hasNone(detachedRunner, ['event.type === "session_compact"'], "detached runner RPC compaction semantics");
 const contextTokensStart = detachedRunner.indexOf("function updateContextTokens(candidate)");
@@ -324,10 +342,10 @@ check(!/export function ensurePackageSetup[\s\S]*maxSubagentDepth\s*=\s*1/.test(
 
 hasAll(orchestrator, [
   "<Role>", "<Agents>", "@explorer", "@librarian", "@oracle", "@designer", "@fixer", "@observer", "<Workflow>",
-  'subagent({ action: "create", agent, task, cwd? })', 'subagent({ action: "list" })',
+  'subagent({ action: "create", agent, abstract, task, cwd? })', 'subagent({ action: "list" })',
   'subagent({ action: "steer", id, message })', 'subagent({ action: "interrupt", id })',
-  'subagent({ action: "resume", id: "source-run-id", message: "continuation objective" })',
-  "subagent_supervisor", "lifecycle notifications arrive automatically at the next safe model boundary",
+  'subagent({ action: "resume", id: "source-run-id", abstract: "new run summary", message: "continuation objective" })',
+  'subagent({ action: "reply", id: runId, message })', "lifecycle notifications arrive automatically at the next safe model boundary",
 ], "orchestrator OMPS contract");
 check(!orchestrator.includes("@council"), "orchestrator must keep Council excluded");
 hasNone(orchestrator, [
@@ -340,7 +358,6 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
   hasAll(text, [
     "detached",
     "contact_supervisor",
-    "subagent_supervisor",
     "--mode rpc",
     "--session-dir",
     "--session <saved sessionFile>",
@@ -368,7 +385,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "顶层 `deny`", "`--exclude-tools", "启动时 `deniedTools`", "image input",
         "复制同一 preset 的 `explorer` 配置", "每次 create 与 resume 前都会重新读取 deny",
         "下一个安全模型边界", "同一条消息",
-      ], `${file} 0.8.5 contract`);
+      ], `${file} 0.9.0 contract`);
   hasNone(text, [
     "RpcClient", "RPC-client seam", "hidden follow-up", "隐藏 follow-up", "The five agents", "五个 agent",
     "all five specialist roles", "五个 specialist", "### Fresh runs", "fresh child calls", "fresh child",
@@ -386,24 +403,26 @@ check(!/pi\.on\("tool_execution_start"[\s\S]{0,120}subagents\.onTurnStart/.test(
 hasAll(widgetRenderer, [
   "MAX_SUBAGENT_WIDGET_LINES = 12", '"├─"', '"└─"', "renderSubagentWidgetLines", "waiting",
   "formatWidgetModel", "formatSubagentModel", "run.model", "formatWidgetTurns", "formatWidgetSessionTokens",
-  "describeWidgetActivity", "activeLines.length * 3", "budget >= 3",
+  "describeWidgetActivity", "activeLines.length * 3", "budget >= 3", "run.abstract", "shortAbstract",
 ], "subagent widget renderer");
+hasNone(widgetRenderer, ["run.task", "shortTask"], "abstract-only widget labels");
 hasAll(modelDisplay, ["THINKING_LEVELS", "formatSubagentModel", '"xhigh"', '"max"'], "subagent model display formatter");
 hasAll(transcriptRenderer, [
   "Container", "Box", "Text", "Markdown", "Spacer", "getMarkdownTheme", "RAW_HTML_TAG",
-  "renderSubagentCall", "renderSubagentResult", "renderSupervisorCall", "renderSupervisorResult",
-  "renderSubagentNotification", "details?.run", "details?.runs", "details?.pending",
-  'actionFromContext(context, "create")', 'actionFromContext(context, "pending")',
+  "renderSubagentCall", "renderSubagentResult",
+  "renderSubagentNotification", "details?.run", "details?.runs", "details?.request",
+  'actionFromContext(context, "create")',
   "immediateAck", "renderRunList", "addFinalOutput", "spacedToolResult", '"Live response"',
-  '"Retained subagent run status"', "run.requestId", "run.reason",
+  '"Active subagent run status"', "run.abstract", "run.reason", 'addField(container, theme, "Abstract", args.abstract',
 ], "subagent transcript renderer");
 hasNone(transcriptRenderer, [
   "gotgenes", "Nico", "preview", "truncated", '"Subagent result"', "renderRunSection", "addActivity",
+  "renderSupervisorCall", "renderSupervisorResult", "subagent_supervisor", "replyTo",
 ], "subagent transcript renderer ownership and focused-output contract");
 const listRendererStart = transcriptRenderer.indexOf("function renderRunList");
 const listRendererEnd = transcriptRenderer.indexOf("export function renderSubagentCall", listRendererStart);
 const listRenderer = transcriptRenderer.slice(listRendererStart, listRendererEnd);
-hasAll(listRenderer, ["styledTitle", "compactRunHeader", 'status !== "waiting"', "run.requestId", "run.reason"], "status-only list renderer");
+hasAll(listRenderer, ["styledTitle", "compactRunHeader", "undefined, true", 'status !== "waiting"', "run.reason"], "status-only list renderer");
 hasNone(listRenderer, ["addFinalOutput", "addLiveActivity", "addRequest", "run.task", "run.cwd", "run.model", "run.deniedTools", "run.output", "run.error", "run.activity", "run.request)"], "status-only list renderer");
 const notificationStart = transcriptRenderer.indexOf("export function renderSubagentNotification");
 const notificationTerminal = transcriptRenderer.indexOf("if (TERMINAL_STATUSES.has(event))", notificationStart);
@@ -419,7 +438,6 @@ check(
 hasAll(runtime, [
   "registerMessageRenderer(SUBAGENT_NOTIFICATION_TYPE, renderSubagentNotification)",
   "renderCall: renderSubagentCall", "renderResult: renderSubagentResult",
-  "renderCall: renderSupervisorCall", "renderResult: renderSupervisorResult",
   "display: true", "run: this.formatRun(run)", "event,",
 ], "subagent transcript registration and visible notification contract");
 check(!runtime.includes('renderShell: "self"'), "subagent transcript tools must use the default tool shell");
@@ -447,6 +465,7 @@ if (packCheck.status === 0) {
     const packed = JSON.parse(packCheck.stdout);
     const files = packed[0]?.files?.map((entry) => entry.path) ?? [];
     check(files.includes("extensions/oh-my-pi-slim/runner/omps-runner.mjs"), "npm pack must include the detached runner");
+    check(files.includes("extensions/oh-my-pi-slim/subagent-checkpoint.ts"), "npm pack must include the shared checkpoint helper");
     check(files.includes("extensions/oh-my-pi-slim/runner/rpc-child.mjs"), "npm pack must include the runner RPC child helper");
     check(files.includes("extensions/oh-my-pi-slim/subagent-model-display.ts"), "npm pack must include the shared subagent model formatter");
     check(files.includes("extensions/oh-my-pi-slim/subagent-transcript-renderer.ts"), "npm pack must include the subagent transcript renderer");

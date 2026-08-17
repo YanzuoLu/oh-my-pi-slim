@@ -43,7 +43,8 @@ function run(overrides = {}) {
   return {
     id: "run-1",
     agent: "fixer",
-    task: "implement the widget",
+    abstract: "implement the widget",
+    task: "full implementation details",
     cwd: "/repo",
     model: "provider/model:high",
     deniedTools: [],
@@ -96,7 +97,7 @@ test("pure active renderer uses three exact lines and terminal renderers keep ou
   const [waitingHeader, waitingStats, waitingActivity] = renderActiveRunLines(run({
     status: "waiting",
     model: "openai/gpt-5.6-sol:xhigh",
-    request: { id: "req", runId: "run-1", reason: "need_decision", message: "Choose A or B", createdAt: "now" },
+    request: { runId: "run-1", reason: "need_decision", message: "Choose A or B", createdAt: "now" },
   }), 3, theme, NOW_MS);
   assert.equal(waitingHeader, "! **fixer [run-1]** waiting  implement the widget");
   assert.equal(waitingStats, "(openai) gpt-5.6-sol • xhigh · ↻0 · 5.0s");

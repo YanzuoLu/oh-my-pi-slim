@@ -8,11 +8,24 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
+import { registerHooks } from "node:module";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
-import {
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === "./subagent-core.js") {
+      return {
+        url: new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
+        shortCircuit: true,
+      };
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
+const {
   atomicWriteJson,
   ensureRunPaths,
   getDetachedRunnerInvocation,
@@ -23,7 +36,7 @@ import {
   readControlInbox,
   safeReadJson,
   writeControl,
-} from "../extensions/oh-my-pi-slim/subagent-run-files.ts";
+} = await import("../extensions/oh-my-pi-slim/subagent-run-files.ts");
 
 const ROOT = resolve(import.meta.dirname, "..");
 const CACHE = join(ROOT, ".cache");
@@ -38,7 +51,7 @@ function mode(path) {
   return statSync(path).mode & 0o777;
 }
 
-function makeRun(scenario, { start = true, extraEnv = {} } = {}) {
+function makeRun(scenario, { start = true, extraEnv = {}, legacyMissingAbstract = false, abstract } = {}) {
   const tempDir = mkdtempSync(join(CACHE, "test-detached-runner-"));
   chmodSync(tempDir, 0o700);
   const runId = `run-${++sequence}`;
@@ -51,6 +64,7 @@ function makeRun(scenario, { start = true, extraEnv = {} } = {}) {
     token,
     ownerSessionId: "owner-session",
     agent: "fixer",
+    abstract: `summary-${scenario}`,
     task: `task-${scenario}`,
     cwd: ROOT,
     model: "stub/model:high",
@@ -62,6 +76,8 @@ function makeRun(scenario, { start = true, extraEnv = {} } = {}) {
     env: { OMPS_STUB_SCENARIO: scenario, OMPS_RUN_ID: runId, ...extraEnv },
     createdAt: new Date().toISOString(),
   };
+  if (legacyMissingAbstract) delete config.abstract;
+  else if (abstract !== undefined) config.abstract = abstract;
   atomicWriteJson(paths.configFile, config);
   let child;
   let stdout = "";
@@ -190,9 +206,10 @@ test("control filenames preserve write order within one process and millisecond"
   const originalNow = Date.now;
   Date.now = () => 1776384000000;
   try {
-    writeControl(paths, "token", "reply", "first", "request-1");
+    writeControl(paths, "token", "reply", "first", 1);
     writeControl(paths, "token", "steer", "second");
     writeControl(paths, "token", "interrupt");
+    assert.throws(() => writeControl(paths, "token", "reply", "legacy", "request-1"), /Invalid reply control/);
     assert.deepEqual(readControlInbox(paths.controlDir).map(({ type, message }) => [type, message]), [
       ["reply", "first"],
       ["steer", "second"],
@@ -208,8 +225,11 @@ test("detached launcher survives its short-lived owner process", async () => {
   const run = makeRun("normal", { start: false });
   try {
     const helperUrl = pathToFileURL(join(ROOT, "extensions/oh-my-pi-slim/subagent-run-files.ts")).href;
+    const coreUrl = pathToFileURL(join(ROOT, "extensions/oh-my-pi-slim/subagent-core.ts")).href;
     const launcher = spawnSync(process.execPath, ["--input-type=module", "--eval", [
-      `import { launchDetachedRunner } from ${JSON.stringify(helperUrl)};`,
+      'import { registerHooks } from "node:module";',
+      `registerHooks({ resolve(specifier, context, nextResolve) { return specifier === "./subagent-core.js" ? { url: ${JSON.stringify(coreUrl)}, shortCircuit: true } : nextResolve(specifier, context); } });`,
+      `const { launchDetachedRunner } = await import(${JSON.stringify(helperUrl)});`,
       `const launched = await launchDetachedRunner(${JSON.stringify(run.paths.configFile)}, ${JSON.stringify(RUNNER)}, { cwd: ${JSON.stringify(ROOT)} });`,
       "process.stdout.write(String(launched.pid));",
     ].join("\n")], { cwd: ROOT, encoding: "utf8", timeout: 5000 });
@@ -253,6 +273,24 @@ test("real runner atomically persists secure config/state and completed output w
   } finally {
     await cleanup(run);
   }
+});
+
+test("real runner accepts legacy launch config without abstract and rejects blank new abstract", async () => {
+  const legacy = makeRun("normal", { legacyMissingAbstract: true });
+  try {
+    const completed = await waitForStatus(legacy, "completed");
+    assert.equal(completed.output, "normal completion");
+    assert.equal(await waitForExit(legacy), 0);
+  } finally { await cleanup(legacy); }
+
+  const blank = makeRun("normal", { start: false, abstract: "   " });
+  try {
+    const result = spawnSync(process.execPath, [RUNNER, blank.paths.configFile], {
+      cwd: ROOT, encoding: "utf8", timeout: 3000,
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /Invalid detached subagent launch config/);
+  } finally { await cleanup(blank); }
 });
 
 test("long streaming activity stays bounded while terminal output remains complete", async () => {
@@ -354,6 +392,26 @@ test("successful compaction starts a new context-token epoch without hiding the 
   }
 });
 
+test("runner observes one settled terminal only after a post-compaction continuation turn", async () => {
+  const run = makeRun("checkpoint-continuation");
+  try {
+    const continued = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.turnCount === 2 && state.responseText.includes("post-checkpoint-300")
+        ? state : undefined;
+    });
+    assert.equal(continued.compactionCount, 1);
+    assert.equal(continued.tokens, 300);
+
+    const completed = await waitForStatus(run, "completed");
+    assert.equal(completed.output, "checkpoint continuation complete");
+    assert.equal(completed.turnCount, 2);
+    assert.equal(completed.compactionCount, 1);
+    assert.equal(completed.tokens, 350);
+    assert.equal(await waitForExit(run), 0);
+  } finally { await cleanup(run); }
+});
+
 test("aborted or result-less compaction does not reset the context-token epoch", async () => {
   const run = makeRun("token-compaction-aborted");
   try {
@@ -400,25 +458,53 @@ test("successful compaction with null final context usage preserves the last vis
   }
 });
 
-test("waiting request persists, wrong-token controls are ignored, and matching reply continues", async () => {
+test("waiting request persists, legacy controls are rejected, and matching sequence reply continues", async () => {
   const run = makeRun("contact");
   try {
     const waiting = await waitForStatus(run, "waiting");
-    assert.equal(waiting.request.id, "request-1");
+    assert.equal("id" in waiting.request, false);
     assert.equal(waiting.request.message, "choose a path");
+    assert.equal(waiting.waitingSeq, 1);
     const waitingUpdatedAt = waiting.updatedAt;
 
-    sendControl(run, { token: "wrong-token", type: "reply", requestId: "request-1", message: "bad" });
+    sendControl(run, { token: "wrong-token", type: "reply", waitingSeq: 1, message: "bad" });
+    sendControl(run, { token: run.config.token, type: "reply", requestId: "legacy-id", message: "legacy" });
     await new Promise((resolve) => setTimeout(resolve, 500));
     const stillWaiting = readState(run);
     assert.equal(stillWaiting.status, "waiting");
-    assert.equal(stillWaiting.request.id, "request-1");
+    assert.equal(stillWaiting.waitingSeq, 1);
     assert.equal(stillWaiting.updatedAt, waitingUpdatedAt);
 
-    sendControl(run, { token: run.config.token, type: "reply", requestId: "request-1", message: "continue" });
+    sendControl(run, { token: run.config.token, type: "reply", waitingSeq: 1, message: "continue" });
     const completed = await waitForStatus(run, "completed");
     assert.equal(completed.output, "completed after reply");
     assert.equal(completed.request, undefined);
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    await cleanup(run);
+  }
+});
+
+test("sequence-one reply cannot wake sequence two and consecutive waiting cycles complete", async () => {
+  const run = makeRun("contact-cycles");
+  try {
+    const first = await waitForStatus(run, "waiting");
+    assert.equal(first.waitingSeq, 1);
+    sendControl(run, { token: run.config.token, type: "reply", waitingSeq: 1, message: "first answer" });
+    const second = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "waiting" && state.waitingSeq === 2 ? state : undefined;
+    });
+    assert.equal(second.request.message, "choose again");
+
+    sendControl(run, { token: run.config.token, type: "reply", waitingSeq: 1, message: "stale answer" });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(readState(run).status, "waiting");
+    assert.equal(readState(run).waitingSeq, 2);
+
+    sendControl(run, { token: run.config.token, type: "reply", waitingSeq: 2, message: "second answer" });
+    const completed = await waitForStatus(run, "completed");
+    assert.equal(completed.output, "completed after reply");
     assert.equal(await waitForExit(run), 0);
   } finally {
     await cleanup(run);
@@ -429,7 +515,7 @@ test("reply prompt crash publishes failed instead of crashing without terminal s
   const run = makeRun("contact-reply-crash");
   try {
     const waiting = await waitForStatus(run, "waiting");
-    sendControl(run, { token: run.config.token, type: "reply", requestId: waiting.request.id, message: "continue" });
+    sendControl(run, { token: run.config.token, type: "reply", waitingSeq: waiting.waitingSeq, message: "continue" });
     const failed = await waitForStatus(run, "failed", 2500);
     assert.match(failed.error, /code=23/);
     assert.match(failed.error, /reply crash/);
@@ -443,7 +529,7 @@ test("hanging reply prompt does not block a later interrupt control", async () =
   const run = makeRun("contact-reply-hang");
   try {
     const waiting = await waitForStatus(run, "waiting");
-    sendControl(run, { token: run.config.token, type: "reply", requestId: waiting.request.id, message: "continue" });
+    sendControl(run, { token: run.config.token, type: "reply", waitingSeq: waiting.waitingSeq, message: "continue" });
     await waitForStatus(run, "running");
     sendControl(run, { token: run.config.token, type: "interrupt" });
     const interrupted = await waitForStatus(run, "interrupted", 2500);
@@ -458,7 +544,8 @@ test("interrupting a waiting run clears its persisted request", async () => {
   const run = makeRun("contact");
   try {
     const waiting = await waitForStatus(run, "waiting");
-    assert.equal(waiting.request.id, "request-1");
+    assert.equal(waiting.waitingSeq, 1);
+    assert.equal("id" in waiting.request, false);
     sendControl(run, { token: run.config.token, type: "interrupt" });
     const interrupted = await waitForStatus(run, "interrupted");
     assert.equal(interrupted.request, undefined);

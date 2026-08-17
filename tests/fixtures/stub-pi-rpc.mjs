@@ -137,6 +137,34 @@ function handlePrompt(command) {
         settled = true;
         send({ type: "agent_settled" });
       }, 1320);
+    } else if (scenario === "checkpoint-continuation") {
+      send({ type: "turn_start", turnIndex: 1, timestamp: Date.now() });
+      send({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "pre-checkpoint-1200" },
+        usage: { totalTokens: 1200 },
+      });
+      setTimeout(() => {
+        send({ type: "tool_execution_start", toolCallId: "checkpoint-tool", toolName: "read", args: {} });
+        send({ type: "tool_execution_end", toolCallId: "checkpoint-tool", toolName: "read", result: { content: [] }, isError: false });
+        assistant("checkpoint tool batch", "toolUse", 1200);
+      }, 180);
+      setTimeout(() => {
+        send({ type: "compaction_end", result: { summary: "checkpoint compacted" }, aborted: false });
+      }, 360);
+      setTimeout(() => {
+        send({ type: "turn_start", turnIndex: 2, timestamp: Date.now() });
+        send({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "post-checkpoint-300" },
+          usage: { totalTokens: 300 },
+        });
+      }, 540);
+      setTimeout(() => {
+        assistant("checkpoint continuation complete", "stop", 350);
+        settled = true;
+        send({ type: "agent_settled" });
+      }, 720);
     } else if (scenario === "token-compaction-aborted") {
       send({ type: "turn_start", turnIndex: promptCount, timestamp: Date.now() });
       send({
@@ -177,7 +205,7 @@ function handlePrompt(command) {
         settled = true;
         send({ type: "agent_settled" });
       }, 440);
-    } else if (scenario.startsWith("contact") && promptCount === 1) {
+    } else if ((scenario === "contact-cycles" && promptCount <= 2) || (scenario.startsWith("contact") && promptCount === 1)) {
       send({ type: "turn_start", turnIndex: 1, timestamp: Date.now() });
       send({ type: "tool_execution_start", toolCallId: "contact-1", toolName: "contact_supervisor", args: {} });
       send({
@@ -187,10 +215,9 @@ function handlePrompt(command) {
         result: {
           details: {
             request: {
-              id: "request-1",
               runId: process.env.OMPS_RUN_ID,
               reason: "need_decision",
-              message: "choose a path",
+              message: promptCount === 1 ? "choose a path" : "choose again",
               createdAt: new Date().toISOString(),
             },
           },
@@ -225,6 +252,9 @@ input.on("line", (line) => {
       total = 9000;
       contextUsage = { tokens: 900, contextWindow: 2000, percent: 45 };
     } else if (scenario === "token-compaction-success") {
+      total = 9000;
+      contextUsage = { tokens: 320, contextWindow: 2000, percent: 16 };
+    } else if (scenario === "checkpoint-continuation") {
       total = 9000;
       contextUsage = { tokens: 320, contextWindow: 2000, percent: 16 };
     } else if (scenario === "token-compaction-aborted") {

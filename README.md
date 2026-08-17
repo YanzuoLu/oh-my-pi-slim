@@ -70,7 +70,7 @@ Top-level `deny` configures exact, case-sensitive tool names independently for e
 }
 ```
 
-The object may contain any subset of the six specialists; missing roles mean `[]`. Unknown or uninstalled tool names are valid and silently ignored, which keeps configs portable. Unknown role keys, duplicate names, empty names, comma-containing names, and the lifecycle-reserved names `subagent`, `subagent_supervisor`, and `contact_supervisor` are rejected.
+The object may contain any subset of the six specialists; missing roles mean `[]`. Unknown or uninstalled tool names are valid and silently ignored, which keeps configs portable. Unknown role keys, duplicate names, empty names, comma-containing names, and the lifecycle-reserved names `subagent` and `contact_supervisor` are rejected. The old unknown name `subagent_supervisor` is accepted like any other portable deny entry.
 
 Activation validates every configured model and its authentication. The main session model is switched to the orchestrator role. For `create`, OMPS injects the specialist's `provider/model:thinking`; the model-facing schema does not expose model, thinking, context, or tool-policy overrides.
 
@@ -79,11 +79,11 @@ Activation validates every configured model and its authentication. The main ses
 ### Create runs
 
 ```js
-subagent({ action: "create", agent: "explorer", task: "Locate the auth flow and related tests." })
-subagent({ action: "create", agent: "observer", task: "Analyze /absolute/path/to/screenshot.png." })
+subagent({ action: "create", agent: "explorer", abstract: "Map the auth flow", task: "Locate the auth flow and related tests." })
+subagent({ action: "create", agent: "observer", abstract: "Analyze the screenshot", task: "Analyze /absolute/path/to/screenshot.png." })
 ```
 
-Create input is exactly `{ action: "create", agent, task, cwd? }`; `action` is mandatory and action-less launches are rejected. Every create writes a launch config, starts a detached background runner, and immediately returns a run ID. There is no wait tool and the parent never owns an in-process child client. The runner alone owns the Pi RPC child and exchanges lifecycle data with the parent through files.
+Create input is exactly `{ action: "create", agent, abstract, task, cwd? }`; `abstract` is required, trimmed, and stored with the run; `action` is mandatory and action-less launches are rejected. Every create writes a launch config, starts a detached background runner, and immediately returns a run ID. There is no wait tool and the parent never owns an in-process child client. The runner alone owns the Pi RPC child and exchanges lifecycle data with the parent through files.
 
 Child startup uses a complete Pi invocation containing:
 
@@ -97,7 +97,7 @@ Child startup uses a complete Pi invocation containing:
 
 At child `session_start`, OMPS activates every tool remaining in Pi's configured registry: all built-in tools plus trusted extension tools discovered for that child session, including global and trusted project-level extensions. The launch-time deny list is applied before this activation, so denied tools remain absent from the active registry, provider schema, and Pi-generated tool prompt metadata. OMPS does not attempt to sandbox unknown future extension capabilities; installed and project-level extensions remain part of the user's trust boundary.
 
-`subagent` and `subagent_supervisor` are main-session-only because the main extension returns before registering them in children. `contact_supervisor` is child-only and is loaded explicitly. None of these lifecycle tools can be configured through deny. Deny is reread before every create and resume; already-active children retain the policy captured at launch.
+`subagent` is main-session-only because the main extension returns before registering it in children. `contact_supervisor` is child-only and is loaded explicitly. These two lifecycle tools cannot be configured through deny. Deny is reread before every create and resume; already-active children retain the policy captured at launch.
 
 ### List, status, notifications, and control
 
@@ -105,30 +105,26 @@ At child `session_start`, OMPS activates every tool remaining in Pi's configured
 subagent({ action: "list" })
 subagent({ action: "steer", id: "run-id", message: "Focus on the parser test." })
 subagent({ action: "interrupt", id: "run-id" })
+subagent({ action: "reply", id: "waiting-run-id", message: "Proceed with option A." })
 ```
 
-Completion, supervisor waiting, failure, and interruption enqueue one custom message with `display: true`, `deliverAs: "steer"`, and `triggerTurn: true`. Pi delivers that same message after the current assistant/tool batch at the next safe model boundary, where it appears in the TUI and enters model context; orchestration does not need to yield or wait for idle. The message content contains the complete request, output, or error, while delivery metadata stays in `details` and does not enter model context. No second TUI entry or model message is created. `list` is status-only: each retained item contains only run ID, agent, status, liveness, optional source run ID, and—while waiting—the request ID and reason. It never returns task, cwd, model/deniedTools, timestamps, session file, activity, output, error, or other historical results. Use `subagent_supervisor({ action: "pending" })` for the complete waiting request. Dependent progress resumes from lifecycle notifications rather than repeated `list` calls.
+Completion, supervisor waiting, failure, and interruption enqueue one custom message with `display: true`, `deliverAs: "steer"`, and `triggerTurn: true`. Pi delivers that same message after the current assistant/tool batch at the next safe model boundary, where it appears in the TUI and enters model context; orchestration does not need to yield or wait for idle. The message content contains the complete request, output, or error, while delivery metadata stays in `details` and does not enter model context. No second TUI entry or model message is created. `list` is active-only and status-only: it returns only starting, running, and waiting runs with run ID, agent, abstract, status, liveness, optional source run ID, and waiting reason. It never returns task, the complete request, cwd, model/deniedTools, timestamps, session file, activity, output, error, or terminal history. The waiting lifecycle notification already contains the complete ID-free request; there is no pending query. Dependent progress resumes from lifecycle notifications rather than repeated `list` calls.
 
-`steer`, `interrupt`, and supervisor replies atomically enqueue token-authenticated files under the run's `control/` directory and return without waiting. `steer` is best-effort. `interrupt` sends an interruption request, while the final notification reports the actual terminal status. The runner applies controls it can accept and publishes the actual transition. Before a terminal state is written, the runner captures final metadata, stops timers/watchers, and fully stops its RPC child, so a saved `sessionFile` is safe to resume.
+`steer`, `interrupt`, and `subagent reply` atomically enqueue token-authenticated files under the run's `control/` directory and return without waiting. `steer` is best-effort. `interrupt` sends an interruption request, while the final notification reports the actual terminal status. The runner applies controls it can accept and publishes the actual transition. Before a terminal state is written, the runner captures final metadata, stops timers/watchers, and fully stops its RPC child, so a saved `sessionFile` is safe to resume.
 
 ### Minimal supervisor
 
 A child calls `contact_supervisor` with `need_decision`, `interview_request`, or `progress_update`. Each call yields the child in `waiting`, including progress updates, so the main orchestrator must reply to continue it. Its terminating tool result carries the request in `details`; background runs send a visible main-session notification.
 
-```js
-subagent_supervisor({ action: "pending" })
-subagent_supervisor({ action: "reply", replyTo: "request-id", message: "Proceed with option A." })
-```
-
-Reply writes a control message to the still-live detached runner and optimistically returns the journal status to `running`. The runner's next state confirms the transition. A subsequent waiting or terminal transition reaches the orchestrator through another single lifecycle custom message at the next safe model boundary.
+Reply with `subagent({ action: "reply", id: "waiting-run-id", message: "Proceed with option A." })` using the same run ID carried by the waiting request. Reply writes a control message to the still-live detached runner and optimistically returns the journal status to `running`. The runner's next state confirms the transition. A subsequent waiting or terminal transition reaches the orchestrator through another single lifecycle custom message at the next safe model boundary.
 
 ### Resume
 
 ```js
-subagent({ action: "resume", id: "source-run-id", message: "Apply the follow-up." })
+subagent({ action: "resume", id: "source-run-id", abstract: "Apply follow-up changes", message: "Apply the follow-up." })
 ```
 
-Resume is allowed only for a terminal retained run with a saved child session file. It starts a new detached background run with `--session <saved sessionFile>`, preserves the source agent, model/thinking contract, cwd, and child-session context, creates a new run ID with `sourceRunId`, and returns immediately. It does not inherit the source run's denied-tool snapshot: the current top-level deny config is reread for the resumed specialist. The source run's launch-time model/thinking string remains a snapshot and is not reread from an edited preset. Resume exposes no launch overrides and refuses a session file already used by an active run.
+Resume requires exactly the terminal source run `id`, a new `abstract`, and the continuation `message`; the abstract follows the create contract and must be non-empty after trimming. It is allowed only for a terminal retained run with a saved child session file. It starts a new detached background run with `--session <saved sessionFile>`, preserves the source agent, model/thinking contract, cwd, and child-session context, creates a new run ID with `sourceRunId`, persists the supplied new abstract instead of inheriting the source abstract, and returns immediately. It does not inherit the source run's denied-tool snapshot: the current top-level deny config is reread for the resumed specialist. The source run's launch-time model/thinking string remains a snapshot and is not reread from an edited preset. Resume exposes no launch overrides and refuses a session file already used by an active run.
 
 ## Persistence, run files, and shutdown
 
@@ -136,15 +132,15 @@ OMPS reads legacy custom entries with `customType: "oh-my-pi-slim:subagents"` an
 
 Each run is isolated by owner session at `<parent-session-dir>/omps-subagent-runs/<ownerSessionId>/<runId>/`, containing mode-0600 `launch.json`, `runner.json`, and `state.json`, a mode-0700 `control/` inbox, and `runner.log`. `runner.json` binds the run token and PID to a verifiable OS process identity. The parent polls these files at a short interval, validates owner/run/token/process identity before signaling persisted PIDs, and drives notification-based orchestration without blocking waits.
 
-Persisted metadata includes the run ID, role, task, cwd, model contract, launch-time `deniedTools`, timestamps, status, final output/error, source run ID, supervisor request, and child `sessionFile`. The removed launch-mode field from old v1 data is ignored and not retained.
+Persisted metadata includes the run ID, role, abstract, task, cwd, model contract, launch-time `deniedTools`, timestamps, status, final output/error, source run ID, supervisor request, and child `sessionFile`. A legacy journal or `launch.json` with a task but no abstract receives the same deterministic fallback: the first 100 Unicode code points of task plus `...`; a present abstract must remain non-blank after trimming. The removed launch-mode field from old v1 data is ignored and not retained.
 
 Detached execution lasts only for the current owner session. Every `session_shutdown`—including reload, new/resume/fork session transitions, and quit—sends interrupt controls to all active owner runs, waits briefly, force-terminates stragglers, and journals `interrupted` while preserving `sessionFile`. Restore never adopts an old live runner: an abnormal leftover is terminated and marked `interrupted`; an already-terminal state remains terminal. Continue later with `resume`, which always creates a new run ID.
 
 ## Background-agent UI
 
-TUI sessions show a widget above the editor adapted from `gotgenes/pi-packages`' `packages/pi-subagents` UI. It uses the same tree layout, 80 ms spinner, 12-line cap, active-first overflow policy, status bar, and short finished-run linger. Each active run is an atomic three-line tree entry: the first line shows its spinner or waiting marker, agent, run ID, waiting state, and task; the dim second line starts with `(provider) model • thinking` and then shows turns, tool uses, token/context/compaction stats, and elapsed time; the third line shows current activity or the warning-colored supervisor request. Keeping task text on the first line prevents it from crowding out the higher-priority model and stats line. The 12-line budget never shows a partial active entry, so at most three complete active runs are visible; overflow remains accurately summarized. `starting` runs still appear as a one-line queued summary, and terminal runs still briefly show one-line outcome entries. The widget is never registered in RPC mode.
+TUI sessions show a widget above the editor adapted from `gotgenes/pi-packages`' `packages/pi-subagents` UI. It uses the same tree layout, 80 ms spinner, 12-line cap, active-first overflow policy, status bar, and short finished-run linger. Each active run is an atomic three-line tree entry: the first line shows its spinner or waiting marker, agent, run ID, waiting state, and abstract; the dim second line starts with `(provider) model • thinking` and then shows turns, tool uses, token/context/compaction stats, and elapsed time; the third line shows current activity or the warning-colored supervisor request. The compaction count is observational only and increments exclusively from successful Pi `compaction_end` RPC events; the runner never uses widget usage or compaction counters to trigger checkpoints. Keeping abstract text on the first line prevents it from crowding out the higher-priority model and stats line. The 12-line budget never shows a partial active entry, so at most three complete active runs are visible; overflow remains accurately summarized. `starting` runs still appear as a one-line queued summary, and terminal runs still briefly show one-line outcome entries. The widget is never registered in RPC mode.
 
-The TUI transcript also has package-owned renderers for `subagent` and `subagent_supervisor` calls and results. Calls show complete action-specific input, including full task, continuation, guidance, reply text, IDs, and cwd. Nonterminal immediate results use compact one-line acknowledgements; an already-terminal or failed result may append its complete final output/error. A retained-run `list` renders only its title and one compact status header per run; a waiting item may add only its request ID and reason. It never renders historical task, activity, output, error, message, or interview data. Each lifecycle notification is the same custom message used for model delivery, not a second TUI-only entry: waiting notifications show the complete request, terminal notifications show complete output/error, and active notifications may show explicitly labeled live response/tool activity. Terminal notifications never repeat stale live response text. Rendering is independent of tool expansion state and does not copy message `details` into model context.
+The TUI transcript also has package-owned renderers for `subagent` calls and results. Calls show complete action-specific input, including full task, continuation, guidance, reply text, IDs, and cwd. Nonterminal immediate results use compact one-line acknowledgements; an already-terminal or failed result may append its complete final output/error. A new active-run `list` carries and renders only its title and one compact status header with abstract per run; a waiting item may add only its reason, so the new list path never exposes task, activity, output, error, message, or interview data. When replaying an old transcript row that predates abstract, the renderer applies the same 100-code-point fallback from its legacy task field, or shows an explicit unavailable-summary placeholder if neither field exists; it never renders the full task as a separate field. Each lifecycle notification is the same custom message used for model delivery, not a second TUI-only entry: waiting notifications show the complete request, terminal notifications show complete output/error, and active notifications may show explicitly labeled live response/tool activity. Terminal notifications never repeat stale live response text. Rendering is independent of tool expansion state and does not copy message `details` into model context.
 
 ## Deliberate scope
 
@@ -154,7 +150,9 @@ Deny/`--exclude-tools` reduces Pi's model-visible tools; it is not an OS sandbox
 
 ## Tool-batch checkpoint compaction
 
-The existing main-session checkpoint behavior is retained. While OMPS is active, a complete assistant tool batch can trigger Pi's native threshold compaction using `SettingsManager` and `shouldCompact`. OMPS validates the completed batch internally, calls public `ctx.abort()`, waits for Pi's matching threshold compaction and `agent_settled`, then sends the package's fixed auto-continue prompt as a follow-up continuation turn. Tool call IDs and names are not included in that model-visible prompt. It does not rewrite context copies or compaction settings.
+The main session and every detached child share the same completed-tool-batch validator, fixed continuation text, and threshold boundary. Each process reads Pi's current `ctx.getContextUsage()` effective context window plus the merged trusted-project `SettingsManager` compaction settings, then applies `shouldCompact`; OMPS does not inspect runner totals, guess provider windows, or hard-code a window size. The mechanism respects Pi's compaction `enabled` switch, so neither main nor child proactively checkpoints while compaction is disabled.
+
+While OMPS is active, the main session keeps its existing behavior: after a complete assistant tool batch crosses that threshold with no queued messages, it calls public `ctx.abort()`, waits for Pi's matching threshold compaction and `agent_settled`, then schedules the fixed prompt as a follow-up continuation turn. A detached child instead queues that same follow-up synchronously inside the matching `session_compact` event (`reason: "threshold"`, `willRetry: false`), so Pi's own post-run queued-message continuation delays the child's single `agent_settled`; no runner marker or terminal protocol is involved. This can repeat across multiple compaction cycles. Any turn that called `contact_supervisor` is skipped completely, preserving the waiting boundary, and a later unrelated compaction cannot resume it. Wrong-reason/retry compactions and aborted runs that settle without the matching compaction are warn-only and do not resume. Tool call IDs and names are not included in the model-visible prompt, and OMPS does not rewrite context copies or compaction settings.
 
 ## Bootstrap and uninstall
 
