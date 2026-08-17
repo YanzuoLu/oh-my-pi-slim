@@ -1,6 +1,6 @@
 # oh-my-pi-slim
 
-> Preset-driven main-session orchestration for Pi with a built-in one-child-per-run background runtime.
+> Preset-driven Pi orchestration with built-in background runs, runtime loops, and session todos.
 
 **English** | [中文](./README.zh-CN.md)
 
@@ -61,6 +61,59 @@ Todo call and result renderers follow the same Ctrl+O contract as subagent trans
 
 An external package that also registers `todo` cannot coexist with the built-in tool. For a local migration, run `pi remove` for that external package separately before loading OMPS. This package never removes or uninstalls external packages automatically.
 
+## Built-in Loop
+
+The package owns one `/loop` command and one model tool named `loop`. Both register whenever the package loads in a main session, even when OMPS orchestration is inactive. The existing child-environment early return prevents both surfaces from registering in child sessions; there is no child replay path.
+
+The command does not parse requests. It forwards any natural-language `/loop ...` invocation unchanged as a real user message with prompt-template expansion disabled. When Pi is busy, that message uses `deliverAs: "steer"`. Model guidance allows `create` only when the latest user message starts with `/loop`; ordinary natural-language requests may list, modify, pause, resume, or delete loops, but may not create one. For a bare `/loop`, the model calls `list` and explains `/loop <interval> <prompt>`.
+
+The single sequential tool has six actions and strict action-specific fields:
+
+```ts
+{ action: "create", interval, abstract, prompt }
+{ action: "delete", id }
+{ action: "modify", id, interval?, abstract?, prompt? }
+{ action: "list" }
+{ action: "pause", id }
+{ action: "resume", id }
+```
+
+`modify` requires at least one changed-field input. IDs are exact eight-character lowercase hexadecimal values; a missing or unknown ID is an error. Duplicate loop configurations are allowed. `abstract` is the short human-readable summary used by compact UI surfaces. `prompt` is the complete self-contained instruction delivered to every future model turn; it may be arbitrarily long and is not a shorthand for the abstract.
+
+Intervals use exactly one positive integer and one lowercase unit from `s`, `m`, `h`, or `d`. The inclusive range is `10s` through `7d`. Stored values use the largest exactly divisible unit, so `60s` becomes `1m`, `120m` becomes `2h`, and `48h` becomes `2d`.
+
+Each loop uses repeating fixed-delay scheduling with recursive one-shot timeouts. Create waits one complete interval before the first fire. Resume also waits one complete interval. Each later timeout starts only after the prior tick finishes. There is no maximum fire count, expiry, loop-count limit, backlog limit, or coalescing.
+
+`pause` clears the timer, sets `nextFireAt` to `null`, and cancels that loop's undelivered compaction-gated fires. Repeating pause is a successful no-change. `resume` restarts from the resume time and repeating resume is a successful no-change. Paused loops may be modified. An effective interval change on an active loop restarts the full delay; an equivalent canonical interval is a no-change. Abstract-only or prompt-only changes preserve the active `nextFireAt`. A fire already captured by the delivery gate keeps its immutable old abstract, interval, and prompt. `delete` removes the loop without a tombstone or history.
+
+Loop state is runtime-only. It never uses `appendEntry`, a journal, files, or snapshot persistence. Compaction and tree navigation preserve loops, timers, and gated fire records. Reload, new session, resumed session, fork, and quit clear every loop. Tree and compaction host operations use the shared notification pause gate, then release matching records in FIFO order without changing subagent notification content or delivery semantics.
+
+Every tick creates an independent package custom message with `deliverAs: "steer"` and `triggerTurn: true`. Content and details include the ID, abstract, canonical interval, successful fire count, fire time, and complete prompt. Every queued fire remains distinct; delivery never merges or coalesces records. `fireCount` increases only after `sendMessage` succeeds. A thrown send increments `failureCount`, `lastFailedAt`, and `lastError`; a later success clears `lastError` without erasing failure history.
+
+`list` returns creation order and the complete public JSON for every loop:
+
+```json
+{
+  "id": "1a2b3c4d",
+  "abstract": "Review the latest project state",
+  "prompt": "Read the complete state and report relevant changes.",
+  "interval": "1m",
+  "status": "active",
+  "createdAt": "2026-05-01T00:00:00.000Z",
+  "updatedAt": "2026-05-01T00:00:00.000Z",
+  "nextFireAt": "2026-05-01T00:01:00.000Z",
+  "fireCount": 0,
+  "failureCount": 0,
+  "lastFiredAt": null,
+  "lastFailedAt": null,
+  "lastError": null
+}
+```
+
+Foreground TUI sessions show a package-owned widget above the editor. Its heading is `● Loops (active/total)`. Each visible loop uses an atomic two-line tree entry: the first line shows `↻` for active, `!` after a delivery error, or `Ⅱ` for paused, followed by abstract and ID; the second shows `Every <interval>`, a once-per-second countdown or paused state, fire count, and current failure text. Active loops sort first by `nextFireAt`; paused loops follow by `createdAt`. The widget uses at most 12 lines, shows at most five loops, and reports `… n more` overflow. RPC sessions never register it.
+
+Package-owned call, result, and fire renderers follow the Ctrl+O data invariant. Collapsed views stay compact and show the expansion hint. Expanded views show complete action-specific input, all public list fields, full errors, and complete prompts. Ctrl+O changes only TUI rendering; it never changes tool-call arguments, model-facing content, custom-message details, list JSON, or mutation receipts.
+
 ## Commands
 
 | Command | Effect |
@@ -70,6 +123,7 @@ An external package that also registers `todo` cannot coexist with the built-in 
 | `/omps status` | Show activation state |
 | `/omps presets` | List presets |
 | `/preset [name]` | Switch preset; bare command lists presets |
+| `/loop [request]` | Forward the unchanged request to the model for runtime loop management |
 | `/omps uninstall` | Clean old OMPS backend migration state, then show the package removal command |
 
 `/reload` restores the active preset through a one-shot in-process slot. New, resumed, or forked parent sessions do not inherit that slot.

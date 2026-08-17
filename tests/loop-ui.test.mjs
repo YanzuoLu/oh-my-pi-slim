@@ -1,0 +1,399 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { registerHooks } from "node:module";
+import { dirname } from "node:path";
+import { stripVTControlCharacters } from "node:util";
+import { pathToFileURL } from "node:url";
+import test from "node:test";
+
+const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
+const piRoot = dirname(dirname(piEntry));
+const dependencyMap = {
+  "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
+  "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
+  typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
+  "./loop-runtime.js": new URL("../extensions/oh-my-pi-slim/loop-runtime.ts", import.meta.url).href,
+  "./loop-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/loop-transcript-renderer.ts", import.meta.url).href,
+  "./loop-widget.js": new URL("../extensions/oh-my-pi-slim/loop-widget.ts", import.meta.url).href,
+};
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    const url = dependencyMap[specifier];
+    return url ? { url, shortCircuit: true } : nextResolve(specifier, context);
+  },
+});
+
+const { visibleWidth } = await import("@earendil-works/pi-tui");
+const { LoopRuntime } = await import("../extensions/oh-my-pi-slim/loop-runtime.ts");
+const {
+  renderLoopCall,
+  renderLoopFire,
+  renderLoopResult,
+} = await import("../extensions/oh-my-pi-slim/loop-transcript-renderer.ts");
+const {
+  LOOP_WIDGET_KEY,
+  MAX_LOOP_WIDGET_LINES,
+  LoopWidget,
+  renderLoopWidgetLines,
+} = await import("../extensions/oh-my-pi-slim/loop-widget.ts");
+
+const NOW_MS = Date.parse("2026-05-01T00:00:00.000Z");
+const theme = {
+  fg: (_color, text) => text,
+  bg: (_color, text) => text,
+  bold: (text) => text,
+};
+
+function loop(overrides = {}) {
+  return {
+    id: "00000001",
+    abstract: "Review the latest project state",
+    prompt: "Read the full project state.\nThen report every relevant change.",
+    interval: "10s",
+    status: "active",
+    createdAt: "2026-05-01T00:00:00.000Z",
+    updatedAt: "2026-05-01T00:00:00.000Z",
+    nextFireAt: "2026-05-01T00:00:10.000Z",
+    fireCount: 0,
+    failureCount: 0,
+    lastFiredAt: null,
+    lastFailedAt: null,
+    lastError: null,
+    ...overrides,
+  };
+}
+
+function renderLines(component, width = 240) {
+  return component.render(width).map((line) => stripVTControlCharacters(line).trimEnd());
+}
+
+function render(component, width = 240) {
+  return renderLines(component, width).join("\n").replace(/^\n+|\n+$/g, "");
+}
+
+function assertBlankSeparator(component) {
+  const lines = renderLines(component);
+  assert.equal(lines[0], "");
+  assert.notEqual(lines[1], "");
+}
+
+function escaped(value) {
+  return new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+}
+
+test("Loop widget renders exact heading, glyph priority, counts, order, and two-line entries", () => {
+  const loops = [
+    loop({ id: "00000001", abstract: "later", nextFireAt: "2026-05-01T00:00:30.000Z", fireCount: 2 }),
+    loop({
+      id: "00000002", abstract: "failed last time", nextFireAt: "2026-05-01T00:00:10.000Z",
+      failureCount: 1, lastError: "queue unavailable", lastFailedAt: "2026-05-01T00:00:00.000Z",
+    }),
+    loop({ id: "00000003", abstract: "paused with old error", status: "paused", nextFireAt: null, lastError: "old", createdAt: "2026-04-30T23:59:00.000Z", fireCount: 1 }),
+    loop({ id: "00000004", abstract: "middle", nextFireAt: "2026-05-01T00:00:20.000Z", fireCount: 1 }),
+  ];
+  const lines = renderLoopWidgetLines(loops, theme, 120, NOW_MS);
+  assert.equal(lines[0], "● Loops (3/4)");
+  assert.match(lines[1], /^├─ ! failed last time \[00000002\]$/);
+  assert.equal(lines[2], "│  └─ Every 10s · next in 10s · 0 fires · 1 failure: queue unavailable");
+  assert.match(lines[3], /^├─ ↻ middle \[00000004\]$/);
+  assert.equal(lines[4], "│  └─ Every 10s · next in 20s · 1 fire");
+  assert.match(lines[5], /^├─ ↻ later \[00000001\]$/);
+  assert.equal(lines[6], "│  └─ Every 10s · next in 30s · 2 fires");
+  assert.match(lines[7], /^└─ Ⅱ paused with old error \[00000003\]$/);
+  assert.equal(lines[8], "   └─ Every 10s · paused · 1 fire");
+  assert.equal(lines.length, 9);
+});
+
+test("Loop widget caps at 12 lines, preserves entries atomically, and keeps IDs under width truncation", () => {
+  const loops = Array.from({ length: 6 }, (_, index) => loop({
+    id: `0000000${index + 1}`,
+    abstract: `A very long abstract for loop number ${index + 1} that must be truncated safely`,
+    nextFireAt: new Date(NOW_MS + (index + 1) * 10_000).toISOString(),
+  }));
+  const overflow = renderLoopWidgetLines(loops, theme, 80, NOW_MS);
+  assert.equal(overflow.length, MAX_LOOP_WIDGET_LINES);
+  assert.equal(overflow.at(-1), "└─ … 1 more");
+  for (let index = 0; index < 5; index += 1) {
+    assert.match(overflow.join("\n"), new RegExp(`\\[0000000${index + 1}\\]`));
+  }
+  assert.doesNotMatch(overflow.join("\n"), /\[00000006\]/);
+  assert.equal(overflow.slice(1, -1).length % 2, 0);
+
+  const narrow = renderLoopWidgetLines([loops[0]], theme, 28, NOW_MS);
+  assert.ok(narrow.every((line) => visibleWidth(line) <= 28));
+  assert.match(stripVTControlCharacters(narrow[1]), /… \[00000001\]$/);
+  assert.equal(renderLoopWidgetLines([], theme, 80, NOW_MS).length, 0);
+});
+
+test("LoopWidget uses one shared 1s timer and clears widget and timer for empty, no UI, and dispose", () => {
+  let loops = [];
+  const intervals = [];
+  const cleared = [];
+  const widgetCalls = [];
+  let renders = 0;
+  let component;
+  const widget = new LoopWidget(() => loops, {
+    nowMs: () => NOW_MS,
+    setInterval(callback, milliseconds) {
+      const timer = { callback, milliseconds, token: Symbol("loop-ui") };
+      intervals.push(timer);
+      return timer;
+    },
+    clearInterval(timer) { cleared.push(timer); },
+  });
+  const tui = { requestRender() { renders += 1; } };
+  const ui = {
+    theme,
+    setWidget(key, content, options) {
+      widgetCalls.push({ key, content, options });
+      if (typeof content === "function") component = content(tui, theme);
+    },
+  };
+
+  widget.setContext(ui);
+  assert.deepEqual(widgetCalls, []);
+  assert.deepEqual(intervals, []);
+  loops = [loop()];
+  widget.update();
+  widget.update();
+  assert.equal(widgetCalls.length, 1);
+  assert.equal(widgetCalls[0].key, LOOP_WIDGET_KEY);
+  assert.deepEqual(widgetCalls[0].options, { placement: "aboveEditor" });
+  assert.equal(intervals.length, 1);
+  assert.equal(intervals[0].milliseconds, 1_000);
+  assert.deepEqual(component.render(80)[0], "● Loops (1/1)");
+  component.invalidate();
+  const registrationsAfterInvalidate = widgetCalls.length;
+  const rendersAfterInvalidate = renders;
+  intervals[0].callback();
+  assert.equal(renders, rendersAfterInvalidate + 1, "cache invalidation keeps the live TUI handle for timer refreshes");
+  assert.equal(widgetCalls.length, registrationsAfterInvalidate, "cache invalidation must not transfer or clear registration ownership");
+
+  loops = [];
+  widget.update();
+  assert.equal(widgetCalls.at(-1).content, undefined);
+  assert.deepEqual(cleared, [intervals[0]]);
+  widget.setContext(undefined);
+  assert.equal(intervals.length, 1);
+
+  widget.setContext(ui);
+  loops = [loop()];
+  widget.update();
+  assert.equal(intervals.length, 2);
+  const clearsBeforeDispose = widgetCalls.filter((call) => call.content === undefined).length;
+  widget.dispose();
+  assert.equal(widgetCalls.at(-1).content, undefined);
+  assert.equal(widgetCalls.filter((call) => call.content === undefined).length, clearsBeforeDispose + 1);
+  widget.dispose();
+  assert.equal(widgetCalls.filter((call) => call.content === undefined).length, clearsBeforeDispose + 1, "dispose clears an owned registration exactly once");
+  assert.deepEqual(cleared, [intervals[0], intervals[1]]);
+});
+
+test("Loop runtime refreshes the foreground widget on mutations, tree rebinding, and fire success or failure", async () => {
+  let now = NOW_MS;
+  let failSend = false;
+  const tools = new Map();
+  const timers = [];
+  const widgetCalls = [];
+  let renders = 0;
+  let component;
+  const pi = {
+    registerTool(definition) { tools.set(definition.name, definition); },
+    registerMessageRenderer() {},
+    sendMessage() {
+      if (failSend) throw new Error("delivery unavailable");
+    },
+  };
+  const runtime = new LoopRuntime(pi, {
+    nowMs: () => now,
+    randomHex: () => "00000001",
+    setTimeout(callback, milliseconds) {
+      const timer = { callback, milliseconds, cleared: false, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeout(timer) { timer.cleared = true; },
+    defer(callback) { callback(); },
+  });
+  runtime.registerTool();
+  const tui = { requestRender() { renders += 1; } };
+  const ui = {
+    theme,
+    setWidget(key, content, options) {
+      widgetCalls.push({ key, content, options });
+      if (typeof content === "function") component = content(tui, theme);
+    },
+  };
+  runtime.setUICtx(ui);
+  const execute = (params) => tools.get("loop").execute("call", params);
+
+  await execute({ action: "create", interval: "10s", abstract: "runtime", prompt: "future" });
+  assert.equal(widgetCalls.length, 1);
+  const afterCreate = renders;
+  await execute({ action: "modify", id: "00000001", abstract: "runtime changed" });
+  await execute({ action: "pause", id: "00000001" });
+  await execute({ action: "resume", id: "00000001" });
+  assert.ok(renders >= afterCreate + 3);
+
+  const beforeTree = renders;
+  runtime.setUICtx(ui);
+  runtime.refreshUI();
+  assert.ok(renders >= beforeTree + 2);
+
+  now += 10_000;
+  timers.at(-1).callback();
+  assert.match(stripVTControlCharacters(component.render(100).join("\n")), /↻ runtime changed \[00000001\]/);
+  const afterSuccess = renders;
+  failSend = true;
+  now += 10_000;
+  timers.at(-1).callback();
+  const failedLines = stripVTControlCharacters(component.render(100).join("\n"));
+  assert.ok(renders > afterSuccess);
+  assert.match(failedLines, /! runtime changed \[00000001\]/);
+  assert.match(failedLines, /1 failure: delivery unavailable/);
+
+  await execute({ action: "delete", id: "00000001" });
+  assert.equal(widgetCalls.at(-1).content, undefined);
+  runtime.setUICtx(undefined);
+  runtime.shutdown();
+});
+
+test("Loop tool calls render all six actions with uniform collapsed hints and no duplicate Action rows", () => {
+  const cases = [
+    {
+      args: { action: "create", interval: "10s", abstract: "Line one\nLine two\u0000", prompt: "Prompt one\nPrompt two" },
+      collapsed: ["Interval: 10s", "Abstract: Line one Line two"],
+      hidden: ["Prompt one", "Prompt two"],
+      expanded: ["Interval: 10s", "Abstract:", "  Line one", "  Line two", "Prompt:", "  Prompt one", "  Prompt two"],
+    },
+    {
+      args: { action: "modify", id: "00000001", interval: "1m", abstract: "New abstract\ncontinued", prompt: "New prompt\ncontinued" },
+      collapsed: ["Loop: 00000001", "Interval: 1m", "Abstract: New abstract continued"],
+      hidden: ["New prompt"],
+      expanded: ["Loop: 00000001", "Interval: 1m", "Abstract:", "  New abstract", "  continued", "Prompt:", "  New prompt", "  continued"],
+    },
+    { args: { action: "delete", id: "00000001" }, collapsed: ["Loop: 00000001"], hidden: [], expanded: ["Loop: 00000001"] },
+    { args: { action: "pause", id: "00000001" }, collapsed: ["Loop: 00000001"], hidden: [], expanded: ["Loop: 00000001"] },
+    { args: { action: "resume", id: "00000001" }, collapsed: ["Loop: 00000001"], hidden: [], expanded: ["Loop: 00000001"] },
+    { args: { action: "list" }, collapsed: [], hidden: [], expanded: [] },
+  ];
+
+  for (const value of cases) {
+    const before = structuredClone(value.args);
+    const collapsed = render(renderLoopCall(value.args, theme, { expanded: false }));
+    assert.equal(collapsed.split("\n")[0], `loop · ${value.args.action} (ctrl+o to expand)`);
+    for (const expected of value.collapsed) assert.match(collapsed, escaped(expected));
+    for (const hidden of value.hidden) assert.doesNotMatch(collapsed, escaped(hidden));
+    assert.doesNotMatch(collapsed, /Action:/);
+
+    const expanded = render(renderLoopCall(value.args, theme, { expanded: true }));
+    assert.equal(expanded.split("\n")[0], `loop · ${value.args.action}`);
+    for (const expected of value.expanded) assert.match(expanded, escaped(expected));
+    assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)|Action:|\u0000/);
+    assert.deepEqual(value.args, before);
+  }
+});
+
+test("Loop mutation and list results render compact receipts, no-change, full hierarchy, errors, and blank separators", () => {
+  const activeLoop = loop({
+    fireCount: 2,
+    failureCount: 1,
+    lastFiredAt: "2026-05-01T00:00:20.000Z",
+    lastFailedAt: "2026-05-01T00:00:10.000Z",
+    lastError: "Full failure line one\nFull failure line two",
+  });
+  const cases = [
+    ["create", { details: { loop: activeLoop, changed: true } }, "✓ Created loop [00000001] · active"],
+    ["modify", { details: { loop: activeLoop, changed: true } }, "✓ Modified loop [00000001] · active"],
+    ["pause", { details: { loop: { ...activeLoop, status: "paused", nextFireAt: null }, changed: true } }, "✓ Paused loop [00000001] · paused"],
+    ["resume", { details: { loop: activeLoop, changed: true } }, "✓ Resumed loop [00000001] · active"],
+    ["delete", { details: { id: "00000001", deleted: true } }, "✓ Deleted loop [00000001]"],
+    ["pause", { details: { loop: { ...activeLoop, status: "paused", nextFireAt: null }, changed: false } }, "○ No change · loop [00000001]"],
+  ];
+  for (const [action, result, receipt] of cases) {
+    const before = structuredClone(result);
+    const collapsedComponent = renderLoopResult(result, { expanded: false }, theme, { args: { action } });
+    assertBlankSeparator(collapsedComponent);
+    assert.equal(render(collapsedComponent), receipt);
+    const expandedComponent = renderLoopResult(result, { expanded: true }, theme, { args: { action } });
+    assertBlankSeparator(expandedComponent);
+    const expanded = render(expandedComponent);
+    assert.match(expanded, escaped(receipt));
+    if (action !== "delete") {
+      for (const expected of [
+        "Status:", "Interval: 10s", "Created: 2026-05-01T00:00:00.000Z", "Updated:",
+        "Next fire:", "Fires: 2", "Failures: 1", "Last fired:", "Last failed:",
+        "Last error:", "Full failure line one", "Full failure line two", "Abstract:", "Prompt:",
+        "Read the full project state.", "Then report every relevant change.",
+      ]) assert.match(expanded, escaped(expected));
+    } else {
+      assert.match(expanded, /Loop: 00000001/);
+      assert.match(expanded, /Deleted: true/);
+    }
+    assert.deepEqual(result, before);
+  }
+
+  const listResult = { details: { loops: [activeLoop, loop({ id: "00000002", status: "paused", nextFireAt: null, abstract: "Paused loop" })] }, content: [{ type: "text", text: "model list" }] };
+  const before = structuredClone(listResult);
+  const collapsed = render(renderLoopResult(listResult, { expanded: false }, theme, { args: { action: "list" } }));
+  assert.match(collapsed, /^● Loops \(1\/2\)/);
+  assert.match(collapsed, /! Review the latest project state \[00000001\] · Every 10s · 2 fires/);
+  assert.match(collapsed, /Ⅱ Paused loop \[00000002\] · Every 10s · 0 fires/);
+  assert.doesNotMatch(collapsed, /Prompt:|Full failure line/);
+  const expanded = render(renderLoopResult(listResult, { expanded: true }, theme, { args: { action: "list" } }));
+  assert.match(expanded, /● Loops \(1\/2\)/);
+  assert.equal((expanded.match(/Prompt:/g) ?? []).length, 2);
+  assert.match(expanded, /Full failure line two/);
+  assert.deepEqual(listResult, before);
+});
+
+test("Loop result fallback collapses to one safe line and expands complete error content without mutation", () => {
+  const result = {
+    content: [{ type: "text", text: "Loop error\u0000 first\nFull error second\nFull error third" }],
+    details: { legacy: true },
+  };
+  const before = structuredClone(result);
+  const collapsedComponent = renderLoopResult(result, { expanded: false, isError: true }, theme, { args: { action: "modify" } });
+  assertBlankSeparator(collapsedComponent);
+  assert.equal(render(collapsedComponent), "Loop error  first");
+  const expandedComponent = renderLoopResult(result, { expanded: true, isError: true }, theme, { args: { action: "modify" } });
+  assertBlankSeparator(expandedComponent);
+  assert.match(render(expandedComponent), /Loop error  first\nFull error second\nFull error third/);
+  assert.deepEqual(result, before);
+});
+
+test("Loop fire renderer preserves compact target and suffix under width, expands full metadata, and safely falls back", () => {
+  const message = {
+    content: "Loop 00000001 fired.\nAbstract: complete\nPrompt:\nFull model prompt",
+    details: {
+      id: "00000001",
+      abstract: "A long fire abstract that should shrink before its suffix disappears",
+      interval: "10s",
+      fireCount: 3,
+      firedAt: "2026-05-01T00:00:30.000Z",
+      prompt: "Full prompt line one\nFull prompt line two\u0000",
+    },
+  };
+  const before = structuredClone(message);
+  const collapsed = render(renderLoopFire(message, { expanded: false, outputPad: 1 }, theme)).trim();
+  assert.equal(collapsed, "↻ Loop [00000001] · A long fire abstract that should shrink before its suffix disappears · fire 3");
+  const narrowLines = renderLines(renderLoopFire(message, { expanded: false, outputPad: 1 }, theme), 42);
+  assert.ok(narrowLines.every((line) => visibleWidth(line) <= 42));
+  assert.match(narrowLines.join("\n"), /↻ Loop \[00000001\] · .* · fire 3/);
+
+  const expanded = render(renderLoopFire(message, { expanded: true, outputPad: 1 }, theme));
+  for (const expected of [
+    "↻ Loop [00000001] · fire 3", "ID: 00000001", "Interval: 10s", "Fire: 3",
+    "Fired at: 2026-05-01T00:00:30.000Z", "Abstract:", "A long fire abstract",
+    "Prompt:", "Full prompt line one", "Full prompt line two",
+  ]) assert.match(expanded, escaped(expected));
+  assert.doesNotMatch(expanded, /\u0000/);
+  assert.deepEqual(message, before);
+
+  const fallback = { content: "Legacy first\u0000 line\nLegacy full second", details: { id: "00000001", prompt: "missing fields" } };
+  const fallbackBefore = structuredClone(fallback);
+  assert.equal(render(renderLoopFire(fallback, { expanded: false, outputPad: 1 }, theme)).trim(), "Legacy first  line");
+  assert.match(render(renderLoopFire(fallback, { expanded: true, outputPad: 1 }, theme)), /Legacy first  line\n Legacy full second|Legacy first  line\nLegacy full second/);
+  assert.deepEqual(fallback, fallbackBefore);
+});

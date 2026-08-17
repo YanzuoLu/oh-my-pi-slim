@@ -1,8 +1,8 @@
 {
   "name": "oh-my-pi-slim",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "private": true,
-  "description": "Preset-driven main-session orchestration for Pi with a built-in background-subagent runtime.",
+  "description": "Preset-driven Pi orchestration with built-in subagents, runtime loops, and session todos.",
   "type": "module",
   "license": "MIT",
   "author": "YanzuoLu",
@@ -18,7 +18,9 @@
     "pi-package",
     "pi",
     "orchestration",
-    "subagents"
+    "subagents",
+    "loops",
+    "scheduling"
   ],
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

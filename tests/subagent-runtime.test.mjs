@@ -27,6 +27,9 @@ const dependencyMap = {
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
   "./bootstrap.js": new URL("../extensions/oh-my-pi-slim/bootstrap.ts", import.meta.url).href,
+  "./loop-runtime.js": new URL("../extensions/oh-my-pi-slim/loop-runtime.ts", import.meta.url).href,
+  "./loop-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/loop-transcript-renderer.ts", import.meta.url).href,
+  "./loop-widget.js": new URL("../extensions/oh-my-pi-slim/loop-widget.ts", import.meta.url).href,
   "./prompt-context.js": new URL("../extensions/oh-my-pi-slim/prompt-context.ts", import.meta.url).href,
   "./subagent-checkpoint.js": new URL("../extensions/oh-my-pi-slim/subagent-checkpoint.ts", import.meta.url).href,
   "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
@@ -253,7 +256,7 @@ function createHarness({
     advance(ms) { clock += ms; },
     setProcessIdentity(pid, identity) { processIdentities.set(pid, identity); },
     paths(id, owner = ownerSessionId) { return getRunPaths(getRunRoot(sessionDir), owner, id); },
-    async restore() { await runtime.restore(ctx); },
+    async restore(notificationDeliveryPaused = false) { await runtime.restore(ctx, notificationDeliveryPaused); },
     cleanup() { rmSync(tempDir, { recursive: true, force: true }); },
   };
 }
@@ -1567,6 +1570,19 @@ test("restore and shutdown reset notification pause state safely", async () => {
   } finally { harness.cleanup(); }
 });
 
+test("tree restore can preserve notification pause until the shared gate releases", async () => {
+  const pending = persistedRun({ id: "tree-pending", status: "completed", output: "restored", notificationPending: "completed" });
+  const harness = createHarness({ branch: [branchEntry(runJournalEntry(pending))] });
+  try {
+    await harness.restore(true);
+    assert.equal(harness.runtime.notificationDeliveryPaused, true);
+    assert.equal(harness.notifications.length, 0, "tree restore does not deliver while the shared gate remains paused");
+    harness.runtime.setNotificationDeliveryPaused(false);
+    assert.equal(harness.notifications.length, 1);
+    assert.equal(harness.notifications[0].message.details.runId, pending.id);
+  } finally { await harness.runtime.shutdown(); harness.cleanup(); }
+});
+
 test("terminal notification stays pending until matching delivered message acknowledgement", async () => {
   const harness = createHarness();
   try {
@@ -2419,8 +2435,8 @@ test("main and child share the fixed checkpoint helpers while main keeps settled
   const childSource = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/child-supervisor.ts"), "utf8");
   const checkpointSource = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent-checkpoint.ts"), "utf8");
   const resumeText = "Resume the user's latest intent. Re-read kept recent messages above the summary to confirm the latest request. If it supersedes earlier plans in the summary, follow it. If no work remains, say so briefly; do not invent work.";
-  assert.match(source, /pi\.on\("session_before_tree", async[\s\S]*await subagents\.shutdown\(\)/);
-  assert.match(source, /pi\.on\("session_tree", async[\s\S]*await subagents\.restore\(ctx\)[\s\S]*subagents\.setModelResolver/);
+  assert.match(source, /pi\.on\("session_before_tree", async \(event\)[\s\S]*const generation = notificationGate\.pause\(\)[\s\S]*event\.signal\.addEventListener\("abort", abortListener, \{ once: true \}\)[\s\S]*await subagents\.shutdown\(\)[\s\S]*hold\.shutdownComplete = true/);
+  assert.match(source, /pi\.on\("session_tree", async[\s\S]*takeTreeNotificationHold\(\)[\s\S]*await subagents\.restore\(ctx, notificationGate\.isPaused\(\)\)[\s\S]*finally[\s\S]*notificationGate\.releaseDeferred\(hold\.generation\)[\s\S]*subagents\.setModelResolver/);
   assert.match(source, /pi\.on\("turn_start", \(\) => \{\s*subagents\.onTurnStart\(\)/);
   assert.doesNotMatch(source, /pi\.on\("tool_execution_start", \(\) => \{\s*subagents\.onTurnStart\(\)/);
   assert.match(source, /pi\.on\("message_end", \(event, ctx\) => \{[\s\S]*event\.message\.role !== "custom"[\s\S]*event\.message\.customType !== SUBAGENT_NOTIFICATION_TYPE[\s\S]*deliveryEpoch = sessionEpoch[\s\S]*deliverySessionId = ctx\.sessionManager\.getSessionId\(\)[\s\S]*setImmediate\(\(\) => \{[\s\S]*deliveryEpoch !== sessionEpoch[\s\S]*acknowledgeNotificationMessage\(message\)/);

@@ -413,14 +413,14 @@ export class OmpsSubagentRuntime {
     });
   }
 
-  async restore(ctx: ExtensionContext): Promise<void> {
+  async restore(ctx: ExtensionContext, notificationDeliveryPaused = false): Promise<void> {
     this.stopPoller();
     this.widget.dispose();
     this.activity.clear();
     this.health.clear();
     this.repliedSeqs.clear();
     this.queuedNotifications.clear();
-    this.notificationDeliveryPaused = false;
+    this.notificationDeliveryPaused = notificationDeliveryPaused;
     this.ctx = ctx;
     this.ownerSessionId = ctx.sessionManager.getSessionId();
     this.runRoot = getRunRoot(ctx.sessionManager.getSessionDir());

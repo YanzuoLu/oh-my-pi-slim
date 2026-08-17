@@ -221,8 +221,11 @@ export function renderSubagentCall(argsValue: unknown, theme: Theme, context: To
   const action = asString(args.action) ?? "create";
   const expanded = context.expanded === true;
   const container = new Container();
-  container.addChild(styledTitle(theme, "subagent", `· ${action}`));
-  addField(container, theme, "Action", action);
+  container.addChild(styledTitle(
+    theme,
+    "subagent",
+    `· ${action}${expanded ? "" : " (ctrl+o to expand)"}`,
+  ));
 
   if (action === "create") {
     addField(container, theme, "Agent", args.agent, "(pending)");

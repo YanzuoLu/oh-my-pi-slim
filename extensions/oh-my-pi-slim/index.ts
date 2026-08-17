@@ -9,6 +9,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { cleanupLegacySubagentSetup, ensurePackageSetup } from "./bootstrap.js";
+import { registerLoopRuntime } from "./loop-runtime.js";
 import { removeMainPiDocumentation, removeMainPiIdentity } from "./prompt-context.js";
 import {
   CHECKPOINT_RESUME_TEXT,
@@ -54,6 +55,14 @@ interface PresetConfig {
   presets: Record<string, Preset>;
   deny: DenyConfig;
   observerFallbackPresets: Set<string>;
+}
+
+interface TreeNotificationHold {
+  generation: number;
+  signal: AbortSignal;
+  abortListener: () => void;
+  shutdownComplete: boolean;
+  abortPending: boolean;
 }
 
 type ImmediateScheduler = (callback: () => void) => unknown;
@@ -271,8 +280,10 @@ function assertNoLegacyBackend(pi: ExtensionAPI): void {
 export default function ohMyPiSlim(pi: ExtensionAPI): void {
   if (process.env.PI_SUBAGENT_CHILD === "1" || process.env.OMPS_SUBAGENT_CHILD === "1") return;
 
+  const loops = registerLoopRuntime(pi);
   const subagents = registerSubagentRuntime(pi);
   const notificationGate = new NotificationDeliveryPauseGate((paused) => {
+    loops.setDeliveryPaused(paused);
     subagents.setNotificationDeliveryPaused(paused);
   });
   let active = false;
@@ -289,6 +300,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     resumeScheduled: boolean;
     notificationGeneration: number;
   } | undefined;
+  let treeNotificationHold: TreeNotificationHold | undefined;
   let fileToolSeenThisTurn = false;
 
   pi.registerFlag("omps", {
@@ -312,12 +324,36 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     ctx.ui.setStatus("oh-my-pi-slim", text ? ctx.ui.theme.fg("accent", text) : undefined);
   }
 
+  function takeTreeNotificationHold(): TreeNotificationHold | undefined {
+    const hold = treeNotificationHold;
+    if (!hold) return;
+    hold.signal.removeEventListener("abort", hold.abortListener);
+    treeNotificationHold = undefined;
+    return hold;
+  }
+
+  function clearTreeNotificationHold(): void {
+    takeTreeNotificationHold();
+  }
+
+  function releaseTreeNotificationHoldDeferred(hold: TreeNotificationHold): void {
+    if (treeNotificationHold !== hold) return;
+    takeTreeNotificationHold();
+    notificationGate.releaseDeferred(hold.generation);
+  }
+
+  function releaseCurrentNotificationsDeferred(): void {
+    const generation = notificationGate.currentGeneration();
+    if (treeNotificationHold?.generation === generation) clearTreeNotificationHold();
+    notificationGate.releaseDeferred(generation);
+  }
+
   function invalidateCheckpoint(releaseNotifications = true): void {
     sessionEpoch += 1;
     pendingCheckpoint = undefined;
     fileToolSeenThisTurn = false;
     if (releaseNotifications && notificationGate.isPaused()) {
-      notificationGate.releaseDeferred(notificationGate.currentGeneration());
+      releaseCurrentNotificationsDeferred();
     } else if (!releaseNotifications) {
       notificationGate.invalidate();
     }
@@ -505,6 +541,9 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (event, ctx) => {
     invalidateCheckpoint(false);
+    clearTreeNotificationHold();
+    loops.reset();
+    loops.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined);
     notificationGate.clearWithoutDelivery();
     sessionCtx = ctx;
     active = false;
@@ -535,31 +574,69 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     updateStatus(ctx);
   });
 
-  pi.on("session_before_switch", () => invalidateCheckpoint(false));
-
-  pi.on("session_before_tree", async () => {
+  pi.on("session_before_switch", () => {
     invalidateCheckpoint(false);
-    await subagents.shutdown();
-    notificationGate.clearWithoutDelivery();
+    clearTreeNotificationHold();
+    loops.shutdown();
+  });
+
+  pi.on("session_before_fork", () => {
+    invalidateCheckpoint(false);
+    clearTreeNotificationHold();
+    loops.shutdown();
+  });
+
+  pi.on("session_before_tree", async (event) => {
+    invalidateCheckpoint(false);
+    clearTreeNotificationHold();
+    const generation = notificationGate.pause();
+    let hold: TreeNotificationHold;
+    const abortListener = () => {
+      if (treeNotificationHold !== hold) return;
+      hold.abortPending = true;
+      if (hold.shutdownComplete) releaseTreeNotificationHoldDeferred(hold);
+    };
+    hold = {
+      generation,
+      signal: event.signal,
+      abortListener,
+      shutdownComplete: false,
+      abortPending: false,
+    };
+    treeNotificationHold = hold;
+    event.signal.addEventListener("abort", abortListener, { once: true });
+    if (event.signal.aborted) abortListener();
+    try {
+      await subagents.shutdown();
+      hold.shutdownComplete = true;
+      if (hold.abortPending) releaseTreeNotificationHoldDeferred(hold);
+    } catch (error) {
+      hold.shutdownComplete = true;
+      releaseTreeNotificationHoldDeferred(hold);
+      throw error;
+    }
   });
 
   pi.on("session_tree", async (_event, ctx) => {
-    notificationGate.clearWithoutDelivery();
     sessionCtx = ctx;
+    loops.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined);
+    loops.refreshUI();
+    const hold = takeTreeNotificationHold();
     try {
-      await subagents.restore(ctx);
+      await subagents.restore(ctx, notificationGate.isPaused());
       if (activePreset) configureSubagentResolvers(activePreset, ctx);
     } catch (error) {
       report(ctx, error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      if (hold) notificationGate.releaseDeferred(hold.generation);
     }
     updateStatus(ctx);
   });
 
   pi.on("input", (event) => {
     if (event.source !== "extension" && notificationGate.isPaused()) {
-      const generation = notificationGate.currentGeneration();
       pendingCheckpoint = undefined;
-      notificationGate.releaseDeferred(generation);
+      releaseCurrentNotificationsDeferred();
     }
     if (!active || event.source === "extension") return;
     pendingCheckpoint = undefined;
@@ -651,7 +728,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       return;
     }
     if (notificationGate.isPaused()) {
-      notificationGate.releaseDeferred(notificationGate.currentGeneration());
+      releaseCurrentNotificationsDeferred();
     }
   });
 
@@ -666,7 +743,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     const checkpoint = pendingCheckpoint;
     if (!checkpoint || checkpoint.epoch !== sessionEpoch) {
       if (notificationGate.isPaused()) {
-        notificationGate.releaseDeferred(notificationGate.currentGeneration());
+        releaseCurrentNotificationsDeferred();
       }
       return;
     }
@@ -681,6 +758,8 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     invalidateCheckpoint(false);
+    clearTreeNotificationHold();
+    loops.shutdown();
     await subagents.shutdown();
     notificationGate.clearWithoutDelivery();
     if (active) {

@@ -1,6 +1,6 @@
 # oh-my-pi-slim
 
-> Pi 主会话的 preset 驱动编排层，内置每个 run 一个 child 的后台运行时。
+> Pi 的 preset 驱动编排层，内置后台 run、runtime loop 与 session todo。
 
 [English](./README.md) | **中文**
 
@@ -61,6 +61,59 @@ Todo call/result renderer 与 subagent transcript 使用相同的 Ctrl+O 规则�
 
 任何同样注册 `todo` 的外部 package 都不能与内置工具共存。本地迁移时，请在加载 OMPS 前单独对该外部 package 执行 `pi remove`。本 package 不会主动删除或卸载任何外部 package。
 
+## 内置 Loop
+
+package 自有一个 `/loop` command 和一个名为 `loop` 的模型工具。只要 package 在 main session 中加载，两者就会注册，不依赖 OMPS 编排是否激活。现有 child 环境 early return 会阻止这两个入口在 child session 注册；不存在 child replay 路径。
+
+command 不解析请求。任何自然语言 `/loop ...` 调用都会关闭 prompt-template expansion，并作为真实 user message 原样转发；Pi busy 时使用 `deliverAs: "steer"`。模型 guideline 只允许在最新 user message 以 `/loop` 开头时调用 `create`。普通自然语言请求可以 list、modify、pause、resume 或 delete，但不能 create。裸 `/loop` 会让模型调用 `list`，并说明 `/loop <interval> <prompt>` 用法。
+
+唯一的 sequential 工具有六个 action，并严格隔离各 action 字段：
+
+```ts
+{ action: "create", interval, abstract, prompt }
+{ action: "delete", id }
+{ action: "modify", id, interval?, abstract?, prompt? }
+{ action: "list" }
+{ action: "pause", id }
+{ action: "resume", id }
+```
+
+`modify` 至少需要提供一个修改字段。ID 是精确八位小写十六进制字符串；缺失或未知 ID 会报错。允许重复 loop 配置。`abstract` 是紧凑 UI 使用的简短人类可读摘要。`prompt` 是每个未来模型 turn 都会收到的完整、自包含指令；它没有文本长度上限，也不是 abstract 的缩写。
+
+interval 严格使用一个正整数和一个小写单位：`s`、`m`、`h` 或 `d`。范围闭区间为 `10s` 到 `7d`。存储时使用可精确整除的最大单位，因此 `60s` 会变为 `1m`，`120m` 会变为 `2h`，`48h` 会变为 `2d`。
+
+每个 loop 使用 recursive one-shot timeout 实现 repeating fixed-delay。create 会等待一个完整 interval 才首次 fire；resume 也会等待完整 interval。后续 timeout 只在前一个 tick 处理完成后开始。没有最大 fire 次数、expiry、loop 数量限制、backlog 限制或 coalescing。
+
+`pause` 会清除 timer，把 `nextFireAt` 设为 `null`，并取消该 loop 尚未投递的 compaction-gated fire。重复 pause 是成功的 no-change。`resume` 从 resume 时刻重新等待完整 interval；重复 resume 也是成功的 no-change。paused loop 可以 modify。active loop 的有效 interval 变化会重新等待完整 delay；等价 canonical interval 是 no-change。只修改 abstract 或 prompt 会保留 active `nextFireAt`。已经被 delivery gate 捕获的 fire 保持其旧 abstract、interval 与 prompt 的 immutable snapshot。`delete` 直接移除 loop，不保留 tombstone 或 history。
+
+Loop 状态只存在于 runtime memory，绝不使用 `appendEntry`、journal、文件或 snapshot persistence。compaction 与 tree navigation 会保留 loops、timers 和 gated fire records；reload、new session、resumed session、fork 与 quit 会清空全部 loop。tree 与 compaction host operation 共用 notification pause gate，随后按 FIFO 释放匹配 records，且不改变 subagent notification 的 content 或 delivery 语义。
+
+每个 tick 都会生成独立的 package custom message，并使用 `deliverAs: "steer"` 与 `triggerTurn: true`。content 和 details 包含 ID、abstract、canonical interval、成功 fire count、fire 时间与完整 prompt。每条 queued fire 都保持独立，delivery 不会 merge 或 coalesce。只有 `sendMessage` 成功后才增加 `fireCount`。send 抛错时增加 `failureCount`，记录 `lastFailedAt` 与 `lastError`；后续成功会清除 `lastError`，但保留失败历史。
+
+`list` 按创建顺序返回每个 loop 的完整公开 JSON：
+
+```json
+{
+  "id": "1a2b3c4d",
+  "abstract": "检查最新项目状态",
+  "prompt": "读取完整状态并报告所有相关变化。",
+  "interval": "1m",
+  "status": "active",
+  "createdAt": "2026-05-01T00:00:00.000Z",
+  "updatedAt": "2026-05-01T00:00:00.000Z",
+  "nextFireAt": "2026-05-01T00:01:00.000Z",
+  "fireCount": 0,
+  "failureCount": 0,
+  "lastFiredAt": null,
+  "lastFailedAt": null,
+  "lastError": null
+}
+```
+
+前台 TUI session 会在 editor 上方显示 package 自有 widget，heading 为 `● Loops (active/total)`。每个可见 loop 使用不可拆分的两行 tree entry：第一行用 `↻` 表示 active、`!` 表示最近 delivery error、`Ⅱ` 表示 paused，并显示 abstract 与 ID；第二行显示 `Every <interval>`、每秒刷新一次的 countdown 或 paused 状态、fire count 与当前 failure 文本。active loop 先按 `nextFireAt` 排序，paused loop 再按 `createdAt` 排序。widget 最多 12 行、最多显示五个 loop，并使用 `… n more` 报告 overflow。RPC session 绝不注册该 widget。
+
+package 自有 call、result 与 fire renderer 遵守 Ctrl+O data invariant。折叠视图保持紧凑并显示展开提示；展开视图显示完整 action-specific input、全部公开 list 字段、完整 error 与完整 prompt。Ctrl+O 只改变 TUI rendering，绝不改变 tool-call arguments、模型可见 content、custom-message details、list JSON 或 mutation receipt。
+
 ## 命令
 
 | 命令 | 作用 |
@@ -70,6 +123,7 @@ Todo call/result renderer 与 subagent transcript 使用相同的 Ctrl+O 规则�
 | `/omps status` | 查看激活状态 |
 | `/omps presets` | 列出 preset |
 | `/preset [name]` | 切换 preset；不带参数时列出 |
+| `/loop [request]` | 把原样 request 转发给模型以管理 runtime loop |
 | `/omps uninstall` | 清理旧 OMPS backend migration state，并显示 package 删除命令 |
 
 `/reload` 通过一次性进程内槽位恢复 active preset。新建、恢复或 fork 的 parent session 不继承该槽位。

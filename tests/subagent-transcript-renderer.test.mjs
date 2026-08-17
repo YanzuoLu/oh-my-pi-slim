@@ -86,7 +86,7 @@ function run(overrides = {}) {
   };
 }
 
-test("Ctrl+O expands complete action-specific call input", () => {
+test("Ctrl+O expands complete action-specific call input without duplicate Action rows", () => {
   const createArgs = {
     action: "create",
     agent: "fixer",
@@ -95,46 +95,53 @@ test("Ctrl+O expands complete action-specific call input", () => {
     cwd: "/full/create/cwd",
   };
   const createCollapsed = render(renderSubagentCall(createArgs, theme, { cwd: "/context/cwd", expanded: false }));
-  assertFull(createCollapsed, ["subagent · create", "Action: create", "Agent: fixer", "Abstract: Create concise abstract"]);
-  assert.doesNotMatch(createCollapsed, /Cwd:|full\/create|Task:|create task payload/);
+  assertFull(createCollapsed, ["subagent · create (ctrl+o to expand)", "Agent: fixer", "Abstract: Create concise abstract"]);
+  assert.doesNotMatch(createCollapsed, /Action:|Cwd:|full\/create|Task:|create task payload/);
   const createExpanded = render(renderSubagentCall(createArgs, theme, { cwd: "/context/cwd", expanded: true }));
-  assertFull(createExpanded, ["Action: create", "Agent: fixer", "Abstract: Create concise abstract", "/full/create/cwd", "Create task line one", "<results>create task payload</results>", "Create task line three"]);
+  assertFull(createExpanded, ["subagent · create", "Agent: fixer", "Abstract: Create concise abstract", "/full/create/cwd", "Create task line one", "<results>create task payload</results>", "Create task line three"]);
 
   const resumeArgs = {
     action: "resume", id: "source-run-full", abstract: "Fresh continuation abstract",
     message: "Continuation line one\nContinuation line two",
   };
   const resumeCollapsed = render(renderSubagentCall(resumeArgs, theme, { expanded: false }));
-  assertFull(resumeCollapsed, ["Action: resume", "Source run: source-run-full", "Abstract: Fresh continuation abstract"]);
-  assert.doesNotMatch(resumeCollapsed, /Continuation task|Continuation line/);
+  assertFull(resumeCollapsed, ["subagent · resume (ctrl+o to expand)", "Source run: source-run-full", "Abstract: Fresh continuation abstract"]);
+  assert.doesNotMatch(resumeCollapsed, /Action:|Continuation task|Continuation line/);
   const resumeExpanded = render(renderSubagentCall(resumeArgs, theme, { expanded: true }));
-  assertFull(resumeExpanded, ["Action: resume", "Source run: source-run-full", "Abstract: Fresh continuation abstract", "Continuation line one", "Continuation line two"]);
+  assertFull(resumeExpanded, ["subagent · resume", "Source run: source-run-full", "Abstract: Fresh continuation abstract", "Continuation line one", "Continuation line two"]);
 
   const steerArgs = { action: "steer", id: "run-steer-full", message: "Guidance line one\n<results>guidance payload</results>" };
   const steerCollapsed = render(renderSubagentCall(steerArgs, theme, { expanded: false }));
-  assertFull(steerCollapsed, ["Action: steer", "Run: run-steer-full"]);
-  assert.doesNotMatch(steerCollapsed, /Guidance|guidance payload/);
+  assertFull(steerCollapsed, ["subagent · steer (ctrl+o to expand)", "Run: run-steer-full"]);
+  assert.doesNotMatch(steerCollapsed, /Action:|Guidance|guidance payload/);
   const steerExpanded = render(renderSubagentCall(steerArgs, theme, { expanded: true }));
-  assertFull(steerExpanded, ["Action: steer", "Run: run-steer-full", "Guidance line one", "<results>guidance payload</results>"]);
+  assertFull(steerExpanded, ["subagent · steer", "Run: run-steer-full", "Guidance line one", "<results>guidance payload</results>"]);
 
   const replyArgs = { action: "reply", id: "run-full", message: "Reply line one\n<results>reply payload</results>\nReply line three" };
   const replyCollapsed = render(renderSubagentCall(replyArgs, theme, { expanded: false }));
-  assertFull(replyCollapsed, ["Action: reply", "Run: run-full"]);
-  assert.doesNotMatch(replyCollapsed, /Reply:|reply payload|Reply line/);
+  assertFull(replyCollapsed, ["subagent · reply (ctrl+o to expand)", "Run: run-full"]);
+  assert.doesNotMatch(replyCollapsed, /Action:|Reply:|reply payload|Reply line/);
   const replyExpanded = render(renderSubagentCall(replyArgs, theme, { expanded: true }));
-  assertFull(replyExpanded, ["Action: reply", "Run: run-full", "Reply line one", "<results>reply payload</results>", "Reply line three"]);
+  assertFull(replyExpanded, ["subagent · reply", "Run: run-full", "Reply line one", "<results>reply payload</results>", "Reply line three"]);
 
   const interruptCollapsed = render(renderSubagentCall({ action: "interrupt", id: "run-interrupt-full" }, theme, { expanded: false }));
   const interruptExpanded = render(renderSubagentCall({ action: "interrupt", id: "run-interrupt-full" }, theme, { expanded: true }));
-  assertFull(interruptCollapsed, ["Action: interrupt", "Run: run-interrupt-full"]);
-  assert.equal(interruptExpanded, interruptCollapsed);
+  assert.equal(interruptCollapsed, "subagent · interrupt (ctrl+o to expand)\nRun: run-interrupt-full");
+  assert.equal(interruptExpanded, "subagent · interrupt\nRun: run-interrupt-full");
 
   const listCollapsed = render(renderSubagentCall({ action: "list" }, theme, { expanded: false }));
-  assertFull(listCollapsed, ["subagent · list", "Action: list"]);
-  assert.doesNotMatch(listCollapsed, /starting, running|abstract|waiting reason/);
+  assert.equal(listCollapsed, "subagent · list (ctrl+o to expand)");
   const listExpanded = render(renderSubagentCall({ action: "list" }, theme, { expanded: true }));
-  assertFull(listExpanded, ["Action: list", "starting, running, and waiting", "abstract", "waiting reason"]);
+  assertFull(listExpanded, ["subagent · list", "starting, running, and waiting", "abstract", "waiting reason"]);
   assert.doesNotMatch(listExpanded, /output|error|activity|task/i);
+
+  for (const value of [createCollapsed, resumeCollapsed, steerCollapsed, replyCollapsed, interruptCollapsed, listCollapsed]) {
+    assert.match(value.split("\n")[0], /\(ctrl\+o to expand\)$/);
+    assert.doesNotMatch(value, /Action:/);
+  }
+  for (const value of [createExpanded, resumeExpanded, steerExpanded, replyExpanded, interruptExpanded, listExpanded]) {
+    assert.doesNotMatch(value, /\(ctrl\+o to expand\)|Action:/);
+  }
 });
 
 test("tool results start with one blank separator line", () => {

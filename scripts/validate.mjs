@@ -110,8 +110,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.9.3", "package version must be 0.9.3");
-check(lock.version === "0.9.3" && lock.packages?.[""]?.version === "0.9.3", "package-lock version must be 0.9.3");
+check(packageJson.version === "0.9.4", "package version must be 0.9.4");
+check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, runtime loops, and session todos.", "package description must include the three built-in runtime surfaces");
+check(["pi-package", "pi", "orchestration", "subagents", "loops", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Loop discovery terms");
+check(lock.version === "0.9.4" && lock.packages?.[""]?.version === "0.9.4", "package-lock version must be 0.9.4");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -138,6 +140,9 @@ for (const name of AGENTS) {
 }
 
 const extension = read("extensions/oh-my-pi-slim/index.ts");
+const loopRuntime = read("extensions/oh-my-pi-slim/loop-runtime.ts");
+const loopWidget = read("extensions/oh-my-pi-slim/loop-widget.ts");
+const loopTranscriptRenderer = read("extensions/oh-my-pi-slim/loop-transcript-renderer.ts");
 const checkpoint = read("extensions/oh-my-pi-slim/subagent-checkpoint.ts");
 const runtime = read("extensions/oh-my-pi-slim/subagent-runtime.ts");
 const core = read("extensions/oh-my-pi-slim/subagent-core.ts");
@@ -153,8 +158,9 @@ const todoWidget = read("extensions/todo/widget.ts");
 
 const functionStart = extension.indexOf("export default function ohMyPiSlim");
 const childGate = extension.indexOf('process.env.PI_SUBAGENT_CHILD === "1" || process.env.OMPS_SUBAGENT_CHILD === "1"', functionStart);
+const loopRegistration = extension.indexOf("registerLoopRuntime(pi)", functionStart);
 const runtimeRegistration = extension.indexOf("registerSubagentRuntime(pi)", functionStart);
-check(functionStart >= 0 && childGate > functionStart && childGate < runtimeRegistration, "main extension must return before child registration");
+check(functionStart >= 0 && childGate > functionStart && childGate < loopRegistration && loopRegistration < runtimeRegistration, "main extension must return before Loop and subagent registration");
 hasAll(extension, [
   "assertNoLegacyBackend(pi)",
   "ensurePackageSetup(PACKAGE_ROOT)",
@@ -162,6 +168,7 @@ hasAll(extension, [
   "await subagents.shutdown()",
   "configureSubagentResolvers(activePreset, ctx)",
   "subagents.setDenyResolver((role) => loadPresetConfig().deny[role])",
+  'pi.on("session_before_fork"',
   'pi.on("session_before_tree"',
   'pi.on("session_tree"',
   'pi.on("session_before_compact"',
@@ -173,14 +180,45 @@ hasAll(extension, [
   "subagents.acknowledgeNotificationMessage(message)",
   "SettingsManager.create(",
   "contextUsageNeedsCheckpoint(",
-  "NotificationDeliveryPauseGate", "setNotificationDeliveryPaused(paused)",
-  "notificationGate.releaseDeferred", "notificationGate.clearWithoutDelivery",
+  "NotificationDeliveryPauseGate", "setNotificationDeliveryPaused(paused)", "loops.setDeliveryPaused(paused)",
+  "notificationGate.releaseDeferred", "notificationGate.clearWithoutDelivery", "registerLoopRuntime(pi)",
+  "treeNotificationHold", "releaseTreeNotificationHoldDeferred", "subagents.restore(ctx, notificationGate.isPaused())",
+  "loops.reset()", "loops.shutdown()", 'loops.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)',
+  "loops.refreshUI()",
 ], "main extension contract");
+const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
+const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
+const beforeForkStart = extension.indexOf('pi.on("session_before_fork"');
+const beforeTreeStart = extension.indexOf('pi.on("session_before_tree"');
+const sessionTreeStart = extension.indexOf('pi.on("session_tree"');
+const inputStart = extension.indexOf('pi.on("input"');
+const sessionStartHandler = extension.slice(sessionStartHandlerStart, beforeSwitchStart);
+const beforeSwitchHandler = extension.slice(beforeSwitchStart, beforeForkStart);
+const beforeForkHandler = extension.slice(beforeForkStart, beforeTreeStart);
+const beforeTreeHandler = extension.slice(beforeTreeStart, sessionTreeStart);
+const sessionTreeHandler = extension.slice(sessionTreeStart, inputStart);
+hasAll(sessionStartHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "loops.reset()"], "session-start tree abort ownership cleanup");
+hasAll(beforeSwitchHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "loops.shutdown()"], "session-switch tree abort ownership cleanup");
+hasAll(beforeForkHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "loops.shutdown()"], "fork loop shutdown");
+hasAll(beforeTreeHandler, [
+  "invalidateCheckpoint(false)", "clearTreeNotificationHold()", "const generation = notificationGate.pause()",
+  'event.signal.addEventListener("abort", abortListener, { once: true })', "event.signal.aborted", "abortPending",
+  "await subagents.shutdown()", "hold.shutdownComplete = true", "releaseTreeNotificationHoldDeferred(hold)", "throw error",
+], "tree shared delivery pause and abort compensation");
+check(beforeTreeHandler.indexOf("await subagents.shutdown()") < beforeTreeHandler.indexOf("hold.shutdownComplete = true"), "tree abort compensation must wait for shutdown completion");
+const treeShutdownCatch = beforeTreeHandler.slice(beforeTreeHandler.indexOf("} catch (error)"));
+check(treeShutdownCatch.indexOf("releaseTreeNotificationHoldDeferred(hold)") < treeShutdownCatch.indexOf("throw error"), "tree shutdown failure must schedule deferred release before propagation");
+hasNone(beforeTreeHandler, ["clearWithoutDelivery", "loops.shutdown()", "loops.reset()"], "tree state preservation");
+hasAll(sessionTreeHandler, ["const hold = takeTreeNotificationHold()", "subagents.restore(ctx, notificationGate.isPaused())", "finally", "notificationGate.releaseDeferred(hold.generation)"], "tree deferred matching release");
+hasNone(sessionTreeHandler, ["clearWithoutDelivery", "loops.setDeliveryPaused(false)", "notificationGate.release(generation)"], "tree synchronous release");
+const shutdownHandler = extension.slice(extension.indexOf('pi.on("session_shutdown"'));
+hasAll(shutdownHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "loops.shutdown()"], "session-shutdown tree abort ownership cleanup");
+hasAll(extension.slice(inputStart, extension.indexOf('pi.on("session_before_compact"')), ["releaseCurrentNotificationsDeferred()"], "ordinary-input canceled-tree fallback");
 hasNone(extension, REMOVED_CAPABILITIES, "main extension");
-const productionToolNames = [...`${extension}\n${runtime}\n${child}\n${todoExtension}`.matchAll(/registerTool\(\{[\s\S]*?\bname:\s*"([^"]+)"/g)]
+const productionToolNames = [...`${extension}\n${loopRuntime}\n${runtime}\n${child}\n${todoExtension}`.matchAll(/registerTool\(\{[\s\S]*?\bname:\s*"([^"]+)"/g)]
   .map((match) => match[1])
   .sort();
-check(JSON.stringify(productionToolNames) === JSON.stringify(["contact_supervisor", "subagent", "todo"]), "production extensions must register exactly the three audited model tools");
+check(JSON.stringify(productionToolNames) === JSON.stringify(["contact_supervisor", "loop", "subagent", "todo"]), "production extensions must register exactly the four audited model tools");
 const notificationMessageEndStart = extension.indexOf('pi.on("message_end"');
 const notificationMessageEndEnd = extension.indexOf('pi.on("tool_execution_end"', notificationMessageEndStart);
 const notificationMessageEnd = extension.slice(notificationMessageEndStart, notificationMessageEndEnd);
@@ -199,6 +237,7 @@ hasAll(agentSettled, [
   "subagents.retryQueuedNotificationsAfterAgentSettled()", "const checkpoint = pendingCheckpoint",
   "scheduleCheckpointResume(checkpoint, ctx)",
 ], "deferred settled notification retry and checkpoint compatibility");
+hasAll(agentSettled, ["releaseCurrentNotificationsDeferred()"], "agent-settled canceled-tree fallback");
 check(notificationMessageEndStart < agentSettledStart, "message_end acknowledgement binding must precede agent_settled retry binding");
 
 hasAll(runtime, [
@@ -270,11 +309,101 @@ hasAll(retryNotification, [
   "this.deliverPendingNotification(delivery.runId)",
 ], "agent-settled notification retry");
 check(!runtime.includes("appendEntry(SUBAGENT_NOTIFICATION_TYPE"), "notification delivery must not append a second TUI entry");
-const restoreStart = runtime.indexOf("async restore(ctx: ExtensionContext)");
+hasAll(loopRuntime, [
+  'export const LOOP_ACTIONS = ["create", "delete", "modify", "list", "pause", "resume"] as const',
+  "export const loopParameters = Type.Object({", "}, { additionalProperties: false });",
+  'executionMode: "sequential"', 'name: "loop"', 'pi.registerCommand("loop"',
+  'expandPromptTemplates: false', 'deliverAs: "steer" as const',
+  'customType: LOOP_MESSAGE_TYPE', 'deliverAs: "steer", triggerTurn: true',
+  "registerMessageRenderer(LOOP_MESSAGE_TYPE, renderLoopFire)", "renderCall: renderLoopCall", "renderResult: renderLoopResult",
+  "setUICtx(ui: ExtensionUIContext | undefined)", "this.widget.update()", "this.widget.dispose()",
+  "firedAt", "setDeliveryPaused(paused: boolean)", "flushGatedFires()", "cancelGatedFires(loop.id)",
+  "parseLoopInterval", "canonicalizeLoopInterval", "randomBytes(4).toString(\"hex\")",
+  "PreparedLoopSchedule", "firedBeforeActivation", "scheduled.activate()", "acceptScheduledTimeout",
+  "this.setTimeoutFn", "this.schedule(current, this.nowMs())", "this.generation += 1",
+], "Loop runtime contract");
+const loopCreateBlock = loopRuntime.slice(loopRuntime.indexOf("private create("), loopRuntime.indexOf("private delete("));
+check(
+  loopCreateBlock.indexOf("const scheduled = this.prepareSchedule") < loopCreateBlock.indexOf("this.loops.set(loop.id, loop)") &&
+  loopCreateBlock.indexOf("this.loops.set(loop.id, loop)") < loopCreateBlock.indexOf("this.applySchedule(loop, scheduled)"),
+  "Loop create must prepare before registry commit and activate only after commit",
+);
+const loopApplySchedule = loopRuntime.slice(loopRuntime.indexOf("private applySchedule("), loopRuntime.indexOf("private acceptScheduledTimeout"));
+check(
+  loopApplySchedule.indexOf("loop.timer = scheduled.timer") < loopApplySchedule.indexOf("scheduled.activate()") &&
+  loopApplySchedule.indexOf("loop.timerToken = scheduled.token") < loopApplySchedule.indexOf("scheduled.activate()") &&
+  loopApplySchedule.indexOf("loop.nextFireAt = scheduled.nextFireAt") < loopApplySchedule.indexOf("scheduled.activate()"),
+  "Loop schedule activation must follow timer, token, and nextFireAt commit",
+);
+hasNone(loopRuntime, ["appendEntry", "setInterval(", "maxFires", "expiresAt", "maxLength", "registerShortcut", "setWidget"], "Loop core semantic boundary");
+hasAll(loopWidget, [
+  'LOOP_WIDGET_KEY = "oh-my-pi-slim:loops"', "MAX_LOOP_WIDGET_LINES = 12", "MAX_VISIBLE_LOOPS = 5",
+  'theme.bold(`● Loops (${active}/${sorted.length})`)', '"↻"', '"Ⅱ"', '"!"',
+  'parts.push(`next in ${formatLoopCountdown', 'parts.push("paused", fireLabel', "failureLabel(loop.failureCount)",
+  "sortLoopsForDisplay", "nextFireAt", "createdAt", 'setIntervalFn(() => this.update(), 1_000)',
+  "requestRender()", 'placement: "aboveEditor"', "stopTimer()", "dispose()", 'setWidget(LOOP_WIDGET_KEY, undefined)',
+  'theme.fg("dim", `… ${hidden} more`)', "lines.slice(0, MAX_LOOP_WIDGET_LINES)",
+], "Loop foreground widget visual contract");
+hasNone(loopWidget, ["notify(", "registerShortcut", "custom(", "overlay"], "Loop widget excluded UI");
+hasAll(loopTranscriptRenderer, [
+  "renderLoopCall", "renderLoopResult", "renderLoopFire", "styledTitle(", '"loop"',
+  '`· ${action}${expanded ? "" : " (ctrl+o to expand)"}`',
+  "context.expanded === true", "options.expanded === true", "spacedResult", "safeFirstLine", "sanitizeLoopBody",
+  'theme.bold(`● Loops (${active}/${sorted.length})`)', "addCompleteLoop", 'addSection(container, theme, "Prompt"',
+  'addField(container, theme, "Fired at"', "LoopFireLine", '· fire ${this.details.fireCount}',
+  'verbs: Record<Exclude<LoopAction, "list">, string>', '"Created"', '"Deleted"', '"Modified"', '"Paused"', '"Resumed"',
+  'No change · loop', "fallbackResult(result, options, theme)",
+], "Loop Ctrl+O and fire renderer visual contract");
+hasNone(loopTranscriptRenderer, ["\\u001b", "registerShortcut", "notify(", "overlay", '"Action"'], "Loop renderer theme-only visual contract");
+const loopSchemaStart = loopRuntime.indexOf("export const loopParameters");
+const loopSchemaEnd = loopRuntime.indexOf("export class LoopRuntime", loopSchemaStart);
+const loopSchema = loopRuntime.slice(loopSchemaStart, loopSchemaEnd);
+check(!loopSchema.includes("anyOf:") && !loopSchema.includes("oneOf:"), "Loop schema root must not declare anyOf or oneOf");
+const loopSchemaDescriptions = [...loopSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
+check(loopSchemaDescriptions.length === 5, "Loop schema must define five field descriptions");
+for (const description of loopSchemaDescriptions) checkSteBlock(description, "Loop schema description");
+const loopToolStart = loopRuntime.indexOf('name: "loop"');
+const loopGuidelinesStart = loopRuntime.indexOf("promptGuidelines: [", loopToolStart);
+const loopGuidelinesEnd = loopRuntime.indexOf("      ],", loopGuidelinesStart);
+const loopToolMetadata = loopRuntime.slice(loopToolStart, loopGuidelinesEnd);
+const loopDescription = propertyString(loopToolMetadata, "description", "Loop tool metadata");
+const loopPromptSnippet = propertyString(loopToolMetadata, "promptSnippet", "Loop tool metadata");
+check(loopDescription === "Create and manage runtime-only repeating fixed-delay prompts.", "Loop description must state runtime-only repeating fixed-delay semantics");
+check(loopPromptSnippet === "Create or manage runtime-only repeating fixed-delay prompts by loop ID.", "Loop promptSnippet must state runtime-only repeating fixed-delay semantics");
+checkSteBlock(loopDescription, "Loop description");
+checkSteBlock(loopPromptSnippet, "Loop promptSnippet");
+const loopGuidelines = staticStrings(loopRuntime.slice(loopGuidelinesStart, loopGuidelinesEnd), "Loop promptGuidelines");
+check(loopGuidelines.length === 18, "Loop promptGuidelines must keep the complete 18-sentence model contract");
+checkSteGuidelines(loopGuidelines, "Loop promptGuideline");
+hasAll(loopGuidelines.join("\n"), [
+  "Use only `action`, `interval`, `abstract`, and `prompt` for `create`.",
+  "Use only `action` and `id` for `delete`, `pause`, or `resume`.",
+  "Use only `action`, `id`, and optional `interval`, `abstract`, or `prompt` for `modify`.",
+  "Use only `action` for `list`.",
+  "For `modify`, provide at least one of `interval`, `abstract`, or `prompt`.",
+  "Expect a missing or unknown `id` to return an error.",
+  "Expect repeated `pause` or `resume` actions to return no change.",
+  "Use `create` only when the latest user message starts with `/loop`.",
+  "Do not create loops from ordinary natural-language requests.",
+  "Use `list`, `delete`, `modify`, `pause`, or `resume` for ordinary requests.",
+  "For a bare `/loop`, call `list` and explain `/loop <interval> <prompt>`.",
+  "For `create`, generate a short abstract from the requested work.",
+  "For `create`, write a self-contained prompt for every future turn.",
+  "For `interval`, use one positive integer with `s`, `m`, `h`, or `d`.",
+  "Use intervals from `10s` through `7d`.",
+  "Expect each `create` or `resume` to wait one full interval before firing.",
+  "Expect loops to survive compaction and tree navigation.",
+  "Expect reload, new, resume, fork, or quit to clear all loops.",
+], "Loop promptGuidelines semantics");
+hasNone(`${loopDescription}\n${loopPromptSnippet}\n${loopGuidelines.join("\n")}`, [
+  "timerToken", "schedule token", "generation", "notification gate", "gatedFires", "appendEntry", "journal", "snapshot",
+], "Loop model metadata internal boundary");
+const restoreStart = runtime.indexOf("async restore(ctx: ExtensionContext, notificationDeliveryPaused = false)");
 const restoreEnd = runtime.indexOf("onTurnStart(): void", restoreStart);
 const restoreNotificationFlow = runtime.slice(restoreStart, restoreEnd);
 hasAll(restoreNotificationFlow, [
-  "queuedNotifications.clear()", 'entry.type === "custom_message"', "SUBAGENT_NOTIFICATION_TYPE",
+  "queuedNotifications.clear()", "this.notificationDeliveryPaused = notificationDeliveryPaused",
+  'entry.type === "custom_message"', "SUBAGENT_NOTIFICATION_TYPE",
   "notificationDeliveryFromDetails(entry.details)", "acknowledgeNotificationDelivery(delivery)",
   "deliverPendingNotification(run.id)",
 ], "restore notification replay and persisted-message acknowledgement");
@@ -295,7 +424,7 @@ hasAll(beforeCompact, [
 const sessionCompactStart = extension.indexOf('pi.on("session_compact"');
 const sessionCompactEnd = extension.indexOf('pi.on("agent_settled"', sessionCompactStart);
 const sessionCompactHandler = extension.slice(sessionCompactStart, sessionCompactEnd);
-hasAll(sessionCompactHandler, ["pendingCheckpoint.sawThresholdCompaction = true", "notificationGate.releaseDeferred"], "deferred compaction notification release");
+hasAll(sessionCompactHandler, ["pendingCheckpoint.sawThresholdCompaction = true", "releaseCurrentNotificationsDeferred()"], "deferred compaction notification release");
 hasNone(sessionCompactHandler, ["setNotificationDeliveryPaused(false)", "sendNotification("], "session_compact synchronous notification release");
 const checkpointResumeStart = extension.indexOf("function scheduleCheckpointResume");
 const checkpointResumeEnd = extension.indexOf("function resolvePresetModels", checkpointResumeStart);
@@ -589,26 +718,68 @@ hasAll(todoWidget, [
   "MAX_TODO_WIDGET_LINES = 12", "● Todos (", '"○"', '"◐"', '"✓"', '⛓ ${task.blockedBy',
   'theme.strikethrough', '"├─"', '"└─"', "hiddenSummary", "setWidget",
   "renderTodoListResult", "renderTodoReceipts", "expanded = false", "receiptStatusTransition",
+  'operations.filter((operation) => operation.op === "append")',
+  'operations.filter((operation) => operation.op === "modify")',
+  'operations.filter((operation) => operation.op === "clear")',
+  'Applied ${append} append · ${modify} modify · ${clear} clear → ${changed} changed · ${noChange} no-change',
   'addResultField(container, theme, "Status"', 'addResultSection(container, theme, "Abstract"',
   'addResultList(container, theme, "Blocked by"', "no-change",
 ], "built-in Todo widget and result-renderer contract");
 hasAll(todoExtension, [
-  "context.expanded === true", 'theme.bold(`todo · ${action}`)', 'addCallField(container, theme, "Action"',
-  'addCallField(container, theme, "Operations"', "operationCounts", '"Append"', '"Modify"', '"Clear"',
+  "context.expanded === true", "todoCallTitle", 'theme.bold("todo")', 'theme.fg("muted", detail)',
+  '`· ${action}${expanded ? "" : " (ctrl+o to expand)"}`', 'action === "list" || !expanded',
+  'addCallField(container, theme, "Operations"', '"Append"', '"Modify"', '"Clear"',
   'addCallSection(container, theme, "Abstract"', 'addCallList(container, theme, "Blocked by"',
   'addCallList(container, theme, "Add blocked by"', 'addCallList(container, theme, "Remove blocked by"',
   "options.expanded === true", "safeFallbackLine", "sanitizeTodoBody",
+  "renderTodoReceipts(snapshot.receipts, snapshot.operations, theme, expanded)",
 ], "Todo Ctrl+O call and result renderer contract");
+hasNone(todoExtension, ['"Action"', "operationCounts", 'theme.bold(`todo · ${action}`)'], "Todo duplicate call metadata");
 check(existsSync(join(ROOT, "tests/todo.test.mjs")), "Todo contract tests must exist");
 check(existsSync(join(ROOT, "tests/provider-schema.test.mjs")), "provider schema compatibility tests must exist");
+check(existsSync(join(ROOT, "tests/loop.test.mjs")), "Loop core contract tests must exist");
+check(existsSync(join(ROOT, "tests/loop-ui.test.mjs")), "Loop visual contract tests must exist");
 check(existsSync(join(ROOT, "tests/fixtures/todo-load-probe.ts")), "Todo real-Pi load probe must exist");
+check(existsSync(join(ROOT, "tests/fixtures/omps-load-probe.ts")), "OMPS real-Pi load probe must exist");
+check(existsSync(join(ROOT, "tests/loop-load.test.mjs")), "Loop real-Pi load tests must exist");
+const loopUiTests = read("tests/loop-ui.test.mjs");
+hasAll(loopUiTests, [
+  "exact heading, glyph priority, counts, order", "caps at 12 lines", "one shared 1s timer",
+  "all six actions", "uniform collapsed hints", "(ctrl+o to expand)", "Action:",
+  "compact receipts", "result fallback", "fire renderer", "without mutation",
+], "Loop focused visual tests");
+const loopCoreTests = read("tests/loop.test.mjs");
+hasAll(loopCoreTests, [
+  "synchronous injected timeout callbacks activate after commit", "scheduler failures preserve active modify and paused resume atomicity",
+  "scheduler unavailable", "tree abort waits for shutdown completion", "abort cannot release delivery before subagent shutdown completes",
+  "shutdown failure schedules deferred gate release before propagating", "ordinary input releases a canceled tree gate",
+], "Loop scheduler seam and tree abort compensation tests");
+const todoTests = read("tests/todo.test.mjs");
+hasAll(todoTests, [
+  'todo · list (ctrl+o to expand)', 'todo · update (ctrl+o to expand)',
+  'assert.equal(collapsed, "todo · update (ctrl+o to expand)")',
+  'Action:|Operations:|Append:|Modify:|Clear:',
+  '✓ Applied 1 append · 2 modify · 0 clear → 2 changed · 1 no-change',
+], "Todo focused Ctrl+O visual tests");
+const subagentTranscriptTests = read("tests/subagent-transcript-renderer.test.mjs");
+hasAll(subagentTranscriptTests, [
+  "without duplicate Action rows", "(ctrl+o to expand)", "Action:",
+  'assert.doesNotMatch(value, /\\(ctrl\\+o to expand\\)|Action:/)',
+], "Subagent focused Ctrl+O visual tests");
 const providerSchemaTests = read("tests/provider-schema.test.mjs");
 hasAll(providerSchemaTests, [
-  "subagentParameters", "contactSupervisorParameters", "todoParameters",
+  "loopParameters", "subagentParameters", "contactSupervisorParameters", "todoParameters",
   'schema.type, "object"', 'schema.additionalProperties, false', "schema.anyOf, undefined", "schema.oneOf, undefined",
   "operationBranches", 'branch.type, "object"', "branch.additionalProperties, false", "modify.minProperties, undefined",
 ], "provider schema JSON audit");
-const todoTests = read("tests/todo.test.mjs");
+const loopLoadTests = read("tests/loop-load.test.mjs");
+hasAll(loopLoadTests, [
+  "real Pi isolated RPC main and child sessions expose exact package tools without widgets",
+  '["loop", "subagent", "todo"]', '["contact_supervisor", "todo"]',
+  'events.some((event) => event.type === "extension_ui_request" && event.method === "setWidget")',
+  "real Pi RPC forwards slash text once as extension input without command recursion or a model call",
+  'text: "/loop   review the exact raw request"', 'source: "extension"',
+], "Loop isolated real-Pi main, child, widget, and slash forwarding smoke");
 hasAll(todoTests, [
   "PI_CODING_AGENT_DIR", '"--no-extensions"', '"--extension", join(root, "extensions/todo/index.ts")',
   "TODO_LOAD_PROBE", "runtime not initialized", "executionMode", "setWidget",
@@ -651,7 +822,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "复制同一 preset 的 `explorer` 配置", "每次 create 与 resume 前都会重新读取 deny",
         "下一个安全模型边界", "同一条消息", "折叠的 TUI 视图只显示紧凑 run header",
         "按 Ctrl+O", "Ctrl+O 只改变 TUI 渲染",
-      ], `${file} 0.9.3 contract`);
+      ], `${file} 0.9.4 contract`);
   hasAll(text, file === "README.md"
     ? [
         "## Built-in Todo", '{ action: "list" }', '{ action: "update"', "commits once",
@@ -665,6 +836,33 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "⛓ subject1, subject2", "abstract 不进入 widget", "● Todos (completed/total)",
         "折叠的 update call", "展开后显示", "changed 与 no-change 计数", "不能与内置工具共存", "执行 `pi remove`", "不会主动删除或卸载任何外部 package",
       ], `${file} built-in Todo contract`);
+  hasAll(text, file === "README.md"
+    ? [
+        "## Built-in Loop", "one `/loop` command and one model tool named `loop`", "six actions",
+        "latest user message starts with `/loop`", "For a bare `/loop`", "/loop <interval> <prompt>",
+        "`abstract` is the short human-readable summary", "`prompt` is the complete self-contained instruction",
+        "inclusive range is `10s` through `7d`", "largest exactly divisible unit", "repeating fixed-delay",
+        "Create waits one complete interval", "Repeating pause is a successful no-change", "repeating resume is a successful no-change",
+        "Abstract-only or prompt-only changes preserve", "`delete` removes the loop without a tombstone or history",
+        "Loop state is runtime-only", "Compaction and tree navigation preserve loops, timers, and gated fire records",
+        "Reload, new session, resumed session, fork, and quit clear every loop", "no maximum fire count", "loop-count limit",
+        "backlog limit, or coalescing", "deliverAs: \"steer\"", "triggerTurn: true", "shared notification pause gate",
+        '"nextFireAt"', '"failureCount"', '"lastError"', "● Loops (active/total)", "atomic two-line tree entry",
+        "Active loops sort first by `nextFireAt`", "at most 12 lines", "once-per-second countdown", "Ctrl+O data invariant",
+      ]
+    : [
+        "## 内置 Loop", "一个 `/loop` command 和一个名为 `loop` 的模型工具", "六个 action",
+        "最新 user message 以 `/loop` 开头", "裸 `/loop`", "/loop <interval> <prompt>",
+        "`abstract` 是紧凑 UI 使用的简短人类可读摘要", "`prompt` 是每个未来模型 turn 都会收到的完整、自包含指令",
+        "范围闭区间为 `10s` 到 `7d`", "可精确整除的最大单位", "repeating fixed-delay",
+        "create 会等待一个完整 interval", "重复 pause 是成功的 no-change", "重复 resume 也是成功的 no-change",
+        "只修改 abstract 或 prompt 会保留", "`delete` 直接移除 loop，不保留 tombstone 或 history",
+        "Loop 状态只存在于 runtime memory", "compaction 与 tree navigation 会保留 loops、timers 和 gated fire records",
+        "reload、new session、resumed session、fork 与 quit 会清空全部 loop", "没有最大 fire 次数", "loop 数量限制",
+        "backlog 限制或 coalescing", "deliverAs: \"steer\"", "triggerTurn: true", "共用 notification pause gate",
+        '"nextFireAt"', '"failureCount"', '"lastError"', "● Loops (active/total)", "不可拆分的两行 tree entry",
+        "active loop 先按 `nextFireAt` 排序", "最多 12 行", "每秒刷新一次的 countdown", "Ctrl+O data invariant",
+      ], `${file} built-in Loop contract`);
   hasNone(text, file === "README.md" ? ["At most one item may be `in_progress`"] : ["最多一个 item 可为 `in_progress`"], `${file} removed single-in-progress contract`);
   hasNone(text, [
     "RpcClient", "RPC-client seam", "hidden follow-up", "隐藏 follow-up", "The five agents", "五个 agent",
@@ -689,7 +887,8 @@ hasNone(widgetRenderer, ["run.task", "shortTask"], "abstract-only widget labels"
 hasAll(modelDisplay, ["THINKING_LEVELS", "formatSubagentModel", '"xhigh"', '"max"'], "subagent model display formatter");
 hasAll(transcriptRenderer, [
   "Container", "Box", "Text", "Markdown", "Spacer", "getMarkdownTheme", "RAW_HTML_TAG",
-  "renderSubagentCall", "renderSubagentResult",
+  "renderSubagentCall", "renderSubagentResult", "styledTitle(", '"subagent"',
+  '`· ${action}${expanded ? "" : " (ctrl+o to expand)"}`',
   "renderSubagentNotification", "details?.run", "details?.runs", "details?.request",
   'actionFromContext(context, "create")',
   "immediateAck", "renderRunList", "addFinalOutput", "spacedToolResult", '"Live response"',
@@ -699,7 +898,7 @@ hasAll(transcriptRenderer, [
 ], "subagent transcript renderer");
 hasNone(transcriptRenderer, [
   "gotgenes", "Nico", "preview", "truncated", '"Subagent result"', "renderRunSection", "addActivity",
-  "renderSupervisorCall", "renderSupervisorResult", "subagent_supervisor", "replyTo",
+  "renderSupervisorCall", "renderSupervisorResult", "subagent_supervisor", "replyTo", '"Action"',
 ], "subagent transcript renderer ownership and focused-output contract");
 const listRendererStart = transcriptRenderer.indexOf("function renderRunList");
 const listRendererEnd = transcriptRenderer.indexOf("export function renderSubagentCall", listRendererStart);
@@ -753,6 +952,13 @@ if (packCheck.status === 0) {
     check(files.includes("extensions/oh-my-pi-slim/runner/rpc-child.mjs"), "npm pack must include the runner RPC child helper");
     check(files.includes("extensions/oh-my-pi-slim/subagent-model-display.ts"), "npm pack must include the shared subagent model formatter");
     check(files.includes("extensions/oh-my-pi-slim/subagent-transcript-renderer.ts"), "npm pack must include the subagent transcript renderer");
+    check(files.includes("extensions/oh-my-pi-slim/loop-runtime.ts"), "npm pack must include the Loop runtime");
+    check(files.includes("extensions/oh-my-pi-slim/loop-widget.ts"), "npm pack must include the Loop widget");
+    check(files.includes("extensions/oh-my-pi-slim/loop-transcript-renderer.ts"), "npm pack must include the Loop transcript renderer");
+    check(files.includes("tests/loop.test.mjs"), "npm pack must include the Loop core tests");
+    check(files.includes("tests/loop-ui.test.mjs"), "npm pack must include the Loop visual tests");
+    check(files.includes("tests/loop-load.test.mjs"), "npm pack must include the Loop real-Pi load tests");
+    check(files.includes("tests/fixtures/omps-load-probe.ts"), "npm pack must include the OMPS real-Pi load probe");
     check(files.includes("extensions/todo/index.ts"), "npm pack must include the Todo extension entry");
     check(files.includes("extensions/todo/core.ts"), "npm pack must include the Todo state core");
     check(files.includes("extensions/todo/widget.ts"), "npm pack must include the Todo widget");

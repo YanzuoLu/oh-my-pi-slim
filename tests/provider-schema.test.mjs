@@ -16,6 +16,9 @@ const moduleUrls = {
 };
 const localMap = {
   "./bootstrap.js": new URL("../extensions/oh-my-pi-slim/bootstrap.ts", import.meta.url).href,
+  "./loop-runtime.js": new URL("../extensions/oh-my-pi-slim/loop-runtime.ts", import.meta.url).href,
+  "./loop-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/loop-transcript-renderer.ts", import.meta.url).href,
+  "./loop-widget.js": new URL("../extensions/oh-my-pi-slim/loop-widget.ts", import.meta.url).href,
   "./prompt-context.js": new URL("../extensions/oh-my-pi-slim/prompt-context.ts", import.meta.url).href,
   "./subagent-checkpoint.js": new URL("../extensions/oh-my-pi-slim/subagent-checkpoint.ts", import.meta.url).href,
   "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
@@ -42,6 +45,7 @@ registerHooks({
   },
 });
 
+const { loopParameters } = await import("../extensions/oh-my-pi-slim/loop-runtime.ts");
 const { subagentParameters } = await import("../extensions/oh-my-pi-slim/subagent-runtime.ts");
 const { contactSupervisorParameters } = await import("../extensions/oh-my-pi-slim/child-supervisor.ts");
 const { todoParameters } = await import("../extensions/todo/index.ts");
@@ -63,9 +67,10 @@ test("all production model-tool schemas serialize with provider-portable object 
   const schemas = {
     subagent: providerJson(subagentParameters),
     contact_supervisor: providerJson(contactSupervisorParameters),
+    loop: providerJson(loopParameters),
     todo: providerJson(todoParameters),
   };
-  assert.deepEqual(Object.keys(schemas).sort(), ["contact_supervisor", "subagent", "todo"]);
+  assert.deepEqual(Object.keys(schemas).sort(), ["contact_supervisor", "loop", "subagent", "todo"]);
   for (const [name, schema] of Object.entries(schemas)) assertPortableObjectRoot(name, schema);
 
   const operationBranches = schemas.todo.properties.operations.items.anyOf;

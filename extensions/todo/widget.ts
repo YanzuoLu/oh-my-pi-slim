@@ -1,6 +1,6 @@
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
-import type { TodoReceipt, TodoTask } from "./core.js";
+import type { TodoOperation, TodoReceipt, TodoTask } from "./core.js";
 
 export const TODO_WIDGET_KEY = "oh-my-pi-slim:todos";
 export const MAX_TODO_WIDGET_LINES = 12;
@@ -149,12 +149,20 @@ function receiptStatusTransition(receipt: TodoReceipt, theme: Theme): string | u
   return `${statusGlyph(match[1] as TodoTask["status"], theme)} → ${statusGlyph(match[2] as TodoTask["status"], theme)}`;
 }
 
-export function renderTodoReceipts(receipts: readonly TodoReceipt[], theme: Theme, expanded = false): Component {
+export function renderTodoReceipts(
+  receipts: readonly TodoReceipt[],
+  operations: readonly TodoOperation[],
+  theme: Theme,
+  expanded = false,
+): Component {
+  const append = operations.filter((operation) => operation.op === "append").length;
+  const modify = operations.filter((operation) => operation.op === "modify").length;
+  const clear = operations.filter((operation) => operation.op === "clear").length;
   const noChange = receipts.filter((receipt) => receipt.kind === "no-change").length;
   const changed = receipts.length - noChange;
   const container = new Container();
   container.addChild(new Text(
-    `${theme.fg("success", "✓")} ${theme.fg("toolOutput", `Applied ${receipts.length} operations · ${changed} changed · ${noChange} no-change`)}`,
+    `${theme.fg("success", "✓")} ${theme.fg("toolOutput", `Applied ${append} append · ${modify} modify · ${clear} clear → ${changed} changed · ${noChange} no-change`)}`,
     0,
     0,
   ));

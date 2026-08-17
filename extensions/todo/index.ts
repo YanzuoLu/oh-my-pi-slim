@@ -143,12 +143,13 @@ function spacedTodoResult(component: Component): Container {
   return container;
 }
 
-function operationCounts(operations: readonly TodoOperation[]): { append: number; modify: number; clear: number } {
-  return {
-    append: operations.filter((operation) => operation.op === "append").length,
-    modify: operations.filter((operation) => operation.op === "modify").length,
-    clear: operations.filter((operation) => operation.op === "clear").length,
-  };
+function todoCallTitle(theme: Theme, action: string, expanded: boolean): Text {
+  const detail = `· ${action}${expanded ? "" : " (ctrl+o to expand)"}`;
+  return new Text(
+    `${theme.fg("toolTitle", theme.bold("todo"))} ${theme.fg("muted", detail)}`,
+    0,
+    0,
+  );
 }
 
 function safeFallbackLine(text: string): string {
@@ -223,21 +224,12 @@ export default function todoExtension(pi: ExtensionAPI): void {
       const action = args.action === "update" ? "update" : "list";
       const expanded = context.expanded === true;
       const container = new Container();
-      container.addChild(new Text(theme.fg("toolTitle", theme.bold(`todo · ${action}`)), 0, 0));
-      addCallField(container, theme, "Action", action);
-      if (action === "list") return container;
+      container.addChild(todoCallTitle(theme, action, expanded));
+      if (action === "list" || !expanded) return container;
 
       const operations = Array.isArray(args.operations) ? args.operations as TodoOperation[] : [];
-      const counts = operationCounts(operations);
       container.addChild(new Spacer(1));
       addCallField(container, theme, "Operations", operations.length);
-      if (!expanded) {
-        addCallField(container, theme, "Append", counts.append, 2);
-        addCallField(container, theme, "Modify", counts.modify, 2);
-        addCallField(container, theme, "Clear", counts.clear, 2);
-        return container;
-      }
-
       for (let index = 0; index < operations.length; index += 1) {
         const operation = operations[index];
         const label = operation.op === "append" ? "Append" : operation.op === "modify" ? "Modify" : "Clear";
@@ -267,7 +259,7 @@ export default function todoExtension(pi: ExtensionAPI): void {
       const expanded = options.expanded === true;
       if (isListDetails(result.details)) return spacedTodoResult(renderTodoListResult(result.details.tasks, theme, expanded));
       const snapshot = parseTodoSnapshot(result.details) as TodoSnapshotDetails | undefined;
-      if (snapshot) return spacedTodoResult(renderTodoReceipts(snapshot.receipts, theme, expanded));
+      if (snapshot) return spacedTodoResult(renderTodoReceipts(snapshot.receipts, snapshot.operations, theme, expanded));
       const text = textContent(result);
       if (!text) {
         return spacedTodoResult(new Text(

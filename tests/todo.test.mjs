@@ -480,8 +480,8 @@ test("widget renders exact glyphs, counts, tree lines, overflow, width, and empt
 test("Ctrl+O expands Todo list and update calls without changing call data", () => {
   const harness = createHarness({ mode: "rpc" });
   const listArgs = { action: "list" };
-  assert.equal(renderComponent(harness.tool.renderCall(listArgs, theme, { expanded: false })), "todo · list\nAction: list");
-  assert.equal(renderComponent(harness.tool.renderCall(listArgs, theme, { expanded: true })), "todo · list\nAction: list");
+  assert.equal(renderComponent(harness.tool.renderCall(listArgs, theme, { expanded: false })), "todo · list (ctrl+o to expand)");
+  assert.equal(renderComponent(harness.tool.renderCall(listArgs, theme, { expanded: true })), "todo · list");
 
   const operations = [
     {
@@ -498,18 +498,14 @@ test("Ctrl+O expands Todo list and update calls without changing call data", () 
   const args = { action: "update", operations };
   const before = structuredClone(args);
   const collapsed = renderComponent(harness.tool.renderCall(args, theme, { expanded: false }));
-  assert.match(collapsed, /^todo · update\nAction: update/);
-  assert.match(collapsed, /Operations: 3/);
-  assert.match(collapsed, /\n  Append: 1/);
-  assert.match(collapsed, /\n  Modify: 1/);
-  assert.match(collapsed, /\n  Clear: 1/);
-  assert.doesNotMatch(collapsed, /A B|Append abstract|Dependency|New subject|Added One|Removed One/);
+  assert.equal(collapsed, "todo · update (ctrl+o to expand)");
+  assert.doesNotMatch(collapsed, /Action:|Operations:|Append:|Modify:|Clear:|A B|Append abstract|Dependency|New subject|Added One|Removed One/);
 
   const expandedComponent = harness.tool.renderCall(args, theme, { expanded: true });
   const expandedLines = renderComponentLines(expandedComponent);
   const expanded = renderComponent(expandedComponent);
   for (const value of [
-    "todo · update", "Action: update", "Operations: 3", "1. Append", "Subject: A B",
+    "todo · update", "Operations: 3", "1. Append", "Subject: A B",
     "Append abstract line one", "Append abstract line two", "Blocked by:", "Dependency One", "Dependency Two",
     "2. Modify", "Target: A B", "New subject: C D", "Status: in_progress",
     "Modify abstract line one", "Modify abstract line two", "Add blocked by:", "Added One", "Added Two",
@@ -538,7 +534,7 @@ test("Ctrl+O expands Todo list and update calls without changing call data", () 
     "    - Removed One",
     "3. Clear",
   ]) assert.equal(expandedLines.includes(line), true, `missing exact hierarchy line: ${JSON.stringify(line)}`);
-  assert.doesNotMatch(expanded, /\u0000|\t/);
+  assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)|Action:|\u0000|\t/);
   assert.deepEqual(args, before);
 });
 
@@ -555,12 +551,12 @@ test("Ctrl+O expands Todo update and list results without changing model data", 
   const updateCollapsedComponent = harness.tool.renderResult(updateResult, { expanded: false }, theme, {});
   assertBlankResultSeparator(updateCollapsedComponent);
   const updateCollapsed = renderComponent(updateCollapsedComponent);
-  assert.equal(updateCollapsed, "✓ Applied 3 operations · 2 changed · 1 no-change");
+  assert.equal(updateCollapsed, "✓ Applied 1 append · 2 modify · 0 clear → 2 changed · 1 no-change");
   assert.doesNotMatch(updateCollapsed, /Appended|Modified|No change|Abstract/);
   const updateExpandedComponent = harness.tool.renderResult(updateResult, { expanded: true }, theme, {});
   assertBlankResultSeparator(updateExpandedComponent);
   const updateExpanded = renderComponent(updateExpandedComponent);
-  assert.match(updateExpanded, /^✓ Applied 3 operations · 2 changed · 1 no-change/);
+  assert.match(updateExpanded, /^✓ Applied 1 append · 2 modify · 0 clear → 2 changed · 1 no-change/);
   assert.match(updateExpanded, /1\. ✓ Appended "A"\./);
   assert.match(updateExpanded, /2\. ○ → ✓ Modified "A": status pending to completed\./);
   assert.match(updateExpanded, /3\. ○ No change for "A"\./);
