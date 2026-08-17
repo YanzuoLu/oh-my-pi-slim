@@ -30,9 +30,17 @@ export default function childSupervisor(pi: ExtensionAPI): void {
     description: "Create a supervisor request and move the child run to waiting for an orchestrator reply.",
     promptSnippet: "Create a supervisor request and pause until reply.",
     promptGuidelines: [
-      "A call includes reason; optional message adds request context; optional interview carries structured questions.",
-      "contact_supervisor moves the run to waiting; the main orchestrator replies through subagent using the same run ID and saved child-session context.",
-      "contact_supervisor reason is need_decision, interview_request, or progress_update; every reason, including progress_update, follows the waiting and reply flow.",
+      "Use `contact_supervisor` when the run needs an orchestrator reply.",
+      "For `reason`, select `need_decision`, `interview_request`, or `progress_update`.",
+      "Use `message` for the complete request context.",
+      "Add `interview` when structured questions can help the orchestrator.",
+      "For each interview question, provide `prompt`.",
+      "Add an interview title only when the title helps the orchestrator.",
+      "Add a question ID only when the ID helps the orchestrator.",
+      "Add `options` only when the options help the orchestrator.",
+      "After the call, wait for the orchestrator reply.",
+      "Wait for a reply for every reason, including `progress_update`.",
+      "Continue work after the orchestrator reply.",
     ],
     parameters: Type.Object({
 

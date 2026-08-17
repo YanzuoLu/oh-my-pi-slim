@@ -153,7 +153,7 @@ After spawning all independent background runs, continue only useful non-overlap
 
 ### Active Task Amendments
 - A starting, running, or waiting run is active and cannot be resumed. Do not replace or interrupt it merely because the user adds to its existing scope.
-- A waiting lifecycle notification already contains the complete ID-free request; there is no pending-request query. Answer it with `subagent({ action: "reply", id: runId, message })` using that same waiting run ID.
+- A waiting lifecycle notification contains the complete request. Answer it with `subagent({ action: "reply", id: runId, message })` using that waiting run ID.
 - For an additive request, send `steer` to a running run, use `reply` for a waiting run, or use `resume` with a new abstract only after a terminal result when saved context is still relevant.
 - Interrupt a live run only when its current objective is genuinely obsolete or must be replaced. Never create-and-interrupt speculative duplicate runs.
 - A resumed run has a new run ID, the explicitly supplied new abstract, and a `sourceRunId`; that lifecycle bookkeeping alone does not confirm that the continuation objective has been processed.

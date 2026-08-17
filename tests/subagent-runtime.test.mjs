@@ -88,6 +88,17 @@ const {
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CACHE = join(ROOT, ".cache");
 const NOW_MS = Date.parse("2026-04-17T00:00:00.000Z");
+
+function assertStePromptGuidelines(guidelines) {
+  assert.ok(Array.isArray(guidelines) && guidelines.length > 0);
+  for (const guideline of guidelines) {
+    const words = guideline.match(/[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*/g) ?? [];
+    assert.ok(words.length <= 20, `STE procedural sentence exceeds 20 words: ${guideline}`);
+    assert.doesNotMatch(guideline, /;/, `STE sentence must not use a semicolon: ${guideline}`);
+    assert.doesNotMatch(guideline, /\b(?:is|are|was|were|be|been|being)\s+\w+(?:ed|en)\b/i, `STE sentence must use active voice: ${guideline}`);
+    assert.match(guideline, /^(?:Use|Add|Read|Expect|Do not|Resume|For|After|Wait|Continue)\b/, `STE sentence must use an instruction or a leading condition: ${guideline}`);
+  }
+}
 const transcriptTheme = {
   fg: (_color, text) => text,
   bg: (_color, text) => text,
@@ -594,11 +605,21 @@ test("registered subagent metadata describes the unified lifecycle", () => {
     assert.match(subagent.description, /list returns active run status with abstract/i);
     assert.match(subagent.description, /reply continues a waiting run by ID/i);
     assert.match(subagent.promptSnippet, /resume terminal runs with a new abstract/i);
+    assertStePromptGuidelines(subagent.promptGuidelines);
     const guidelines = subagent.promptGuidelines.join("\n");
-    for (const phrase of ["create requires agent, abstract, and task", "resume requires a completed, failed, or interrupted source run ID", "new non-empty abstract", "starting, running, and waiting", "complete request", "optional interview", "reply accepts a waiting run ID", "terminal results"]) {
-      assert.match(`${subagent.description}\n${guidelines}`, new RegExp(phrase, "i"));
+    for (const phrase of [
+      "Use `subagent create` with `agent`, `abstract`, and `task`.",
+      "Use `abstract` for a short run summary.",
+      "Use `task` for the complete objective.",
+      "Use the complete request and run ID from the waiting notification.",
+      "Use `subagent list` to inspect starting, running, and waiting runs.",
+      "Use `subagent resume` with the source run ID, a new `abstract`, and `message`.",
+      "Use `message` for the complete continuation objective.",
+      "Use `subagent reply` with a live waiting run ID and the complete reply in `message`.",
+    ]) {
+      assert.equal(subagent.promptGuidelines.includes(phrase), true, `missing guideline: ${phrase}`);
     }
-    assert.doesNotMatch(`${subagent.description}\n${subagent.promptSnippet}\n${guidelines}`, /subagent_supervisor|pending query|replyTo|request ID/i);
+    assert.doesNotMatch(`${subagent.description}\n${subagent.promptSnippet}\n${guidelines}`, /subagent_supervisor|pending query|replyTo|request ID|waitingSeq|deliveryKey|legacy/i);
     assert.equal(typeof subagent.renderCall, "function");
     assert.equal(typeof subagent.renderResult, "function");
     assert.equal(typeof harness.messageRenderers.get("oh-my-pi-slim:subagent-notification"), "function");
@@ -683,13 +704,20 @@ test("contact_supervisor prompt metadata describes persistent reply-to-continue 
     sessionStart();
     assert.deepEqual(activeTools, allTools);
     assert.equal(definition.promptSnippet, "Create a supervisor request and pause until reply.");
-    assert.equal(definition.promptGuidelines[0], "A call includes reason; optional message adds request context; optional interview carries structured questions.");
+    assertStePromptGuidelines(definition.promptGuidelines);
     assert.equal(definition.parameters.required.includes("message"), false);
-    const guidelines = definition.promptGuidelines.join("\n");
-    for (const phrase of ["reason", "message", "interview", "waiting", "need_decision", "interview_request", "progress_update", "same run ID", "reply"]) {
-      assert.match(guidelines, new RegExp(phrase, "i"));
+    for (const phrase of [
+      "Use `contact_supervisor` when the run needs an orchestrator reply.",
+      "For `reason`, select `need_decision`, `interview_request`, or `progress_update`.",
+      "Use `message` for the complete request context.",
+      "Add `interview` when structured questions can help the orchestrator.",
+      "After the call, wait for the orchestrator reply.",
+      "Wait for a reply for every reason, including `progress_update`.",
+    ]) {
+      assert.equal(definition.promptGuidelines.includes(phrase), true, `missing guideline: ${phrase}`);
     }
-    assert.doesNotMatch(`${definition.description}\n${definition.promptSnippet}\n${guidelines}`, /request ID|UUID/i);
+    const guidelines = definition.promptGuidelines.join("\n");
+    assert.doesNotMatch(`${definition.description}\n${definition.promptSnippet}\n${guidelines}`, /request ID|UUID|waitingSeq|deliveryKey|legacy|saved child/i);
     const result = await definition.execute("call", { reason: "interview_request", message: "choose", interview: { title: "Choice" } });
     assert.deepEqual(result.details.request, {
       runId: process.env.OMPS_PARENT_RUN_ID,

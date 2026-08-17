@@ -65,8 +65,8 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.9.0", "package version must be 0.9.0");
-check(lock.version === "0.9.0" && lock.packages?.[""]?.version === "0.9.0", "package-lock version must be 0.9.0");
+check(packageJson.version === "0.9.1", "package version must be 0.9.1");
+check(lock.version === "0.9.1" && lock.packages?.[""]?.version === "0.9.1", "package-lock version must be 0.9.1");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify(["./extensions/oh-my-pi-slim/index.ts"]), "package must load only the OMPS extension");
 check(packageJson.pi?.subagents === undefined, "package must not expose a pi.subagents manifest");
 check(packageJson.dependencies === undefined || Object.keys(packageJson.dependencies).length === 0, "package must have no runtime dependency on the removed backend");
@@ -173,8 +173,10 @@ hasAll(runtime, [
   "retryQueuedNotificationsAfterAgentSettled",
   "collectRunDirectoryGarbage",
   "Create specialists with an abstract; resume terminal runs with a new abstract; list, steer, interrupt, or reply by run ID.",
-  "subagent resume requires a completed, failed, or interrupted source run ID",
-  "subagent reply accepts a waiting run ID and message",
+  "Use `abstract` for a short run summary.",
+  "Use `task` for the complete objective.",
+  "Use `subagent resume` with the source run ID, a new `abstract`, and `message`.",
+  "Use `subagent reply` with a live waiting run ID and the complete reply in `message`.",
   "PI_SUBAGENT_CHILD: \"1\"",
   "OMPS_SUBAGENT_CHILD: \"1\"",
 ], "built-in detached runtime");
@@ -239,6 +241,15 @@ hasAll(listAction, ["reconcileAll", "ACTIVE_STATUSES.has(run.status)", "formatRu
 hasNone(listAction, [".formatRun(", "this.activity", ".output", ".error", ".task"], "list status action");
 const publicSchema = runtime.slice(runtime.indexOf("export const subagentParameters"), runtime.indexOf("export class OmpsSubagentRuntime"));
 hasNone(publicSchema, REMOVED_CAPABILITIES, "public tool schemas");
+const subagentGuidelinesStart = runtime.indexOf("promptGuidelines: [", runtime.indexOf('name: "subagent"'));
+const subagentGuidelinesEnd = runtime.indexOf("      ],", subagentGuidelinesStart);
+const subagentGuidelines = runtime.slice(subagentGuidelinesStart, subagentGuidelinesEnd);
+hasAll(subagentGuidelines, [
+  "Use `subagent create`", "short run summary", "complete objective",
+  "waiting notification", "terminal notification", "Use `subagent list`",
+  "Use `subagent steer`", "Use `subagent interrupt`", "Use `subagent resume`", "Use `subagent reply`",
+], "ASD-STE100-style subagent guidelines");
+hasNone(subagentGuidelines, [";", " is delivered", " is returned", "saved child-session", "waitingSeq", "deliveryKey", "legacy", "request ID"], "ASD-STE100-style subagent guidelines");
 check(!runtime.includes(REMOVED_WAIT_TOOL), "runtime must not register or mention the removed wait tool");
 hasAll(core, [
   '"create"', '"list"', '"interrupt"', '"steer"', '"resume"', '"reply"',
@@ -272,7 +283,15 @@ hasAll(child, [
   'pi.sendUserMessage(CHECKPOINT_RESUME_TEXT, { deliverAs: "followUp" })',
   "pendingCheckpoint = undefined",
 ], "child supervisor extension");
-hasNone(child, ["randomUUID", "request ID", "request.id"], "ID-free child supervisor request");
+const contactGuidelinesStart = child.indexOf("promptGuidelines: [", child.indexOf('name: "contact_supervisor"'));
+const contactGuidelinesEnd = child.indexOf("    ],", contactGuidelinesStart);
+const contactGuidelines = child.slice(contactGuidelinesStart, contactGuidelinesEnd);
+hasAll(contactGuidelines, [
+  "Use `contact_supervisor`", "For `reason`, select", "complete request context",
+  "structured questions", "wait for the orchestrator reply", "including `progress_update`",
+], "ASD-STE100-style contact supervisor guidelines");
+hasNone(contactGuidelines, [";", " is delivered", "saved child-session", "waitingSeq", "deliveryKey", "legacy", "request ID", "UUID"], "ASD-STE100-style contact supervisor guidelines");
+hasNone(child, ["randomUUID", "request ID", "request.id"], "child supervisor request schema");
 
 hasAll(runFiles, [
   "getRunPaths", "ensureRunPaths", "listOwnerRunIds", "removeRunFiles", "atomicWriteJson", "safeReadJson", "tailLog", "isPidAlive", "getProcessIdentity",
@@ -385,7 +404,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "顶层 `deny`", "`--exclude-tools", "启动时 `deniedTools`", "image input",
         "复制同一 preset 的 `explorer` 配置", "每次 create 与 resume 前都会重新读取 deny",
         "下一个安全模型边界", "同一条消息",
-      ], `${file} 0.9.0 contract`);
+      ], `${file} 0.9.1 contract`);
   hasNone(text, [
     "RpcClient", "RPC-client seam", "hidden follow-up", "隐藏 follow-up", "The five agents", "五个 agent",
     "all five specialist roles", "五个 specialist", "### Fresh runs", "fresh child calls", "fresh child",
