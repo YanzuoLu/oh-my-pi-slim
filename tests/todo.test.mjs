@@ -122,8 +122,35 @@ function stateFrom(result) {
   return result.details.state.tasks;
 }
 
+function renderComponentLines(component, width = 240) {
+  return component.render(width).map((line) => line.trimEnd());
+}
+
+function renderComponent(component, width = 240) {
+  return renderComponentLines(component, width).join("\n").replace(/^\n+|\n+$/g, "");
+}
+
+function assertBlankResultSeparator(component) {
+  const lines = renderComponentLines(component);
+  assert.equal(lines[0], "");
+  assert.notEqual(lines[1], "");
+}
+
 function schemaObjects(schema) {
   return schema.anyOf ?? schema.oneOf ?? [];
+}
+
+function assertSteSentence(sentence) {
+  const words = sentence.match(/[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*/g) ?? [];
+  assert.ok(words.length <= 20, `STE sentence exceeds 20 words: ${sentence}`);
+  assert.doesNotMatch(sentence, /;/, `STE sentence must not use a semicolon: ${sentence}`);
+  assert.match(sentence, /^(?:Use|For|Complete|Before|Expect|Read|Apply|Select|Provide|Add|Remove)\b/, `STE sentence must start with an instruction or condition: ${sentence}`);
+}
+
+function assertSteBlock(block) {
+  const sentences = block.split(/(?<=[.!?])\s+/).filter(Boolean);
+  assert.ok(sentences.length > 0);
+  for (const sentence of sentences) assertSteSentence(sentence);
 }
 
 test("registers exactly one todo tool with exact actions and strict schemas", () => {
@@ -132,23 +159,61 @@ test("registers exactly one todo tool with exact actions and strict schemas", ()
   assert.equal(harness.tool.executionMode, "sequential");
   assert.deepEqual(harness.commands, []);
   assert.deepEqual(harness.shortcuts, []);
-  const top = schemaObjects(todoParameters);
-  assert.equal(top.length, 2);
-  assert.deepEqual(top.map((schema) => schema.properties.action.const).sort(), ["list", "update"]);
-  for (const schema of top) {
-    assert.equal(schema.additionalProperties, false);
-    assert.deepEqual(Object.keys(schema.properties).sort(), schema.properties.action.const === "list" ? ["action"] : ["action", "operations"]);
-  }
-  const list = top.find((schema) => schema.properties.action.const === "list");
-  const update = top.find((schema) => schema.properties.action.const === "update");
-  assert.deepEqual(list.required, ["action"]);
-  assert.equal(update.properties.operations.minItems, 1);
-  assert.equal(update.properties.operations.maxItems, undefined);
-  const operations = schemaObjects(update.properties.operations.items);
+  assert.equal(todoParameters.type, "object");
+  assert.equal(todoParameters.additionalProperties, false);
+  assert.equal(todoParameters.anyOf, undefined);
+  assert.equal(todoParameters.oneOf, undefined);
+  assert.deepEqual(todoParameters.required, ["action"]);
+  assert.deepEqual(Object.keys(todoParameters.properties).sort(), ["action", "operations"]);
+  assert.deepEqual(schemaObjects(todoParameters.properties.action).map((schema) => schema.const).sort(), ["list", "update"]);
+  assert.equal(todoParameters.properties.action.description, "Select list or update.");
+  assert.equal(todoParameters.properties.operations.minItems, 1);
+  assert.equal(todoParameters.properties.operations.maxItems, undefined);
+  assert.equal(todoParameters.properties.operations.description, "For update, apply at least one operation in order. For list, omit operations.");
+  const operations = schemaObjects(todoParameters.properties.operations.items);
   assert.deepEqual(operations.map((schema) => schema.properties.op.const).sort(), ["append", "clear", "modify"]);
   assert.ok(operations.every((schema) => schema.additionalProperties === false));
-  assert.equal(operations.find((schema) => schema.properties.op.const === "modify").minProperties, 2);
+  const append = operations.find((schema) => schema.properties.op.const === "append");
+  const modify = operations.find((schema) => schema.properties.op.const === "modify");
+  assert.equal(modify.minProperties, undefined);
+  const dependencyDescriptions = [
+    append.properties.blockedBy.description,
+    modify.properties.addBlockedBy.description,
+    modify.properties.removeBlockedBy.description,
+  ];
+  assert.deepEqual(dependencyDescriptions, [
+    "Add initial dependencies by exact subject.",
+    "Add dependencies by exact subject.",
+    "Remove dependencies by exact subject.",
+  ]);
+  assert.equal(new Set(dependencyDescriptions).size, 3);
+  for (const schema of [append.properties.blockedBy, modify.properties.addBlockedBy, modify.properties.removeBlockedBy]) {
+    assert.equal(schema.items.description, "Use an existing exact subject.");
+  }
+  assert.equal(modify.properties.status.description, "Select pending, in_progress, or completed.");
   assert.throws(() => applyTodoUpdate([], [{ op: "append", subject: "A", abstract: "a", unknown: true }]), /unknown fields/);
+});
+
+test("Todo execute enforces action-specific operations boundaries", () => {
+  const harness = createHarness({ mode: "rpc" });
+  harness.emit("session_start", { reason: "startup" });
+  assert.throws(
+    () => harness.tool.execute("call", { action: "list", operations: [{ op: "clear" }] }, undefined, undefined, harness.ctx),
+    /list does not accept operations/,
+  );
+  assert.throws(
+    () => harness.tool.execute("call", { action: "update" }, undefined, undefined, harness.ctx),
+    /update requires at least one operation/,
+  );
+  assert.throws(
+    () => harness.tool.execute("call", { action: "update", operations: [] }, undefined, undefined, harness.ctx),
+    /update requires at least one operation/,
+  );
+  assert.throws(
+    () => harness.tool.execute("call", { action: "unknown" }, undefined, undefined, harness.ctx),
+    /Unknown todo action/,
+  );
+  assert.throws(() => applyTodoUpdate([], [{ op: "modify", target: "missing" }]), /requires at least one mutable field/);
 });
 
 test("append and modify can target an earlier append in one atomic batch", () => {
@@ -376,7 +441,7 @@ test("widget renders exact glyphs, counts, tree lines, overflow, width, and empt
     task("Done", "completed"),
   ];
   const lines = renderTodoLines(tasks, theme, 80);
-  assert.equal(lines[0], "Todos (1/3)");
+  assert.equal(lines[0], "● Todos (1/3)");
   assert.match(lines[1], /○ Pending/);
   assert.match(lines[2], /◐ Active/);
   assert.match(lines[3], /✓ ~Done~/);
@@ -412,43 +477,176 @@ test("widget renders exact glyphs, counts, tree lines, overflow, width, and empt
   assert.equal(harness.widgetCalls.at(-1).content, undefined);
 });
 
-test("renderers sanitize controls, show complete calls and receipts, and never copy snapshots into model content", () => {
+test("Ctrl+O expands Todo list and update calls without changing call data", () => {
   const harness = createHarness({ mode: "rpc" });
-  harness.emit("session_start", { reason: "startup" });
+  const listArgs = { action: "list" };
+  assert.equal(renderComponent(harness.tool.renderCall(listArgs, theme, { expanded: false })), "todo · list\nAction: list");
+  assert.equal(renderComponent(harness.tool.renderCall(listArgs, theme, { expanded: true })), "todo · list\nAction: list");
+
   const operations = [
-    { op: "append", subject: "A\nB", abstract: "summary\u0000" },
-    { op: "modify", target: "A\nB", newSubject: "C\tD", status: "in_progress" },
+    {
+      op: "append", subject: "A\nB", abstract: "Append abstract line one\nAppend abstract line two\u0000",
+      blockedBy: ["Dependency\tOne", "Dependency Two"],
+    },
+    {
+      op: "modify", target: "A\nB", newSubject: "C\tD", status: "in_progress",
+      abstract: "Modify abstract line one\nModify abstract line two",
+      addBlockedBy: ["Added One", "Added Two"], removeBlockedBy: ["Removed One"],
+    },
+    { op: "clear" },
   ];
-  const call = harness.tool.renderCall({ action: "update", operations }, theme, {});
-  const callText = call.render(200).join("\n");
-  assert.doesNotMatch(callText, /\u0000/);
-  assert.match(callText, /append/);
-  assert.match(callText, /modify/);
-  const result = runUpdate(harness.tool, harness.ctx, operations);
-  assert.doesNotMatch(result.content[0].text, /"state"|"tasks"|abstract/);
-  const rendered = harness.tool.renderResult(result, {}, theme, {});
-  const renderedText = rendered.render(200).join("\n");
-  assert.match(renderedText, /Appended/);
-  assert.match(renderedText, /Renamed/);
-  assert.doesNotMatch(renderedText, /oh-my-pi-slim:todo-update|"state"|"tasks"/);
+  const args = { action: "update", operations };
+  const before = structuredClone(args);
+  const collapsed = renderComponent(harness.tool.renderCall(args, theme, { expanded: false }));
+  assert.match(collapsed, /^todo · update\nAction: update/);
+  assert.match(collapsed, /Operations: 3/);
+  assert.match(collapsed, /\n  Append: 1/);
+  assert.match(collapsed, /\n  Modify: 1/);
+  assert.match(collapsed, /\n  Clear: 1/);
+  assert.doesNotMatch(collapsed, /A B|Append abstract|Dependency|New subject|Added One|Removed One/);
+
+  const expandedComponent = harness.tool.renderCall(args, theme, { expanded: true });
+  const expandedLines = renderComponentLines(expandedComponent);
+  const expanded = renderComponent(expandedComponent);
+  for (const value of [
+    "todo · update", "Action: update", "Operations: 3", "1. Append", "Subject: A B",
+    "Append abstract line one", "Append abstract line two", "Blocked by:", "Dependency One", "Dependency Two",
+    "2. Modify", "Target: A B", "New subject: C D", "Status: in_progress",
+    "Modify abstract line one", "Modify abstract line two", "Add blocked by:", "Added One", "Added Two",
+    "Remove blocked by:", "Removed One", "3. Clear",
+  ]) assert.match(expanded, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  for (const line of [
+    "1. Append",
+    "  Subject: A B",
+    "  Abstract:",
+    "    Append abstract line one",
+    "    Append abstract line two",
+    "  Blocked by:",
+    "    - Dependency One",
+    "    - Dependency Two",
+    "2. Modify",
+    "  Target: A B",
+    "  New subject: C D",
+    "  Status: in_progress",
+    "  Abstract:",
+    "    Modify abstract line one",
+    "    Modify abstract line two",
+    "  Add blocked by:",
+    "    - Added One",
+    "    - Added Two",
+    "  Remove blocked by:",
+    "    - Removed One",
+    "3. Clear",
+  ]) assert.equal(expandedLines.includes(line), true, `missing exact hierarchy line: ${JSON.stringify(line)}`);
+  assert.doesNotMatch(expanded, /\u0000|\t/);
+  assert.deepEqual(args, before);
 });
 
-test("Todo model metadata follows the STE sentence rules and includes the frozen guidance", () => {
+test("Ctrl+O expands Todo update and list results without changing model data", () => {
   const harness = createHarness({ mode: "rpc" });
-  const metadata = [harness.tool.description, ...harness.tool.promptGuidelines];
-  for (const block of metadata) {
-    for (const sentence of block.split(/(?<=[.!?])\s+/).filter(Boolean)) {
-      const words = sentence.match(/[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*/g) ?? [];
-      assert.ok(words.length <= 20, `sentence exceeds 20 words: ${sentence}`);
-      assert.doesNotMatch(sentence, /;/);
-    }
+  harness.emit("session_start", { reason: "startup" });
+  const updateResult = runUpdate(harness.tool, harness.ctx, [
+    { op: "append", subject: "A", abstract: "Abstract line one\nAbstract line two" },
+    { op: "modify", target: "A", status: "completed" },
+    { op: "modify", target: "A", status: "completed" },
+  ]);
+  const updateBefore = structuredClone(updateResult);
+  assert.doesNotMatch(updateResult.content[0].text, /"state"|"tasks"|abstract/);
+  const updateCollapsedComponent = harness.tool.renderResult(updateResult, { expanded: false }, theme, {});
+  assertBlankResultSeparator(updateCollapsedComponent);
+  const updateCollapsed = renderComponent(updateCollapsedComponent);
+  assert.equal(updateCollapsed, "✓ Applied 3 operations · 2 changed · 1 no-change");
+  assert.doesNotMatch(updateCollapsed, /Appended|Modified|No change|Abstract/);
+  const updateExpandedComponent = harness.tool.renderResult(updateResult, { expanded: true }, theme, {});
+  assertBlankResultSeparator(updateExpandedComponent);
+  const updateExpanded = renderComponent(updateExpandedComponent);
+  assert.match(updateExpanded, /^✓ Applied 3 operations · 2 changed · 1 no-change/);
+  assert.match(updateExpanded, /1\. ✓ Appended "A"\./);
+  assert.match(updateExpanded, /2\. ○ → ✓ Modified "A": status pending to completed\./);
+  assert.match(updateExpanded, /3\. ○ No change for "A"\./);
+  assert.doesNotMatch(updateExpanded, /oh-my-pi-slim:todo-update|"state"|"tasks"/);
+  assert.deepEqual(updateResult, updateBefore);
+
+  runUpdate(harness.tool, harness.ctx, [{ op: "append", subject: "B", abstract: "Second abstract", blockedBy: ["A"] }]);
+  const listResult = runList(harness.tool, harness.ctx);
+  const listBefore = structuredClone(listResult);
+  const listCollapsedComponent = harness.tool.renderResult(listResult, { expanded: false }, theme, {});
+  assertBlankResultSeparator(listCollapsedComponent);
+  const listCollapsed = renderComponent(listCollapsedComponent);
+  assert.equal(listCollapsed, "● Todos (1/2)");
+  assert.doesNotMatch(listCollapsed, /A|B|Abstract|Status|Blocked/);
+  const listExpandedComponent = harness.tool.renderResult(listResult, { expanded: true }, theme, {});
+  assertBlankResultSeparator(listExpandedComponent);
+  const listExpandedLines = renderComponentLines(listExpandedComponent);
+  const listExpanded = renderComponent(listExpandedComponent);
+  for (const value of [
+    "● Todos (1/2)", "✓ A", "Status: completed", "Abstract:", "Abstract line one", "Abstract line two",
+    "Blocked by:", "○ B", "Status: pending", "Second abstract", "- A",
+  ]) assert.match(listExpanded, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  for (const line of [
+    "✓ A",
+    "  Status: completed",
+    "  Abstract:",
+    "    Abstract line one",
+    "    Abstract line two",
+    "  Blocked by:",
+    "    —",
+    "○ B",
+    "  Status: pending",
+    "  Abstract:",
+    "    Second abstract",
+    "  Blocked by:",
+    "    - A",
+  ]) assert.equal(listExpandedLines.includes(line), true, `missing exact result hierarchy line: ${JSON.stringify(line)}`);
+  assert.deepEqual(listResult, listBefore);
+  assert.equal(listResult.content[0].text, JSON.stringify(listResult.details.tasks));
+});
+
+test("Todo fallback collapses safely and expands full text", () => {
+  const harness = createHarness({ mode: "rpc" });
+  const result = { content: [{ type: "text", text: "Fallback\u0000 first\nFallback second\nFallback third" }] };
+  const before = structuredClone(result);
+  const collapsedComponent = harness.tool.renderResult(result, { expanded: false }, theme, {});
+  assertBlankResultSeparator(collapsedComponent);
+  const collapsed = renderComponent(collapsedComponent);
+  assert.equal(collapsed, "Fallback  first");
+  assert.doesNotMatch(collapsed, /second|third|\u0000/);
+  const expandedComponent = harness.tool.renderResult(result, { expanded: true }, theme, {});
+  assertBlankResultSeparator(expandedComponent);
+  const expanded = renderComponent(expandedComponent);
+  assert.match(expanded, /Fallback  first\nFallback second\nFallback third/);
+  assert.doesNotMatch(expanded, /\u0000/);
+  assert.deepEqual(result, before);
+});
+
+test("Todo model metadata follows the STE sentence rules and includes the complete guidance", () => {
+  const harness = createHarness({ mode: "rpc" });
+  for (const block of [harness.tool.description, harness.tool.promptSnippet, ...harness.tool.promptGuidelines]) {
+    assertSteBlock(block);
   }
-  const text = TODO_PROMPT_GUIDELINES.join("\n");
-  for (const term of [
-    "current session's complete list", "atomically", "unique subject", "short item summary", "exact target subject",
-    "existing subjects", "Complete every dependency", "new task group",
-    "complete old items, clear, and append", "cancel the whole update",
-  ]) assert.match(text, new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  const expectedGuidelines = [
+    "Use `todo list` to read the complete todo list for the current session.",
+    "For `list`, omit `operations`.",
+    "Use `todo update` to apply all operations atomically.",
+    "For `update`, provide at least one operation.",
+    "For `append`, provide a unique `subject` and an `abstract`.",
+    "Use `abstract` for a short item summary.",
+    "For `append`, use `blockedBy` to add initial dependencies by exact subject.",
+    "For `modify`, use the exact current subject in `target`.",
+    "For `modify`, provide at least one change.",
+    "Use `newSubject` to rename the item.",
+    "For `modify`, use `abstract` as the replacement summary.",
+    "For `status`, select `pending`, `in_progress`, or `completed`.",
+    "Use `addBlockedBy` to add dependencies by exact subject.",
+    "Use `removeBlockedBy` to remove dependencies by exact subject.",
+    "Complete every dependency before you start or complete an item.",
+    "Before a new task group, use `clear` only after all old items are complete.",
+    "Use one update to complete old items, apply `clear`, and append a new group.",
+    "Use `clear` at most once in each update.",
+    "Expect any failure to cancel the whole update.",
+  ];
+  assert.deepEqual(TODO_PROMPT_GUIDELINES, expectedGuidelines);
+  assert.doesNotMatch(TODO_PROMPT_GUIDELINES.join("\n"), /\b(?:snapshot|replay|store|version|widget|ID)\b/i);
 });
 
 test("Todo factory never enumerates tools during initialization", () => {
@@ -493,6 +691,9 @@ test("real Pi loads only Todo in an isolated RPC smoke without registering a wid
     assert.ok(notification, result.stdout);
     assert.deepEqual(JSON.parse(notification.message.slice("TODO_LOAD_PROBE ".length)), {
       count: 1,
+      rootType: "object",
+      additionalProperties: false,
+      rootHasUnion: false,
       actions: ["list", "update"],
     });
   } finally {

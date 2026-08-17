@@ -86,38 +86,55 @@ function run(overrides = {}) {
   };
 }
 
-test("call renderers keep complete action-specific input", () => {
-  const created = render(renderSubagentCall({
+test("Ctrl+O expands complete action-specific call input", () => {
+  const createArgs = {
     action: "create",
     agent: "fixer",
     abstract: "Create concise abstract",
     task: "Create task line one\n<results>create task payload</results>\nCreate task line three",
     cwd: "/full/create/cwd",
-  }, theme, { cwd: "/context/cwd" }));
-  assertFull(created, ["Action: create", "Agent: fixer", "Abstract: Create concise abstract", "/full/create/cwd", "Create task line one", "<results>create task payload</results>", "Create task line three"]);
+  };
+  const createCollapsed = render(renderSubagentCall(createArgs, theme, { cwd: "/context/cwd", expanded: false }));
+  assertFull(createCollapsed, ["subagent · create", "Action: create", "Agent: fixer", "Abstract: Create concise abstract"]);
+  assert.doesNotMatch(createCollapsed, /Cwd:|full\/create|Task:|create task payload/);
+  const createExpanded = render(renderSubagentCall(createArgs, theme, { cwd: "/context/cwd", expanded: true }));
+  assertFull(createExpanded, ["Action: create", "Agent: fixer", "Abstract: Create concise abstract", "/full/create/cwd", "Create task line one", "<results>create task payload</results>", "Create task line three"]);
 
-  const resume = render(renderSubagentCall({
+  const resumeArgs = {
     action: "resume", id: "source-run-full", abstract: "Fresh continuation abstract",
     message: "Continuation line one\nContinuation line two",
-  }, theme));
-  assertFull(resume, ["Action: resume", "Source run: source-run-full", "Abstract: Fresh continuation abstract", "Continuation line one", "Continuation line two"]);
+  };
+  const resumeCollapsed = render(renderSubagentCall(resumeArgs, theme, { expanded: false }));
+  assertFull(resumeCollapsed, ["Action: resume", "Source run: source-run-full", "Abstract: Fresh continuation abstract"]);
+  assert.doesNotMatch(resumeCollapsed, /Continuation task|Continuation line/);
+  const resumeExpanded = render(renderSubagentCall(resumeArgs, theme, { expanded: true }));
+  assertFull(resumeExpanded, ["Action: resume", "Source run: source-run-full", "Abstract: Fresh continuation abstract", "Continuation line one", "Continuation line two"]);
 
-  const steer = render(renderSubagentCall({
-    action: "steer", id: "run-steer-full", message: "Guidance line one\n<results>guidance payload</results>",
-  }, theme));
-  assertFull(steer, ["Action: steer", "Run: run-steer-full", "Guidance line one", "<results>guidance payload</results>"]);
+  const steerArgs = { action: "steer", id: "run-steer-full", message: "Guidance line one\n<results>guidance payload</results>" };
+  const steerCollapsed = render(renderSubagentCall(steerArgs, theme, { expanded: false }));
+  assertFull(steerCollapsed, ["Action: steer", "Run: run-steer-full"]);
+  assert.doesNotMatch(steerCollapsed, /Guidance|guidance payload/);
+  const steerExpanded = render(renderSubagentCall(steerArgs, theme, { expanded: true }));
+  assertFull(steerExpanded, ["Action: steer", "Run: run-steer-full", "Guidance line one", "<results>guidance payload</results>"]);
 
-  const interrupt = render(renderSubagentCall({ action: "interrupt", id: "run-interrupt-full" }, theme));
-  assertFull(interrupt, ["Action: interrupt", "Run: run-interrupt-full"]);
+  const replyArgs = { action: "reply", id: "run-full", message: "Reply line one\n<results>reply payload</results>\nReply line three" };
+  const replyCollapsed = render(renderSubagentCall(replyArgs, theme, { expanded: false }));
+  assertFull(replyCollapsed, ["Action: reply", "Run: run-full"]);
+  assert.doesNotMatch(replyCollapsed, /Reply:|reply payload|Reply line/);
+  const replyExpanded = render(renderSubagentCall(replyArgs, theme, { expanded: true }));
+  assertFull(replyExpanded, ["Action: reply", "Run: run-full", "Reply line one", "<results>reply payload</results>", "Reply line three"]);
 
-  const list = render(renderSubagentCall({ action: "list" }, theme));
-  assertFull(list, ["Action: list", "starting, running, and waiting", "abstract", "waiting reason"]);
-  assert.doesNotMatch(list, /output|error|activity|task/i);
+  const interruptCollapsed = render(renderSubagentCall({ action: "interrupt", id: "run-interrupt-full" }, theme, { expanded: false }));
+  const interruptExpanded = render(renderSubagentCall({ action: "interrupt", id: "run-interrupt-full" }, theme, { expanded: true }));
+  assertFull(interruptCollapsed, ["Action: interrupt", "Run: run-interrupt-full"]);
+  assert.equal(interruptExpanded, interruptCollapsed);
 
-  const reply = render(renderSubagentCall({
-    action: "reply", id: "run-full", message: "Reply line one\n<results>reply payload</results>\nReply line three",
-  }, theme));
-  assertFull(reply, ["Action: reply", "Run: run-full", "Reply line one", "<results>reply payload</results>", "Reply line three"]);
+  const listCollapsed = render(renderSubagentCall({ action: "list" }, theme, { expanded: false }));
+  assertFull(listCollapsed, ["subagent · list", "Action: list"]);
+  assert.doesNotMatch(listCollapsed, /starting, running|abstract|waiting reason/);
+  const listExpanded = render(renderSubagentCall({ action: "list" }, theme, { expanded: true }));
+  assertFull(listExpanded, ["Action: list", "starting, running, and waiting", "abstract", "waiting reason"]);
+  assert.doesNotMatch(listExpanded, /output|error|activity|task/i);
 });
 
 test("tool results start with one blank separator line", () => {
@@ -168,38 +185,51 @@ test("subagent immediate results use accurate compact action acknowledgements", 
   ));
   assert.equal(interrupt, "! Interrupt requested · explorer [interrupt-id] · running");
 
-  const alreadyTerminal = render(renderSubagentResult(
-    { details: { run: run({ id: "done-id", agent: "explorer", status: "completed", output: "terminal output", error: undefined }) } },
-    { expanded: false, isPartial: false }, theme, { args: { action: "interrupt", id: "done-id" } },
+  const terminalResult = { details: { run: run({ id: "done-id", agent: "explorer", status: "completed", output: "terminal output", error: undefined }) } };
+  const alreadyTerminalCollapsed = render(renderSubagentResult(
+    terminalResult, { expanded: false, isPartial: false }, theme, { args: { action: "interrupt", id: "done-id" } },
   ));
-  assertFull(alreadyTerminal, ["✓ explorer [done-id] · already completed", "terminal output"]);
-  assert.doesNotMatch(alreadyTerminal, /Interrupt requested/);
+  assert.equal(alreadyTerminalCollapsed, "✓ explorer [done-id] · already completed");
+  assert.doesNotMatch(alreadyTerminalCollapsed, /terminal output|Interrupt requested/);
+  const alreadyTerminalExpanded = render(renderSubagentResult(
+    terminalResult, { expanded: true, isPartial: false }, theme, { args: { action: "interrupt", id: "done-id" } },
+  ));
+  assertFull(alreadyTerminalExpanded, ["✓ explorer [done-id] · already completed", "terminal output"]);
 
-  const failedSteer = render(renderSubagentResult(
-    { details: { run: run({ id: "failed-steer-id", agent: "fixer", status: "failed", output: undefined, error: "stored failure" }) } },
-    { expanded: false, isPartial: false }, theme, { args: { action: "steer", id: "failed-steer-id", message: "too late" } },
+  const failedResult = { details: { run: run({ id: "failed-steer-id", agent: "fixer", status: "failed", output: undefined, error: "stored failure" }) } };
+  const failedSteerCollapsed = render(renderSubagentResult(
+    failedResult, { expanded: false, isPartial: false }, theme, { args: { action: "steer", id: "failed-steer-id", message: "too late" } },
   ));
-  assertFull(failedSteer, ["✗ fixer [failed-steer-id] · already failed", "stored failure"]);
-  assert.doesNotMatch(failedSteer, /Steer requested/);
+  assert.equal(failedSteerCollapsed, "✗ fixer [failed-steer-id] · already failed");
+  assert.doesNotMatch(failedSteerCollapsed, /stored failure|Steer requested/);
+  const failedSteerExpanded = render(renderSubagentResult(
+    failedResult, { expanded: true, isPartial: false }, theme, { args: { action: "steer", id: "failed-steer-id", message: "too late" } },
+  ));
+  assertFull(failedSteerExpanded, ["✗ fixer [failed-steer-id] · already failed", "stored failure"]);
 });
 
-test("failed immediate result adds only complete final output and error", () => {
-  const failed = render(renderSubagentResult(
-    { details: { run: run({
-      id: "failed-id",
-      agent: "fixer",
-      status: "failed",
-      output: "Failure output\n<results>failure output payload</results>",
-      error: "Failure error\n<results>failure error payload</results>",
-    }) } },
-    { expanded: false, isPartial: false }, theme, { args: { action: "create", agent: "fixer", task: "must not repeat" } },
+test("terminal immediate results expand only final output and error", () => {
+  const result = { details: { run: run({
+    id: "failed-id",
+    agent: "fixer",
+    status: "failed",
+    output: "Failure output\n<results>failure output payload</results>",
+    error: "Failure error\n<results>failure error payload</results>",
+  }) } };
+  const collapsed = render(renderSubagentResult(
+    result, { expanded: false, isPartial: false }, theme, { args: { action: "create", agent: "fixer", task: "must not repeat" } },
   ));
-  assertFull(failed, ["✗ Started fixer [failed-id] · failed", "<results>failure output payload</results>", "<results>failure error payload</results>"]);
-  assert.doesNotMatch(failed, /Task:|Cwd:|Model:|Activity|Response:|Live response|Session:/);
+  assert.equal(collapsed, "✗ Started fixer [failed-id] · failed");
+  assert.doesNotMatch(collapsed, /failure output|failure error|Task:/i);
+  const expanded = render(renderSubagentResult(
+    result, { expanded: true, isPartial: false }, theme, { args: { action: "create", agent: "fixer", task: "must not repeat" } },
+  ));
+  assertFull(expanded, ["✗ Started fixer [failed-id] · failed", "<results>failure output payload</results>", "<results>failure error payload</results>"]);
+  assert.doesNotMatch(expanded, /Task:|Cwd:|Model:|Activity|Response:|Live response|Session:/);
 });
 
-test("list renders only compact run status and waiting request identity", () => {
-  const listText = render(renderSubagentResult({
+test("Ctrl+O expands list waiting reasons without exposing excluded run data", () => {
+  const result = {
     details: {
       runs: [
         run({
@@ -248,14 +278,23 @@ test("list renders only compact run status and waiting request identity", () => 
         }),
       ],
     },
-  }, { expanded: false, isPartial: false }, theme, { args: { action: "list" } }));
-
-  assertFull(listText, [
+  };
+  const before = structuredClone(result);
+  const collapsed = render(renderSubagentResult(result, { expanded: false, isPartial: false }, theme, { args: { action: "list" } }));
+  assertFull(collapsed, [
     "Active subagent run status · 2",
     "● explorer [active-id] · running  active abstract",
     "! fixer [waiting-id] · waiting  waiting abstract",
-    "Request · interview_request",
   ]);
+  assert.doesNotMatch(collapsed, /Reason:|interview_request/);
+  const expanded = render(renderSubagentResult(result, { expanded: true, isPartial: false }, theme, { args: { action: "list" } }));
+  assertFull(expanded, [
+    "Active subagent run status · 2",
+    "● explorer [active-id] · running  active abstract",
+    "! fixer [waiting-id] · waiting  waiting abstract",
+    "Reason: interview_request",
+  ]);
+  assert.deepEqual(result, before);
   for (const sentinel of [
     "TASK_SENTINEL", "CWD_SENTINEL", "MODEL_SENTINEL", "TOOLS_SENTINEL", "CREATED_SENTINEL",
     "UPDATED_SENTINEL", "SESSION_SENTINEL", "SOURCE_SENTINEL", "ACTIVITY_SENTINEL", "ACTIVITY_TOOL_SENTINEL",
@@ -264,9 +303,10 @@ test("list renders only compact run status and waiting request identity", () => 
     "WAITING_ACTIVITY_SENTINEL", "WAITING_OUTPUT_SENTINEL", "WAITING_ERROR_SENTINEL", "TERMINAL_ABSTRACT_SENTINEL",
     "REQUEST_MESSAGE_SENTINEL", "INTERVIEW_SENTINEL", "QUESTION_SENTINEL", "REQUEST_CREATED_SENTINEL",
   ]) {
-    assert.doesNotMatch(listText, new RegExp(sentinel));
+    assert.doesNotMatch(collapsed, new RegExp(sentinel));
+    assert.doesNotMatch(expanded, new RegExp(sentinel));
   }
-  assert.doesNotMatch(listText, /Task:|Cwd:|Tools:|Model:|Created:|Updated:|Session:|Source run:|Live response:|Output:|Error:|Message:|Interview:/);
+  assert.doesNotMatch(expanded, /Task:|Cwd:|Tools:|Model:|Created:|Updated:|Session:|Source run:|Live response:|Output:|Error:|Message:|Interview:/);
 });
 
 test("legacy transcript list derives a Unicode-safe abstract or shows an explicit unavailable placeholder", () => {
@@ -356,11 +396,21 @@ test("notification fallback collapses to a safe first line and expands full cont
   assertFull(expanded, ["Fallback first line", "<results>fallback full payload</results>", "Fallback last line"]);
 });
 
-test("missing details and partial results keep full content fallback", () => {
-  const fallback = render(renderSubagentResult({
-    content: [{ type: "text", text: "Fallback line one\n<results>fallback payload</results>\nFallback line three" }],
-  }, { expanded: false, isPartial: true }, theme, { args: { action: "create" } }));
-  assertFull(fallback, ["Fallback line one", "<results>fallback payload</results>", "Fallback line three"]);
+test("tool-result fallback collapses safely and expands full content", () => {
+  const result = {
+    content: [{ type: "text", text: "Fallback\u0000 line one\n<results>fallback payload</results>\nFallback line three" }],
+  };
+  const before = structuredClone(result);
+  const collapsed = render(renderSubagentResult(
+    result, { expanded: false, isPartial: true }, theme, { args: { action: "create" } },
+  ));
+  assert.equal(collapsed, "Fallback  line one");
+  assert.doesNotMatch(collapsed, /fallback payload|Fallback line three|\u0000/);
+  const expanded = render(renderSubagentResult(
+    result, { expanded: true, isPartial: true }, theme, { args: { action: "create" } },
+  ));
+  assertFull(expanded, ["Fallback", "<results>fallback payload</results>", "Fallback line three"]);
+  assert.deepEqual(result, before);
 
   const emptyPartial = render(renderSubagentResult(
     { content: [] }, { expanded: false, isPartial: true }, theme, { args: { action: "create" } },

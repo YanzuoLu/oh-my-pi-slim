@@ -56,6 +56,59 @@ interface PresetConfig {
   observerFallbackPresets: Set<string>;
 }
 
+type ImmediateScheduler = (callback: () => void) => unknown;
+
+export class NotificationDeliveryPauseGate {
+  private generation = 0;
+  private paused = false;
+  private readonly setPaused: (paused: boolean) => void;
+  private readonly defer: ImmediateScheduler;
+
+  constructor(setPaused: (paused: boolean) => void, defer: ImmediateScheduler = (callback) => setImmediate(callback)) {
+    this.setPaused = setPaused;
+    this.defer = defer;
+  }
+
+  pause(): number {
+    this.generation += 1;
+    this.paused = true;
+    this.setPaused(true);
+    return this.generation;
+  }
+
+  currentGeneration(): number {
+    return this.generation;
+  }
+
+  isPaused(): boolean {
+    return this.paused;
+  }
+
+  isCurrent(generation: number): boolean {
+    return this.paused && this.generation === generation;
+  }
+
+  release(generation: number): boolean {
+    if (!this.isCurrent(generation)) return false;
+    this.paused = false;
+    this.setPaused(false);
+    return true;
+  }
+
+  releaseDeferred(generation: number): void {
+    this.defer(() => this.release(generation));
+  }
+
+  invalidate(): void {
+    this.generation += 1;
+  }
+
+  clearWithoutDelivery(): void {
+    this.generation += 1;
+    this.paused = false;
+  }
+}
+
 function envEnabled(): boolean {
   return TRUE_VALUES.test(String(process.env.OMPS_ENABLE ?? "").trim());
 }
@@ -219,6 +272,9 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   if (process.env.PI_SUBAGENT_CHILD === "1" || process.env.OMPS_SUBAGENT_CHILD === "1") return;
 
   const subagents = registerSubagentRuntime(pi);
+  const notificationGate = new NotificationDeliveryPauseGate((paused) => {
+    subagents.setNotificationDeliveryPaused(paused);
+  });
   let active = false;
   let nudgeSentThisUserTurn = false;
   let activePresetName: string | undefined;
@@ -231,6 +287,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     epoch: number;
     sawThresholdCompaction: boolean;
     resumeScheduled: boolean;
+    notificationGeneration: number;
   } | undefined;
   let fileToolSeenThisTurn = false;
 
@@ -255,10 +312,15 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     ctx.ui.setStatus("oh-my-pi-slim", text ? ctx.ui.theme.fg("accent", text) : undefined);
   }
 
-  function invalidateCheckpoint(): void {
+  function invalidateCheckpoint(releaseNotifications = true): void {
     sessionEpoch += 1;
     pendingCheckpoint = undefined;
     fileToolSeenThisTurn = false;
+    if (releaseNotifications && notificationGate.isPaused()) {
+      notificationGate.releaseDeferred(notificationGate.currentGeneration());
+    } else if (!releaseNotifications) {
+      notificationGate.invalidate();
+    }
   }
 
   function scheduleCheckpointResume(checkpoint: NonNullable<typeof pendingCheckpoint>, ctx: ExtensionContext): void {
@@ -268,7 +330,11 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       if (pendingCheckpoint !== checkpoint || checkpoint.epoch !== sessionEpoch || !active) return;
       pendingCheckpoint = undefined;
       report(ctx, "Pi compaction completed; starting a best-effort extension user turn from the checkpoint.", "warning");
-      pi.sendUserMessage(CHECKPOINT_RESUME_TEXT, { deliverAs: "followUp" });
+      try {
+        pi.sendUserMessage(CHECKPOINT_RESUME_TEXT, { deliverAs: "followUp" });
+      } finally {
+        notificationGate.releaseDeferred(checkpoint.notificationGeneration);
+      }
     });
   }
 
@@ -438,7 +504,8 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", async (event, ctx) => {
-    invalidateCheckpoint();
+    invalidateCheckpoint(false);
+    notificationGate.clearWithoutDelivery();
     sessionCtx = ctx;
     active = false;
     activePresetName = undefined;
@@ -468,14 +535,16 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     updateStatus(ctx);
   });
 
-  pi.on("session_before_switch", invalidateCheckpoint);
+  pi.on("session_before_switch", () => invalidateCheckpoint(false));
 
   pi.on("session_before_tree", async () => {
-    invalidateCheckpoint();
+    invalidateCheckpoint(false);
     await subagents.shutdown();
+    notificationGate.clearWithoutDelivery();
   });
 
   pi.on("session_tree", async (_event, ctx) => {
+    notificationGate.clearWithoutDelivery();
     sessionCtx = ctx;
     try {
       await subagents.restore(ctx);
@@ -487,9 +556,32 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("input", (event) => {
+    if (event.source !== "extension" && notificationGate.isPaused()) {
+      const generation = notificationGate.currentGeneration();
+      pendingCheckpoint = undefined;
+      notificationGate.releaseDeferred(generation);
+    }
     if (!active || event.source === "extension") return;
     pendingCheckpoint = undefined;
     nudgeSentThisUserTurn = false;
+  });
+
+  pi.on("session_before_compact", (event) => {
+    const generation = notificationGate.pause();
+    const checkpoint = pendingCheckpoint;
+    if (checkpoint?.epoch === sessionEpoch && event.reason === "threshold" && event.willRetry === false) {
+      checkpoint.notificationGeneration = generation;
+    }
+    const releaseAfterAbort = () => {
+      setImmediate(() => {
+        if (!notificationGate.isCurrent(generation)) return;
+        const currentCheckpoint = pendingCheckpoint;
+        if (currentCheckpoint?.epoch === sessionEpoch && currentCheckpoint.notificationGeneration === generation) return;
+        notificationGate.release(generation);
+      });
+    };
+    if (event.signal.aborted) releaseAfterAbort();
+    else event.signal.addEventListener("abort", releaseAfterAbort, { once: true });
   });
 
   pi.on("before_agent_start", (event, ctx) => {
@@ -531,7 +623,13 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       if (usage && usage.tokens !== null && usage.contextWindow !== null) {
         const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() }).getCompactionSettings();
         if (contextUsageNeedsCheckpoint(usage, settings)) {
-          pendingCheckpoint = { epoch: sessionEpoch, sawThresholdCompaction: false, resumeScheduled: false };
+          const notificationGeneration = notificationGate.pause();
+          pendingCheckpoint = {
+            epoch: sessionEpoch,
+            sawThresholdCompaction: false,
+            resumeScheduled: false,
+            notificationGeneration,
+          };
           report(ctx, "Context reached Pi's native compaction threshold; checkpointing after the completed tool batch.", "info");
           ctx.abort();
           return;
@@ -550,6 +648,10 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   pi.on("session_compact", (event) => {
     if (pendingCheckpoint?.epoch === sessionEpoch && event.reason === "threshold" && event.willRetry === false) {
       pendingCheckpoint.sawThresholdCompaction = true;
+      return;
+    }
+    if (notificationGate.isPaused()) {
+      notificationGate.releaseDeferred(notificationGate.currentGeneration());
     }
   });
 
@@ -562,18 +664,25 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     });
 
     const checkpoint = pendingCheckpoint;
-    if (!checkpoint || checkpoint.epoch !== sessionEpoch) return;
+    if (!checkpoint || checkpoint.epoch !== sessionEpoch) {
+      if (notificationGate.isPaused()) {
+        notificationGate.releaseDeferred(notificationGate.currentGeneration());
+      }
+      return;
+    }
     if (checkpoint.sawThresholdCompaction) {
       scheduleCheckpointResume(checkpoint, ctx);
       return;
     }
     pendingCheckpoint = undefined;
+    notificationGate.releaseDeferred(checkpoint.notificationGeneration);
     report(ctx, "OMPS ended the previous low-level run after a complete tool batch, but Pi did not complete threshold compaction; automatic checkpoint resume was not started.", "warning");
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    invalidateCheckpoint();
+    invalidateCheckpoint(false);
     await subagents.shutdown();
+    notificationGate.clearWithoutDelivery();
     if (active) {
       active = false;
       if (originalModel) await pi.setModel(originalModel);

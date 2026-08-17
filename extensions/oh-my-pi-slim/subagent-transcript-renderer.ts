@@ -6,7 +6,8 @@ export const SUBAGENT_NOTIFICATION_TYPE = "oh-my-pi-slim:subagent-notification";
 
 type UnknownRecord = Record<string, unknown>;
 type ToolResultLike = { content?: unknown; details?: unknown };
-type ToolRenderContextLike = { cwd?: string; args?: unknown };
+type ToolRenderContextLike = { cwd?: string; args?: unknown; expanded?: boolean };
+type ToolResultRenderOptionsLike = { isPartial?: boolean; expanded?: boolean };
 type MessageLike = { content?: unknown; details?: unknown };
 type MessageRenderOptionsLike = { outputPad?: number; expanded?: boolean };
 
@@ -38,6 +39,11 @@ function contentText(content: unknown): string {
     if (block?.type === "text" && typeof block.text === "string") return block.text;
     return displayValue(item, "");
   }).join("\n");
+}
+
+function safeFirstLine(text: string): string {
+  const line = text.split(/\r?\n/).find((value) => value.trim()) ?? "";
+  return line.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim();
 }
 
 function styledTitle(theme: Theme, title: string, detail?: string): Text {
@@ -140,9 +146,12 @@ function addLiveActivity(container: Container, theme: Theme, value: unknown): vo
   }
 }
 
-function fallbackResult(result: ToolResultLike, theme: Theme, partial: boolean): Component {
+function fallbackResult(result: ToolResultLike, theme: Theme, partial: boolean, expanded: boolean): Component {
   const text = contentText(result.content);
-  if (text) return fullBody(text, theme, 0);
+  if (text) {
+    if (expanded) return fullBody(text, theme, 0);
+    return new Text(theme.fg("toolOutput", safeFirstLine(text)), 0, 0);
+  }
   return new Text(theme.fg(partial ? "warning" : "dim", partial ? "Result pending…" : "No result content."), 0, 0);
 }
 
@@ -158,7 +167,7 @@ function actionFromContext(context: ToolRenderContextLike, fallback: string): { 
   return { action: asString(args.action) ?? fallback, args };
 }
 
-function immediateAck(run: UnknownRecord, action: string, args: UnknownRecord, theme: Theme): Container {
+function immediateAck(run: UnknownRecord, action: string, args: UnknownRecord, theme: Theme, expanded: boolean): Container {
   const { agent, id, status } = runIdentity(run);
   const terminal = TERMINAL_STATUSES.has(status);
   let glyph = terminal ? statusGlyph(status, theme) : theme.fg("success", "✓");
@@ -180,11 +189,11 @@ function immediateAck(run: UnknownRecord, action: string, args: UnknownRecord, t
   }
   const container = new Container();
   container.addChild(new Text(`${glyph} ${theme.fg("toolOutput", text)}`, 0, 0));
-  if (terminal) addFinalOutput(container, theme, run);
+  if (terminal && expanded) addFinalOutput(container, theme, run);
   return container;
 }
 
-function renderRunList(runs: unknown[], theme: Theme): Container {
+function renderRunList(runs: unknown[], theme: Theme, expanded: boolean): Container {
   const activeRuns = runs.filter((value) => {
     const status = runIdentity(asRecord(value) ?? {}).status;
     return status === "starting" || status === "running" || status === "waiting";
@@ -200,9 +209,9 @@ function renderRunList(runs: unknown[], theme: Theme): Container {
     const { status } = runIdentity(run);
     container.addChild(new Spacer(1));
     container.addChild(compactRunHeader(run, theme, undefined, true));
-    if (status !== "waiting") return;
+    if (!expanded || status !== "waiting") return;
     const reason = asString(run.reason);
-    if (reason) container.addChild(new Text(theme.fg("dim", `Request · ${reason}`), 0, 0));
+    if (reason) addField(container, theme, "Reason", reason);
   });
   return container;
 }
@@ -210,6 +219,7 @@ function renderRunList(runs: unknown[], theme: Theme): Container {
 export function renderSubagentCall(argsValue: unknown, theme: Theme, context: ToolRenderContextLike = {}): Component {
   const args = asRecord(argsValue) ?? {};
   const action = asString(args.action) ?? "create";
+  const expanded = context.expanded === true;
   const container = new Container();
   container.addChild(styledTitle(theme, "subagent", `· ${action}`));
   addField(container, theme, "Action", action);
@@ -217,52 +227,63 @@ export function renderSubagentCall(argsValue: unknown, theme: Theme, context: To
   if (action === "create") {
     addField(container, theme, "Agent", args.agent, "(pending)");
     addField(container, theme, "Abstract", args.abstract, "(pending)");
-    addField(container, theme, "Cwd", args.cwd ?? context.cwd, "(parent session cwd)");
-    if (typeof args.task === "string") addFullSection(container, theme, "Task", args.task);
-    else addField(container, theme, "Task", undefined, "(pending)");
+    if (expanded) {
+      addField(container, theme, "Cwd", args.cwd ?? context.cwd, "(parent session cwd)");
+      if (typeof args.task === "string") addFullSection(container, theme, "Task", args.task);
+      else addField(container, theme, "Task", undefined, "(pending)");
+    }
   } else if (action === "resume") {
     addField(container, theme, "Source run", args.id, "(pending)");
     addField(container, theme, "Abstract", args.abstract, "(pending)");
-    if (typeof args.message === "string") addFullSection(container, theme, "Continuation task", args.message);
-    else addField(container, theme, "Continuation task", undefined, "(pending)");
+    if (expanded) {
+      if (typeof args.message === "string") addFullSection(container, theme, "Continuation task", args.message);
+      else addField(container, theme, "Continuation task", undefined, "(pending)");
+    }
   } else if (action === "steer") {
     addField(container, theme, "Run", args.id, "(pending)");
-    if (typeof args.message === "string") addFullSection(container, theme, "Guidance", args.message);
-    else addField(container, theme, "Guidance", undefined, "(pending)");
+    if (expanded) {
+      if (typeof args.message === "string") addFullSection(container, theme, "Guidance", args.message);
+      else addField(container, theme, "Guidance", undefined, "(pending)");
+    }
   } else if (action === "interrupt") {
     addField(container, theme, "Run", args.id, "(pending)");
   } else if (action === "reply") {
     addField(container, theme, "Run", args.id, "(pending)");
-    if (typeof args.message === "string") addFullSection(container, theme, "Reply", args.message);
-    else addField(container, theme, "Reply", undefined, "(pending)");
+    if (expanded) {
+      if (typeof args.message === "string") addFullSection(container, theme, "Reply", args.message);
+      else addField(container, theme, "Reply", undefined, "(pending)");
+    }
   } else if (action === "list") {
-    container.addChild(new Spacer(1));
-    container.addChild(new Text(
-      theme.fg("toolOutput", "Returns only starting, running, and waiting run status with abstract and optional waiting reason."),
-      0,
-      0,
-    ));
+    if (expanded) {
+      container.addChild(new Spacer(1));
+      container.addChild(new Text(
+        theme.fg("toolOutput", "Returns only starting, running, and waiting run status with abstract and optional waiting reason."),
+        0,
+        0,
+      ));
+    }
   } else {
     addField(container, theme, "Run", args.id);
-    if (typeof args.message === "string") addFullSection(container, theme, "Message", args.message);
+    if (expanded && typeof args.message === "string") addFullSection(container, theme, "Message", args.message);
   }
   return container;
 }
 
 export function renderSubagentResult(
   result: ToolResultLike,
-  options: { isPartial?: boolean } = {},
+  options: ToolResultRenderOptionsLike = {},
   theme: Theme,
   context: ToolRenderContextLike = {},
 ): Component {
   const details = asRecord(result.details);
   const { action, args } = actionFromContext(context, "create");
+  const expanded = options.expanded === true;
   const runs = details?.runs;
-  if (action === "list" && Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme));
+  if (action === "list" && Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme, expanded));
   const run = asRecord(details?.run);
-  if (run) return spacedToolResult(immediateAck(run, action, args, theme));
-  if (Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme));
-  return spacedToolResult(fallbackResult(result, theme, options.isPartial === true));
+  if (run) return spacedToolResult(immediateAck(run, action, args, theme, expanded));
+  if (Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme, expanded));
+  return spacedToolResult(fallbackResult(result, theme, options.isPartial === true, expanded));
 }
 
 export function renderSubagentNotification(

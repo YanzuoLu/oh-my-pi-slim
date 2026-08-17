@@ -1,5 +1,5 @@
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import type { TodoReceipt, TodoTask } from "./core.js";
 
 export const TODO_WIDGET_KEY = "oh-my-pi-slim:todos";
@@ -9,10 +9,20 @@ export function sanitizeTodoText(value: unknown): string {
   return String(value ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
 }
 
-function taskGlyph(task: TodoTask, theme: Theme): string {
-  if (task.status === "completed") return theme.fg("success", "✓");
-  if (task.status === "in_progress") return theme.fg("accent", "◐");
+export function sanitizeTodoBody(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, " ");
+}
+
+function statusGlyph(status: TodoTask["status"], theme: Theme): string {
+  if (status === "completed") return theme.fg("success", "✓");
+  if (status === "in_progress") return theme.fg("accent", "◐");
   return theme.fg("dim", "○");
+}
+
+function taskGlyph(task: TodoTask, theme: Theme): string {
+  return statusGlyph(task.status, theme);
 }
 
 function taskSubject(task: TodoTask, theme: Theme): string {
@@ -78,7 +88,7 @@ export function renderTodoLines(
   if (tasks.length === 0 || maxLines <= 0) return [];
   const truncate = (line: string): string => truncateToWidth(line, Math.max(1, width), "…");
   const completed = tasks.filter((task) => task.status === "completed").length;
-  const lines = [truncate(theme.fg("accent", theme.bold(`Todos (${completed}/${tasks.length})`)))];
+  const lines = [truncate(theme.fg("accent", theme.bold(`● Todos (${completed}/${tasks.length})`)))];
   const layout = selectTodoWidgetLayout(tasks, maxLines);
   for (let index = 0; index < layout.visible.length; index += 1) {
     const last = index === layout.visible.length - 1 && layout.hidden.length === 0;
@@ -90,17 +100,78 @@ export function renderTodoLines(
   return lines.slice(0, maxLines);
 }
 
-export function renderTodoListResult(tasks: readonly TodoTask[], theme: Theme): Text {
-  if (tasks.length === 0) return new Text(theme.fg("dim", "Todos (0/0)"), 0, 0);
-  return new Text(renderTodoLines(tasks, theme, Number.MAX_SAFE_INTEGER, tasks.length + 1).join("\n"), 0, 0);
+function addResultField(container: Container, theme: Theme, label: string, value: unknown, indent = 0): void {
+  container.addChild(new Text(
+    `${theme.fg("dim", `${label}:`)} ${theme.fg("toolOutput", sanitizeTodoText(value ?? "—"))}`,
+    indent,
+    0,
+  ));
 }
 
-export function renderTodoReceipts(receipts: readonly TodoReceipt[], theme: Theme): Text {
-  const text = receipts.map((receipt) => {
-    const color = receipt.kind === "no-change" ? "dim" : receipt.kind === "clear" ? "warning" : "success";
-    return theme.fg(color, `${receipt.operation}. ${sanitizeTodoText(receipt.text)}`);
-  }).join("\n");
-  return new Text(text, 0, 0);
+function addResultSection(container: Container, theme: Theme, label: string, value: unknown, indent = 0): void {
+  container.addChild(new Text(theme.fg("dim", `${label}:`), indent, 0));
+  container.addChild(new Text(theme.fg("toolOutput", sanitizeTodoBody(value)), indent + 2, 0));
+}
+
+function addResultList(container: Container, theme: Theme, label: string, values: readonly string[], indent = 0): void {
+  container.addChild(new Text(theme.fg("dim", `${label}:`), indent, 0));
+  if (values.length === 0) {
+    container.addChild(new Text(theme.fg("dim", "—"), indent + 2, 0));
+    return;
+  }
+  for (const value of values) {
+    container.addChild(new Text(`${theme.fg("dim", "-")} ${theme.fg("toolOutput", sanitizeTodoText(value))}`, indent + 2, 0));
+  }
+}
+
+export function renderTodoListResult(tasks: readonly TodoTask[], theme: Theme, expanded = false): Component {
+  const completed = tasks.filter((task) => task.status === "completed").length;
+  const container = new Container();
+  container.addChild(new Text(theme.fg("accent", theme.bold(`● Todos (${completed}/${tasks.length})`)), 0, 0));
+  if (!expanded) return container;
+  for (const task of tasks) {
+    container.addChild(new Spacer(1));
+    container.addChild(new Text(
+      `${statusGlyph(task.status, theme)} ${theme.fg("toolTitle", theme.bold(sanitizeTodoText(task.subject)))}`,
+      0,
+      0,
+    ));
+    addResultField(container, theme, "Status", task.status, 2);
+    addResultSection(container, theme, "Abstract", task.abstract, 2);
+    addResultList(container, theme, "Blocked by", task.blockedBy, 2);
+  }
+  return container;
+}
+
+function receiptStatusTransition(receipt: TodoReceipt, theme: Theme): string | undefined {
+  const match = /\bstatus (pending|in_progress|completed) to (pending|in_progress|completed)\b/.exec(receipt.text);
+  if (!match) return;
+  return `${statusGlyph(match[1] as TodoTask["status"], theme)} → ${statusGlyph(match[2] as TodoTask["status"], theme)}`;
+}
+
+export function renderTodoReceipts(receipts: readonly TodoReceipt[], theme: Theme, expanded = false): Component {
+  const noChange = receipts.filter((receipt) => receipt.kind === "no-change").length;
+  const changed = receipts.length - noChange;
+  const container = new Container();
+  container.addChild(new Text(
+    `${theme.fg("success", "✓")} ${theme.fg("toolOutput", `Applied ${receipts.length} operations · ${changed} changed · ${noChange} no-change`)}`,
+    0,
+    0,
+  ));
+  if (!expanded) return container;
+  for (const receipt of receipts) {
+    const transition = receiptStatusTransition(receipt, theme);
+    const glyph = transition ?? (receipt.kind === "no-change"
+      ? theme.fg("dim", "○")
+      : receipt.kind === "clear" ? theme.fg("warning", "✓") : theme.fg("success", "✓"));
+    container.addChild(new Spacer(1));
+    container.addChild(new Text(
+      `${theme.fg("dim", `${receipt.operation}.`)} ${glyph} ${theme.fg("toolOutput", sanitizeTodoText(receipt.text))}`,
+      0,
+      0,
+    ));
+  }
+  return container;
 }
 
 export class TodoWidget {

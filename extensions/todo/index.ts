@@ -1,5 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { Container, Spacer, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   applyTodoUpdate,
@@ -14,6 +14,7 @@ import {
 import {
   renderTodoListResult,
   renderTodoReceipts,
+  sanitizeTodoBody,
   sanitizeTodoText,
   TodoWidget,
 } from "./widget.js";
@@ -22,17 +23,25 @@ const statusSchema = Type.Union([
   Type.Literal("pending"),
   Type.Literal("in_progress"),
   Type.Literal("completed"),
-], { description: "Select the target item status." });
+], { description: "Select pending, in_progress, or completed." });
 
-const subjectListSchema = Type.Array(Type.String({ description: "Use an existing exact subject." }), {
-  description: "List exact dependency subjects.",
+const appendDependencySchema = Type.Array(Type.String({ description: "Use an existing exact subject." }), {
+  description: "Add initial dependencies by exact subject.",
+});
+
+const addDependencySchema = Type.Array(Type.String({ description: "Use an existing exact subject." }), {
+  description: "Add dependencies by exact subject.",
+});
+
+const removeDependencySchema = Type.Array(Type.String({ description: "Use an existing exact subject." }), {
+  description: "Remove dependencies by exact subject.",
 });
 
 export const appendOperationSchema = Type.Object({
   op: Type.Literal("append"),
   subject: Type.String({ description: "Provide a unique item subject." }),
   abstract: Type.String({ description: "Provide a short item summary." }),
-  blockedBy: Type.Optional(subjectListSchema),
+  blockedBy: Type.Optional(appendDependencySchema),
 }, { additionalProperties: false });
 
 export const modifyOperationSchema = Type.Object({
@@ -41,9 +50,9 @@ export const modifyOperationSchema = Type.Object({
   newSubject: Type.Optional(Type.String({ description: "Provide a unique replacement subject." })),
   abstract: Type.Optional(Type.String({ description: "Provide a short replacement summary." })),
   status: Type.Optional(statusSchema),
-  addBlockedBy: Type.Optional(subjectListSchema),
-  removeBlockedBy: Type.Optional(subjectListSchema),
-}, { additionalProperties: false, minProperties: 2 });
+  addBlockedBy: Type.Optional(addDependencySchema),
+  removeBlockedBy: Type.Optional(removeDependencySchema),
+}, { additionalProperties: false });
 
 export const clearOperationSchema = Type.Object({
   op: Type.Literal("clear"),
@@ -55,30 +64,37 @@ export const todoOperationSchema = Type.Union([
   clearOperationSchema,
 ]);
 
-export const todoParameters = Type.Union([
-  Type.Object({
-    action: Type.Literal("list"),
-  }, { additionalProperties: false }),
-  Type.Object({
-    action: Type.Literal("update"),
-    operations: Type.Array(todoOperationSchema, {
-      minItems: 1,
-      description: "Apply these operations in order.",
-    }),
-  }, { additionalProperties: false }),
-]);
+export const todoParameters = Type.Object({
+  action: Type.Union([
+    Type.Literal("list"),
+    Type.Literal("update"),
+  ], { description: "Select list or update." }),
+  operations: Type.Optional(Type.Array(todoOperationSchema, {
+    minItems: 1,
+    description: "For update, apply at least one operation in order. For list, omit operations.",
+  })),
+}, { additionalProperties: false });
 
 export const TODO_PROMPT_SNIPPET = "Read or update the current session todo list";
 export const TODO_PROMPT_GUIDELINES = [
-  "Use `todo list` to read the current session's complete list.",
-  "Use `todo update` to apply every operation atomically.",
-  "For append, provide a unique subject and an abstract.",
-  "Use abstract for a short item summary.",
-  "For modify, use the exact target subject.",
-  "Use only existing subjects in blockedBy.",
+  "Use `todo list` to read the complete todo list for the current session.",
+  "For `list`, omit `operations`.",
+  "Use `todo update` to apply all operations atomically.",
+  "For `update`, provide at least one operation.",
+  "For `append`, provide a unique `subject` and an `abstract`.",
+  "Use `abstract` for a short item summary.",
+  "For `append`, use `blockedBy` to add initial dependencies by exact subject.",
+  "For `modify`, use the exact current subject in `target`.",
+  "For `modify`, provide at least one change.",
+  "Use `newSubject` to rename the item.",
+  "For `modify`, use `abstract` as the replacement summary.",
+  "For `status`, select `pending`, `in_progress`, or `completed`.",
+  "Use `addBlockedBy` to add dependencies by exact subject.",
+  "Use `removeBlockedBy` to remove dependencies by exact subject.",
   "Complete every dependency before you start or complete an item.",
-  "Before a new task group, complete all old items and use clear.",
-  "You can complete old items, clear, and append a new group in one update.",
+  "Before a new task group, use `clear` only after all old items are complete.",
+  "Use one update to complete old items, apply `clear`, and append a new group.",
+  "Use `clear` at most once in each update.",
   "Expect any failure to cancel the whole update.",
 ] as const;
 
@@ -96,21 +112,48 @@ function textContent(result: { content?: Array<{ type?: string; text?: string }>
   return item?.text ?? "";
 }
 
-function renderOperation(operation: TodoOperation, number: number): string {
-  if (operation.op === "clear") return `${number}. clear`;
-  if (operation.op === "append") {
-    const blocked = operation.blockedBy?.length
-      ? ` blockedBy=[${operation.blockedBy.map((value) => JSON.stringify(sanitizeTodoText(value))).join(", ")}]`
-      : "";
-    return `${number}. append subject=${JSON.stringify(sanitizeTodoText(operation.subject))} abstract=${JSON.stringify(sanitizeTodoText(operation.abstract))}${blocked}`;
+function addCallField(container: Container, theme: Theme, label: string, value: unknown, indent = 0): void {
+  container.addChild(new Text(
+    `${theme.fg("dim", `${label}:`)} ${theme.fg("toolOutput", sanitizeTodoText(value ?? "—"))}`,
+    indent,
+    0,
+  ));
+}
+
+function addCallSection(container: Container, theme: Theme, label: string, value: unknown, indent = 0): void {
+  container.addChild(new Text(theme.fg("dim", `${label}:`), indent, 0));
+  container.addChild(new Text(theme.fg("toolOutput", sanitizeTodoBody(value)), indent + 2, 0));
+}
+
+function addCallList(container: Container, theme: Theme, label: string, values: readonly string[], indent = 0): void {
+  container.addChild(new Text(theme.fg("dim", `${label}:`), indent, 0));
+  if (values.length === 0) {
+    container.addChild(new Text(theme.fg("dim", "—"), indent + 2, 0));
+    return;
   }
-  const fields: string[] = [`target=${JSON.stringify(sanitizeTodoText(operation.target))}`];
-  if (operation.newSubject !== undefined) fields.push(`newSubject=${JSON.stringify(sanitizeTodoText(operation.newSubject))}`);
-  if (operation.abstract !== undefined) fields.push(`abstract=${JSON.stringify(sanitizeTodoText(operation.abstract))}`);
-  if (operation.status !== undefined) fields.push(`status=${operation.status}`);
-  if (operation.removeBlockedBy !== undefined) fields.push(`removeBlockedBy=[${operation.removeBlockedBy.map((value) => JSON.stringify(sanitizeTodoText(value))).join(", ")}]`);
-  if (operation.addBlockedBy !== undefined) fields.push(`addBlockedBy=[${operation.addBlockedBy.map((value) => JSON.stringify(sanitizeTodoText(value))).join(", ")}]`);
-  return `${number}. modify ${fields.join(" ")}`;
+  for (const value of values) {
+    container.addChild(new Text(`${theme.fg("dim", "-")} ${theme.fg("toolOutput", sanitizeTodoText(value))}`, indent + 2, 0));
+  }
+}
+
+function spacedTodoResult(component: Component): Container {
+  const container = new Container();
+  container.addChild(new Spacer(1));
+  container.addChild(component);
+  return container;
+}
+
+function operationCounts(operations: readonly TodoOperation[]): { append: number; modify: number; clear: number } {
+  return {
+    append: operations.filter((operation) => operation.op === "append").length,
+    modify: operations.filter((operation) => operation.op === "modify").length,
+    clear: operations.filter((operation) => operation.op === "clear").length,
+  };
+}
+
+function safeFallbackLine(text: string): string {
+  const line = text.split(/\r?\n/).find((value) => value.trim()) ?? "";
+  return sanitizeTodoText(line).trim();
 }
 
 function isListDetails(value: unknown): value is TodoListDetails {
@@ -149,12 +192,17 @@ export default function todoExtension(pi: ExtensionAPI): void {
     execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const id = sessionId(ctx);
       if (params.action === "list") {
+        if (params.operations !== undefined) throw new Error("todo list does not accept operations.");
         const tasks = readState(id);
         const details: TodoListDetails = { type: "oh-my-pi-slim:todo-list", tasks: cloneTodoTasks(tasks) };
         return {
           content: [{ type: "text", text: JSON.stringify(tasks) }],
           details,
         };
+      }
+      if (params.action !== "update") throw new Error(`Unknown todo action: ${String(params.action)}.`);
+      if (!Array.isArray(params.operations) || params.operations.length === 0) {
+        throw new Error("todo update requires at least one operation.");
       }
 
       const current = readState(id);
@@ -171,21 +219,64 @@ export default function todoExtension(pi: ExtensionAPI): void {
       };
     },
 
-    renderCall(args, theme) {
-      if (args.action === "list") return new Text(theme.fg("toolTitle", theme.bold("todo list")), 0, 0);
+    renderCall(args, theme, context) {
+      const action = args.action === "update" ? "update" : "list";
+      const expanded = context.expanded === true;
+      const container = new Container();
+      container.addChild(new Text(theme.fg("toolTitle", theme.bold(`todo · ${action}`)), 0, 0));
+      addCallField(container, theme, "Action", action);
+      if (action === "list") return container;
+
       const operations = Array.isArray(args.operations) ? args.operations as TodoOperation[] : [];
-      const lines = [theme.fg("toolTitle", theme.bold("todo update"))];
-      for (let index = 0; index < operations.length; index += 1) {
-        lines.push(theme.fg("muted", renderOperation(operations[index], index + 1)));
+      const counts = operationCounts(operations);
+      container.addChild(new Spacer(1));
+      addCallField(container, theme, "Operations", operations.length);
+      if (!expanded) {
+        addCallField(container, theme, "Append", counts.append, 2);
+        addCallField(container, theme, "Modify", counts.modify, 2);
+        addCallField(container, theme, "Clear", counts.clear, 2);
+        return container;
       }
-      return new Text(lines.join("\n"), 0, 0);
+
+      for (let index = 0; index < operations.length; index += 1) {
+        const operation = operations[index];
+        const label = operation.op === "append" ? "Append" : operation.op === "modify" ? "Modify" : "Clear";
+        container.addChild(new Spacer(1));
+        container.addChild(new Text(
+          `${theme.fg("dim", `${index + 1}.`)} ${theme.fg("toolTitle", theme.bold(label))}`,
+          0,
+          0,
+        ));
+        if (operation.op === "append") {
+          addCallField(container, theme, "Subject", operation.subject, 2);
+          addCallSection(container, theme, "Abstract", operation.abstract, 2);
+          addCallList(container, theme, "Blocked by", operation.blockedBy ?? [], 2);
+        } else if (operation.op === "modify") {
+          addCallField(container, theme, "Target", operation.target, 2);
+          if (operation.newSubject !== undefined) addCallField(container, theme, "New subject", operation.newSubject, 2);
+          if (operation.status !== undefined) addCallField(container, theme, "Status", operation.status, 2);
+          if (operation.abstract !== undefined) addCallSection(container, theme, "Abstract", operation.abstract, 2);
+          if (operation.addBlockedBy !== undefined) addCallList(container, theme, "Add blocked by", operation.addBlockedBy, 2);
+          if (operation.removeBlockedBy !== undefined) addCallList(container, theme, "Remove blocked by", operation.removeBlockedBy, 2);
+        }
+      }
+      return container;
     },
 
-    renderResult(result, _options, theme) {
-      if (isListDetails(result.details)) return renderTodoListResult(result.details.tasks, theme);
+    renderResult(result, options, theme) {
+      const expanded = options.expanded === true;
+      if (isListDetails(result.details)) return spacedTodoResult(renderTodoListResult(result.details.tasks, theme, expanded));
       const snapshot = parseTodoSnapshot(result.details) as TodoSnapshotDetails | undefined;
-      if (snapshot) return renderTodoReceipts(snapshot.receipts, theme);
-      return new Text(sanitizeTodoText(textContent(result)), 0, 0);
+      if (snapshot) return spacedTodoResult(renderTodoReceipts(snapshot.receipts, theme, expanded));
+      const text = textContent(result);
+      if (!text) {
+        return spacedTodoResult(new Text(
+          theme.fg(options.isPartial ? "warning" : "dim", options.isPartial ? "Result pending…" : "No result content."),
+          0,
+          0,
+        ));
+      }
+      return spacedTodoResult(new Text(theme.fg("toolOutput", expanded ? sanitizeTodoBody(text) : safeFallbackLine(text)), 0, 0));
     },
   });
 

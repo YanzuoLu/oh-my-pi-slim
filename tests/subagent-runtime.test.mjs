@@ -67,6 +67,7 @@ const {
   subagentParameters,
 } = await import("../extensions/oh-my-pi-slim/subagent-runtime.ts");
 const {
+  NotificationDeliveryPauseGate,
   parseConfigFile,
   parseDenyConfig,
   supportsImageInput,
@@ -89,14 +90,25 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CACHE = join(ROOT, ".cache");
 const NOW_MS = Date.parse("2026-04-17T00:00:00.000Z");
 
+function assertSteSentence(sentence) {
+  const words = sentence.match(/[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*/g) ?? [];
+  assert.ok(words.length <= 20, `STE procedural sentence exceeds 20 words: ${sentence}`);
+  assert.doesNotMatch(sentence, /;/, `STE sentence must not use a semicolon: ${sentence}`);
+  assert.doesNotMatch(sentence, /\b(?:is|are|was|were|be|been|being)\s+\w+(?:ed|en)\b/i, `STE sentence must use active voice: ${sentence}`);
+  assert.match(sentence, /^(?:Use|Add|Read|Expect|Do not|Resume|For|In|After|Wait|Continue|Create|Reply|Select)\b/, `STE sentence must use an instruction or a leading condition: ${sentence}`);
+}
+
+function assertSteBlock(block) {
+  const sentences = block.split(/(?<=[.!?])\s+/).filter(Boolean);
+  assert.ok(sentences.length > 0);
+  for (const sentence of sentences) assertSteSentence(sentence);
+}
+
 function assertStePromptGuidelines(guidelines) {
   assert.ok(Array.isArray(guidelines) && guidelines.length > 0);
   for (const guideline of guidelines) {
-    const words = guideline.match(/[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*/g) ?? [];
-    assert.ok(words.length <= 20, `STE procedural sentence exceeds 20 words: ${guideline}`);
-    assert.doesNotMatch(guideline, /;/, `STE sentence must not use a semicolon: ${guideline}`);
-    assert.doesNotMatch(guideline, /\b(?:is|are|was|were|be|been|being)\s+\w+(?:ed|en)\b/i, `STE sentence must use active voice: ${guideline}`);
-    assert.match(guideline, /^(?:Use|Add|Read|Expect|Do not|Resume|For|After|Wait|Continue)\b/, `STE sentence must use an instruction or a leading condition: ${guideline}`);
+    assert.equal(guideline.split(/(?<=[.!?])\s+/).filter(Boolean).length, 1, `STE guideline must contain one sentence: ${guideline}`);
+    assertSteSentence(guideline);
   }
 }
 const transcriptTheme = {
@@ -370,6 +382,16 @@ test("public schema and package-agent boundaries remain minimal", async () => {
   assert.deepEqual(subagentParameters.properties.action.anyOf.map(({ const: action }) => action), SUBAGENT_ACTIONS);
   assert.equal(subagentParameters.required.includes("action"), true);
   assert.equal("maxLength" in subagentParameters.properties.abstract, false);
+  assert.deepEqual(Object.fromEntries(Object.entries(subagentParameters.properties).map(([field, schema]) => [field, schema.description])), {
+    agent: "For create, select the specialist role.",
+    abstract: "For create or resume, provide a short run summary.",
+    task: "For create, provide the complete objective.",
+    cwd: "For create, provide a different working directory.",
+    action: "Select the run action.",
+    id: "For steer, interrupt, resume, or reply, provide the run ID.",
+    message: "For steer, provide guidance. For resume, provide the continuation objective. For reply, provide the waiting-request answer.",
+  });
+  for (const schema of Object.values(subagentParameters.properties)) assertSteBlock(schema.description);
   assert.deepEqual(validateCreateInput({ agent: "explorer", abstract: " map auth ", task: " map " }), {
     agent: "explorer", abstract: "map auth", task: "map", cwd: undefined,
   });
@@ -377,6 +399,85 @@ test("public schema and package-agent boundaries remain minimal", async () => {
   assert.throws(() => validateCreateInput({ agent: "custom", abstract: "x", task: "x" }), /Unknown agent/);
   assert.deepEqual([...discoverPackageAgents().keys()], ["designer", "explorer", "fixer", "librarian", "observer", "oracle"]);
   assert.equal(shouldApproveChildProject(true, ROOT, join(ROOT, "extensions")), true);
+});
+
+test("notification compaction gate defers manual compact release behind a queued user turn", () => {
+  const deferred = [];
+  const pauseTransitions = [];
+  const notifications = [];
+  let pending = false;
+  let userTurnActive = false;
+  const gate = new NotificationDeliveryPauseGate((paused) => {
+    pauseTransitions.push(paused);
+    if (!paused && pending) {
+      pending = false;
+      notifications.push({
+        userTurnActive,
+        options: { deliverAs: "steer", triggerTurn: true },
+      });
+    }
+  }, (callback) => deferred.push(callback));
+
+  const generation = gate.pause();
+  pending = true;
+  gate.releaseDeferred(generation);
+  assert.deepEqual(notifications, [], "session_compact handlers must not synchronously send notifications");
+  assert.equal(deferred.length, 1);
+  userTurnActive = true;
+  deferred.shift()();
+  assert.deepEqual(notifications, [{
+    userTurnActive: true,
+    options: { deliverAs: "steer", triggerTurn: true },
+  }]);
+  assert.deepEqual(pauseTransitions, [true, false]);
+});
+
+test("notification compaction gate covers abort, next-input, checkpoint, failure, stale generation, and shutdown sequences", () => {
+  const deferred = [];
+  const transitions = [];
+  const gate = new NotificationDeliveryPauseGate((paused) => transitions.push(paused), (callback) => deferred.push(callback));
+  const flushOne = () => deferred.shift()?.();
+
+  const abortGeneration = gate.pause();
+  gate.releaseDeferred(abortGeneration);
+  assert.equal(gate.isPaused(), true);
+  flushOne();
+  assert.equal(gate.isPaused(), false, "manual abort releases only after the deferred callback");
+
+  const errorGeneration = gate.pause();
+  gate.releaseDeferred(errorGeneration);
+  assert.equal(gate.isPaused(), true, "manual error remains held until the next input schedules release");
+  flushOne();
+  assert.equal(gate.isPaused(), false);
+
+  const checkpointGeneration = gate.pause();
+  assert.equal(gate.isPaused(), true, "checkpoint session_compact keeps delivery paused");
+  const continuation = [];
+  continuation.push(CHECKPOINT_RESUME_TEXT);
+  gate.releaseDeferred(checkpointGeneration);
+  assert.equal(gate.isPaused(), true, "checkpoint resume starts before notification release");
+  flushOne();
+  assert.equal(gate.isPaused(), false);
+  assert.deepEqual(continuation, [CHECKPOINT_RESUME_TEXT]);
+
+  const failureGeneration = gate.pause();
+  gate.releaseDeferred(failureGeneration);
+  flushOne();
+  assert.equal(gate.isPaused(), false, "agent_settled failure release clears the gate");
+
+  const staleGeneration = gate.pause();
+  gate.releaseDeferred(staleGeneration);
+  const currentGeneration = gate.pause();
+  flushOne();
+  assert.equal(gate.isCurrent(currentGeneration), true, "an older deferred callback cannot unlock a newer compaction");
+  gate.releaseDeferred(currentGeneration);
+  flushOne();
+  assert.equal(gate.isPaused(), false);
+
+  gate.pause();
+  gate.clearWithoutDelivery();
+  assert.equal(gate.isPaused(), false, "shutdown clears pause state without delivering");
+  assert.deepEqual(transitions.filter((paused) => paused === false).length, 5);
 });
 
 test("shared checkpoint helpers validate complete tool batches and strict threshold boundaries", () => {
@@ -600,26 +701,47 @@ test("registered subagent metadata describes the unified lifecycle", () => {
   const harness = createHarness();
   try {
     const subagent = harness.tools.get("subagent");
-    assert.match(subagent.description, /required agent, abstract, and task/i);
-    assert.match(subagent.description, /resume requires a terminal source run ID, a new abstract, and a continuation message/i);
-    assert.match(subagent.description, /list returns active run status with abstract/i);
-    assert.match(subagent.description, /reply continues a waiting run by ID/i);
-    assert.match(subagent.promptSnippet, /resume terminal runs with a new abstract/i);
+    assert.equal(subagent.description, "Create specialist runs and manage them by run ID. Resume terminal runs with a new summary and objective. Reply to waiting runs.");
+    assert.equal(subagent.promptSnippet, "Create or manage specialist runs by ID.");
+    assertSteBlock(subagent.description);
+    assertSteBlock(subagent.promptSnippet);
     assertStePromptGuidelines(subagent.promptGuidelines);
+    const expectedGuidelines = [
+      "Use only `action`, `agent`, `abstract`, `task`, and optional `cwd` for `create`.",
+      "For `create`, select `agent` as the specialist role.",
+      "For `create`, use `abstract` for a short run summary.",
+      "For `create`, use `task` for the complete objective.",
+      "For `create`, add `cwd` only for a different working directory.",
+      "Expect `create` to return a new run ID.",
+      "Use the returned run ID for later actions.",
+      "Read each waiting notification before you reply.",
+      "Read each waiting notification for the complete request and run ID.",
+      "Read each terminal notification for the final output or error.",
+      "Use only `action` for `list`.",
+      "Use `list` to inspect active starting, running, and waiting runs.",
+      "Expect `list` to return ID, agent, abstract, status, live, optional sourceRunId, and optional reason.",
+      "Do not use `list` to get requests, activity, or terminal results.",
+      "Use only `action`, `id`, and `message` for `steer`.",
+      "For `steer`, use a running run ID in `id`.",
+      "For `steer`, use `message` for complete guidance.",
+      "Use only `action` and `id` for `interrupt`.",
+      "For `interrupt`, use a starting, running, or waiting run ID in `id`.",
+      "After `interrupt`, read the terminal notification for the actual status.",
+      "Use only `action`, `id`, `abstract`, and `message` for `resume`.",
+      "Resume only a terminal source run that has saved context.",
+      "For `resume`, use the terminal source run ID in `id`.",
+      "For `resume`, use `abstract` for a new short run summary.",
+      "For `resume`, use `message` for the complete continuation objective.",
+      "Expect `resume` to return a new run ID.",
+      "Use the new run ID for later actions.",
+      "Use only `action`, `id`, and `message` for `reply`.",
+      "For `reply`, use a live waiting run ID in `id`.",
+      "In `message`, answer the complete waiting request.",
+      "Expect `reply` to continue the same run.",
+    ];
+    assert.deepEqual(subagent.promptGuidelines, expectedGuidelines);
     const guidelines = subagent.promptGuidelines.join("\n");
-    for (const phrase of [
-      "Use `subagent create` with `agent`, `abstract`, and `task`.",
-      "Use `abstract` for a short run summary.",
-      "Use `task` for the complete objective.",
-      "Use the complete request and run ID from the waiting notification.",
-      "Use `subagent list` to inspect starting, running, and waiting runs.",
-      "Use `subagent resume` with the source run ID, a new `abstract`, and `message`.",
-      "Use `message` for the complete continuation objective.",
-      "Use `subagent reply` with a live waiting run ID and the complete reply in `message`.",
-    ]) {
-      assert.equal(subagent.promptGuidelines.includes(phrase), true, `missing guideline: ${phrase}`);
-    }
-    assert.doesNotMatch(`${subagent.description}\n${subagent.promptSnippet}\n${guidelines}`, /subagent_supervisor|pending query|replyTo|request ID|waitingSeq|deliveryKey|legacy/i);
+    assert.doesNotMatch(`${subagent.description}\n${subagent.promptSnippet}\n${guidelines}`, /subagent_supervisor|pending query|replyTo|request ID|waitingSeq|deliveryKey|legacy|saved child-session/i);
     assert.equal(typeof subagent.renderCall, "function");
     assert.equal(typeof subagent.renderResult, "function");
     assert.equal(typeof harness.messageRenderers.get("oh-my-pi-slim:subagent-notification"), "function");
@@ -705,6 +827,10 @@ test("contact_supervisor prompt metadata describes persistent reply-to-continue 
     assert.deepEqual(activeTools, allTools);
     assert.equal(definition.promptSnippet, "Create a supervisor request and pause until reply.");
     assertStePromptGuidelines(definition.promptGuidelines);
+    assert.equal(definition.parameters.type, "object");
+    assert.equal(definition.parameters.additionalProperties, false);
+    assert.equal(definition.parameters.anyOf, undefined);
+    assert.equal(definition.parameters.oneOf, undefined);
     assert.equal(definition.parameters.required.includes("message"), false);
     for (const phrase of [
       "Use `contact_supervisor` when the run needs an orchestrator reply.",
@@ -1366,6 +1492,78 @@ test("interrupt accepts a waiting non-terminal run", async () => {
     const result = await harness.tools.get("subagent").execute("interrupt", { action: "interrupt", id });
     assert.match(result.content[0].text, /Interrupt requested/);
     assert.equal(controls(harness, id).at(-1).type, "interrupt");
+  } finally { harness.cleanup(); }
+});
+
+test("paused runtime holds waiting and terminal notifications, then unpauses each pending delivery once", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const waiting = persistedRun({
+      id: "waiting-run",
+      status: "waiting",
+      waitingSeq: 1,
+      request: { runId: "waiting-run", reason: "need_decision", message: "choose", createdAt: new Date(NOW_MS).toISOString() },
+      notificationPending: "waiting",
+    });
+    const terminal = persistedRun({
+      id: "terminal-run",
+      status: "completed",
+      output: "done",
+      notificationPending: "completed",
+    });
+    harness.runtime.setNotificationDeliveryPaused(true);
+    harness.runtime.registry.restore([waiting, terminal]);
+    harness.runtime.deliverPendingNotification(waiting.id);
+    harness.runtime.deliverPendingNotification(terminal.id);
+    assert.equal(harness.notifications.length, 0);
+    assert.equal(harness.runtime.queuedNotifications.size, 0, "paused delivery must not enter the sent-message queue");
+    assert.equal(harness.runtime.registry.get(waiting.id).notificationPending, "waiting");
+    assert.equal(harness.runtime.registry.get(terminal.id).notificationPending, "completed");
+
+    harness.runtime.setNotificationDeliveryPaused(false);
+    assert.equal(harness.notifications.length, 2);
+    assert.deepEqual(harness.notifications.map(({ message }) => message.details.status).sort(), ["completed", "waiting"]);
+    harness.runtime.setNotificationDeliveryPaused(false);
+    assert.equal(harness.notifications.length, 2, "repeated unpause does not send queued deliveries twice");
+  } finally { harness.cleanup(); }
+});
+
+test("paused runtime preserves queued acknowledgements and releases only new pending notifications", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const first = persistedRun({ id: "first", status: "completed", output: "first", notificationPending: "completed" });
+    harness.runtime.registry.restore([first]);
+    harness.runtime.deliverPendingNotification(first.id);
+    const firstMessage = harness.notifications[0].message;
+    harness.runtime.setNotificationDeliveryPaused(true);
+    assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(firstMessage)), true);
+    assert.equal(harness.runtime.registry.get(first.id).notificationPending, undefined);
+
+    const second = persistedRun({ id: "second", status: "failed", error: "second", notificationPending: "failed" });
+    harness.runtime.registry.restore([harness.runtime.registry.require(first.id), second]);
+    harness.runtime.deliverPendingNotification(second.id);
+    assert.equal(harness.notifications.length, 1);
+    assert.equal(harness.runtime.queuedNotifications.size, 0);
+    harness.runtime.setNotificationDeliveryPaused(false);
+    assert.equal(harness.notifications.length, 2);
+    assert.equal(harness.notifications[1].message.details.runId, second.id);
+  } finally { harness.cleanup(); }
+});
+
+test("restore and shutdown reset notification pause state safely", async () => {
+  const pending = persistedRun({ id: "restore-pending", status: "completed", output: "restored", notificationPending: "completed" });
+  const harness = createHarness({ branch: [branchEntry(runJournalEntry(pending))] });
+  try {
+    harness.runtime.setNotificationDeliveryPaused(true);
+    await harness.restore();
+    assert.equal(harness.notifications.length, 1, "restore clears a stale gate and replays the persisted pending notification");
+    harness.runtime.setNotificationDeliveryPaused(true);
+    await harness.runtime.shutdown();
+    assert.equal(harness.runtime.notificationDeliveryPaused, false);
+    assert.equal(harness.runtime.queuedNotifications.size, 0);
+    assert.equal(harness.notifications.length, 1, "shutdown clears the gate without another send");
   } finally { harness.cleanup(); }
 });
 

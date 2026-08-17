@@ -279,15 +279,17 @@ function stateActivity(state: DetachedRunState): DetachedRunActivity {
 }
 
 export const subagentParameters = Type.Object({
-  agent: Type.Optional(Type.String({ description: "Specialist role for create" })),
-  abstract: Type.Optional(Type.String({ description: "Concise run summary for create or resume; required and non-empty after trimming" })),
-  task: Type.Optional(Type.String({ description: "Objective for create" })),
-  cwd: Type.Optional(Type.String({ description: "Working directory for create" })),
+  agent: Type.Optional(Type.String({ description: "For create, select the specialist role." })),
+  abstract: Type.Optional(Type.String({ description: "For create or resume, provide a short run summary." })),
+  task: Type.Optional(Type.String({ description: "For create, provide the complete objective." })),
+  cwd: Type.Optional(Type.String({ description: "For create, provide a different working directory." })),
   action: Type.Union(SUBAGENT_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Create, list, steer, interrupt, resume, or reply to a run",
+    description: "Select the run action.",
   }),
-  id: Type.Optional(Type.String({ description: "Run ID for steer, interrupt, resume, or reply; resume uses the terminal source run ID" })),
-  message: Type.Optional(Type.String({ description: "Guidance for steer, continuation objective for resume, or waiting-run reply" })),
+  id: Type.Optional(Type.String({ description: "For steer, interrupt, resume, or reply, provide the run ID." })),
+  message: Type.Optional(Type.String({
+    description: "For steer, provide guidance. For resume, provide the continuation objective. For reply, provide the waiting-request answer.",
+  })),
 }, { additionalProperties: false });
 
 if (JSON.stringify(publicSchemaKeys(subagentParameters)) !== JSON.stringify([...SUBAGENT_PUBLIC_FIELDS].sort())) {
@@ -318,6 +320,7 @@ export class OmpsSubagentRuntime {
   private readonly repliedSeqs = new Map<string, RepliedSeq>();
   private readonly queuedNotifications = new Set<string>();
   private readonly reconciling = new Set<string>();
+  private notificationDeliveryPaused = false;
   private readonly unsubscribeRegistry: () => void;
   private ctx?: ExtensionContext;
   private ownerSessionId?: string;
@@ -356,35 +359,52 @@ export class OmpsSubagentRuntime {
     this.denyResolver = resolver;
   }
 
+  setNotificationDeliveryPaused(paused: boolean): void {
+    if (this.notificationDeliveryPaused === paused) return;
+    this.notificationDeliveryPaused = paused;
+    if (paused || this.shuttingDown) return;
+    for (const run of this.registry.list()) this.deliverPendingNotification(run.id);
+  }
+
   registerTools(): void {
     this.pi.registerMessageRenderer(SUBAGENT_NOTIFICATION_TYPE, renderSubagentNotification);
     this.pi.registerTool({
       name: "subagent",
       label: "Subagent",
-      description: "Create a package specialist asynchronously with required agent, abstract, and task, then manage it by run ID. Resume requires a terminal source run ID, a new abstract, and a continuation message. List returns active run status with abstract. Lifecycle notifications deliver complete waiting requests and terminal results through steer; reply continues a waiting run by ID.",
-      promptSnippet: "Create specialists with an abstract; resume terminal runs with a new abstract; list, steer, interrupt, or reply by run ID.",
+      description: "Create specialist runs and manage them by run ID. Resume terminal runs with a new summary and objective. Reply to waiting runs.",
+      promptSnippet: "Create or manage specialist runs by ID.",
       promptGuidelines: [
-        "Use `subagent create` with `agent`, `abstract`, and `task`.",
-        "Use `abstract` for a short run summary.",
-        "Use `task` for the complete objective.",
-        "Add `cwd` only when the run needs a different working directory.",
+        "Use only `action`, `agent`, `abstract`, `task`, and optional `cwd` for `create`.",
+        "For `create`, select `agent` as the specialist role.",
+        "For `create`, use `abstract` for a short run summary.",
+        "For `create`, use `task` for the complete objective.",
+        "For `create`, add `cwd` only for a different working directory.",
+        "Expect `create` to return a new run ID.",
         "Use the returned run ID for later actions.",
         "Read each waiting notification before you reply.",
-        "Use the complete request and run ID from the waiting notification.",
+        "Read each waiting notification for the complete request and run ID.",
         "Read each terminal notification for the final output or error.",
-        "Use `subagent list` to inspect starting, running, and waiting runs.",
+        "Use only `action` for `list`.",
+        "Use `list` to inspect active starting, running, and waiting runs.",
         "Expect `list` to return ID, agent, abstract, status, live, optional sourceRunId, and optional reason.",
         "Do not use `list` to get requests, activity, or terminal results.",
-        "Use `subagent steer` with a running run ID and complete guidance in `message`.",
-        "Use `subagent interrupt` with a starting, running, or waiting run ID.",
-        "Read the next notification for the actual terminal status.",
+        "Use only `action`, `id`, and `message` for `steer`.",
+        "For `steer`, use a running run ID in `id`.",
+        "For `steer`, use `message` for complete guidance.",
+        "Use only `action` and `id` for `interrupt`.",
+        "For `interrupt`, use a starting, running, or waiting run ID in `id`.",
+        "After `interrupt`, read the terminal notification for the actual status.",
+        "Use only `action`, `id`, `abstract`, and `message` for `resume`.",
         "Resume only a terminal source run that has saved context.",
-        "Use `subagent resume` with the source run ID, a new `abstract`, and `message`.",
-        "Use `message` for the complete continuation objective.",
-        "Expect resume to create a new run ID.",
+        "For `resume`, use the terminal source run ID in `id`.",
+        "For `resume`, use `abstract` for a new short run summary.",
+        "For `resume`, use `message` for the complete continuation objective.",
+        "Expect `resume` to return a new run ID.",
         "Use the new run ID for later actions.",
-        "Use `subagent reply` with a live waiting run ID and the complete reply in `message`.",
-        "Expect the same run to continue after reply.",
+        "Use only `action`, `id`, and `message` for `reply`.",
+        "For `reply`, use a live waiting run ID in `id`.",
+        "In `message`, answer the complete waiting request.",
+        "Expect `reply` to continue the same run.",
       ],
       parameters: subagentParameters,
       execute: async (_toolCallId, params) => this.executeSubagent(params as RuntimeInput),
@@ -400,6 +420,7 @@ export class OmpsSubagentRuntime {
     this.health.clear();
     this.repliedSeqs.clear();
     this.queuedNotifications.clear();
+    this.notificationDeliveryPaused = false;
     this.ctx = ctx;
     this.ownerSessionId = ctx.sessionManager.getSessionId();
     this.runRoot = getRunRoot(ctx.sessionManager.getSessionDir());
@@ -447,6 +468,7 @@ export class OmpsSubagentRuntime {
     this.denyResolver = undefined;
     this.stopPoller();
     this.queuedNotifications.clear();
+    this.notificationDeliveryPaused = false;
     const activeIds = this.registry.list().filter((run) => ACTIVE_STATUSES.has(run.status)).map((run) => run.id);
     await Promise.all(activeIds.map((id) => this.terminateRun(id, "Parent session shut down.", false)));
     this.widget.dispose();
@@ -454,6 +476,7 @@ export class OmpsSubagentRuntime {
     this.health.clear();
     this.repliedSeqs.clear();
     this.queuedNotifications.clear();
+    this.notificationDeliveryPaused = false;
     this.ctx = undefined;
     this.ownerSessionId = undefined;
     this.runRoot = undefined;
@@ -665,7 +688,7 @@ export class OmpsSubagentRuntime {
   }
 
   private deliverPendingNotification(id: string): void {
-    if (this.shuttingDown) return;
+    if (this.shuttingDown || this.notificationDeliveryPaused) return;
     const run = this.registry.get(id);
     if (!run) return;
     const delivery = this.pendingNotificationDelivery(run);

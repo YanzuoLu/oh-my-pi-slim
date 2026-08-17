@@ -48,6 +48,51 @@ function hasNone(text, terms, label) {
   for (const term of terms) check(!text.includes(term), `${label} contains removed token: ${term}`);
 }
 
+function staticStrings(block, label) {
+  const values = [];
+  for (const match of block.matchAll(/"((?:\\.|[^"\\])*)"/g)) {
+    try { values.push(JSON.parse(match[0])); }
+    catch (error) { errors.push(`${label} contains an unreadable string: ${error.message}`); }
+  }
+  return values;
+}
+
+function checkSteSentence(sentence, label) {
+  const words = sentence.match(/[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*/g) ?? [];
+  check(words.length <= 20, `${label} exceeds 20 words: ${sentence}`);
+  check(!sentence.includes(";"), `${label} contains a semicolon: ${sentence}`);
+  check(!/\b(?:is|are|was|were|be|been|being)\s+\w+(?:ed|en)\b/i.test(sentence), `${label} does not use active voice: ${sentence}`);
+  check(/^(?:Use|Add|Remove|Read|Expect|Do not|Resume|For|In|After|Before|Wait|Continue|Complete|Create|Reply|Select|Provide|Apply)\b/.test(sentence), `${label} does not start with an instruction or condition: ${sentence}`);
+}
+
+function checkSteBlock(block, label) {
+  const sentences = block.split(/(?<=[.!?])\s+/).filter(Boolean);
+  check(sentences.length > 0, `${label} must contain text`);
+  for (const sentence of sentences) checkSteSentence(sentence, label);
+}
+
+function checkSteGuidelines(guidelines, label) {
+  check(guidelines.length > 0, `${label} must be statically readable`);
+  for (const guideline of guidelines) {
+    const sentences = guideline.split(/(?<=[.!?])\s+/).filter(Boolean);
+    check(sentences.length === 1, `${label} must use one sentence per guideline: ${guideline}`);
+    checkSteSentence(guideline, label);
+  }
+}
+
+function propertyString(block, property, label) {
+  const match = new RegExp(`\\b${property}:\\s*("(?:\\\\.|[^"\\\\])*")`).exec(block);
+  if (!match) {
+    errors.push(`${label} must define ${property}`);
+    return "";
+  }
+  try { return JSON.parse(match[1]); }
+  catch (error) {
+    errors.push(`${label} contains an unreadable ${property}: ${error.message}`);
+    return "";
+  }
+}
+
 function frontmatter(text, file) {
   const match = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
   check(Boolean(match), `${file} must have YAML frontmatter and a body`);
@@ -65,8 +110,8 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.9.2", "package version must be 0.9.2");
-check(lock.version === "0.9.2" && lock.packages?.[""]?.version === "0.9.2", "package-lock version must be 0.9.2");
+check(packageJson.version === "0.9.3", "package version must be 0.9.3");
+check(lock.version === "0.9.3" && lock.packages?.[""]?.version === "0.9.3", "package-lock version must be 0.9.3");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -119,6 +164,8 @@ hasAll(extension, [
   "subagents.setDenyResolver((role) => loadPresetConfig().deny[role])",
   'pi.on("session_before_tree"',
   'pi.on("session_tree"',
+  'pi.on("session_before_compact"',
+  'pi.on("session_compact"',
   'pi.on("turn_end"',
   'pi.on("turn_start"',
   'pi.on("message_end"',
@@ -126,8 +173,14 @@ hasAll(extension, [
   "subagents.acknowledgeNotificationMessage(message)",
   "SettingsManager.create(",
   "contextUsageNeedsCheckpoint(",
+  "NotificationDeliveryPauseGate", "setNotificationDeliveryPaused(paused)",
+  "notificationGate.releaseDeferred", "notificationGate.clearWithoutDelivery",
 ], "main extension contract");
 hasNone(extension, REMOVED_CAPABILITIES, "main extension");
+const productionToolNames = [...`${extension}\n${runtime}\n${child}\n${todoExtension}`.matchAll(/registerTool\(\{[\s\S]*?\bname:\s*"([^"]+)"/g)]
+  .map((match) => match[1])
+  .sort();
+check(JSON.stringify(productionToolNames) === JSON.stringify(["contact_supervisor", "subagent", "todo"]), "production extensions must register exactly the three audited model tools");
 const notificationMessageEndStart = extension.indexOf('pi.on("message_end"');
 const notificationMessageEndEnd = extension.indexOf('pi.on("tool_execution_end"', notificationMessageEndStart);
 const notificationMessageEnd = extension.slice(notificationMessageEndStart, notificationMessageEndEnd);
@@ -177,12 +230,13 @@ hasAll(runtime, [
   "notificationDeliveryFromDetails",
   "acknowledgeNotificationMessage",
   "retryQueuedNotificationsAfterAgentSettled",
+  "setNotificationDeliveryPaused(paused: boolean)", "notificationDeliveryPaused",
   "collectRunDirectoryGarbage",
-  "Create specialists with an abstract; resume terminal runs with a new abstract; list, steer, interrupt, or reply by run ID.",
-  "Use `abstract` for a short run summary.",
-  "Use `task` for the complete objective.",
-  "Use `subagent resume` with the source run ID, a new `abstract`, and `message`.",
-  "Use `subagent reply` with a live waiting run ID and the complete reply in `message`.",
+  "Create or manage specialist runs by ID.",
+  "For `create`, use `abstract` for a short run summary.",
+  "For `create`, use `task` for the complete objective.",
+  "Use only `action`, `id`, `abstract`, and `message` for `resume`.",
+  "Use only `action`, `id`, and `message` for `reply`.",
   "PI_SUBAGENT_CHILD: \"1\"",
   "OMPS_SUBAGENT_CHILD: \"1\"",
 ], "built-in detached runtime");
@@ -193,7 +247,7 @@ const deliverNotificationEnd = runtime.indexOf("private failRun", deliverNotific
 const sendNotification = runtime.slice(sendNotificationStart, deliverNotificationStart);
 const deliverNotification = runtime.slice(deliverNotificationStart, deliverNotificationEnd);
 hasAll(sendNotification, ['display: true', "deliveryKey: delivery.deliveryKey", 'deliverAs: "steer"', "triggerTurn: true"], "single steer notification message");
-hasAll(deliverNotification, ["queuedNotifications.has", "queuedNotifications.add", "sendNotification", "queuedNotifications.delete"], "pending-until-message-end notification queue");
+hasAll(deliverNotification, ["notificationDeliveryPaused", "queuedNotifications.has", "queuedNotifications.add", "sendNotification", "queuedNotifications.delete"], "pending-until-message-end notification queue");
 hasNone(deliverNotification, ["notificationPending: undefined", "appendEntry"], "pending-until-message-end notification queue");
 const acknowledgeNotificationStart = runtime.indexOf("acknowledgeNotificationMessage(messageValue: unknown)");
 const acknowledgeNotificationEnd = runtime.indexOf("private sendNotification", acknowledgeNotificationStart);
@@ -226,7 +280,30 @@ hasAll(restoreNotificationFlow, [
 ], "restore notification replay and persisted-message acknowledgement");
 const shutdownStart = runtime.indexOf("async shutdown(): Promise<void>");
 const shutdownEnd = runtime.indexOf("private startPoller", shutdownStart);
-hasAll(runtime.slice(shutdownStart, shutdownEnd), ["queuedNotifications.clear()"], "shutdown notification queue cleanup");
+hasAll(runtime.slice(shutdownStart, shutdownEnd), ["queuedNotifications.clear()", "notificationDeliveryPaused = false"], "shutdown notification queue cleanup");
+const pauseSetterStart = runtime.indexOf("setNotificationDeliveryPaused(paused: boolean)");
+const pauseSetterEnd = runtime.indexOf("registerTools(): void", pauseSetterStart);
+const pauseSetter = runtime.slice(pauseSetterStart, pauseSetterEnd);
+hasAll(pauseSetter, ["this.notificationDeliveryPaused === paused", "if (paused || this.shuttingDown) return", "this.registry.list()", "this.deliverPendingNotification(run.id)"], "notification delivery pause setter");
+const beforeCompactStart = extension.indexOf('pi.on("session_before_compact"');
+const beforeCompactEnd = extension.indexOf('pi.on("before_agent_start"', beforeCompactStart);
+const beforeCompact = extension.slice(beforeCompactStart, beforeCompactEnd);
+hasAll(beforeCompact, [
+  "notificationGate.pause()", "event.signal.aborted", 'addEventListener("abort"', "setImmediate(() =>",
+  "notificationGate.isCurrent(generation)", "notificationGate.release(generation)",
+], "compaction notification pause and abort release");
+const sessionCompactStart = extension.indexOf('pi.on("session_compact"');
+const sessionCompactEnd = extension.indexOf('pi.on("agent_settled"', sessionCompactStart);
+const sessionCompactHandler = extension.slice(sessionCompactStart, sessionCompactEnd);
+hasAll(sessionCompactHandler, ["pendingCheckpoint.sawThresholdCompaction = true", "notificationGate.releaseDeferred"], "deferred compaction notification release");
+hasNone(sessionCompactHandler, ["setNotificationDeliveryPaused(false)", "sendNotification("], "session_compact synchronous notification release");
+const checkpointResumeStart = extension.indexOf("function scheduleCheckpointResume");
+const checkpointResumeEnd = extension.indexOf("function resolvePresetModels", checkpointResumeStart);
+const checkpointResume = extension.slice(checkpointResumeStart, checkpointResumeEnd);
+check(
+  checkpointResume.indexOf("pi.sendUserMessage(CHECKPOINT_RESUME_TEXT") < checkpointResume.indexOf("notificationGate.releaseDeferred"),
+  "checkpoint continuation must start before deferred notification release",
+);
 const applyStateStart = runtime.indexOf("private applyState(");
 const applyStateEnd = runtime.indexOf("private async failUnhealthyRun", applyStateStart);
 const applyState = runtime.slice(applyStateStart, applyStateEnd);
@@ -247,15 +324,59 @@ hasAll(listAction, ["reconcileAll", "ACTIVE_STATUSES.has(run.status)", "formatRu
 hasNone(listAction, [".formatRun(", "this.activity", ".output", ".error", ".task"], "list status action");
 const publicSchema = runtime.slice(runtime.indexOf("export const subagentParameters"), runtime.indexOf("export class OmpsSubagentRuntime"));
 hasNone(publicSchema, REMOVED_CAPABILITIES, "public tool schemas");
-const subagentGuidelinesStart = runtime.indexOf("promptGuidelines: [", runtime.indexOf('name: "subagent"'));
+hasAll(publicSchema, [
+  "export const subagentParameters = Type.Object({", "}, { additionalProperties: false });",
+  'description: "For create, select the specialist role."',
+  'description: "For create or resume, provide a short run summary."',
+  'description: "For create, provide the complete objective."',
+  'description: "For create, provide a different working directory."',
+  'description: "Select the run action."',
+  'description: "For steer, interrupt, resume, or reply, provide the run ID."',
+  'description: "For steer, provide guidance. For resume, provide the continuation objective. For reply, provide the waiting-request answer."',
+], "subagent schema descriptions");
+const publicSchemaDescriptions = [...publicSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
+check(publicSchemaDescriptions.length === 7, "subagent schema must define seven field descriptions");
+for (const description of publicSchemaDescriptions) checkSteBlock(description, "subagent schema description");
+const subagentToolStart = runtime.indexOf('name: "subagent"');
+const subagentGuidelinesStart = runtime.indexOf("promptGuidelines: [", subagentToolStart);
 const subagentGuidelinesEnd = runtime.indexOf("      ],", subagentGuidelinesStart);
-const subagentGuidelines = runtime.slice(subagentGuidelinesStart, subagentGuidelinesEnd);
-hasAll(subagentGuidelines, [
-  "Use `subagent create`", "short run summary", "complete objective",
-  "waiting notification", "terminal notification", "Use `subagent list`",
-  "Use `subagent steer`", "Use `subagent interrupt`", "Use `subagent resume`", "Use `subagent reply`",
+const subagentToolMetadata = runtime.slice(subagentToolStart, subagentGuidelinesEnd);
+const subagentDescription = propertyString(subagentToolMetadata, "description", "subagent tool metadata");
+const subagentPromptSnippet = propertyString(subagentToolMetadata, "promptSnippet", "subagent tool metadata");
+const subagentGuidelineBlock = runtime.slice(subagentGuidelinesStart, subagentGuidelinesEnd);
+const subagentGuidelines = staticStrings(subagentGuidelineBlock, "subagent promptGuidelines");
+checkSteBlock(subagentDescription, "subagent description");
+checkSteBlock(subagentPromptSnippet, "subagent promptSnippet");
+checkSteGuidelines(subagentGuidelines, "subagent promptGuideline");
+const subagentGuidelineText = subagentGuidelines.join("\n");
+hasAll(subagentGuidelineText, [
+  "Use only `action`, `agent`, `abstract`, `task`, and optional `cwd` for `create`.",
+  "For `create`, select `agent` as the specialist role.",
+  "For `create`, use `abstract` for a short run summary.",
+  "For `create`, use `task` for the complete objective.",
+  "For `create`, add `cwd` only for a different working directory.",
+  "Expect `create` to return a new run ID.",
+  "Read each waiting notification for the complete request and run ID.",
+  "Read each terminal notification for the final output or error.",
+  "Use only `action` for `list`.",
+  "Use `list` to inspect active starting, running, and waiting runs.",
+  "Expect `list` to return ID, agent, abstract, status, live, optional sourceRunId, and optional reason.",
+  "Do not use `list` to get requests, activity, or terminal results.",
+  "Use only `action`, `id`, and `message` for `steer`.",
+  "For `steer`, use `message` for complete guidance.",
+  "Use only `action` and `id` for `interrupt`.",
+  "For `interrupt`, use a starting, running, or waiting run ID in `id`.",
+  "After `interrupt`, read the terminal notification for the actual status.",
+  "Use only `action`, `id`, `abstract`, and `message` for `resume`.",
+  "Resume only a terminal source run that has saved context.",
+  "For `resume`, use `message` for the complete continuation objective.",
+  "Expect `resume` to return a new run ID.",
+  "Use only `action`, `id`, and `message` for `reply`.",
+  "For `reply`, use a live waiting run ID in `id`.",
+  "In `message`, answer the complete waiting request.",
+  "Expect `reply` to continue the same run.",
 ], "ASD-STE100-style subagent guidelines");
-hasNone(subagentGuidelines, [";", " is delivered", " is returned", "saved child-session", "waitingSeq", "deliveryKey", "legacy", "request ID"], "ASD-STE100-style subagent guidelines");
+check(!/request ID|waitingSeq|deliveryKey|legacy|saved child-session/i.test(`${subagentDescription}\n${subagentPromptSnippet}\n${subagentGuidelineText}`), "subagent model metadata must not expose internal terms");
 check(!runtime.includes(REMOVED_WAIT_TOOL), "runtime must not register or mention the removed wait tool");
 hasAll(core, [
   '"create"', '"list"', '"interrupt"', '"steer"', '"resume"', '"reply"',
@@ -271,6 +392,8 @@ hasAll(checkpoint, [
   "export function contextUsageNeedsCheckpoint", "shouldCompact(",
 ], "shared checkpoint contract");
 hasAll(child, [
+  'export const contactSupervisorParameters = Type.Object({', "}, { additionalProperties: false });",
+  "parameters: contactSupervisorParameters",
   'process.env.OMPS_SUBAGENT_CHILD !== "1"',
   'name: "contact_supervisor"',
   '"need_decision"',
@@ -292,6 +415,8 @@ hasAll(child, [
 const contactGuidelinesStart = child.indexOf("promptGuidelines: [", child.indexOf('name: "contact_supervisor"'));
 const contactGuidelinesEnd = child.indexOf("    ],", contactGuidelinesStart);
 const contactGuidelines = child.slice(contactGuidelinesStart, contactGuidelinesEnd);
+const contactGuidelineValues = staticStrings(contactGuidelines, "contact_supervisor promptGuidelines");
+checkSteGuidelines(contactGuidelineValues, "contact_supervisor promptGuideline");
 hasAll(contactGuidelines, [
   "Use `contact_supervisor`", "For `reason`, select", "complete request context",
   "structured questions", "wait for the orchestrator reply", "including `progress_update`",
@@ -390,6 +515,7 @@ check(
 
 hasAll(todoExtension, [
   'name: "todo"', 'executionMode: "sequential"', 'Type.Literal("list")', 'Type.Literal("update")',
+  "export const todoParameters = Type.Object({", "operations: Type.Optional(Type.Array(todoOperationSchema",
   "additionalProperties: false", "minItems: 1", "TODO_PROMPT_GUIDELINES",
   'ctx.mode !== "tui"', 'pi.on("session_start"', 'pi.on("session_tree"',
   'pi.on("session_compact"', 'pi.on("session_shutdown"', "makeTodoSnapshot",
@@ -397,21 +523,60 @@ hasAll(todoExtension, [
 ], "built-in Todo extension");
 const todoFactory = todoExtension.slice(todoExtension.indexOf("export default function todoExtension"));
 hasNone(todoFactory, ["getAllTools("], "Todo extension factory initialization");
+const todoSchemaBlock = todoExtension.slice(0, todoExtension.indexOf("export const TODO_PROMPT_SNIPPET"));
+hasAll(todoSchemaBlock, [
+  'description: "Select list or update."',
+  'description: "For update, apply at least one operation in order. For list, omit operations."',
+  'description: "Select pending, in_progress, or completed."',
+  'description: "Add initial dependencies by exact subject."',
+  'description: "Add dependencies by exact subject."',
+  'description: "Remove dependencies by exact subject."',
+], "Todo schema descriptions");
+hasNone(todoSchemaBlock, [
+  'description: "List exact dependency subjects."',
+  "export const todoParameters = Type.Union([",
+  "minProperties",
+], "Todo schema portability");
+check(todoSchemaBlock.split('description: "Add initial dependencies by exact subject."').length - 1 === 1, "append blockedBy must have one distinct array description");
+check(todoSchemaBlock.split('description: "Add dependencies by exact subject."').length - 1 === 1, "addBlockedBy must have one distinct array description");
+check(todoSchemaBlock.split('description: "Remove dependencies by exact subject."').length - 1 === 1, "removeBlockedBy must have one distinct array description");
+check(todoSchemaBlock.split('description: "Use an existing exact subject."').length - 1 === 3, "each dependency array item must use the exact-subject description");
+const todoSchemaDescriptions = [...todoSchemaBlock.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
+for (const description of todoSchemaDescriptions) checkSteBlock(description, "Todo schema description");
+hasAll(todoExtension, [
+  'export const TODO_PROMPT_SNIPPET = "Read or update the current session todo list"',
+  'description: "Read or update the current session todo list. Apply updates atomically."',
+], "Todo tool metadata");
+checkSteBlock("Read or update the current session todo list", "Todo promptSnippet");
+checkSteBlock("Read or update the current session todo list. Apply updates atomically.", "Todo description");
 const todoGuidelineStart = todoExtension.indexOf("export const TODO_PROMPT_GUIDELINES = [");
 const todoGuidelineEnd = todoExtension.indexOf("] as const;", todoGuidelineStart);
 const todoGuidelineBlock = todoExtension.slice(todoGuidelineStart, todoGuidelineEnd);
-const todoGuidelines = [...todoGuidelineBlock.matchAll(/"((?:\\.|[^"\\])*)"/g)].map((match) => JSON.parse(match[0]));
-check(todoGuidelines.length > 0, "Todo promptGuidelines must be statically readable");
+const todoGuidelines = staticStrings(todoGuidelineBlock, "Todo promptGuidelines");
+checkSteGuidelines(todoGuidelines, "Todo promptGuideline");
 const todoGuidelineText = todoGuidelines.join("\n");
 hasAll(todoGuidelineText, [
-  "current session's complete list", "every operation atomically", "unique subject", "short item summary",
-  "exact target subject", "existing subjects in blockedBy", "Complete every dependency",
-  "new task group", "clear, and append a new group", "cancel the whole update",
+  "Use `todo list` to read the complete todo list for the current session.",
+  "For `list`, omit `operations`.",
+  "Use `todo update` to apply all operations atomically.",
+  "For `update`, provide at least one operation.",
+  "For `append`, provide a unique `subject` and an `abstract`.",
+  "Use `abstract` for a short item summary.",
+  "For `append`, use `blockedBy` to add initial dependencies by exact subject.",
+  "For `modify`, use the exact current subject in `target`.",
+  "For `modify`, provide at least one change.",
+  "Use `newSubject` to rename the item.",
+  "For `modify`, use `abstract` as the replacement summary.",
+  "For `status`, select `pending`, `in_progress`, or `completed`.",
+  "Use `addBlockedBy` to add dependencies by exact subject.",
+  "Use `removeBlockedBy` to remove dependencies by exact subject.",
+  "Complete every dependency before you start or complete an item.",
+  "Before a new task group, use `clear` only after all old items are complete.",
+  "Use one update to complete old items, apply `clear`, and append a new group.",
+  "Use `clear` at most once in each update.",
+  "Expect any failure to cancel the whole update.",
 ], "Todo promptGuidelines semantics");
-for (const guideline of todoGuidelines) {
-  check(!guideline.includes(";"), `Todo promptGuideline must not contain a semicolon: ${guideline}`);
-  check(!/\b(?:snapshot|replay|store|version|widget)\b/i.test(guideline), `Todo promptGuideline exposes an internal implementation term: ${guideline}`);
-}
+check(!/\b(?:snapshot|replay|store|version|widget|ID)\b/i.test(todoGuidelineText), "Todo promptGuidelines must not expose internal terms");
 hasAll(todoCore, [
   "TODO_SNAPSHOT_TYPE", "applyTodoUpdate", "validateTodoState", "replayTodoBranch",
   "todo update failed at operation", "clear can appear only once",
@@ -421,15 +586,33 @@ hasNone(`${todoCore}\n${todoGuidelineText}`, [
   "at most one task can be in_progress", "at most one item in_progress",
 ], "Todo multiple in_progress contract");
 hasAll(todoWidget, [
-  "MAX_TODO_WIDGET_LINES = 12", '"Todos (', '"○"', '"◐"', '"✓"', '⛓ ${task.blockedBy',
+  "MAX_TODO_WIDGET_LINES = 12", "● Todos (", '"○"', '"◐"', '"✓"', '⛓ ${task.blockedBy',
   'theme.strikethrough', '"├─"', '"└─"', "hiddenSummary", "setWidget",
-], "built-in Todo widget contract");
+  "renderTodoListResult", "renderTodoReceipts", "expanded = false", "receiptStatusTransition",
+  'addResultField(container, theme, "Status"', 'addResultSection(container, theme, "Abstract"',
+  'addResultList(container, theme, "Blocked by"', "no-change",
+], "built-in Todo widget and result-renderer contract");
+hasAll(todoExtension, [
+  "context.expanded === true", 'theme.bold(`todo · ${action}`)', 'addCallField(container, theme, "Action"',
+  'addCallField(container, theme, "Operations"', "operationCounts", '"Append"', '"Modify"', '"Clear"',
+  'addCallSection(container, theme, "Abstract"', 'addCallList(container, theme, "Blocked by"',
+  'addCallList(container, theme, "Add blocked by"', 'addCallList(container, theme, "Remove blocked by"',
+  "options.expanded === true", "safeFallbackLine", "sanitizeTodoBody",
+], "Todo Ctrl+O call and result renderer contract");
 check(existsSync(join(ROOT, "tests/todo.test.mjs")), "Todo contract tests must exist");
+check(existsSync(join(ROOT, "tests/provider-schema.test.mjs")), "provider schema compatibility tests must exist");
 check(existsSync(join(ROOT, "tests/fixtures/todo-load-probe.ts")), "Todo real-Pi load probe must exist");
+const providerSchemaTests = read("tests/provider-schema.test.mjs");
+hasAll(providerSchemaTests, [
+  "subagentParameters", "contactSupervisorParameters", "todoParameters",
+  'schema.type, "object"', 'schema.additionalProperties, false', "schema.anyOf, undefined", "schema.oneOf, undefined",
+  "operationBranches", 'branch.type, "object"', "branch.additionalProperties, false", "modify.minProperties, undefined",
+], "provider schema JSON audit");
 const todoTests = read("tests/todo.test.mjs");
 hasAll(todoTests, [
   "PI_CODING_AGENT_DIR", '"--no-extensions"', '"--extension", join(root, "extensions/todo/index.ts")',
   "TODO_LOAD_PROBE", "runtime not initialized", "executionMode", "setWidget",
+  'rootType: "object"', "rootHasUnion: false", "Todo execute enforces action-specific operations boundaries",
   "multiple items can become in_progress", "parseTodoSnapshot(snapshot)?.state.tasks",
 ], "Todo isolated real-Pi load smoke and multiple-active contract");
 
@@ -452,6 +635,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
     "interrupted",
     "resume",
     "follow-up continuation turn",
+    "setImmediate", "compaction_end", "triggerTurn: true", "queued",
   ], file);
   hasAll(text, file === "README.md"
     ? [
@@ -467,17 +651,19 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "复制同一 preset 的 `explorer` 配置", "每次 create 与 resume 前都会重新读取 deny",
         "下一个安全模型边界", "同一条消息", "折叠的 TUI 视图只显示紧凑 run header",
         "按 Ctrl+O", "Ctrl+O 只改变 TUI 渲染",
-      ], `${file} 0.9.2 contract`);
+      ], `${file} 0.9.3 contract`);
   hasAll(text, file === "README.md"
     ? [
         "## Built-in Todo", '{ action: "list" }', '{ action: "update"', "commits once",
         "Multiple items may be `in_progress`", "versioned successful", "at most 12 total lines", "Each item shows only its subject",
-        "⛓ subject1, subject2", "Abstracts remain available only", "cannot coexist", "run `pi remove`", "never removes or uninstalls external packages",
+        "⛓ subject1, subject2", "Abstracts stay out of the widget", "● Todos (completed/total)",
+        "Collapsed update calls", "Expanded results", "changed and no-change counts", "cannot coexist", "run `pi remove`", "never removes or uninstalls external packages",
       ]
     : [
         "## 内置 Todo", '{ action: "list" }', '{ action: "update"', "只 commit 一次",
         "多个 item 可以同时为 `in_progress`", "新版本 tool-result details", "总计最多 12 行", "每个 item 只显示 subject",
-        "⛓ subject1, subject2", "abstract 只保留", "不能与内置工具共存", "执行 `pi remove`", "不会主动删除或卸载任何外部 package",
+        "⛓ subject1, subject2", "abstract 不进入 widget", "● Todos (completed/total)",
+        "折叠的 update call", "展开后显示", "changed 与 no-change 计数", "不能与内置工具共存", "执行 `pi remove`", "不会主动删除或卸载任何外部 package",
       ], `${file} built-in Todo contract`);
   hasNone(text, file === "README.md" ? ["At most one item may be `in_progress`"] : ["最多一个 item 可为 `in_progress`"], `${file} removed single-in-progress contract`);
   hasNone(text, [
@@ -508,6 +694,8 @@ hasAll(transcriptRenderer, [
   'actionFromContext(context, "create")',
   "immediateAck", "renderRunList", "addFinalOutput", "spacedToolResult", '"Live response"',
   '"Active subagent run status"', "run.abstract", "run.reason", 'addField(container, theme, "Abstract", args.abstract',
+  "expanded?: boolean", "context.expanded === true", "options.expanded === true", "terminal && expanded",
+  "fallbackResult(result, theme, options.isPartial === true, expanded)",
 ], "subagent transcript renderer");
 hasNone(transcriptRenderer, [
   "gotgenes", "Nico", "preview", "truncated", '"Subagent result"', "renderRunSection", "addActivity",
@@ -516,7 +704,7 @@ hasNone(transcriptRenderer, [
 const listRendererStart = transcriptRenderer.indexOf("function renderRunList");
 const listRendererEnd = transcriptRenderer.indexOf("export function renderSubagentCall", listRendererStart);
 const listRenderer = transcriptRenderer.slice(listRendererStart, listRendererEnd);
-hasAll(listRenderer, ["styledTitle", "compactRunHeader", "undefined, true", 'status !== "waiting"', "run.reason"], "status-only list renderer");
+hasAll(listRenderer, ["styledTitle", "compactRunHeader", "undefined, true", '!expanded || status !== "waiting"', "run.reason"], "status-only list renderer");
 hasNone(listRenderer, ["addFinalOutput", "addLiveActivity", "addRequest", "run.task", "run.cwd", "run.model", "run.deniedTools", "run.output", "run.error", "run.activity", "run.request)"], "status-only list renderer");
 const notificationStart = transcriptRenderer.indexOf("export function renderSubagentNotification");
 const notificationHeader = transcriptRenderer.indexOf("container.addChild(compactRunHeader", notificationStart);

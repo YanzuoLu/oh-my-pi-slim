@@ -12,6 +12,21 @@ import {
 
 const REASONS = ["need_decision", "interview_request", "progress_update"] as const;
 
+export const contactSupervisorParameters = Type.Object({
+  reason: Type.Union(REASONS.map((reason) => Type.Literal(reason)), {
+    description: "Supervisor request type",
+  }),
+  message: Type.Optional(Type.String({ description: "Request context for the main orchestrator" })),
+  interview: Type.Optional(Type.Object({
+    title: Type.Optional(Type.String({ description: "Structured interview title" })),
+    questions: Type.Optional(Type.Array(Type.Object({
+      id: Type.Optional(Type.String({ description: "Question identifier" })),
+      prompt: Type.String({ description: "Question text" }),
+      options: Type.Optional(Type.Array(Type.String(), { description: "Answer options" })),
+    }), { description: "Structured interview questions" })),
+  }, { description: "Structured interview details" })),
+}, { additionalProperties: false });
+
 export default function childSupervisor(pi: ExtensionAPI): void {
   if (process.env.OMPS_SUBAGENT_CHILD !== "1" || process.env.PI_SUBAGENT_CHILD !== "1") return;
 
@@ -42,21 +57,7 @@ export default function childSupervisor(pi: ExtensionAPI): void {
       "Wait for a reply for every reason, including `progress_update`.",
       "Continue work after the orchestrator reply.",
     ],
-    parameters: Type.Object({
-
-      reason: Type.Union(REASONS.map((reason) => Type.Literal(reason)), {
-        description: "Supervisor request type",
-      }),
-      message: Type.Optional(Type.String({ description: "Request context for the main orchestrator" })),
-      interview: Type.Optional(Type.Object({
-        title: Type.Optional(Type.String({ description: "Structured interview title" })),
-        questions: Type.Optional(Type.Array(Type.Object({
-          id: Type.Optional(Type.String({ description: "Question identifier" })),
-          prompt: Type.String({ description: "Question text" }),
-          options: Type.Optional(Type.Array(Type.String(), { description: "Answer options" })),
-        }), { description: "Structured interview questions" })),
-      }, { description: "Structured interview details" })),
-    }),
+    parameters: contactSupervisorParameters,
     async execute(_toolCallId, params) {
       const runId = process.env.OMPS_PARENT_RUN_ID;
       if (!runId) throw new Error("OMPS parent run identity is missing.");
