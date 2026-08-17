@@ -1,6 +1,6 @@
 {
   "name": "oh-my-pi-slim",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "private": true,
   "description": "Preset-driven main-session orchestration for Pi with a built-in background-subagent runtime.",
   "type": "module",
@@ -28,7 +28,8 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/oh-my-pi-slim/index.ts"
+      "./extensions/oh-my-pi-slim/index.ts",
+      "./extensions/todo/index.ts"
     ],
     "skills": [
       "./extensions/oh-my-pi-slim/skills"

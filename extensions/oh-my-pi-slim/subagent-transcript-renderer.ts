@@ -8,7 +8,7 @@ type UnknownRecord = Record<string, unknown>;
 type ToolResultLike = { content?: unknown; details?: unknown };
 type ToolRenderContextLike = { cwd?: string; args?: unknown };
 type MessageLike = { content?: unknown; details?: unknown };
-type MessageRenderOptionsLike = { outputPad?: number };
+type MessageRenderOptionsLike = { outputPad?: number; expanded?: boolean };
 
 const RAW_HTML_TAG = /<\/?[A-Za-z][^>]*>/;
 const LIVE_STATUSES = new Set(["starting", "running"]);
@@ -274,19 +274,24 @@ export function renderSubagentNotification(
   const run = asRecord(details?.run);
   if (!run) {
     const content = typeof message.content === "string" ? message.content : displayValue(message.content, "");
-    return content ? fullBody(content, theme, options.outputPad ?? 0) : new Text("", 0, 0);
+    if (!content) return new Text("", 0, 0);
+    if (options.expanded === true) return fullBody(content, theme, options.outputPad ?? 0);
+    const firstLine = content.split(/\r?\n/).find((line) => line.trim()) ?? "";
+    return new Text(theme.fg("customMessageText", firstLine), options.outputPad ?? 0, 0);
   }
 
   const event = asString(details?.event) ?? asString(details?.status) ?? asString(run.status) ?? "update";
   const box = new Box(options.outputPad ?? 1, 1, (text) => theme.bg("customMessageBg", text));
   const container = new Container();
   container.addChild(compactRunHeader(run, theme, event));
-  if (TERMINAL_STATUSES.has(event)) {
-    addFinalOutput(container, theme, run);
-  } else if (event === "waiting") {
-    addRequest(container, theme, details?.request ?? run.request);
-  } else if (LIVE_STATUSES.has(event) && run.output === undefined) {
-    addLiveActivity(container, theme, run.activity);
+  if (options.expanded === true) {
+    if (TERMINAL_STATUSES.has(event)) {
+      addFinalOutput(container, theme, run);
+    } else if (event === "waiting") {
+      addRequest(container, theme, details?.request ?? run.request);
+    } else if (LIVE_STATUSES.has(event) && run.output === undefined) {
+      addLiveActivity(container, theme, run.activity);
+    }
   }
   box.addChild(container);
   return box;

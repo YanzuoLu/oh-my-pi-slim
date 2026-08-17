@@ -284,48 +284,76 @@ test("legacy transcript list derives a Unicode-safe abstract or shows an explici
   assert.doesNotMatch(listText, /tail/);
 });
 
-test("terminal notifications contain only compact status and complete output or error", () => {
-  for (const [status, glyph] of [["completed", "✓"], ["failed", "✗"], ["interrupted", "✗"]]) {
-    const notification = render(renderSubagentNotification({
-      content: "Model-facing content must not be duplicated.",
+test("Ctrl+O collapses waiting notification details without changing model content", () => {
+  const message = {
+    content: "Model-facing waiting content with the complete request.",
+    display: true,
+    details: { event: "waiting", status: "waiting", request: run({ status: "waiting" }).request, run: run({ status: "waiting" }) },
+  };
+  const before = structuredClone(message);
+  const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
+  assert.equal(collapsed, " ! fixer [run-1] · waiting");
+  assert.doesNotMatch(collapsed, /Request|need_decision|request payload|Choose|A or B|Created|Model-facing/);
+
+  const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
+  assertFull(expanded, [
+    "! fixer [run-1] · waiting", "Request", "need_decision", "<results>request payload</results>",
+    "Choose", "A or B?", "Created: 2026-04-17T00:01:00.000Z",
+  ]);
+  assert.doesNotMatch(expanded, /Task:|Low-value task|Live response|activity payload|Output:|stored output|Error:|stored error|Model:|Cwd:|Tools:|Session:|waitingSeq|Model-facing/);
+  assert.deepEqual(message, before);
+  assert.equal(message.content, before.content);
+});
+
+test("Ctrl+O expands completed, failed, and interrupted notification output or error", () => {
+  const cases = [
+    { status: "completed", glyph: "✓", run: run({ status: "completed", output: "COMPLETED_OUTPUT", error: undefined }), body: "COMPLETED_OUTPUT" },
+    { status: "failed", glyph: "✗", run: run({ status: "failed", output: undefined, error: "FAILED_ERROR" }), body: "FAILED_ERROR" },
+    { status: "interrupted", glyph: "✗", run: run({ status: "interrupted", output: "INTERRUPTED_OUTPUT", error: "INTERRUPTED_ERROR" }), body: "INTERRUPTED_OUTPUT" },
+  ];
+  for (const value of cases) {
+    const message = {
+      content: `Model-facing ${value.status} content.`,
       display: true,
-      details: { event: status, status, run: run({ status }) },
-    }, { expanded: false, outputPad: 1 }, theme));
-    assertFull(notification, [
-      `${glyph} fixer [run-1] · ${status}`,
-      "<results>stored output payload</results>",
-      "<results>stored error payload</results>",
-    ]);
-    assert.doesNotMatch(notification, /Task:|Low-value task|Response:|Live response|activity payload|Model:|Cwd:|Tools:|Created:|Updated:|Session:|Request|Model-facing content/);
+      details: { event: value.status, status: value.status, run: value.run },
+    };
+    const before = structuredClone(message);
+    const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
+    assert.equal(collapsed, ` ${value.glyph} fixer [run-1] · ${value.status}`);
+    assert.doesNotMatch(collapsed, /COMPLETED_OUTPUT|FAILED_ERROR|INTERRUPTED_OUTPUT|INTERRUPTED_ERROR|Model-facing/);
+
+    const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
+    assertFull(expanded, [`${value.glyph} fixer [run-1] · ${value.status}`, value.body]);
+    if (value.status === "interrupted") assert.match(expanded, /INTERRUPTED_ERROR/);
+    assert.doesNotMatch(expanded, /Task:|Low-value task|Live response|activity payload|Model:|Cwd:|Tools:|Request|Model-facing/);
+    assert.deepEqual(message, before);
   }
 });
 
-test("waiting notification contains only the complete request", () => {
-  const notification = render(renderSubagentNotification({
-    content: "Model-facing waiting content.",
-    display: true,
-    details: { event: "waiting", status: "waiting", request: run({ status: "waiting" }).request, run: run({ status: "waiting" }) },
-  }, { expanded: false, outputPad: 1 }, theme));
-  assertFull(notification, [
-    "! fixer [run-1] · waiting",
-    "Request",
-    "need_decision",
-    "<results>request payload</results>",
-    "Choose",
-    "A or B?",
-    "Created: 2026-04-17T00:01:00.000Z",
-  ]);
-  assert.doesNotMatch(notification, /Task:|Low-value task|Response:|Live response|activity payload|Output:|stored output|Error:|stored error|Model:|Cwd:|Tools:|Session:|req-1|waitingSeq/);
-});
-
-test("active notification may show only explicitly labeled live response and active tools", () => {
-  const notification = render(renderSubagentNotification({
+test("Ctrl+O collapses active activity and expands complete live details", () => {
+  const message = {
     content: "Model-facing running content.",
     display: true,
     details: { event: "running", status: "running", run: run({ status: "running", output: undefined, error: undefined }) },
-  }, { expanded: false, outputPad: 1 }, theme));
-  assertFull(notification, ["● fixer [run-1] · running", "Live response:", "<results>activity payload</results>", "toolA"]);
-  assert.doesNotMatch(notification, /Task:|Low-value task|Response:|Output:|Error:|Model:|Cwd:|Tools:|Request/);
+  };
+  const before = structuredClone(message);
+  const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
+  assert.equal(collapsed, " ● fixer [run-1] · running");
+  assert.doesNotMatch(collapsed, /Live response|activity payload|toolA|Model-facing/);
+
+  const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
+  assertFull(expanded, ["● fixer [run-1] · running", "Live response:", "<results>activity payload</results>", "Active tools:", "toolA"]);
+  assert.doesNotMatch(expanded, /Task:|Low-value task|Output:|Error:|Model:|Cwd:|Request|Model-facing/);
+  assert.deepEqual(message, before);
+});
+
+test("notification fallback collapses to a safe first line and expands full content", () => {
+  const message = { content: "Fallback first line\n<results>fallback full payload</results>\nFallback last line" };
+  const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
+  assert.equal(collapsed, " Fallback first line");
+  assert.doesNotMatch(collapsed, /fallback full payload|Fallback last line/);
+  const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
+  assertFull(expanded, ["Fallback first line", "<results>fallback full payload</results>", "Fallback last line"]);
 });
 
 test("missing details and partial results keep full content fallback", () => {

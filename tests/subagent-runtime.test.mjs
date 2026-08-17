@@ -1433,13 +1433,20 @@ test("terminal notification stays pending until matching delivered message ackno
     assert.equal(harness.journalWrites.at(-1).data.run.notificationPending, undefined);
 
     const notificationRenderer = harness.messageRenderers.get("oh-my-pi-slim:subagent-notification");
-    const renderedNotification = notificationRenderer(
+    const collapsedNotification = notificationRenderer(
       sent.message,
       { expanded: false, outputPad: 1 },
       transcriptTheme,
     ).render(240).map((line) => stripVTControlCharacters(line)).join("\n");
-    assert.match(renderedNotification, /complete output\s*\n\s*second output line/);
-    assert.match(renderedNotification, /complete error\s*\n\s*second error line/);
+    assert.match(collapsedNotification, /fixer \[[^\]]+\] · completed/);
+    assert.doesNotMatch(collapsedNotification, /complete output|complete error/);
+    const expandedNotification = notificationRenderer(
+      sent.message,
+      { expanded: true, outputPad: 1 },
+      transcriptTheme,
+    ).render(240).map((line) => stripVTControlCharacters(line)).join("\n");
+    assert.match(expandedNotification, /complete output\s*\n\s*second output line/);
+    assert.match(expandedNotification, /complete error\s*\n\s*second error line/);
   } finally { harness.cleanup(); }
 });
 

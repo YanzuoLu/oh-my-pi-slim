@@ -65,9 +65,12 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.9.1", "package version must be 0.9.1");
-check(lock.version === "0.9.1" && lock.packages?.[""]?.version === "0.9.1", "package-lock version must be 0.9.1");
-check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify(["./extensions/oh-my-pi-slim/index.ts"]), "package must load only the OMPS extension");
+check(packageJson.version === "0.9.2", "package version must be 0.9.2");
+check(lock.version === "0.9.2" && lock.packages?.[""]?.version === "0.9.2", "package-lock version must be 0.9.2");
+check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
+  "./extensions/oh-my-pi-slim/index.ts",
+  "./extensions/todo/index.ts",
+]), "package must load the OMPS and built-in Todo extensions");
 check(packageJson.pi?.subagents === undefined, "package must not expose a pi.subagents manifest");
 check(packageJson.dependencies === undefined || Object.keys(packageJson.dependencies).length === 0, "package must have no runtime dependency on the removed backend");
 check(!packageText.includes('"pi-subagents"'), "package.json must not mention pi-subagents");
@@ -99,6 +102,9 @@ const rpcChild = read("extensions/oh-my-pi-slim/runner/rpc-child.mjs");
 const detachedRunner = read("extensions/oh-my-pi-slim/runner/omps-runner.mjs");
 const bootstrap = read("extensions/oh-my-pi-slim/bootstrap.ts");
 const orchestrator = read("extensions/oh-my-pi-slim/orchestrator.md");
+const todoExtension = read("extensions/todo/index.ts");
+const todoCore = read("extensions/todo/core.ts");
+const todoWidget = read("extensions/todo/widget.ts");
 
 const functionStart = extension.indexOf("export default function ohMyPiSlim");
 const childGate = extension.indexOf('process.env.PI_SUBAGENT_CHILD === "1" || process.env.OMPS_SUBAGENT_CHILD === "1"', functionStart);
@@ -371,6 +377,61 @@ hasNone(orchestrator, [
   "task_result", "task_status", "task_nudge", "cancel_task", "wait_for_user", "Background Job Board",
   "Reusable Sessions", "Active / Unreconciled", "subagent_type", "task_id", "ast_grep_search", "apply_patch",
 ], "orchestrator removed OpenCode runtime");
+const expectedTodoContinuity = `### Todo Continuity
+- When the user adds a new task while a todo list exists, append the new task to the end of the existing todo list instead of replacing the list.
+- Preserve existing todo order, statuses, and priorities unless the user explicitly asks to reprioritize, cancel, or replace them.
+- Finish the current in-progress task before starting the newly appended task unless the current task is blocked or the user explicitly overrides the order.`;
+const todoContinuityStart = orchestrator.indexOf("### Todo Continuity");
+const todoContinuityEnd = orchestrator.indexOf("Can tasks be split", todoContinuityStart);
+check(
+  orchestrator.slice(todoContinuityStart, todoContinuityEnd).trim() === expectedTodoContinuity,
+  "orchestrator Todo Continuity must match the exact upstream text",
+);
+
+hasAll(todoExtension, [
+  'name: "todo"', 'executionMode: "sequential"', 'Type.Literal("list")', 'Type.Literal("update")',
+  "additionalProperties: false", "minItems: 1", "TODO_PROMPT_GUIDELINES",
+  'ctx.mode !== "tui"', 'pi.on("session_start"', 'pi.on("session_tree"',
+  'pi.on("session_compact"', 'pi.on("session_shutdown"', "makeTodoSnapshot",
+  "JSON.stringify(tasks)",
+], "built-in Todo extension");
+const todoFactory = todoExtension.slice(todoExtension.indexOf("export default function todoExtension"));
+hasNone(todoFactory, ["getAllTools("], "Todo extension factory initialization");
+const todoGuidelineStart = todoExtension.indexOf("export const TODO_PROMPT_GUIDELINES = [");
+const todoGuidelineEnd = todoExtension.indexOf("] as const;", todoGuidelineStart);
+const todoGuidelineBlock = todoExtension.slice(todoGuidelineStart, todoGuidelineEnd);
+const todoGuidelines = [...todoGuidelineBlock.matchAll(/"((?:\\.|[^"\\])*)"/g)].map((match) => JSON.parse(match[0]));
+check(todoGuidelines.length > 0, "Todo promptGuidelines must be statically readable");
+const todoGuidelineText = todoGuidelines.join("\n");
+hasAll(todoGuidelineText, [
+  "current session's complete list", "every operation atomically", "unique subject", "short item summary",
+  "exact target subject", "existing subjects in blockedBy", "Complete every dependency",
+  "new task group", "clear, and append a new group", "cancel the whole update",
+], "Todo promptGuidelines semantics");
+for (const guideline of todoGuidelines) {
+  check(!guideline.includes(";"), `Todo promptGuideline must not contain a semicolon: ${guideline}`);
+  check(!/\b(?:snapshot|replay|store|version|widget)\b/i.test(guideline), `Todo promptGuideline exposes an internal implementation term: ${guideline}`);
+}
+hasAll(todoCore, [
+  "TODO_SNAPSHOT_TYPE", "applyTodoUpdate", "validateTodoState", "replayTodoBranch",
+  "todo update failed at operation", "clear can appear only once",
+  "requires completed dependency", "dependency cycle", "cloneTasks",
+], "built-in Todo state contract");
+hasNone(`${todoCore}\n${todoGuidelineText}`, [
+  "at most one task can be in_progress", "at most one item in_progress",
+], "Todo multiple in_progress contract");
+hasAll(todoWidget, [
+  "MAX_TODO_WIDGET_LINES = 12", '"Todos (', '"○"', '"◐"', '"✓"', '⛓ ${task.blockedBy',
+  'theme.strikethrough', '"├─"', '"└─"', "hiddenSummary", "setWidget",
+], "built-in Todo widget contract");
+check(existsSync(join(ROOT, "tests/todo.test.mjs")), "Todo contract tests must exist");
+check(existsSync(join(ROOT, "tests/fixtures/todo-load-probe.ts")), "Todo real-Pi load probe must exist");
+const todoTests = read("tests/todo.test.mjs");
+hasAll(todoTests, [
+  "PI_CODING_AGENT_DIR", '"--no-extensions"', '"--extension", join(root, "extensions/todo/index.ts")',
+  "TODO_LOAD_PROBE", "runtime not initialized", "executionMode", "setWidget",
+  "multiple items can become in_progress", "parseTodoSnapshot(snapshot)?.state.tasks",
+], "Todo isolated real-Pi load smoke and multiple-active contract");
 
 for (const file of ["README.md", "README.zh-CN.md"]) {
   const text = read(file);
@@ -397,14 +458,28 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "The six specialists", "All seven provider/model pairs", 'action: "create"', "`action` is mandatory",
         "Top-level `deny`", "`--exclude-tools", "launch-time `deniedTools`", "image input",
         "copies that preset's `explorer` configuration", "reread before every create and resume",
-        "next safe model boundary", "same custom message",
+        "next safe model boundary", "same custom message", "collapsed TUI view shows only the compact run header",
+        "Press Ctrl+O", "Ctrl+O changes only TUI rendering",
       ]
     : [
         "六个 specialist", "七个 provider/model", 'action: "create"', "`action` 必填",
         "顶层 `deny`", "`--exclude-tools", "启动时 `deniedTools`", "image input",
         "复制同一 preset 的 `explorer` 配置", "每次 create 与 resume 前都会重新读取 deny",
-        "下一个安全模型边界", "同一条消息",
-      ], `${file} 0.9.1 contract`);
+        "下一个安全模型边界", "同一条消息", "折叠的 TUI 视图只显示紧凑 run header",
+        "按 Ctrl+O", "Ctrl+O 只改变 TUI 渲染",
+      ], `${file} 0.9.2 contract`);
+  hasAll(text, file === "README.md"
+    ? [
+        "## Built-in Todo", '{ action: "list" }', '{ action: "update"', "commits once",
+        "Multiple items may be `in_progress`", "versioned successful", "at most 12 total lines", "Each item shows only its subject",
+        "⛓ subject1, subject2", "Abstracts remain available only", "cannot coexist", "run `pi remove`", "never removes or uninstalls external packages",
+      ]
+    : [
+        "## 内置 Todo", '{ action: "list" }', '{ action: "update"', "只 commit 一次",
+        "多个 item 可以同时为 `in_progress`", "新版本 tool-result details", "总计最多 12 行", "每个 item 只显示 subject",
+        "⛓ subject1, subject2", "abstract 只保留", "不能与内置工具共存", "执行 `pi remove`", "不会主动删除或卸载任何外部 package",
+      ], `${file} built-in Todo contract`);
+  hasNone(text, file === "README.md" ? ["At most one item may be `in_progress`"] : ["最多一个 item 可为 `in_progress`"], `${file} removed single-in-progress contract`);
   hasNone(text, [
     "RpcClient", "RPC-client seam", "hidden follow-up", "隐藏 follow-up", "The five agents", "五个 agent",
     "all five specialist roles", "五个 specialist", "### Fresh runs", "fresh child calls", "fresh child",
@@ -444,15 +519,17 @@ const listRenderer = transcriptRenderer.slice(listRendererStart, listRendererEnd
 hasAll(listRenderer, ["styledTitle", "compactRunHeader", "undefined, true", 'status !== "waiting"', "run.reason"], "status-only list renderer");
 hasNone(listRenderer, ["addFinalOutput", "addLiveActivity", "addRequest", "run.task", "run.cwd", "run.model", "run.deniedTools", "run.output", "run.error", "run.activity", "run.request)"], "status-only list renderer");
 const notificationStart = transcriptRenderer.indexOf("export function renderSubagentNotification");
-const notificationTerminal = transcriptRenderer.indexOf("if (TERMINAL_STATUSES.has(event))", notificationStart);
+const notificationHeader = transcriptRenderer.indexOf("container.addChild(compactRunHeader", notificationStart);
+const notificationExpanded = transcriptRenderer.indexOf("if (options.expanded === true)", notificationHeader);
+const notificationTerminal = transcriptRenderer.indexOf("if (TERMINAL_STATUSES.has(event))", notificationExpanded);
 const notificationWaiting = transcriptRenderer.indexOf('else if (event === "waiting")', notificationTerminal);
 const notificationLive = transcriptRenderer.indexOf("else if (LIVE_STATUSES.has(event)", notificationWaiting);
 check(
-  notificationStart >= 0 && notificationTerminal > notificationStart && notificationWaiting > notificationTerminal &&
-  notificationLive > notificationWaiting &&
+  notificationStart >= 0 && notificationHeader > notificationStart && notificationExpanded > notificationHeader &&
+  notificationTerminal > notificationExpanded && notificationWaiting > notificationTerminal && notificationLive > notificationWaiting &&
   transcriptRenderer.slice(notificationTerminal, notificationWaiting).includes("addFinalOutput") &&
   !transcriptRenderer.slice(notificationTerminal, notificationWaiting).includes("addLiveActivity"),
-  "terminal notifications must render final output without live response",
+  "notification details must render only inside the options.expanded branch",
 );
 hasAll(runtime, [
   "registerMessageRenderer(SUBAGENT_NOTIFICATION_TYPE, renderSubagentNotification)",
@@ -488,6 +565,11 @@ if (packCheck.status === 0) {
     check(files.includes("extensions/oh-my-pi-slim/runner/rpc-child.mjs"), "npm pack must include the runner RPC child helper");
     check(files.includes("extensions/oh-my-pi-slim/subagent-model-display.ts"), "npm pack must include the shared subagent model formatter");
     check(files.includes("extensions/oh-my-pi-slim/subagent-transcript-renderer.ts"), "npm pack must include the subagent transcript renderer");
+    check(files.includes("extensions/todo/index.ts"), "npm pack must include the Todo extension entry");
+    check(files.includes("extensions/todo/core.ts"), "npm pack must include the Todo state core");
+    check(files.includes("extensions/todo/widget.ts"), "npm pack must include the Todo widget");
+    check(files.includes("tests/todo.test.mjs"), "npm pack must include the Todo contract tests");
+    check(files.includes("tests/fixtures/todo-load-probe.ts"), "npm pack must include the Todo real-Pi load probe");
     check(files.includes("agents/observer.md"), "npm pack must include the Observer role");
   } catch (error) {
     errors.push(`npm pack --dry-run output must be JSON: ${error.message}`);

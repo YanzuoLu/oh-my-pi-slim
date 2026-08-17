@@ -32,7 +32,32 @@ pi --omps
 pi install git:github.com/YanzuoLu/oh-my-pi-slim
 ```
 
-package manifest 只加载 `./extensions/oh-my-pi-slim/index.ts`，不再包含 `pi-subagents` dependency 或 extension entry。
+package manifest 加载 `./extensions/oh-my-pi-slim/index.ts`，以及独立的内置 Todo 入口 `./extensions/todo/index.ts`；不再包含 `pi-subagents` dependency 或 extension entry。
+
+## 内置 Todo
+
+package 在 main 与 child session 中始终注册一个名为 `todo` 的模型工具。Todo 不依赖 OMPS 是否激活，也不依赖 preset；它不增加 command、shortcut 或配置。
+
+```ts
+{ action: "list" }
+{ action: "update", operations: [
+  { op: "append", subject, abstract, blockedBy? },
+  { op: "modify", target, newSubject?, abstract?, status?, addBlockedBy?, removeBlockedBy? },
+  { op: "clear" }
+] }
+```
+
+每个 task 精确为 `{ subject, abstract, status, blockedBy }`。subject 会 trim，在 session 内区分大小写且全局唯一，并使用精确匹配。`list` 按 append 顺序返回当前 session 的完整数组，包括 completed item；它不会创建持久化 snapshot。
+
+`update` 按顺序在 draft 上应用非空 operations 数组，最后只 commit 一次。任一 operation 非法都会取消整个 update。依赖只能引用执行到该 operation 时已经存在的 subject。rename 会原子更新所有依赖引用。最终依赖图不能包含缺失引用、自依赖或环；每个 `in_progress` 或 `completed` item 的全部依赖都必须 completed。只要满足该依赖规则，多个 item 可以同时为 `in_progress`。
+
+`clear` 在一个 batch 中最多出现一次，并可位于任意位置。执行 clear 时，draft 必须为空或只包含 completed item。一个 batch 可以先完成旧任务组，再 clear，并 append 新任务组。否则 completed item 会一直保留到 clear。
+
+状态按 Pi session 独立，只通过成功 `todo update` 的新版本 tool-result details 持久化。reload、tree navigation 与 compaction 会从当前 branch 恢复最后一个合法 snapshot。RPC child 会注册工具，但绝不注册 widget。
+
+前台 TUI session 会在 editor 上方显示 tree widget。每个 item 只显示 subject；存在依赖时，行尾显示 `⛓ subject1, subject2`。abstract 只保留在模型可见的完整 `list` JSON 中。widget 显示 `Todos (completed/total)` 与状态 glyph，总计最多 12 行。overflow 会优先隐藏 completed item，并准确分别统计隐藏状态。空状态会移除 widget。
+
+任何同样注册 `todo` 的外部 package 都不能与内置工具共存。本地迁移时，请在加载 OMPS 前单独对该外部 package 执行 `pi remove`。本 package 不会主动删除或卸载任何外部 package。
 
 ## 命令
 
@@ -140,7 +165,7 @@ Detached execution 只持续到当前 owner session 结束。所有 `session_shu
 
 TUI 会在 editor 上方显示一个适配自 `gotgenes/pi-packages` 中 `packages/pi-subagents` 的 widget。它保留原 UI 的 tree layout、80 ms spinner、最多 12 行、active 优先 overflow、status bar 与 finished 短暂 linger。每个 active run 是不可拆分的三行 tree entry：第一行显示 spinner 或 waiting 标记、agent、run ID、waiting 状态与 abstract；dim 的第二行以 `(provider) model • thinking` 开头，随后显示 turn、tool use、token/context/compaction 与 elapsed；第三行显示当前 activity，或以 warning 色显示 supervisor request。compaction count 仅用于观察，并且只由成功的 Pi `compaction_end` RPC event 增加；runner 绝不会用 widget usage 或 compaction counter 触发 checkpoint。abstract 只占第一行并随该行截断，不再挤掉优先可见的 model/stats 行。12 行预算绝不显示半个 active entry，因此最多完整显示 3 个 active run，overflow 会准确汇总；`starting` 仍是一行 queued summary，terminal run 仍短暂显示一行 outcome。RPC mode 绝不注册 widget。
 
-TUI transcript 还为 `subagent` 的 call/result 提供 package 自有 renderer。call 会完整显示对应 action 的输入，包括完整 task、continuation、guidance、reply、ID 与 cwd；非 terminal 的 immediate result 使用紧凑的单行确认；already-terminal 或启动失败的结果可附加完整最终 output/error。新的 active run `list` 只携带并渲染标题和每个 run 含 abstract 的一行紧凑 status header；waiting item 最多再显示 reason，因此新 list 路径绝不暴露 task、activity、output、error、message 或 interview。回放早于 abstract 字段的旧 transcript row 时，renderer 会从 legacy task 使用同一个 100-code-point fallback；若两者都没有，则显示明确的 summary unavailable placeholder，并且不会把完整 task 作为独立字段渲染。每条 lifecycle notification 就是用于模型交付的同一条 custom message，不会再创建第二条 TUI-only entry：waiting 通知显示完整 request，terminal 通知显示完整 output/error，active 通知可显示明确标为 `Live response` 的 response/tool activity；terminal 通知绝不重复过期的 live response。显示不受 tool expansion 状态影响，renderer 也不会把 message `details` 复制进 model context。
+TUI transcript 还为 `subagent` 的 call/result 提供 package 自有 renderer。call 会完整显示对应 action 的输入，包括完整 task、continuation、guidance、reply、ID 与 cwd；非 terminal 的 immediate result 使用紧凑的单行确认；already-terminal 或启动失败的结果可附加完整最终 output/error。新的 active run `list` 只携带并渲染标题和每个 run 含 abstract 的一行紧凑 status header；waiting item 最多再显示 reason，因此新 list 路径绝不暴露 task、activity、output、error、message 或 interview。回放早于 abstract 字段的旧 transcript row 时，renderer 会从 legacy task 使用同一个 100-code-point fallback；若两者都没有，则显示明确的 summary unavailable placeholder，并且不会把完整 task 作为独立字段渲染。每条 lifecycle notification 就是用于模型交付的同一条 custom message，不会再创建第二条 TUI-only entry。折叠的 TUI 视图只显示紧凑 run header。按 Ctrl+O 后才展开 waiting request、terminal output/error 或 active live activity；terminal 通知绝不重复过期的 live response。Ctrl+O 只改变 TUI 渲染，不会改变 custom message content，也不会把 `details` 复制进 model context。
 
 ## 有意限制的范围
 

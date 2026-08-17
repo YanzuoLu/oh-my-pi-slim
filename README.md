@@ -32,7 +32,32 @@ pi --omps
 pi install git:github.com/YanzuoLu/oh-my-pi-slim
 ```
 
-The package manifest loads only `./extensions/oh-my-pi-slim/index.ts`. There is no `pi-subagents` dependency or extension entry.
+The package manifest loads `./extensions/oh-my-pi-slim/index.ts` and the independent built-in Todo entry at `./extensions/todo/index.ts`. There is no `pi-subagents` dependency or extension entry.
+
+## Built-in Todo
+
+The package always registers one model tool named `todo` in main and child sessions. Todo does not depend on OMPS activation or preset selection. It adds no command, shortcut, or configuration.
+
+```ts
+{ action: "list" }
+{ action: "update", operations: [
+  { op: "append", subject, abstract, blockedBy? },
+  { op: "modify", target, newSubject?, abstract?, status?, addBlockedBy?, removeBlockedBy? },
+  { op: "clear" }
+] }
+```
+
+Each task is exactly `{ subject, abstract, status, blockedBy }`. Subjects are trimmed, case-sensitive, globally unique within the session, and matched exactly. `list` returns the complete current-session array in append order, including completed items. It never creates a persistence snapshot.
+
+`update` applies its non-empty operation array to a draft in order and commits once. Any invalid operation cancels the whole update. Dependencies may reference only subjects that already exist at that operation. Renames update every dependency reference atomically. The final graph must have no missing reference, self-dependency, or cycle. Every dependency of an `in_progress` or `completed` item must be completed. Multiple items may be `in_progress` when their dependencies satisfy this rule.
+
+`clear` may appear once anywhere in a batch. At that point, the draft must be empty or contain only completed items. One batch can complete the old group, clear it, and append a new group. Completed items otherwise remain visible until clear.
+
+State belongs to each Pi session and persists only through versioned successful `todo update` tool-result details. Reload, tree navigation, and compaction restore the latest valid snapshot on the current branch. RPC children register the tool but never register the widget.
+
+Foreground TUI sessions show a tree widget above the editor. Each item shows only its subject, followed by `⛓ subject1, subject2` when dependencies exist. Abstracts remain available only in the complete model-facing `list` JSON. The widget displays `Todos (completed/total)`, status glyphs, and at most 12 total lines. Overflow hides completed items first and reports exact hidden status counts. An empty state removes the widget.
+
+An external package that also registers `todo` cannot coexist with the built-in tool. For a local migration, run `pi remove` for that external package separately before loading OMPS. This package never removes or uninstalls external packages automatically.
 
 ## Commands
 
@@ -140,7 +165,7 @@ Detached execution lasts only for the current owner session. Every `session_shut
 
 TUI sessions show a widget above the editor adapted from `gotgenes/pi-packages`' `packages/pi-subagents` UI. It uses the same tree layout, 80 ms spinner, 12-line cap, active-first overflow policy, status bar, and short finished-run linger. Each active run is an atomic three-line tree entry: the first line shows its spinner or waiting marker, agent, run ID, waiting state, and abstract; the dim second line starts with `(provider) model • thinking` and then shows turns, tool uses, token/context/compaction stats, and elapsed time; the third line shows current activity or the warning-colored supervisor request. The compaction count is observational only and increments exclusively from successful Pi `compaction_end` RPC events; the runner never uses widget usage or compaction counters to trigger checkpoints. Keeping abstract text on the first line prevents it from crowding out the higher-priority model and stats line. The 12-line budget never shows a partial active entry, so at most three complete active runs are visible; overflow remains accurately summarized. `starting` runs still appear as a one-line queued summary, and terminal runs still briefly show one-line outcome entries. The widget is never registered in RPC mode.
 
-The TUI transcript also has package-owned renderers for `subagent` calls and results. Calls show complete action-specific input, including full task, continuation, guidance, reply text, IDs, and cwd. Nonterminal immediate results use compact one-line acknowledgements; an already-terminal or failed result may append its complete final output/error. A new active-run `list` carries and renders only its title and one compact status header with abstract per run; a waiting item may add only its reason, so the new list path never exposes task, activity, output, error, message, or interview data. When replaying an old transcript row that predates abstract, the renderer applies the same 100-code-point fallback from its legacy task field, or shows an explicit unavailable-summary placeholder if neither field exists; it never renders the full task as a separate field. Each lifecycle notification is the same custom message used for model delivery, not a second TUI-only entry: waiting notifications show the complete request, terminal notifications show complete output/error, and active notifications may show explicitly labeled live response/tool activity. Terminal notifications never repeat stale live response text. Rendering is independent of tool expansion state and does not copy message `details` into model context.
+The TUI transcript also has package-owned renderers for `subagent` calls and results. Calls show complete action-specific input, including full task, continuation, guidance, reply text, IDs, and cwd. Nonterminal immediate results use compact one-line acknowledgements; an already-terminal or failed result may append its complete final output/error. A new active-run `list` carries and renders only its title and one compact status header with abstract per run; a waiting item may add only its reason, so the new list path never exposes task, activity, output, error, message, or interview data. When replaying an old transcript row that predates abstract, the renderer applies the same 100-code-point fallback from its legacy task field, or shows an explicit unavailable-summary placeholder if neither field exists; it never renders the full task as a separate field. Each lifecycle notification is the same custom message used for model delivery, not a second TUI-only entry. Its collapsed TUI view shows only the compact run header. Press Ctrl+O to expand waiting requests, terminal output/errors, or active live activity. Terminal notifications never repeat stale live response text. Ctrl+O changes only TUI rendering and never changes the custom message content or copies `details` into model context.
 
 ## Deliberate scope
 
