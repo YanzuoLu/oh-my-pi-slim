@@ -57,6 +57,15 @@ function hiddenSummary(tasks: readonly TodoTask[]): string {
   return `+${tasks.length} more (${parts.join(", ")})`;
 }
 
+function todoWidgetHeading(tasks: readonly TodoTask[], theme: Theme): string {
+  const completed = tasks.filter((task) => task.status === "completed").length;
+  const active = completed < tasks.length;
+  const color = active ? "accent" : "dim";
+  const glyph = active ? theme.bold("●") : "○";
+  const label = active ? theme.bold(`Todos (${completed}/${tasks.length})`) : `Todos (${completed}/${tasks.length})`;
+  return `${formatSemanticGlyphPrefix(theme.fg(color, glyph))}${theme.fg(color, label)}`;
+}
+
 export function isTodoTaskBlocked(task: TodoTask, tasks: readonly TodoTask[]): boolean {
   const bySubject = new Map(tasks.map((candidate) => [candidate.subject, candidate]));
   return task.blockedBy.some((dependency) => bySubject.get(dependency)?.status !== "completed");
@@ -100,9 +109,7 @@ export function renderTodoLines(
 ): string[] {
   if (tasks.length === 0 || maxLines <= 0) return [];
   const truncate = (line: string): string => truncateToWidth(line, Math.max(1, width), "…");
-  const completed = tasks.filter((task) => task.status === "completed").length;
-  const heading = `${formatSemanticGlyphPrefix(theme.fg("accent", theme.bold("●")))}${theme.fg("accent", theme.bold(`Todos (${completed}/${tasks.length})`))}`;
-  const lines = [truncate(heading)];
+  const lines = [truncate(todoWidgetHeading(tasks, theme))];
   const layout = selectTodoWidgetLayout(tasks, maxLines);
   for (let index = 0; index < layout.visible.length; index += 1) {
     const last = index === layout.visible.length - 1 && layout.hidden.length === 0;

@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.2", "package version must be 0.10.2");
+check(packageJson.version === "0.10.3", "package version must be 0.10.3");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.2" && lock.packages?.[""]?.version === "0.10.2", "package-lock version must be 0.10.2");
+check(lock.version === "0.10.3" && lock.packages?.[""]?.version === "0.10.3", "package-lock version must be 0.10.3");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -1089,7 +1089,7 @@ check(!/export function ensurePackageSetup[\s\S]*maxSubagentDepth\s*=\s*1/.test(
 hasAll(orchestrator, [
   "<Role>", "<Agents>", "@explorer", "@librarian", "@oracle", "@designer", "@fixer", "@observer", "<Workflow>",
   'subagent({ action: "create", agent, abstract, task, cwd? })', 'subagent({ action: "list" })',
-  'subagent({ action: "status", id })', 'subagent({ action: "clear" })', 'clear is refused while any run is starting, running, or waiting',
+  'subagent({ action: "status", id })', 'Use `subagent clear` when retained runs are no longer useful and should be discarded.',
   'subagent({ action: "steer", id, message })', 'subagent({ action: "interrupt", id })',
   'subagent({ action: "resume", id: "source-run-id", abstract: "new run summary", message: "continuation objective" })',
   'subagent({ action: "reply", id: runId, message })', "lifecycle notifications arrive automatically at the next safe model boundary",
@@ -1102,12 +1102,13 @@ hasNone(orchestrator, [
 const expectedTodoContinuity = `### Todo Continuity
 - When the user adds a new task while a todo list exists, append the new task to the end of the existing todo list instead of replacing the list.
 - Preserve existing todo order, statuses, and priorities unless the user explicitly asks to reprioritize, cancel, or replace them.
-- Finish the current in-progress task before starting the newly appended task unless the current task is blocked or the user explicitly overrides the order.`;
+- Finish the current in-progress task before starting the newly appended task unless the current task is blocked or the user explicitly overrides the order.
+- Clear the completed todo list when its items are unrelated to upcoming work.`;
 const todoContinuityStart = orchestrator.indexOf("### Todo Continuity");
 const todoContinuityEnd = orchestrator.indexOf("Can tasks be split", todoContinuityStart);
 check(
   orchestrator.slice(todoContinuityStart, todoContinuityEnd).trim() === expectedTodoContinuity,
-  "orchestrator Todo Continuity must match the exact upstream text",
+  "orchestrator Todo Continuity must preserve upstream guidance and the reviewed clear boundary",
 );
 
 hasAll(todoExtension, [
@@ -1277,6 +1278,15 @@ hasAll(todoWidget, [
   'addResultField(container, theme, "Status"', 'addResultSection(container, theme, "Abstract"',
   'addResultList(container, theme, "Blocked by"', "no-change",
 ], "built-in Todo widget and result-renderer contract");
+const todoWidgetHeadingBlock = todoWidget.slice(todoWidget.indexOf("function todoWidgetHeading"), todoWidget.indexOf("export function isTodoTaskBlocked"));
+hasAll(todoWidgetHeadingBlock, [
+  'const active = completed < tasks.length', 'const color = active ? "accent" : "dim"',
+  'const glyph = active ? theme.bold("●") : "○"',
+  'const label = active ? theme.bold(`Todos (${completed}/${tasks.length})`) : `Todos (${completed}/${tasks.length})`',
+  "formatSemanticGlyphPrefix(theme.fg(color, glyph))", "theme.fg(color, label)",
+], "Todo persistent widget active and all-completed idle heading visual");
+hasNone(todoWidgetHeadingBlock, ['theme.bold("○")'], "Todo idle heading must remain dim without bold emphasis");
+check(todoWidget.includes("truncate(todoWidgetHeading(tasks, theme))"), "Todo persistent widget must render through the active-idle heading helper");
 hasAll(todoExtension, [
   "context.expanded === true", "todoCallTitle", 'theme.bold("todo")', 'theme.fg("muted", detail)',
   '`· ${action}${expanded ? "" : " (ctrl+o to expand)"}`', 'action === "list" || !expanded',
@@ -1339,7 +1349,11 @@ hasAll(todoTests, [
   '✓  Applied 0 append · 0 modify · 1 delete · 0 clear → 1 changed · 0 no-change',
   "widget priority sorts every state from current dependencies", "missing-ref", "sorts before slicing",
   'cannot delete "Core" because "Left", "Right" depend on it',
-], "Todo focused Ctrl+O visual tests");
+  "widget active and all-completed idle headings keep exact roles, ANSI, width, overflow, and row treatment",
+  "widget heading refreshes both ways across update, delete, clear, replay, tree, compact, and session restore",
+  '"○  Todos (14/14)"', "all-completed widget must not render any accent role",
+  "tool result keeps its existing non-widget heading visual", "roleAnsiTheme",
+], "Todo focused Ctrl+O and active-idle widget visual tests");
 const subagentTranscriptTests = read("tests/subagent-transcript-renderer.test.mjs");
 hasAll(subagentTranscriptTests, [
   "clear receipts stay compact when collapsed and list every retained-item warning when expanded",

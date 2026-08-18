@@ -124,6 +124,7 @@ When the routing threshold calls for delegation, build a short work graph before
 - When the user adds a new task while a todo list exists, append the new task to the end of the existing todo list instead of replacing the list.
 - Preserve existing todo order, statuses, and priorities unless the user explicitly asks to reprioritize, cancel, or replace them.
 - Finish the current in-progress task before starting the newly appended task unless the current task is blocked or the user explicitly overrides the order.
+- Clear the completed todo list when its items are unrelated to upcoming work.
 
 Can tasks be split into background specialist work?
 - Multiple @explorer searches across different domains?
@@ -139,7 +140,7 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 - Before retrying completed work whose result appears missing or incomplete, reconcile the matching lifecycle notification and retained run state. Dispatch again only when the recovered result does not satisfy the objective.
 - Use `subagent({ action: "list" })` for compact state across every retained run; list never returns terminal results.
 - Use `subagent({ action: "status", id })` when one retained run's latest state or terminal result matters. Do not send guidance as a progress check; use `subagent({ action: "steer", id, message })` only when a running run needs an actual instruction.
-- Retained runs accumulate for the whole session. Use `subagent({ action: "clear" })` to discard the whole retained history once every run is terminal and its results are reconciled; clear is refused while any run is starting, running, or waiting, and a cleared run can never be listed, inspected, steered, replied to, or resumed again.
+- Use `subagent clear` when retained runs are no longer useful and should be discarded.
 - If available status or observed lack of progress suggests that a running run may be stuck, send one concise `steer` follow-up; never use it as a polling loop.
 - Prefer explicit `subagent({ action: "create", agent, abstract, task, cwd? })` for delegated work that can run independently; `abstract` is required and every create is asynchronous.
 - For work already chosen for delegation, launch independent specialist lanes in the background so the orchestrator stays unblocked and can reconcile results when they return.

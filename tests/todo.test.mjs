@@ -55,6 +55,14 @@ const vtTheme = {
   bold: (text) => `\u001b[1m${text}\u001b[22m`,
   strikethrough: (text) => `\u001b[9m${text}\u001b[29m`,
 };
+const roleAnsiTheme = {
+  fg: (color, text) => {
+    const code = { accent: 35, dim: 2, success: 32, text: 37, toolOutput: 36, toolTitle: 34, warning: 33, error: 31 }[color] ?? 39;
+    return `\u001b[${code}m${text}\u001b[0m`;
+  },
+  bold: (text) => `\u001b[1m${text}\u001b[22m`,
+  strikethrough: (text) => `\u001b[9m${text}\u001b[29m`,
+};
 
 function task(subject, status = "pending", blockedBy = [], abstract = `${subject} summary`) {
   return { subject, abstract, status, blockedBy };
@@ -636,6 +644,96 @@ test("widget sorts before slicing, preserves the 12-line budget, counts hidden s
   assert.deepEqual(renderTodoLines([], theme, 80), []);
 });
 
+test("widget active and all-completed idle headings keep exact roles, ANSI, width, overflow, and row treatment", () => {
+  const activeAnsi = renderTodoLines([task("Pending")], roleAnsiTheme, 80);
+  assert.equal(
+    activeAnsi[0],
+    "\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mTodos (0/1)\u001b[22m\u001b[0m",
+  );
+
+  const completed = [
+    task("First", "completed"),
+    task("Dependent", "completed", ["First"]),
+    task("Latest", "completed"),
+  ];
+  assert.deepEqual(renderTodoLines(completed, theme, 80), [
+    "○  Todos (3/3)",
+    "├─ ✓  ~Latest~",
+    "├─ ✓  ~Dependent~ ⛓  First",
+    "└─ ✓  ~First~",
+  ]);
+  const idleAnsi = renderTodoLines(completed, roleAnsiTheme, 80);
+  assert.equal(idleAnsi[0], "\u001b[2m○\u001b[0m  \u001b[2mTodos (3/3)\u001b[0m");
+  assert.doesNotMatch(idleAnsi.join("\n"), /\u001b\[35m/, "all-completed widget must not render any accent role");
+  assert.match(idleAnsi.join("\n"), /\u001b\[2m\u001b\[9mLatest\u001b\[29m\u001b\[0m/);
+  assert.match(idleAnsi.join("\n"), /\u001b\[2m⛓\u001b\[0m  \u001b\[2mFirst\u001b\[0m/);
+
+  for (const width of [6, 12, 18]) {
+    const narrow = renderTodoLines(completed, roleAnsiTheme, width);
+    assert.ok(narrow.every((line) => visibleWidth(line) <= width));
+    assert.doesNotMatch(narrow[0], /●|\u001b\[35m/);
+  }
+  assert.match(renderTodoLines(completed, theme, 6)[0], /^○  /);
+
+  const completedOverflow = Array.from({ length: 14 }, (_, index) => task(`done-${index}`, "completed"));
+  const overflow = renderTodoLines(completedOverflow, theme, 80);
+  assert.equal(overflow.length, MAX_TODO_WIDGET_LINES);
+  assert.equal(overflow[0], "○  Todos (14/14)");
+  assert.equal(overflow.at(-1), "└─ +4 more (4 completed)");
+  const overflowAnsi = renderTodoLines(completedOverflow, roleAnsiTheme, 30);
+  assert.ok(overflowAnsi.every((line) => visibleWidth(line) <= 30));
+  assert.doesNotMatch(overflowAnsi.join("\n"), /\u001b\[35m/);
+  assert.match(overflowAnsi.at(-1), /\u001b\[2m\+4 more \(4 completed\)\u001b\[0m/);
+});
+
+test("widget heading refreshes both ways across update, delete, clear, replay, tree, compact, and session restore", () => {
+  const completedSnapshot = makeTodoSnapshot(
+    [task("Restored", "completed")],
+    [{ op: "append", subject: "Restored", abstract: "Restored summary" }],
+    [{ operation: 1, kind: "append", text: "Appended." }],
+  );
+  const activeSnapshot = makeTodoSnapshot(
+    [task("Restored", "pending")],
+    [{ op: "append", subject: "Restored", abstract: "Restored summary" }],
+    [{ operation: 1, kind: "append", text: "Appended." }],
+  );
+  const harness = createHarness({ mode: "tui", branch: [branchResult(completedSnapshot)] });
+  harness.emit("session_start", { reason: "restore" });
+  assert.equal(harness.widgetComponent.render(80)[0], "○  Todos (1/1)");
+
+  harness.setBranch([branchResult(activeSnapshot)]);
+  harness.emit("session_tree", {});
+  assert.equal(harness.renders, 1);
+  assert.equal(harness.widgetComponent.render(80)[0], "●  Todos (0/1)");
+
+  harness.setBranch([branchResult(completedSnapshot)]);
+  harness.emit("session_compact", {});
+  assert.equal(harness.renders, 2);
+  assert.equal(harness.widgetComponent.render(80)[0], "○  Todos (1/1)");
+
+  runUpdate(harness.tool, harness.ctx, [{ op: "append", subject: "Open", abstract: "open" }]);
+  assert.equal(harness.widgetComponent.render(80)[0], "●  Todos (1/2)");
+  runUpdate(harness.tool, harness.ctx, [{ op: "modify", target: "Open", status: "completed" }]);
+  assert.equal(harness.widgetComponent.render(80)[0], "○  Todos (2/2)");
+  runUpdate(harness.tool, harness.ctx, [{ op: "modify", target: "Open", status: "in_progress" }]);
+  assert.equal(harness.widgetComponent.render(80)[0], "●  Todos (1/2)");
+  runUpdate(harness.tool, harness.ctx, [{ op: "modify", target: "Open", status: "completed" }]);
+  assert.equal(harness.widgetComponent.render(80)[0], "○  Todos (2/2)");
+
+  runUpdate(harness.tool, harness.ctx, [{ op: "append", subject: "Delete me", abstract: "delete" }]);
+  assert.equal(harness.widgetComponent.render(80)[0], "●  Todos (2/3)");
+  runUpdate(harness.tool, harness.ctx, [{ op: "delete", target: "Delete me" }]);
+  assert.equal(harness.widgetComponent.render(80)[0], "○  Todos (2/2)");
+
+  runUpdate(harness.tool, harness.ctx, [{ op: "clear" }]);
+  assert.equal(harness.widgetCalls.at(-1).content, undefined);
+  assert.equal(harness.widgetComponent, undefined);
+  assert.deepEqual(JSON.parse(runList(harness.tool, harness.ctx).content[0].text), []);
+
+  runUpdate(harness.tool, harness.ctx, [{ op: "append", subject: "Again", abstract: "again" }]);
+  assert.equal(harness.widgetComponent.render(80)[0], "●  Todos (0/1)");
+});
+
 test("widget immediately reorders after status, dependency completion or restore, and delete while list order stays append-based", () => {
   const harness = createHarness({ mode: "tui" });
   harness.emit("session_start", { reason: "startup" });
@@ -784,6 +882,10 @@ test("Ctrl+O expands Todo update and list results without changing model data", 
   assert.doesNotMatch(updateExpanded, /[✓○] [^ →]|[✓○] {3}/);
   assert.doesNotMatch(updateExpanded, /oh-my-pi-slim:todo-update|"state"|"tasks"/);
   assert.deepEqual(updateResult, updateBefore);
+
+  const completedListResult = runList(harness.tool, harness.ctx);
+  const completedListCollapsed = renderComponent(harness.tool.renderResult(completedListResult, { expanded: false }, theme, {}));
+  assert.equal(completedListCollapsed, "●  Todos (1/1)", "tool result keeps its existing non-widget heading visual");
 
   runUpdate(harness.tool, harness.ctx, [{ op: "append", subject: "B", abstract: "Second abstract", blockedBy: ["A"] }]);
   const listResult = runList(harness.tool, harness.ctx);
