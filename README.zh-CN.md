@@ -161,6 +161,8 @@ Loop 会跨 compaction 与 tree navigation 保留，但 reload、new session、s
 
 `notifyOn` 使用区分大小写的 literal match。命令必须保持前台运行：不要使用 `nohup`、`setsid`、`disown`、尾随 `&` 或其他 detach escape。
 
+matcher 与 terminal notification 共用同一种形式：每条都说明 monitor 当前状态，并且只携带上一条 notification 之后新增的输出，不重发完整日志。要看一个 record 的完整 retained state 与合并输出，`status` 是唯一入口。
+
 terminal record 与相关输出会一直保留到 `delete`。先用 `status` 检查结果，不再需要时再 `delete`。
 
 ### `ask_user_question`
@@ -232,6 +234,7 @@ Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree res
 
 - compaction 与 tree operation 期间，package notification 会安全排队，之后正常交付，不丢失用户可见结果。
 - package tool row 与 notification 使用 Ctrl+O 切换 collapsed/expanded；展开只改变显示，不改变工具数据或持久化状态。
+- Monitor notification 是增量的：每条都标明当前状态并只展示新增输出，因此 `monitor status` 始终是读取完整 retained state 与日志的唯一入口。
 - 前台 TUI 为 retained subagent、Todo、Loop、Monitor 与 active Goal 提供紧凑 widget；RPC session 不注册这些 widget。
 - subagent、Todo 与 Monitor widget 跟随与 tool row 相同的 Ctrl+O 状态：collapsed 隐藏已结束的行，并在标题末尾追加使用当前配置键位的 dim 提示；expanded 显示完整内容。Loop 与 Goal widget 始终显示完整内容。
 - Subagent、Todo 与 Goal 会按各自 session 或 branch 范围恢复。尤其是成功执行的 subagent `clear` 在 reload 后仍保持清空。

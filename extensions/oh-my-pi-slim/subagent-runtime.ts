@@ -1215,7 +1215,12 @@ export class OmpsSubagentRuntime {
     }
     if (action === "reply") return this.reply(id, requireString(input.message, "message"));
     const run = this.requireRun(id);
-    if (isTerminalStatus(run.status)) return toolText(`${id} is already ${run.status}.`, { run: this.formatRun(run) });
+    if (isTerminalStatus(run.status)) {
+      // A steer that loses the race to a terminal transition must stay compact: the queued
+      // terminal lifecycle notification remains the single automatic delivery of output/error.
+      const terminalRun = action === "steer" ? this.formatRunSummary(run) : this.formatRun(run);
+      return toolText(`${id} is already ${run.status}.`, { run: terminalRun });
+    }
     const target = this.validConfig(id);
     if (!target) throw new Error(`Run ${id} has no valid detached control target.`);
     if (action === "steer") {

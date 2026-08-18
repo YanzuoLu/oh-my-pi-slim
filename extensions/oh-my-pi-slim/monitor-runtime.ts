@@ -499,12 +499,12 @@ export class MonitorRuntime {
       name: "monitor",
       label: "Monitor",
       executionMode: "sequential",
-      description: "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher, summary, and terminal notifications report noteworthy output and completion. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one detailed record with retained combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.",
+      description: "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher and terminal notifications carry the current status and only the output added since the previous notification. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.",
       promptSnippet: "Supervise long-running foreground commands.",
       promptGuidelines: [
         "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
         "Do not poll a running monitor with repeated `monitor status` calls.",
-        "`monitor list` summarizes all records, while `monitor status` returns one record's detailed state and logs.",
+        "`monitor list` summarizes records, notifications carry current status and incremental output, and `monitor status` returns full retained state and logs.",
       ],
       parameters: monitorParameters,
       execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => this.execute(params as MonitorInput, ctx),
@@ -1243,16 +1243,7 @@ export class MonitorRuntime {
       return;
     }
     this.sentMatcherAt.push(this.nowMs());
-    const fitted = this.fitNotificationLines(record, payload, (lines, omitted, truncated) => {
-      const truncation = truncated ? `\n[truncated: omitted ${omitted} lines and/or shortened oversized lines; use monitor status]` : "";
-      const abstract = boundedText(record.abstract, RESPONSE_TEXT_MAX).text;
-      const content = [
-        `Monitor ${record.id} (${abstract}) matched: ${keywords.join(", ")}.`,
-        ...lines.map((line) => `[${line.stream}] ${line.text}`),
-      ].join("\n") + truncation;
-      const details = { id: record.id, abstract, kind: "matcher", matched: keywords, lines, omitted, truncated };
-      return { content, details };
-    });
+    const fitted = this.buildUpdateNotification(record, keywords, payload);
     this.queueNotification(record, "matcher", fitted.content, fitted.details);
   }
 
@@ -1341,6 +1332,44 @@ export class MonitorRuntime {
     }
   }
 
+  /**
+   * Single payload builder for every running matcher batch and every terminal close.
+   * Each update states the monitor's current status and carries only the lines after
+   * the delivered notification position; full retained state stays behind `monitor status`.
+   */
+  private buildUpdateNotification(
+    record: MonitorRecord,
+    matched: string[],
+    payload: NotificationLines,
+  ): { content: string; details: Record<string, unknown> } {
+    const terminal = record.status !== "running";
+    return this.fitNotificationLines(record, payload, (lines, omitted, truncated) => {
+      const abstract = boundedText(record.abstract, RESPONSE_TEXT_MAX).text;
+      const exitCode = terminal ? record.exitCode : null;
+      const signal = terminal ? record.signal : null;
+      const error = terminal && record.error !== null ? boundedText(record.error, RESPONSE_TEXT_MAX).text : null;
+      const heading = [`Monitor ${record.id} (${abstract}) status ${record.status}.`];
+      if (matched.length > 0) heading.push(`Matched: ${matched.join(", ")}.`);
+      if (terminal) heading.push(`Exit code: ${exitCode ?? "null"}; signal: ${signal ?? "null"}; error: ${error ?? "null"}.`);
+      const truncation = truncated ? `\n[truncated: omitted ${omitted} lines and/or shortened oversized lines; use monitor status]` : "";
+      const content = [...heading, ...lines.map((line) => `[${line.stream}] ${line.text}`)].join("\n") + truncation;
+      const details = {
+        id: record.id,
+        abstract,
+        kind: "update",
+        status: record.status,
+        matched: [...matched],
+        exitCode,
+        signal,
+        error,
+        lines,
+        omitted,
+        truncated,
+      };
+      return { content, details };
+    });
+  }
+
   private finalize(record: MonitorRecord): void {
     if (record.status !== "running") return;
     const now = new Date(this.nowMs()).toISOString();
@@ -1363,23 +1392,7 @@ export class MonitorRuntime {
       const latest = record.nextSeq - 1;
       const payload = this.notificationLines(record, record.notificationCursor, 100);
       record.notificationCursor = latest;
-      let state: MonitorOperationalState;
-      try { state = this.operationalState(record, 0, 100, 36 * 1024); }
-      catch {
-        state = this.operationalState(record, 0, 1, 36 * 1024);
-      }
-      const fitted = this.fitNotificationLines(record, payload, (lines, omitted, truncated) => {
-        const abstract = boundedText(record.abstract, RESPONSE_TEXT_MAX).text;
-        const truncation = truncated ? `\n[truncated: omitted ${omitted} lines and/or shortened oversized lines; use monitor status]` : "";
-        const boundedError = boundedText(record.error ?? "null", RESPONSE_TEXT_MAX).text;
-        const content = [
-          `Monitor ${record.id} (${abstract}) reached terminal status ${record.status}.`,
-          `Exit code: ${record.exitCode ?? "null"}; signal: ${record.signal ?? "null"}; error: ${boundedError}.`,
-          ...lines.map((line) => `[${line.stream}] ${line.text}`),
-        ].join("\n") + truncation;
-        const details = { id: record.id, abstract, kind: "terminal", status: state, lines, omitted, truncated };
-        return { content, details };
-      });
+      const fitted = this.buildUpdateNotification(record, [], payload);
       this.queueNotification(record, "terminal", fitted.content, fitted.details);
     }
   }

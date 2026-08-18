@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.4", "package version must be 0.10.4");
+check(packageJson.version === "0.10.5", "package version must be 0.10.5");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.4" && lock.packages?.[""]?.version === "0.10.4", "package-lock version must be 0.10.4");
+check(lock.version === "0.10.5" && lock.packages?.[""]?.version === "0.10.5", "package-lock version must be 0.10.5");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -670,8 +670,53 @@ hasAll(monitorRuntime, [
   "droppedBytes", "droppedLines", "MONITOR_NOTIFICATION_TYPE",
   "registerMessageRenderer(MONITOR_NOTIFICATION_TYPE, renderMonitorNotification)", "renderCall: renderMonitorCall", "renderResult: renderMonitorResult",
   "setUICtx(ui: ExtensionUIContext | undefined)", "refreshUI(): void", "this.widget.handleChange(change)", "this.widget.dispose()",
+  "private buildUpdateNotification(", 'kind: "update"', "const state = this.operationalState(record, start, end, this.toolContentMaxBytes)", "combined: scan.lines",
 ], "Monitor runtime and visual wiring contract");
 hasNone(monitorRuntime, ["registerCommand", "registerShortcut", "setWidget", "notify(", "nohup parser", "readFileSync", "writeFileSync", "partialLineMaxChars"], "Monitor delegated visual boundary");
+check((monitorRuntime.match(/buildUpdateNotification\(/g) ?? []).length === 3, "Monitor matcher and terminal notifications must share exactly one payload builder and two call sites");
+const monitorUpdateBuilder = monitorRuntime.slice(
+  monitorRuntime.indexOf("private buildUpdateNotification("),
+  monitorRuntime.indexOf("private finalize(record: MonitorRecord)"),
+);
+hasAll(monitorUpdateBuilder, [
+  'const terminal = record.status !== "running"',
+  "this.fitNotificationLines(record, payload, (lines, omitted, truncated)",
+  "`Monitor ${record.id} (${abstract}) status ${record.status}.`",
+  '`Matched: ${matched.join(", ")}.`',
+  '`Exit code: ${exitCode ?? "null"}; signal: ${signal ?? "null"}; error: ${error ?? "null"}.`',
+  "const exitCode = terminal ? record.exitCode : null",
+  "const signal = terminal ? record.signal : null",
+  "const error = terminal && record.error !== null ? boundedText(record.error, RESPONSE_TEXT_MAX).text : null",
+  "matched: [...matched]",
+  "exitCode,\n        signal,\n        error,",
+  "[truncated: omitted ${omitted} lines and/or shortened oversized lines; use monitor status]",
+  "lines,\n        omitted,\n        truncated,",
+], "Monitor unified incremental update payload builder");
+hasNone(monitorUpdateBuilder, [
+  "operationalState(", "scanLogTail(", "logPath", "combined", "command", "cwd", "pid",
+], "unified update payload must never embed full operational state");
+const monitorMatcherFlush = monitorRuntime.slice(
+  monitorRuntime.indexOf("private flushMatcherBatch(record: MonitorRecord)"),
+  monitorRuntime.indexOf("private expireRateWindow()"),
+);
+hasAll(monitorMatcherFlush, [
+  "this.notificationLines(record, record.notificationCursor, 100)",
+  "this.buildUpdateNotification(record, keywords, payload)",
+  'this.queueNotification(record, "matcher", fitted.content, fitted.details)',
+], "Monitor matcher batch reuses the unified builder and keeps its private delivery kind");
+hasNone(monitorMatcherFlush, ['kind: "matcher"', "fitNotificationLines", "operationalState("], "Monitor matcher batch must not keep a second payload template");
+const monitorFinalize = monitorRuntime.slice(
+  monitorRuntime.indexOf("private finalize(record: MonitorRecord)"),
+  monitorRuntime.indexOf("private forceTerminal(record: MonitorRecord"),
+);
+hasAll(monitorFinalize, [
+  "this.notificationLines(record, record.notificationCursor, 100)",
+  "this.buildUpdateNotification(record, [], payload)",
+  'this.queueNotification(record, "terminal", fitted.content, fitted.details)',
+], "Monitor terminal close reuses the unified builder and keeps its private delivery kind");
+hasNone(monitorFinalize, [
+  "operationalState(record, 0, 100, 36 * 1024)", "operationalState(", "scanLogTail(", 'kind: "terminal"', "fitNotificationLines",
+], "Monitor terminal close must not scan the retained log or build a second payload template");
 hasAll(monitorWidget, [
   'MONITOR_WIDGET_KEY = "oh-my-pi-slim:monitors"', "MAX_MONITOR_WIDGET_LINES = 12", "MAX_VISIBLE_MONITORS = 10",
   "MONITOR_RENDER_THROTTLE_MS = 110", 'theme.bold("●")', 'theme.fg("accent", "↻")', '"✓"', '"!"', '"×"',
@@ -702,11 +747,29 @@ hasAll(monitorTranscriptRenderer, [
   "renderMonitorCall", "renderMonitorResult", "renderMonitorNotification", 'theme.bold("monitor")', 'monitorStatusGlyph("running", theme)',
   '`· ${safeAction}${expanded ? "" : " (ctrl+o to expand)"}`', "spacedResult", "safeFirstLine", "sanitizeMonitorBody",
   'theme.bold(`Monitors (${running}/${monitors.length})`)', "renderOperationalState", 'addCombinedLines(container, theme, "Combined lines"',
-  'details?.kind === "matcher"', 'details?.kind === "terminal"', 'details?.kind === "summary"',
+  'details?.kind === "update"', 'details?.kind === "matcher"', 'details?.kind === "terminal"', 'details?.kind === "summary"',
   'Monitors · rate limited', 'matched ${details.matched.length}', "Incremental lines", "Forced deletion",
   "ExpandableNotificationLine", 'theme.fg("muted", " (ctrl+o to expand)")', "visibleWidth(this.hint)",
+  "function updateNotification(value: UnknownRecord): UpdateNotification | undefined",
+  "function renderUpdateNotification(details: UpdateNotification, expanded: boolean, theme: Theme): Component",
+  "Legacy pre-`update` matcher payload", "Legacy pre-`update` terminal payload",
 ], "Monitor Ctrl+O, result, and notification visual contract");
 hasNone(monitorTranscriptRenderer, ["\\u001b", "registerShortcut", "notify(", "overlay", '"Action"'], "Monitor renderer theme-only visual contract");
+const monitorUpdateRenderBlock = monitorTranscriptRenderer.slice(
+  monitorTranscriptRenderer.indexOf("function renderUpdateNotification"),
+  monitorTranscriptRenderer.indexOf("interface MatcherNotification"),
+);
+hasAll(monitorUpdateRenderBlock, [
+  'monitorStatusGlyph(details.status, theme)', '` · ${details.status}${matchedSuffix}`',
+  '` · matched ${details.matched.length}`', 'addField(container, theme, "Status", details.status)',
+  'addStringList(container, theme, "Matched", details.matched)', 'addField(container, theme, "Exit code", details.exitCode)',
+  'addField(container, theme, "Signal", details.signal)', 'addSection(container, theme, "Error"',
+  'addField(container, theme, "Omitted", details.omitted)', 'addField(container, theme, "Truncated", details.truncated)',
+  'addCombinedLines(container, theme, "Incremental lines", details.lines)',
+], "unified update notification renderer layout");
+hasNone(monitorUpdateRenderBlock, [
+  "renderOperationalState", "Log path", "Combined lines", "Notification stats", "operationalStateFromValue",
+], "unified update notification renderer must not display full operational state");
 const trustedBashStart = monitorRuntime.indexOf('candidates.push(\n    "/bin/bash"');
 const pathBashFallback = monitorRuntime.indexOf('String(process.env.PATH ?? "").split(delimiter)', trustedBashStart);
 check(trustedBashStart >= 0 && trustedBashStart < pathBashFallback, "Monitor must prefer trusted absolute bash candidates before PATH fallback");
@@ -733,7 +796,7 @@ const monitorGuidelinesEnd = monitorRuntime.indexOf("      ],", monitorGuideline
 const monitorToolMetadata = monitorRuntime.slice(monitorToolStart, monitorGuidelinesEnd);
 const monitorDescription = propertyString(monitorToolMetadata, "description", "Monitor tool metadata");
 const monitorPromptSnippet = propertyString(monitorToolMetadata, "promptSnippet", "Monitor tool metadata");
-check(monitorDescription === "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher, summary, and terminal notifications report noteworthy output and completion. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one detailed record with retained combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.", "Monitor description must match the reviewed contract");
+check(monitorDescription === "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher and terminal notifications carry the current status and only the output added since the previous notification. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.", "Monitor description must match the reviewed contract");
 check(monitorPromptSnippet === "Supervise long-running foreground commands.", "Monitor promptSnippet must match the reviewed contract");
 checkSteBlock(monitorDescription, "Monitor description");
 checkSteBlock(monitorPromptSnippet, "Monitor promptSnippet");
@@ -741,7 +804,7 @@ const monitorGuidelines = staticStrings(monitorRuntime.slice(monitorGuidelinesSt
 const expectedMonitorGuidelines = [
   "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
   "Do not poll a running monitor with repeated `monitor status` calls.",
-  "`monitor list` summarizes all records, while `monitor status` returns one record's detailed state and logs.",
+  "`monitor list` summarizes records, notifications carry current status and incremental output, and `monitor status` returns full retained state and logs.",
 ];
 check(JSON.stringify(monitorGuidelines) === JSON.stringify(expectedMonitorGuidelines), "Monitor promptGuidelines must match the reviewed array");
 checkSteGuidelines(monitorGuidelines, "Monitor promptGuideline", "monitor");
@@ -914,6 +977,18 @@ const statusActionStart = runtime.indexOf('if (action === "status") {', listActi
 const statusActionEnd = runtime.indexOf('if (action === "reply")', statusActionStart);
 const statusAction = runtime.slice(statusActionStart, statusActionEnd);
 hasAll(statusAction, ["this.formatRunStatus(this.requireRun(id))", "JSON.stringify(run, null, 2)", "{ run }"], "single retained-run status action");
+const terminalRaceStart = runtime.indexOf("if (isTerminalStatus(run.status)) {", statusActionEnd);
+const terminalRaceEnd = runtime.indexOf("const target = this.validConfig(id);", terminalRaceStart);
+check(terminalRaceStart > statusActionEnd && terminalRaceEnd > terminalRaceStart, "steer and interrupt must share one terminal-status branch before control writing");
+const terminalRace = runtime.slice(terminalRaceStart, terminalRaceEnd);
+hasAll(terminalRace, [
+  'const terminalRun = action === "steer" ? this.formatRunSummary(run) : this.formatRun(run)',
+  "`${id} is already ${run.status}.`", "{ run: terminalRun }",
+], "terminal steer race receipt must carry only the public run summary");
+hasNone(terminalRace, [
+  "run.output", "run.error", "this.activity", "formatRunStatus", "deliverPendingNotification",
+  "notificationPending", "queuedNotifications", "deliveryKey",
+], "terminal steer race receipt");
 check(runtime.indexOf("await this.reconcileRun(id)", listActionEnd) < statusActionStart, "status must reconcile its ID before reading the latest registry value");
 hasAll(runtime, [
   'if ((action === "status" || action === "interrupt") && input.message !== undefined)',
@@ -1166,7 +1241,15 @@ hasAll(subagentRuntimeTests, [
   "subagent list stays compact across all six statuses while status isolates one latest retained result",
   "subagent status reconciles before reading the latest registry and distinguishes unknown IDs",
   "reload and restore retain terminal results for status until clear removes the run",
+  "a steer that loses the terminal race stays compact while the queued notification keeps the only full result",
 ], "Subagent clear and retained-history list tests");
+hasAll(subagentRuntimeTests, [
+  '["abstract", "agent", "id", "live", "status"]',
+  'assert.equal(controls(harness, id).length, 0, "a terminal run never receives a steer control")',
+  "assert.equal(harness.runtime.registry.get(id).notificationPending, status)",
+  "assert.equal(harness.runtime.queuedNotifications.has(sent.message.details.deliveryKey), true)",
+  "assert.doesNotMatch(JSON.stringify(result.details), /SENTINEL/)",
+], "Subagent terminal steer race compact receipt and untouched notification lifecycle test");
 const subagentWidgetTests = read("tests/subagent-widget.test.mjs");
 hasAll(subagentWidgetTests, [
   "terminal runs never drop or linger out and dispose clears widget, status, and timer",
@@ -1527,6 +1610,10 @@ hasAll(subagentTranscriptTests, [
   'assert.doesNotMatch(value, /\\(ctrl\\+o to expand\\)|Action:/)',
   'waiting (ctrl+o to expand)', '${value.status} (ctrl+o to expand)', 'running (ctrl+o to expand)',
   "[✓●!] [^ ]|[✓●!] {3}",
+  "terminal steer immediate results never repeat final output or error even from legacy full run details",
+  "assert.doesNotMatch(value, /SENTINEL/)",
+  "assert.doesNotMatch(value, /Output:|Error:|Live response|Task:|Session:/)",
+  "assert.doesNotMatch(failedSteerExpanded, /stored failure|Output:|Error:/)",
 ], "Subagent focused Ctrl+O tool and notification visual tests");
 const providerSchemaTests = read("tests/provider-schema.test.mjs");
 hasAll(providerSchemaTests, [
@@ -1545,6 +1632,16 @@ hasAll(monitorTests, [
   "partial-line truncation reports dropped UTF-8 bytes",
   "matcher and terminal payloads include abstract",
   "hasBlockingWork()",
+  "share one incremental update contract that states current status",
+  '["id", "abstract", "kind", "status", "matched", "exitCode", "signal", "error", "lines", "omitted", "truncated", "deliveryKey"]',
+  'assert.equal(matcher.details.kind, "update")', 'assert.equal(terminal.details.kind, "update")',
+  "terminal updates always carry an empty matched array",
+  "terminal updates report completed, failed, and killed while matcher updates always stay running",
+  "close after a matcher batch repeats no line",
+  "a matcher batch still pending at close folds its lines into the single terminal update",
+  "zero incremental lines stay legal and never replay retained history",
+  "terminal notification must not carry full state field",
+  "monitor status stays the only full retained state and log entry point",
 ], "Monitor focused process, logging, delivery, payload, and Goal-reservation tests");
 const monitorUiTests = read("tests/monitor-ui.test.mjs");
 hasAll(monitorUiTests, [
@@ -1552,6 +1649,12 @@ hasAll(monitorUiTests, [
   "throttles and coalesces output", "registers once", "invalidate a no-op", "rebinds", "disposes",
   "all four actions", "uniform hints", "full operational state", "forced warnings", "global summary notifications",
   "matched 2 (ctrl+o to expand)", "rate limited (ctrl+o to expand)", '${status} (ctrl+o to expand)',
+  "Monitor unified update notifications collapse by status and expand one incremental layout without full operational state",
+  "Monitor legacy matcher, legacy terminal, and global summary notifications still render complete bounded details",
+  'kind: "update"', "a running update carries no terminal verdict rows",
+  "a terminal update never embeds notification stats, log paths, combined lines, or full operational state",
+  "a tight width sheds the abstract but never the expand hint",
+  'for (const kind of ["terminal", "update", "matcher", undefined])',
   "fallbacks and errors sanitize controls", "model-facing list data invariant", "without a TUI context",
   "narrow.map((line) => stripVTControlCharacters(line))", '"printf done"',
   "├─ ↻  running first", "[↻!×✓●○] [^ ]|[↻!×✓●○] {3}", "↻  Monitor [00000001]",
@@ -1792,6 +1895,17 @@ for (const [name, source] of [
     "options.expanded === true", "truncateToWidth", "visibleWidth(this.hint)",
   ], `${name} package-owned expandable notification hint contract`);
 }
+const immediateAckStart = transcriptRenderer.indexOf("function immediateAck(");
+const immediateAckEnd = transcriptRenderer.indexOf("function addRunSummaryDetails", immediateAckStart);
+check(immediateAckStart >= 0 && immediateAckEnd > immediateAckStart, "transcript renderer must keep one immediate acknowledgement helper");
+const immediateAckRenderer = transcriptRenderer.slice(immediateAckStart, immediateAckEnd);
+hasAll(immediateAckRenderer, [
+  'text = `${agent} [${id}] · already ${status}`',
+  'if (terminal && expanded && action !== "steer") addFinalOutput(container, theme, run)',
+], "terminal steer immediate acknowledgement must never repeat final output or error");
+hasNone(immediateAckRenderer, [
+  "if (terminal && expanded) addFinalOutput", "addLiveActivity", "addRequest", "run.task", "run.activity",
+], "immediate acknowledgement renderer");
 const statusRendererStart = transcriptRenderer.indexOf("function renderRunStatus");
 const listRendererStart = transcriptRenderer.indexOf("function renderRunList", statusRendererStart);
 const listRendererEnd = transcriptRenderer.indexOf("export function renderSubagentCall", listRendererStart);

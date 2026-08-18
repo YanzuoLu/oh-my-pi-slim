@@ -105,12 +105,12 @@ test("monitor schema and registration expose the exact portable main-only contra
   const tool = harness.tools.get("monitor");
   assert.equal(tool.executionMode, "sequential");
   assert.equal(harness.tools.size, 1);
-  assert.equal(tool.description, "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher, summary, and terminal notifications report noteworthy output and completion. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one detailed record with retained combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.");
+  assert.equal(tool.description, "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher and terminal notifications carry the current status and only the output added since the previous notification. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.");
   assert.equal(tool.promptSnippet, "Supervise long-running foreground commands.");
   assert.deepEqual(tool.promptGuidelines, [
     "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
     "Do not poll a running monitor with repeated `monitor status` calls.",
-    "`monitor list` summarizes all records, while `monitor status` returns one record's detailed state and logs.",
+    "`monitor list` summarizes records, notifications carry current status and incremental output, and `monitor status` returns full retained state and logs.",
   ]);
   assert.equal(schema.properties.action.description, "Choose an action. create requires abstract and command, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.");
   assert.equal(schema.properties.command.description, "Foreground Bash command for create. Do not use nohup, setsid, disown, trailing &, or another detach escape.");
@@ -303,9 +303,9 @@ test("notification gate, acknowledgement, retry, terminal blocker, retention, an
   assert.equal(runtime.hasRunning(), false);
   assert.equal(runtime.hasBlockingWork(), true, "undelivered terminal notification blocks Goal");
   const terminal = sent.at(-1);
-  assert.equal(terminal.message.details.kind, "terminal");
-  assert.equal(terminal.message.details.status.status, "failed");
-  assert.equal(terminal.message.details.status.exitCode, 7);
+  assert.equal(terminal.message.details.kind, "update");
+  assert.equal(terminal.message.details.status, "failed");
+  assert.equal(terminal.message.details.exitCode, 7);
   assert.equal(existsSync(created.details.monitor.logPath), true, "terminal logs remain until delete");
   await execute({ action: "delete", id: "33333333" });
   assert.equal(existsSync(created.details.monitor.logPath), false);
@@ -499,12 +499,170 @@ test("matcher and terminal payloads include abstract and stay within content and
   assert.ok(Buffer.byteLength(JSON.stringify(matcher.details)) <= 96 * 1024);
   assert.equal(matcher.details.truncated, true);
   assert.ok(matcher.details.omitted > 0);
+  assert.match(matcher.content, /\n\[truncated: omitted \d+ lines and\/or shortened oversized lines; use monitor status\]$/);
+
+  for (let index = 0; index < 150; index += 1) child.stdout.write(`tail-${index}\n`);
   closeChild(child);
   await wait();
   const terminal = harness.messages.at(-1).message;
   assert.equal(terminal.details.abstract, "bounded payload");
   assert.ok(Buffer.byteLength(terminal.content) <= 50 * 1024);
   assert.ok(Buffer.byteLength(JSON.stringify(terminal.details)) <= 96 * 1024);
+  assert.equal(terminal.details.lines.length, 100, "terminal updates reuse the same 100-line incremental cap");
+  assert.equal(terminal.details.omitted, 50);
+  assert.equal(terminal.details.truncated, true);
+  assert.match(terminal.content, /\n\[truncated: omitted 50 lines and\/or shortened oversized lines; use monitor status\]$/);
+  for (const field of [
+    "command", "cwd", "pid", "createdAt", "updatedAt", "endedAt", "notifyOn", "matchedCount", "notificationCount",
+    "suppressedCount", "logPath", "logBytes", "logLines", "droppedBytes", "droppedLines", "start", "end", "returned", "combined",
+  ]) assert.equal(field in terminal.details, false, `terminal notification must not carry full state field ${field}`);
+  assert.equal(typeof terminal.details.status, "string");
+
+  const state = (await harness.execute({ action: "status", id: "50505050" })).details.monitor;
+  assert.equal(state.status, "completed");
+  assert.equal(typeof state.logPath, "string");
+  assert.ok(state.combined.length > 0, "monitor status stays the only full retained state and log entry point");
+});
+
+test("matcher and terminal notifications share one incremental update contract that states current status", async (t) => {
+  let child;
+  const harness = createHarness({
+    randomHex: () => "61616161",
+    spawn() { child = fakeChild(); return child; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 2,
+  });
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", abstract: "unified", command: "unused", notifyOn: ["hit"] });
+  child.stdout.write("before\nhit one\n");
+  await wait(5);
+
+  const shape = ["id", "abstract", "kind", "status", "matched", "exitCode", "signal", "error", "lines", "omitted", "truncated", "deliveryKey"];
+  const matcher = harness.messages[0].message;
+  assert.deepEqual(Object.keys(matcher.details), shape);
+  assert.equal(matcher.details.kind, "update");
+  assert.equal(matcher.details.status, "running");
+  assert.deepEqual(matcher.details.matched, ["hit"]);
+  assert.equal(matcher.details.exitCode, null);
+  assert.equal(matcher.details.signal, null);
+  assert.equal(matcher.details.error, null);
+  assert.deepEqual(matcher.details.lines.map((line) => line.text), ["before", "hit one"]);
+  assert.equal(matcher.details.omitted, 0);
+  assert.equal(matcher.details.truncated, false);
+  assert.deepEqual(matcher.content.split("\n"), [
+    "Monitor 61616161 (unified) status running.",
+    "Matched: hit.",
+    "[stdout] before",
+    "[stdout] hit one",
+  ]);
+  assert.doesNotMatch(matcher.content, /Exit code/);
+
+  child.stdout.write("after\n");
+  closeChild(child, 0, null);
+  await wait();
+  assert.equal(harness.messages.length, 2);
+  const terminal = harness.messages[1].message;
+  assert.deepEqual(Object.keys(terminal.details), shape);
+  assert.equal(terminal.details.kind, "update");
+  assert.equal(terminal.details.status, "completed");
+  assert.deepEqual(terminal.details.matched, [], "terminal updates always carry an empty matched array");
+  assert.equal(terminal.details.exitCode, 0);
+  assert.equal(terminal.details.signal, null);
+  assert.equal(terminal.details.error, null);
+  assert.deepEqual(terminal.content.split("\n"), [
+    "Monitor 61616161 (unified) status completed.",
+    "Exit code: 0; signal: null; error: null.",
+    "[stdout] after",
+  ]);
+
+  const matcherSeqs = matcher.details.lines.map((line) => line.seq);
+  const terminalSeqs = terminal.details.lines.map((line) => line.seq);
+  assert.deepEqual(matcherSeqs, [1, 2]);
+  assert.deepEqual(terminalSeqs, [3]);
+  assert.equal(terminalSeqs.some((seq) => matcherSeqs.includes(seq)), false, "close after a matcher batch repeats no line");
+});
+
+test("terminal updates report completed, failed, and killed while matcher updates always stay running", async (t) => {
+  const cases = [
+    { id: "62626262", code: 0, signal: null, status: "completed" },
+    { id: "63636363", code: 3, signal: null, status: "failed" },
+    { id: "64646464", code: null, signal: "SIGTERM", status: "killed" },
+  ];
+  for (const { id, code, signal, status } of cases) {
+    let child;
+    const harness = createHarness({
+      randomHex: () => id,
+      spawn() { child = fakeChild(); return child; },
+      resolveShell: () => "/bin/bash",
+      matcherBatchMs: 2,
+    });
+    t.after(async () => harness.runtime.shutdown());
+    await harness.execute({ action: "create", abstract: `end ${status}`, command: "unused", notifyOn: ["hit"] });
+    child.stdout.write("hit\n");
+    await wait(5);
+    assert.equal(harness.messages[0].message.details.status, "running");
+    assert.deepEqual(harness.messages[0].message.details.matched, ["hit"]);
+    closeChild(child, code, signal);
+    await wait();
+    const terminal = harness.messages.at(-1).message;
+    assert.equal(terminal.details.status, status);
+    assert.equal(terminal.details.exitCode, code);
+    assert.equal(terminal.details.signal, signal);
+    assert.equal(terminal.content.split("\n")[0], `Monitor ${id} (end ${status}) status ${status}.`);
+    assert.equal(terminal.content.split("\n")[1], `Exit code: ${code ?? "null"}; signal: ${signal ?? "null"}; error: null.`);
+    for (const sent of harness.messages) {
+      if (sent.message.details.matched.length > 0) assert.equal(sent.message.details.status, "running");
+    }
+  }
+});
+
+test("a matcher batch still pending at close folds its lines into the single terminal update", async (t) => {
+  let child;
+  const harness = createHarness({
+    randomHex: () => "65656565",
+    spawn() { child = fakeChild(); return child; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 5_000,
+  });
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", abstract: "fold", command: "unused", notifyOn: ["hit"] });
+  child.stdout.write("hit one\nhit two\n");
+  await wait(5);
+  assert.equal(harness.messages.length, 0, "the batch window has not elapsed yet");
+  closeChild(child, 0, null);
+  await wait();
+  assert.equal(harness.messages.length, 1, "the cancelled batch produces no extra notification");
+  const terminal = harness.messages[0].message;
+  assert.equal(terminal.details.status, "completed");
+  assert.deepEqual(terminal.details.matched, []);
+  assert.deepEqual(terminal.details.lines.map((line) => line.text), ["hit one", "hit two"]);
+});
+
+test("zero incremental lines stay legal and never replay retained history", async (t) => {
+  let child;
+  const harness = createHarness({
+    randomHex: () => "66666666",
+    spawn() { child = fakeChild(); return child; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 2,
+  });
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", abstract: "quiet", command: "unused", notifyOn: ["hit"] });
+  child.stdout.write("hit now\n");
+  await wait(5);
+  assert.equal(harness.messages.length, 1);
+  closeChild(child, 0, null);
+  await wait();
+  const terminal = harness.messages[1].message;
+  assert.deepEqual(terminal.details.lines, []);
+  assert.equal(terminal.details.omitted, 0);
+  assert.equal(terminal.details.truncated, false);
+  assert.deepEqual(terminal.content.split("\n"), [
+    "Monitor 66666666 (quiet) status completed.",
+    "Exit code: 0; signal: null; error: null.",
+  ]);
+  const state = (await harness.execute({ action: "status", id: "66666666" })).details.monitor;
+  assert.deepEqual(state.combined.map((line) => line.text), ["hit now"], "retained history stays reachable through monitor status");
 });
 
 test("small injected log cap rolls from complete line boundaries with a marker and counters", async (t) => {

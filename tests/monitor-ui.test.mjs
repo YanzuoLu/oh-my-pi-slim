@@ -577,7 +577,79 @@ test("Monitor create/status/list/delete results render compact receipts, full op
   assert.deepEqual(forcedResult, forcedBefore);
 });
 
-test("Monitor matcher, terminal, and global summary notifications collapse exactly and expand complete bounded details without changing model content", () => {
+test("Monitor unified update notifications collapse by status and expand one incremental layout without full operational state", () => {
+  const incremental = monitor().combined;
+  const update = (overrides = {}) => ({
+    id: "00000001",
+    abstract: "compile release",
+    kind: "update",
+    status: "running",
+    matched: [],
+    exitCode: null,
+    signal: null,
+    error: null,
+    lines: incremental,
+    omitted: 0,
+    truncated: false,
+    ...overrides,
+  });
+
+  const running = {
+    content: "MODEL RUNNING CONTENT MUST STAY UNCHANGED",
+    details: update({ matched: ["ready", "done"], omitted: 4, truncated: true }),
+  };
+  const runningBefore = structuredClone(running);
+  assert.equal(render(renderMonitorNotification(running, { expanded: false, outputPad: 0 }, theme)).trim(), "↻  Monitor [00000001] · compile release · running · matched 2 (ctrl+o to expand)");
+  const runningNarrow = renderLines(renderMonitorNotification(running, { expanded: false, outputPad: 0 }, theme), 32);
+  assert.ok(runningNarrow.every((line) => visibleWidth(line) <= 32));
+  assert.match(runningNarrow.join("\n").trim(), /\(ctrl\+o to expand\)$/, "a tight width sheds the abstract but never the expand hint");
+  assert.match(render(renderMonitorNotification(running, { expanded: false, outputPad: 0 }, theme), 44).trim(), /· matched 2 \(ctrl\+o to expand\)$/);
+  const runningExpanded = render(renderMonitorNotification(running, { expanded: true, outputPad: 0 }, theme));
+  for (const expected of ["Status: running", "Matched:", "ready", "done", "Omitted: 4", "Truncated: true", "Incremental lines:", "[stdout] ready now", "[stderr] warning  line"]) {
+    assert.match(runningExpanded, escaped(expected));
+  }
+  assert.doesNotMatch(runningExpanded, /Exit code:|Signal:|Error:/, "a running update carries no terminal verdict rows");
+  assert.doesNotMatch(runningExpanded, /\(ctrl\+o to expand\)|MODEL RUNNING CONTENT|\u001b|\u0000/);
+  assert.deepEqual(running, runningBefore);
+
+  const quiet = { content: "model quiet", details: update({ lines: [] }) };
+  assert.equal(render(renderMonitorNotification(quiet, { expanded: false, outputPad: 0 }, theme)).trim(), "↻  Monitor [00000001] · compile release · running (ctrl+o to expand)");
+  assert.match(render(renderMonitorNotification(quiet, { expanded: true, outputPad: 0 }, theme)), /Incremental lines:\n  —/);
+
+  for (const [status, glyph, exitCode, signal, error] of [
+    ["completed", "✓", 0, null, null],
+    ["failed", "!", 7, null, "build failed"],
+    ["killed", "×", null, "SIGTERM", null],
+  ]) {
+    const message = {
+      content: `MODEL ${status.toUpperCase()} CONTENT MUST STAY UNCHANGED`,
+      details: update({ status, exitCode, signal, error, omitted: 1 }),
+    };
+    const before = structuredClone(message);
+    assert.equal(render(renderMonitorNotification(message, { expanded: false, outputPad: 0 }, theme)).trim(), `${glyph}  Monitor [00000001] · compile release · ${status} (ctrl+o to expand)`);
+    const expanded = render(renderMonitorNotification(message, { expanded: true, outputPad: 0 }, theme));
+    for (const expectedRow of [
+      `Status: ${status}`, "Matched:", `Exit code: ${exitCode ?? "—"}`, `Signal: ${signal ?? "—"}`,
+      "Error:", error ?? "—", "Omitted: 1", "Truncated: false", "Incremental lines:", "[stdout] ready now",
+    ]) assert.match(expanded, escaped(expectedRow));
+    assert.doesNotMatch(
+      expanded,
+      /PID:|Cwd:|Command:|Log path:|Log bytes:|Log lines:|Combined lines:|Notifications:|Suppressed:|Dropped bytes:|Window:|Returned:|Matchers:/,
+      "a terminal update never embeds notification stats, log paths, combined lines, or full operational state",
+    );
+    assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)|CONTENT MUST STAY UNCHANGED|\u001b|\u0000/);
+    assert.deepEqual(message, before);
+  }
+
+  const ansiCollapsed = renderMonitorNotification(running, { expanded: false, outputPad: 0 }, roleAnsiTheme).render(240);
+  assert.match(stripVTControlCharacters(ansiCollapsed.join("\n")).trim(), /^↻ {2}Monitor \[00000001\] · compile release · running · matched 2/);
+  for (const width of [24, 40, 120]) {
+    const lines = renderMonitorNotification(running, { expanded: false, outputPad: 0 }, roleAnsiTheme).render(width);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width), `collapsed update must fit width ${width}`);
+  }
+});
+
+test("Monitor legacy matcher, legacy terminal, and global summary notifications still render complete bounded details without changing model content", () => {
   const incremental = monitor().combined;
   const matcher = {
     content: "MODEL MATCHER CONTENT MUST STAY UNCHANGED",
@@ -653,13 +725,15 @@ test("Monitor renderer fallbacks and errors sanitize controls, collapse width-sa
   assert.doesNotMatch(expanded, /\u001b|\u0000/);
   assert.deepEqual(result, before);
 
-  const message = { content: "Legacy\u001b[31m red\u001b[0m first\nLegacy complete second", details: { kind: "terminal", malformed: true } };
-  const messageBefore = structuredClone(message);
-  assert.equal(render(renderMonitorNotification(message, { expanded: false, outputPad: 0 }, theme), 80).trim(), "Legacy red first (ctrl+o to expand)");
-  const messageExpanded = render(renderMonitorNotification(message, { expanded: true, outputPad: 0 }, theme));
-  assert.match(messageExpanded, /Legacy red first\nLegacy complete second/);
-  assert.doesNotMatch(messageExpanded, /\(ctrl\+o to expand\)/);
-  assert.deepEqual(message, messageBefore);
+  for (const kind of ["terminal", "update", "matcher", undefined]) {
+    const message = { content: "Legacy\u001b[31m red\u001b[0m first\nLegacy complete second", details: { kind, malformed: true } };
+    const messageBefore = structuredClone(message);
+    assert.equal(render(renderMonitorNotification(message, { expanded: false, outputPad: 0 }, theme), 80).trim(), "Legacy red first (ctrl+o to expand)");
+    const messageExpanded = render(renderMonitorNotification(message, { expanded: true, outputPad: 0 }, theme));
+    assert.match(messageExpanded, /Legacy red first\nLegacy complete second/);
+    assert.doesNotMatch(messageExpanded, /\(ctrl\+o to expand\)/);
+    assert.deepEqual(message, messageBefore);
+  }
 });
 
 test("Monitor keeps model-facing list data invariant and never registers a foreground widget without a TUI context", async () => {

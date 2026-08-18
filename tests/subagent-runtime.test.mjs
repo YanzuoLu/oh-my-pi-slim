@@ -1709,6 +1709,70 @@ test("steer and interrupt only enqueue controls and return requested", async () 
   }
 });
 
+test("a steer that loses the terminal race stays compact while the queued notification keeps the only full result", async () => {
+  for (const { status, output, error } of [
+    { status: "completed", output: "TERMINAL_RACE_OUTPUT_SENTINEL\nsecond output line", error: undefined },
+    { status: "failed", output: undefined, error: "TERMINAL_RACE_ERROR_SENTINEL\nsecond error line" },
+    { status: "interrupted", output: "TERMINAL_RACE_PARTIAL_SENTINEL", error: "TERMINAL_RACE_STOP_SENTINEL" },
+  ]) {
+    const harness = createHarness();
+    try {
+      await harness.restore();
+      const started = await createRun(harness, { task: "TERMINAL_RACE_TASK_SENTINEL" });
+      const id = started.details.run.id;
+      const config = readConfig(harness, id);
+      harness.alive.add(999);
+      atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token));
+      await inspect(harness, id);
+      assert.equal(harness.runtime.registry.get(id).status, "running");
+      assert.equal(harness.notifications.length, 0);
+
+      // The run reaches a terminal status after the model chose steer but before the tool reconciles.
+      atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+        status,
+        output,
+        error,
+        sessionFile: join(harness.tempDir, "session.jsonl"),
+      }));
+      const result = await harness.tools.get("subagent").execute("steer", { action: "steer", id, message: "too late" });
+
+      assert.equal(result.content[0].text, `${id} is already ${status}.`);
+      assert.deepEqual(Object.keys(result.details.run).sort(), ["abstract", "agent", "id", "live", "status"]);
+      assert.deepEqual(result.details.run, { id, agent: "fixer", abstract: "detached summary", status, live: false });
+      assert.equal(result.details.run.output, undefined);
+      assert.equal(result.details.run.error, undefined);
+      assert.equal(result.details.run.activity, undefined);
+      assert.equal(result.details.run.task, undefined);
+      assert.equal(result.details.run.sessionFile, undefined);
+      assert.doesNotMatch(JSON.stringify(result.details), /SENTINEL/);
+      assert.equal(controls(harness, id).length, 0, "a terminal run never receives a steer control");
+
+      // The queued terminal lifecycle notification stays the single automatic full-result delivery.
+      assert.equal(harness.notifications.length, 1);
+      const sent = harness.notifications[0];
+      assert.deepEqual(sent.options, { deliverAs: "steer", triggerTurn: true });
+      assert.equal(sent.message.details.event, status);
+      assert.equal(sent.message.details.deliveryKey, expectedDeliveryKey(id, status));
+      assert.equal(sent.message.details.run.output, output);
+      assert.equal(sent.message.details.run.error, error);
+      assert.equal(sent.message.details.run.task, "TERMINAL_RACE_TASK_SENTINEL");
+      assert.equal(harness.runtime.registry.get(id).notificationPending, status);
+      assert.equal(harness.runtime.queuedNotifications.has(sent.message.details.deliveryKey), true);
+
+      // Acknowledgement lifecycle is untouched by the compact steer receipt.
+      assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(sent.message)), true);
+      assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+      assert.equal(harness.runtime.queuedNotifications.has(sent.message.details.deliveryKey), false);
+      assert.equal(harness.notifications.length, 1);
+
+      // subagent status remains the explicit entry point for the complete terminal result.
+      const statusResult = await harness.tools.get("subagent").execute("status", { action: "status", id });
+      assert.equal(statusResult.details.run.output, output);
+      assert.equal(statusResult.details.run.error, error);
+    } finally { harness.cleanup(); }
+  }
+});
+
 test("interrupt accepts a waiting non-terminal run", async () => {
   const harness = createHarness();
   try {

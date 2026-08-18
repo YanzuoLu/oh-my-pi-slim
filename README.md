@@ -161,6 +161,8 @@ Runs and observes long-running foreground Bash commands on POSIX systems.
 
 `notifyOn` uses case-sensitive literal matching. Commands must remain in the foreground: do not use `nohup`, `setsid`, `disown`, trailing `&`, or another detach escape.
 
+Matcher and terminal notifications share one shape: each states the monitor's current status and carries only the output added since the previous notification, never the whole log. `status` is the single entry point for a record's full retained state and combined output.
+
 Terminal records and retained output remain available until `delete`. Use `status` to inspect the result, then `delete` when the record is no longer needed.
 
 ### `ask_user_question`
@@ -232,6 +234,7 @@ Provider, model, and thinking level are independently configurable per role. Aut
 
 - Package notifications are safely queued during compaction and tree operations, then delivered without losing the user-visible result.
 - Package tool rows and notifications use Ctrl+O for collapsed and expanded views. Expansion changes presentation only, never tool data or persisted state.
+- Monitor notifications are incremental. Every one names the current status and shows only new output, so `monitor status` stays the single place to read full retained state and logs.
 - Foreground TUI sessions show compact widgets for retained subagents, Todos, Loops, Monitors, and the active Goal. RPC sessions do not register these widgets.
 - The subagent, Todo, and Monitor widgets follow the same Ctrl+O state as tool rows. Collapsed hides finished rows and adds a dim hint with your configured key; expanded shows the full body. Loop and Goal widgets always show their full body.
 - Subagent, Todo, and Goal state restore on their documented session or branch scope. In particular, a successful subagent `clear` remains clear after reload.

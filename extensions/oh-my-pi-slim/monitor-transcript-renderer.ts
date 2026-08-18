@@ -409,6 +409,57 @@ export function renderMonitorResult(
   return spacedResult(new WidthSafeLine(compactStateLine(state, theme)));
 }
 
+interface UpdateNotification {
+  id: string;
+  abstract: string;
+  status: MonitorStatus;
+  matched: string[];
+  exitCode: number | null;
+  signal: string | null;
+  error: string | null;
+  lines: MonitorCombinedLine[];
+  omitted: number;
+  truncated: boolean;
+}
+
+function updateNotification(value: UnknownRecord): UpdateNotification | undefined {
+  const id = asString(value.id);
+  const abstract = asString(value.abstract);
+  const status = asStatus(value.status);
+  const matched = stringArray(value.matched);
+  const exitCode = asNullableNumber(value.exitCode);
+  const signal = asNullableString(value.signal);
+  const error = asNullableString(value.error);
+  const lines = combinedLinesFromValue(value.lines);
+  const omitted = asNumber(value.omitted);
+  const truncated = asBoolean(value.truncated);
+  if (!id || abstract === undefined || !status || !matched || exitCode === undefined || signal === undefined ||
+      error === undefined || !lines || omitted === undefined || truncated === undefined) return;
+  return { id, abstract, status, matched, exitCode, signal, error, lines, omitted, truncated };
+}
+
+/** One layout for every matcher and terminal update: current status first, then the incremental lines. */
+function renderUpdateNotification(details: UpdateNotification, expanded: boolean, theme: Theme): Component {
+  const running = details.status === "running";
+  const matchedSuffix = running && details.matched.length > 0 ? ` · matched ${details.matched.length}` : "";
+  const head = `${formatSemanticGlyphPrefix(monitorStatusGlyph(details.status, theme))}${theme.fg("customMessageText", `Monitor [${sanitizeMonitorText(details.id)}] · ${sanitizeMonitorText(details.abstract)}`)}`;
+  const tail = theme.fg("customMessageText", ` · ${details.status}${matchedSuffix}`);
+  if (!expanded) return new ExpandableNotificationLine(head, tail, theme);
+  const container = new Container();
+  container.addChild(new Text(`${head}${tail}`, 0, 0));
+  addField(container, theme, "Status", details.status);
+  addStringList(container, theme, "Matched", details.matched);
+  if (!running) {
+    addField(container, theme, "Exit code", details.exitCode);
+    addField(container, theme, "Signal", details.signal);
+    addSection(container, theme, "Error", details.error ?? "—");
+  }
+  addField(container, theme, "Omitted", details.omitted);
+  addField(container, theme, "Truncated", details.truncated);
+  addCombinedLines(container, theme, "Incremental lines", details.lines);
+  return container;
+}
+
 interface MatcherNotification {
   id: string;
   abstract: string;
@@ -418,6 +469,7 @@ interface MatcherNotification {
   truncated: boolean;
 }
 
+/** Legacy pre-`update` matcher payload retained so already-persisted sessions still render in full. */
 function matcherNotification(value: UnknownRecord): MatcherNotification | undefined {
   const id = asString(value.id);
   const abstract = asString(value.abstract);
@@ -485,6 +537,7 @@ function renderSummaryNotification(details: UnknownRecord, expanded: boolean, th
   return container;
 }
 
+/** Legacy pre-`update` terminal payload whose `status` field carried a whole operational state object. */
 function renderTerminalNotification(details: UnknownRecord, expanded: boolean, theme: Theme): Component | undefined {
   const id = asString(details.id);
   const abstract = asString(details.abstract);
@@ -521,7 +574,10 @@ export function renderMonitorNotification(
 ): Component {
   const details = asRecord(message.details);
   let content: Component | undefined;
-  if (details?.kind === "matcher") {
+  if (details?.kind === "update") {
+    const parsed = updateNotification(details);
+    if (parsed) content = renderUpdateNotification(parsed, options.expanded === true, theme);
+  } else if (details?.kind === "matcher") {
     const parsed = matcherNotification(details);
     if (parsed) content = renderMatcherNotification(parsed, options.expanded === true, theme);
   } else if (details?.kind === "terminal") {

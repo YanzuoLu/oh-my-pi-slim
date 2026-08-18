@@ -226,7 +226,9 @@ function immediateAck(run: UnknownRecord, action: string, args: UnknownRecord, t
   }
   const container = new Container();
   container.addChild(new Text(`${formatSemanticGlyphPrefix(glyph)}${theme.fg("toolOutput", text)}`, 0, 0));
-  if (terminal && expanded) addFinalOutput(container, theme, run);
+  // Terminal steer never repeats final results, even when a legacy session replays a full run shape:
+  // the queued terminal notification owns that delivery.
+  if (terminal && expanded && action !== "steer") addFinalOutput(container, theme, run);
   return container;
 }
 

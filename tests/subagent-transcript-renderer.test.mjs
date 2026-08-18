@@ -225,7 +225,49 @@ test("subagent immediate results use accurate compact action acknowledgements", 
   const failedSteerExpanded = render(renderSubagentResult(
     failedResult, { expanded: true, isPartial: false }, theme, { args: { action: "steer", id: "failed-steer-id", message: "too late" } },
   ));
-  assertFull(failedSteerExpanded, ["✗  fixer [failed-steer-id] · already failed", "stored failure"]);
+  assert.equal(failedSteerExpanded, "✗  fixer [failed-steer-id] · already failed");
+  assert.doesNotMatch(failedSteerExpanded, /stored failure|Output:|Error:/);
+});
+
+test("terminal steer immediate results never repeat final output or error even from legacy full run details", () => {
+  for (const { status, glyph, output, error } of [
+    { status: "completed", glyph: "✓", output: "LEGACY_STEER_OUTPUT_SENTINEL", error: undefined },
+    { status: "failed", glyph: "✗", output: undefined, error: "LEGACY_STEER_ERROR_SENTINEL" },
+    { status: "interrupted", glyph: "✗", output: "LEGACY_STEER_PARTIAL_SENTINEL", error: "LEGACY_STEER_STOP_SENTINEL" },
+  ]) {
+    // Legacy sessions replayed a full run shape into details.run; the renderer must still suppress it.
+    const legacy = {
+      content: [{ type: "text", text: `legacy-steer-${status} is already ${status}.` }],
+      details: {
+        run: run({
+          id: `legacy-steer-${status}`,
+          agent: "fixer",
+          status,
+          output,
+          error,
+          task: "LEGACY_STEER_TASK_SENTINEL",
+          sessionFile: "/tmp/legacy-steer-session.jsonl",
+          activity: { responseText: "LEGACY_STEER_ACTIVITY_SENTINEL" },
+        }),
+      },
+    };
+    const context = { args: { action: "steer", id: `legacy-steer-${status}`, message: "too late" } };
+    const collapsed = render(renderSubagentResult(legacy, { expanded: false, isPartial: false }, theme, context));
+    assert.equal(collapsed, `${glyph}  fixer [legacy-steer-${status}] · already ${status}`);
+    const expanded = render(renderSubagentResult(legacy, { expanded: true, isPartial: false }, theme, context));
+    assert.equal(expanded, `${glyph}  fixer [legacy-steer-${status}] · already ${status}`);
+    for (const value of [collapsed, expanded]) {
+      assert.doesNotMatch(value, /SENTINEL/);
+      assert.doesNotMatch(value, /Output:|Error:|Live response|Task:|Session:/);
+    }
+
+    // subagent status stays the explicit full-result entry point for the very same run shape.
+    const statusExpanded = render(renderSubagentResult(
+      legacy, { expanded: true, isPartial: false }, theme, { args: { action: "status", id: `legacy-steer-${status}` } },
+    ));
+    if (output !== undefined) assert.match(statusExpanded, new RegExp(output));
+    if (error !== undefined) assert.match(statusExpanded, new RegExp(error));
+  }
 });
 
 test("terminal immediate results expand only final output and error", () => {
