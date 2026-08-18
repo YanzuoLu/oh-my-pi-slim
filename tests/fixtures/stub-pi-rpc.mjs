@@ -100,6 +100,21 @@ function handlePrompt(command) {
         settled = true;
         send({ type: "agent_settled" });
       }, 660);
+    } else if (scenario === "provider-token-high-water") {
+      const text = "provider token high water complete";
+      send({ type: "turn_start", turnIndex: promptCount, timestamp: Date.now() });
+      lastAssistantText = text;
+      send({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text }],
+          stopReason: "stop",
+          usage: { input: 80, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 100 },
+        },
+      });
+      settled = true;
+      send({ type: "agent_settled" });
     } else if (scenario === "token-compaction-success") {
       send({ type: "turn_start", turnIndex: promptCount, timestamp: Date.now() });
       send({
@@ -248,7 +263,10 @@ input.on("line", (line) => {
   } else if (command.type === "get_session_stats") {
     let total = 42;
     let contextUsage = { tokens: 42, contextWindow: 200, percent: 25 };
-    if (scenario === "token-regression") {
+    if (scenario === "provider-token-high-water") {
+      total = settled ? 130 : 100;
+      contextUsage = { tokens: 100, contextWindow: 2000, percent: 5 };
+    } else if (scenario === "token-regression") {
       total = 9000;
       contextUsage = { tokens: 900, contextWindow: 2000, percent: 45 };
     } else if (scenario === "token-compaction-success") {

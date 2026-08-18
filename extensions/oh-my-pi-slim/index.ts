@@ -8,8 +8,12 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { registerAskRuntime } from "./ask-runtime.js";
+import { AskTuiDriver } from "./ask-tui.js";
 import { cleanupLegacySubagentSetup, ensurePackageSetup } from "./bootstrap.js";
+import { GOAL_CONTINUATION_MESSAGE_TYPE, registerGoalRuntime, type GoalRuntime } from "./goal-runtime.js";
 import { registerLoopRuntime } from "./loop-runtime.js";
+import { MONITOR_NOTIFICATION_TYPE, registerMonitorRuntime } from "./monitor-runtime.js";
 import { removeMainPiDocumentation, removeMainPiIdentity } from "./prompt-context.js";
 import {
   CHECKPOINT_RESUME_TEXT,
@@ -26,7 +30,6 @@ const ORCHESTRATOR_PROMPT = parseFrontmatter(readFileSync(join(EXTENSION_DIR, "o
 const CONFIG_FILE = "oh-my-pi-slim.json";
 const ROLE_NAMES = ["orchestrator", ...SPECIALIST_NAMES] as const;
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const FILE_TOOLS = new Set(["read", "edit", "write"]);
 const TRUE_VALUES = /^(1|true|yes|on)$/i;
 const SAFE_PRESET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_MODEL_PART = /^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$/;
@@ -280,14 +283,32 @@ function assertNoLegacyBackend(pi: ExtensionAPI): void {
 export default function ohMyPiSlim(pi: ExtensionAPI): void {
   if (process.env.PI_SUBAGENT_CHILD === "1" || process.env.OMPS_SUBAGENT_CHILD === "1") return;
 
+  const asks = registerAskRuntime(pi);
   const loops = registerLoopRuntime(pi);
+  const monitors = registerMonitorRuntime(pi);
   const subagents = registerSubagentRuntime(pi);
+  let goal: GoalRuntime | undefined;
   const notificationGate = new NotificationDeliveryPauseGate((paused) => {
     loops.setDeliveryPaused(paused);
+    monitors?.setDeliveryPaused(paused);
     subagents.setNotificationDeliveryPaused(paused);
+    goal?.setDeliveryPaused(paused);
   });
+  goal = registerGoalRuntime(pi, {
+    hasPendingCheckpoint: () => pendingCheckpoint !== undefined,
+    isNotificationDeliveryPaused: () => notificationGate.isPaused(),
+    hasActiveSubagents: () => subagents.hasActiveRuns(),
+    hasPendingSubagentNotifications: () => subagents.hasPendingNotifications(),
+    hasBlockingMonitors: () => monitors?.hasBlockingWork() ?? false,
+    askWaitingCount: () => asks.waitingCount(),
+    childStats: (runIds) => subagents.goalStats(runIds),
+  });
+  asks.setGoalActiveResolver(() => goal?.isActive() ?? false);
+  subagents.subscribeRunCreated((runId) => goal?.ownRun(runId));
+  subagents.registry.subscribe(() => goal?.notePackageLifecycleChange());
+  asks.subscribe(() => goal?.notePackageLifecycleChange());
+  let monitorGoalUnsubscribe: (() => void) | undefined;
   let active = false;
-  let nudgeSentThisUserTurn = false;
   let activePresetName: string | undefined;
   let activePreset: Preset | undefined;
   let originalModel: ExtensionContext["model"];
@@ -301,7 +322,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     notificationGeneration: number;
   } | undefined;
   let treeNotificationHold: TreeNotificationHold | undefined;
-  let fileToolSeenThisTurn = false;
 
   pi.registerFlag("omps", {
     description: "Run the main Pi session as the oh-my-pi-slim orchestrator",
@@ -316,6 +336,10 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   function report(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error"): void {
     if (ctx.hasUI) ctx.ui.notify(message, level);
     else console.error(`[oh-my-pi-slim] ${message}`);
+  }
+
+  function bindAskDriver(ctx?: ExtensionContext): void {
+    asks.setTuiDriver(ctx?.hasUI === true && ctx.mode === "tui" ? new AskTuiDriver(ctx.ui) : undefined);
   }
 
   function updateStatus(ctx: ExtensionContext): void {
@@ -340,6 +364,8 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     if (treeNotificationHold !== hold) return;
     takeTreeNotificationHold();
     notificationGate.releaseDeferred(hold.generation);
+    const ctx = sessionCtx;
+    if (ctx) setImmediate(() => goal?.reevaluateAfterHostOperation(ctx));
   }
 
   function releaseCurrentNotificationsDeferred(): void {
@@ -351,7 +377,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   function invalidateCheckpoint(releaseNotifications = true): void {
     sessionEpoch += 1;
     pendingCheckpoint = undefined;
-    fileToolSeenThisTurn = false;
+    goal?.invalidateDeferred();
     if (releaseNotifications && notificationGate.isPaused()) {
       releaseCurrentNotificationsDeferred();
     } else if (!releaseNotifications) {
@@ -429,7 +455,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     activePresetName = presetName;
     activePreset = preset;
     configureSubagentResolvers(preset, ctx);
-    nudgeSentThisUserTurn = false;
     (globalThis as Record<string, unknown>)[RELOAD_PRESET_STORE_KEY] = presetName;
     updateStatus(ctx);
   }
@@ -441,7 +466,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     activePreset = undefined;
     subagents.setModelResolver();
     subagents.setDenyResolver();
-    nudgeSentThisUserTurn = false;
     delete (globalThis as Record<string, unknown>)[RELOAD_PRESET_STORE_KEY];
     if (originalModel) await pi.setModel(originalModel);
     if (originalThinking !== undefined) pi.setThinkingLevel(originalThinking);
@@ -542,9 +566,19 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   pi.on("session_start", async (event, ctx) => {
     invalidateCheckpoint(false);
     clearTreeNotificationHold();
+    asks.reset();
+    bindAskDriver(ctx);
+    asks.reconcileHostMode(ctx);
     loops.reset();
+    await monitors?.reset();
+    monitorGoalUnsubscribe?.();
+    monitorGoalUnsubscribe = monitors?.subscribe(() => goal?.notePackageLifecycleChange());
     loops.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined);
+    monitors?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined);
+    monitors?.refreshUI();
+    goal?.setUICtx(undefined);
     notificationGate.clearWithoutDelivery();
+    goal?.setDeliveryPaused(false);
     sessionCtx = ctx;
     active = false;
     activePresetName = undefined;
@@ -553,7 +587,8 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     subagents.setDenyResolver();
     originalModel = undefined;
     originalThinking = undefined;
-    nudgeSentThisUserTurn = false;
+    goal?.restore(ctx, event.reason === "startup" || event.reason === "reload" || event.reason === "resume" || event.reason === "fork");
+    goal?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined);
     try {
       assertNoLegacyBackend(pi);
       ensurePackageSetup(PACKAGE_ROOT);
@@ -574,21 +609,32 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     updateStatus(ctx);
   });
 
-  pi.on("session_before_switch", () => {
+  pi.on("session_before_switch", async () => {
     invalidateCheckpoint(false);
     clearTreeNotificationHold();
+    asks.abortAll("Session switch aborted the questionnaire.");
+    bindAskDriver();
     loops.shutdown();
+    goal?.setUICtx(undefined);
+    await monitors?.shutdown();
   });
 
-  pi.on("session_before_fork", () => {
+  pi.on("session_before_fork", async () => {
     invalidateCheckpoint(false);
     clearTreeNotificationHold();
+    asks.abortAll("Session fork aborted the questionnaire.");
+    bindAskDriver();
     loops.shutdown();
+    goal?.setUICtx(undefined);
+    await monitors?.shutdown();
   });
 
   pi.on("session_before_tree", async (event) => {
     invalidateCheckpoint(false);
     clearTreeNotificationHold();
+    asks.abortAll("Session tree navigation aborted the questionnaire.");
+    bindAskDriver();
+    goal?.setUICtx(undefined);
     const generation = notificationGate.pause();
     let hold: TreeNotificationHold;
     const abortListener = () => {
@@ -619,12 +665,18 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
 
   pi.on("session_tree", async (_event, ctx) => {
     sessionCtx = ctx;
+    bindAskDriver(ctx);
+    asks.reconcileHostMode(ctx);
     loops.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined);
     loops.refreshUI();
+    monitors?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined);
+    monitors?.refreshUI();
     const hold = takeTreeNotificationHold();
     try {
       await subagents.restore(ctx, notificationGate.isPaused());
       if (activePreset) configureSubagentResolvers(activePreset, ctx);
+      goal?.restore(ctx, true);
+      goal?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined);
     } catch (error) {
       report(ctx, error instanceof Error ? error.message : String(error), "error");
     } finally {
@@ -638,12 +690,12 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       pendingCheckpoint = undefined;
       releaseCurrentNotificationsDeferred();
     }
+    if (event.source !== "extension") goal?.onExternalUserInput();
     if (!active || event.source === "extension") return;
     pendingCheckpoint = undefined;
-    nudgeSentThisUserTurn = false;
   });
 
-  pi.on("session_before_compact", (event) => {
+  pi.on("session_before_compact", (event, ctx) => {
     const generation = notificationGate.pause();
     const checkpoint = pendingCheckpoint;
     if (checkpoint?.epoch === sessionEpoch && event.reason === "threshold" && event.willRetry === false) {
@@ -654,7 +706,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
         if (!notificationGate.isCurrent(generation)) return;
         const currentCheckpoint = pendingCheckpoint;
         if (currentCheckpoint?.epoch === sessionEpoch && currentCheckpoint.notificationGeneration === generation) return;
-        notificationGate.release(generation);
+        if (notificationGate.release(generation)) goal?.reevaluateAfterHostOperation(ctx);
       });
     };
     if (event.signal.aborted) releaseAfterAbort();
@@ -662,13 +714,28 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", (event, ctx) => {
-    if (!active || !activePreset || !activePresetName) return;
+    asks.reconcileHostMode(ctx);
+    const goalReminder = goal?.phaseReminder();
+    const message = {
+      customType: "oh-my-pi-slim:phase-reminder",
+      content: goalReminder ? `${PHASE_REMINDER}\n\n${goalReminder}` : PHASE_REMINDER,
+      display: false,
+    };
+    if (!active || !activePreset || !activePresetName) return goalReminder ? { message } : undefined;
     let systemPrompt = removeMainPiDocumentation(event.systemPrompt);
     if (isAnthropicOAuth(ctx)) systemPrompt = removeMainPiIdentity(systemPrompt);
     return {
       systemPrompt: `${systemPrompt}\n\n${ORCHESTRATOR_PROMPT}`,
-      message: { customType: "oh-my-pi-slim:phase-reminder", content: PHASE_REMINDER, display: false },
+      message,
     };
+  });
+
+  pi.on("agent_start", () => {
+    goal?.onAgentStart();
+  });
+
+  pi.on("agent_end", (event) => {
+    goal?.onAgentEnd(event);
   });
 
   pi.on("turn_start", () => {
@@ -676,23 +743,33 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("message_end", (event, ctx) => {
-    if (event.message.role !== "custom" || event.message.customType !== SUBAGENT_NOTIFICATION_TYPE) return;
+    if (event.message.role !== "custom") return;
     const message = event.message;
+    if (message.customType === GOAL_CONTINUATION_MESSAGE_TYPE) {
+      const deliveryEpoch = sessionEpoch;
+      const deliverySessionId = ctx.sessionManager.getSessionId();
+      setImmediate(() => {
+        if (deliveryEpoch !== sessionEpoch || sessionCtx?.sessionManager.getSessionId() !== deliverySessionId) return;
+        goal?.acknowledgeContinuationMessage(message);
+      });
+      return;
+    }
+    if (event.message.customType !== SUBAGENT_NOTIFICATION_TYPE && event.message.customType !== MONITOR_NOTIFICATION_TYPE) return;
+    // Bind acknowledgement to this session so delayed message_end events cannot acknowledge a new runtime's private key.
     const deliveryEpoch = sessionEpoch;
     const deliverySessionId = ctx.sessionManager.getSessionId();
     setImmediate(() => {
       if (deliveryEpoch !== sessionEpoch || sessionCtx?.sessionManager.getSessionId() !== deliverySessionId) return;
-      subagents.acknowledgeNotificationMessage(message);
+      if (message.customType === SUBAGENT_NOTIFICATION_TYPE) subagents.acknowledgeNotificationMessage(message);
+      else monitors?.acknowledgeNotificationMessage(message);
     });
   });
 
-  pi.on("tool_execution_end", (event) => {
-    if (active && FILE_TOOLS.has(event.toolName)) fileToolSeenThisTurn = true;
+  pi.on("tool_execution_start", () => {
+    goal?.onToolExecutionStart();
   });
 
   pi.on("turn_end", (event, ctx) => {
-    const sawFileTool = fileToolSeenThisTurn;
-    fileToolSeenThisTurn = false;
     if (!active) return;
     const completedBatch = completedToolBatch(event);
     if (completedBatch && !pendingCheckpoint && !ctx.hasPendingMessages()) {
@@ -708,59 +785,63 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
             notificationGeneration,
           };
           report(ctx, "Context reached Pi's native compaction threshold; checkpointing after the completed tool batch.", "info");
+          goal?.markHostAbort();
           ctx.abort();
           return;
         }
       }
     }
-    if (sawFileTool && !nudgeSentThisUserTurn && !ctx.hasPendingMessages()) {
-      nudgeSentThisUserTurn = true;
-      pi.sendMessage(
-        { customType: "oh-my-pi-slim:file-nudge", content: PHASE_REMINDER, display: false },
-        { deliverAs: "steer", triggerTurn: true },
-      );
-    }
   });
 
-  pi.on("session_compact", (event) => {
+  pi.on("session_compact", (event, ctx) => {
+    goal?.refreshFromBranch(ctx);
     if (pendingCheckpoint?.epoch === sessionEpoch && event.reason === "threshold" && event.willRetry === false) {
       pendingCheckpoint.sawThresholdCompaction = true;
       return;
     }
     if (notificationGate.isPaused()) {
       releaseCurrentNotificationsDeferred();
+      setImmediate(() => goal?.reevaluateAfterHostOperation(ctx));
     }
   });
 
   pi.on("agent_settled", (_event, ctx) => {
+    // Retry only while this session/runtime still owns the queued private delivery keys.
     const deliveryEpoch = sessionEpoch;
     const deliverySessionId = ctx.sessionManager.getSessionId();
     setImmediate(() => {
       if (deliveryEpoch !== sessionEpoch || sessionCtx?.sessionManager.getSessionId() !== deliverySessionId) return;
       subagents.retryQueuedNotificationsAfterAgentSettled();
+      monitors?.retryQueuedNotificationsAfterAgentSettled();
     });
 
     const checkpoint = pendingCheckpoint;
     if (!checkpoint || checkpoint.epoch !== sessionEpoch) {
-      if (notificationGate.isPaused()) {
-        releaseCurrentNotificationsDeferred();
-      }
+      if (notificationGate.isPaused()) releaseCurrentNotificationsDeferred();
+      goal?.onAgentSettled(ctx);
       return;
     }
+    goal?.onAgentSettled(ctx, { suppressContinuation: true });
     if (checkpoint.sawThresholdCompaction) {
       scheduleCheckpointResume(checkpoint, ctx);
       return;
     }
     pendingCheckpoint = undefined;
     notificationGate.releaseDeferred(checkpoint.notificationGeneration);
-    report(ctx, "OMPS ended the previous low-level run after a complete tool batch, but Pi did not complete threshold compaction; automatic checkpoint resume was not started.", "warning");
+    setImmediate(() => goal?.reevaluateAfterHostOperation(ctx));
+    report(ctx, "OMPS ended the previous low-level run after a complete tool batch, but Pi did not complete threshold compaction; the Goal scheduler will reevaluate continuation after delivery resumes.", "warning");
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
     invalidateCheckpoint(false);
     clearTreeNotificationHold();
+    asks.abortAll("Session shutdown aborted the questionnaire.");
+    bindAskDriver();
     loops.shutdown();
-    await subagents.shutdown();
+    goal?.shutdown();
+    monitorGoalUnsubscribe?.();
+    monitorGoalUnsubscribe = undefined;
+    await Promise.all([subagents.shutdown(), monitors?.shutdown()]);
     notificationGate.clearWithoutDelivery();
     if (active) {
       active = false;
@@ -774,7 +855,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     subagents.setDenyResolver();
     originalModel = undefined;
     originalThinking = undefined;
-    nudgeSentThisUserTurn = false;
     if (ctx.hasUI) ctx.ui.setStatus("oh-my-pi-slim", undefined);
   });
 }

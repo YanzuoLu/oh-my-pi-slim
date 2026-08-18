@@ -150,6 +150,7 @@ let state = {
   activeTools: {},
   responseText: "",
   tokens: 0,
+  providerTokens: 0,
   compactionCount: 0,
 };
 let ending = false;
@@ -163,6 +164,7 @@ let controlWatcher;
 let client;
 let lastAssistantOutput = "";
 let tokenResetPending = false;
+let providerTokenBaseline = 0;
 
 function writeState() {
   atomicWriteJson(stateFile, state);
@@ -219,8 +221,18 @@ function updateContextTokens(candidate) {
   return true;
 }
 
+function providerUsageTokens(usage) {
+  if (!isRecord(usage)) return 0;
+  return ["input", "output", "cacheRead", "cacheWrite"]
+    .map((field) => typeof usage[field] === "number" && Number.isFinite(usage[field]) && usage[field] > 0 ? usage[field] : 0)
+    .reduce((sum, amount) => sum + amount, 0);
+}
+
 function updateStats(stats) {
   if (!isRecord(stats)) return;
+  if (isRecord(stats.tokens) && typeof stats.tokens.total === "number" && Number.isFinite(stats.tokens.total) && stats.tokens.total >= 0) {
+    state.providerTokens = Math.max(state.providerTokens, stats.tokens.total - providerTokenBaseline);
+  }
   const usage = stats.contextUsage;
   if (isRecord(usage)) {
     updateContextTokens(usage.tokens);
@@ -313,11 +325,15 @@ function handleEvent(event) {
     if (isRecord(event.message) && event.message.role === "assistant") {
       if (typeof event.message.stopReason === "string") lastStopReason = event.message.stopReason;
       if (typeof event.message.errorMessage === "string") lastError = event.message.errorMessage;
-      if (isRecord(event.message.usage)) updateContextTokens(event.message.usage.totalTokens);
+      if (isRecord(event.message.usage)) {
+        updateContextTokens(event.message.usage.totalTokens);
+        state.providerTokens += providerUsageTokens(event.message.usage);
+      }
     }
     patchActivity({
       responseText: state.responseText,
       ...(state.tokens > 0 ? { tokens: state.tokens } : {}),
+      providerTokens: state.providerTokens,
     });
     return;
   }
@@ -456,7 +472,13 @@ try {
     if (!ending && !TERMINAL.has(state.status)) void finish("failed", { error: errorText(error) });
   });
   await client.start();
-  const childState = await withTimeout(client.getState(), STARTUP_TIMEOUT_MS, "RPC child startup probe");
+  const [childState, initialStats] = await Promise.all([
+    withTimeout(client.getState(), STARTUP_TIMEOUT_MS, "RPC child startup probe"),
+    withTimeout(client.getSessionStats(), STARTUP_TIMEOUT_MS, "RPC child startup stats"),
+  ]);
+  if (isRecord(initialStats?.tokens) && typeof initialStats.tokens.total === "number" && Number.isFinite(initialStats.tokens.total) && initialStats.tokens.total >= 0) {
+    providerTokenBaseline = initialStats.tokens.total;
+  }
   transition("running", {
     sessionFile: isRecord(childState) && typeof childState.sessionFile === "string" ? childState.sessionFile : undefined,
   });

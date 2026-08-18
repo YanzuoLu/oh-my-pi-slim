@@ -377,10 +377,10 @@ test("Loop fire renderer preserves compact target and suffix under width, expand
   };
   const before = structuredClone(message);
   const collapsed = render(renderLoopFire(message, { expanded: false, outputPad: 1 }, theme)).trim();
-  assert.equal(collapsed, "↻ Loop [00000001] · A long fire abstract that should shrink before its suffix disappears · fire 3");
-  const narrowLines = renderLines(renderLoopFire(message, { expanded: false, outputPad: 1 }, theme), 42);
-  assert.ok(narrowLines.every((line) => visibleWidth(line) <= 42));
-  assert.match(narrowLines.join("\n"), /↻ Loop \[00000001\] · .* · fire 3/);
+  assert.equal(collapsed, "↻ Loop [00000001] · A long fire abstract that should shrink before its suffix disappears · fire 3 (ctrl+o to expand)");
+  const narrowLines = renderLines(renderLoopFire(message, { expanded: false, outputPad: 1 }, theme), 55);
+  assert.ok(narrowLines.every((line) => visibleWidth(line) <= 55));
+  assert.match(render(renderLoopFire(message, { expanded: false, outputPad: 1 }, theme), 55).trim(), /↻ Loop \[00000001\].* · fire 3 \(ctrl\+o to expand\)$/);
 
   const expanded = render(renderLoopFire(message, { expanded: true, outputPad: 1 }, theme));
   for (const expected of [
@@ -388,12 +388,14 @@ test("Loop fire renderer preserves compact target and suffix under width, expand
     "Fired at: 2026-05-01T00:00:30.000Z", "Abstract:", "A long fire abstract",
     "Prompt:", "Full prompt line one", "Full prompt line two",
   ]) assert.match(expanded, escaped(expected));
-  assert.doesNotMatch(expanded, /\u0000/);
+  assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)|\u0000/);
   assert.deepEqual(message, before);
 
   const fallback = { content: "Legacy first\u0000 line\nLegacy full second", details: { id: "00000001", prompt: "missing fields" } };
   const fallbackBefore = structuredClone(fallback);
-  assert.equal(render(renderLoopFire(fallback, { expanded: false, outputPad: 1 }, theme)).trim(), "Legacy first  line");
-  assert.match(render(renderLoopFire(fallback, { expanded: true, outputPad: 1 }, theme)), /Legacy first  line\n Legacy full second|Legacy first  line\nLegacy full second/);
+  assert.equal(render(renderLoopFire(fallback, { expanded: false, outputPad: 1 }, theme)).trim(), "Legacy first  line (ctrl+o to expand)");
+  const fallbackExpanded = render(renderLoopFire(fallback, { expanded: true, outputPad: 1 }, theme));
+  assert.match(fallbackExpanded, /Legacy first  line\n Legacy full second|Legacy first  line\nLegacy full second/);
+  assert.doesNotMatch(fallbackExpanded, /\(ctrl\+o to expand\)/);
   assert.deepEqual(fallback, fallbackBefore);
 });

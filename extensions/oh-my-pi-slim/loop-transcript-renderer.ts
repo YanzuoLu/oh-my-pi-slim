@@ -38,18 +38,28 @@ function safeFirstLine(text: string): string {
   return sanitizeLoopText(line).trim();
 }
 
-class TruncatedLine implements Component {
-  private readonly value: string;
+class ExpandableNotificationLine implements Component {
+  private readonly head: string;
+  private readonly tail: string;
+  private readonly hint: string;
   private readonly paddingX: number;
 
-  constructor(value: string, paddingX = 0) {
-    this.value = value;
+  constructor(head: string, tail: string, theme: Theme, paddingX = 0) {
+    this.head = head;
+    this.tail = tail;
+    this.hint = theme.fg("muted", " (ctrl+o to expand)");
     this.paddingX = paddingX;
   }
 
   render(width: number): string[] {
     const contentWidth = Math.max(1, width - this.paddingX * 2);
-    return [`${" ".repeat(this.paddingX)}${truncateToWidth(this.value, contentWidth, "…")}`];
+    const fixedWidth = visibleWidth(this.tail) + visibleWidth(this.hint);
+    const headWidth = Math.max(0, contentWidth - fixedWidth);
+    const head = truncateToWidth(this.head, headWidth, "…");
+    const line = fixedWidth <= contentWidth
+      ? `${head}${this.tail}${this.hint}`
+      : `${truncateToWidth(`${this.head}${this.tail}`, Math.max(0, contentWidth - visibleWidth(this.hint)), "…")}${this.hint}`;
+    return [`${" ".repeat(this.paddingX)}${truncateToWidth(line, contentWidth, "…")}`];
   }
 
   invalidate(): void {}
@@ -67,9 +77,12 @@ class LoopFireLine implements Component {
   render(width: number): string[] {
     const prefix = `${this.theme.fg("accent", "↻")} ${this.theme.fg("customMessageText", `Loop [${sanitizeLoopText(this.details.id)}] · `)}`;
     const suffix = this.theme.fg("customMessageText", ` · fire ${this.details.fireCount}`);
-    const abstractWidth = Math.max(0, width - visibleWidth(prefix) - visibleWidth(suffix));
-    const abstract = truncateToWidth(sanitizeLoopText(this.details.abstract), abstractWidth, "…");
-    return [truncateToWidth(`${prefix}${this.theme.fg("customMessageText", abstract)}${suffix}`, Math.max(1, width), "…")];
+    const line = new ExpandableNotificationLine(
+      `${prefix}${this.theme.fg("customMessageText", sanitizeLoopText(this.details.abstract))}`,
+      suffix,
+      this.theme,
+    );
+    return line.render(width);
   }
 
   invalidate(): void {}
@@ -304,7 +317,12 @@ export function renderLoopFire(
     const content = typeof message.content === "string" ? message.content : contentText(message.content);
     if (!content) return new Text("", 0, 0);
     if (options.expanded === true) return new Text(theme.fg("customMessageText", sanitizeLoopBody(content)), options.outputPad ?? 0, 0);
-    return new TruncatedLine(theme.fg("customMessageText", safeFirstLine(content)), options.outputPad ?? 0);
+    return new ExpandableNotificationLine(
+      theme.fg("customMessageText", safeFirstLine(content)),
+      "",
+      theme,
+      options.outputPad ?? 0,
+    );
   }
 
   const box = new Box(options.outputPad ?? 1, 1, (text) => theme.bg("customMessageBg", text));

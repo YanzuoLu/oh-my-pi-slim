@@ -1,5 +1,5 @@
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Markdown, Spacer, Text, type Component } from "@earendil-works/pi-tui";
+import { Box, Container, Markdown, Spacer, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { legacyRunAbstract } from "./subagent-core.js";
 
 export const SUBAGENT_NOTIFICATION_TYPE = "oh-my-pi-slim:subagent-notification";
@@ -44,6 +44,33 @@ function contentText(content: unknown): string {
 function safeFirstLine(text: string): string {
   const line = text.split(/\r?\n/).find((value) => value.trim()) ?? "";
   return line.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim();
+}
+
+class ExpandableNotificationLine implements Component {
+  private readonly head: string;
+  private readonly tail: string;
+  private readonly hint: string;
+  private readonly paddingX: number;
+
+  constructor(head: string, tail: string, theme: Theme, paddingX = 0) {
+    this.head = head;
+    this.tail = tail;
+    this.hint = theme.fg("muted", " (ctrl+o to expand)");
+    this.paddingX = paddingX;
+  }
+
+  render(width: number): string[] {
+    const contentWidth = Math.max(1, width - this.paddingX * 2);
+    const fixedWidth = visibleWidth(this.tail) + visibleWidth(this.hint);
+    const headWidth = Math.max(0, contentWidth - fixedWidth);
+    const head = truncateToWidth(this.head, headWidth, "…");
+    const line = fixedWidth <= contentWidth
+      ? `${head}${this.tail}${this.hint}`
+      : `${truncateToWidth(`${this.head}${this.tail}`, Math.max(0, contentWidth - visibleWidth(this.hint)), "…")}${this.hint}`;
+    return [`${" ".repeat(this.paddingX)}${truncateToWidth(line, contentWidth, "…")}`];
+  }
+
+  invalidate(): void {}
 }
 
 function styledTitle(theme: Theme, title: string, detail?: string): Text {
@@ -101,16 +128,25 @@ function transcriptRunAbstract(run: UnknownRecord): string | undefined {
   return "Legacy run summary unavailable";
 }
 
-function compactRunHeader(run: UnknownRecord, theme: Theme, statusOverride?: string, includeAbstract = false): Text {
+function compactRunHeaderParts(
+  run: UnknownRecord,
+  theme: Theme,
+  statusOverride?: string,
+  includeAbstract = false,
+): { head: string; tail: string } {
   const identity = runIdentity(run);
   const status = statusOverride ?? identity.status;
   const abstractText = includeAbstract ? transcriptRunAbstract(run) : undefined;
   const abstract = abstractText ? `  ${abstractText}` : "";
-  return new Text(
-    `${statusGlyph(status, theme)} ${theme.fg("toolTitle", theme.bold(identity.agent))} ${theme.fg("accent", `[${identity.id}]`)} ${theme.fg("muted", `· ${status}`)}${abstract}`,
-    0,
-    0,
-  );
+  return {
+    head: `${statusGlyph(status, theme)} ${theme.fg("toolTitle", theme.bold(identity.agent))} ${theme.fg("accent", `[${identity.id}]`)}`,
+    tail: ` ${theme.fg("muted", `· ${status}`)}${abstract}`,
+  };
+}
+
+function compactRunHeader(run: UnknownRecord, theme: Theme, statusOverride?: string, includeAbstract = false): Text {
+  const parts = compactRunHeaderParts(run, theme, statusOverride, includeAbstract);
+  return new Text(`${parts.head}${parts.tail}`, 0, 0);
 }
 
 function addRequest(container: Container, theme: Theme, value: unknown): void {
@@ -301,11 +337,22 @@ export function renderSubagentNotification(
     if (!content) return new Text("", 0, 0);
     if (options.expanded === true) return fullBody(content, theme, options.outputPad ?? 0);
     const firstLine = content.split(/\r?\n/).find((line) => line.trim()) ?? "";
-    return new Text(theme.fg("customMessageText", firstLine), options.outputPad ?? 0, 0);
+    return new ExpandableNotificationLine(
+      theme.fg("customMessageText", safeFirstLine(firstLine)),
+      "",
+      theme,
+      options.outputPad ?? 0,
+    );
   }
 
   const event = asString(details?.event) ?? asString(details?.status) ?? asString(run.status) ?? "update";
   const box = new Box(options.outputPad ?? 1, 1, (text) => theme.bg("customMessageBg", text));
+  if (options.expanded !== true) {
+    const parts = compactRunHeaderParts(run, theme, event);
+    box.addChild(new ExpandableNotificationLine(parts.head, parts.tail, theme));
+    return box;
+  }
+
   const container = new Container();
   container.addChild(compactRunHeader(run, theme, event));
   if (options.expanded === true) {

@@ -26,8 +26,17 @@ const dependencyMap = {
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
+  "./ask-runtime.js": new URL("../extensions/oh-my-pi-slim/ask-runtime.ts", import.meta.url).href,
+  "./ask-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts", import.meta.url).href,
+  "./ask-tui.js": new URL("../extensions/oh-my-pi-slim/ask-tui.ts", import.meta.url).href,
   "./bootstrap.js": new URL("../extensions/oh-my-pi-slim/bootstrap.ts", import.meta.url).href,
+  "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
+  "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
+  "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
   "./loop-runtime.js": new URL("../extensions/oh-my-pi-slim/loop-runtime.ts", import.meta.url).href,
+  "./monitor-runtime.js": new URL("../extensions/oh-my-pi-slim/monitor-runtime.ts", import.meta.url).href,
+  "./monitor-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/monitor-transcript-renderer.ts", import.meta.url).href,
+  "./monitor-widget.js": new URL("../extensions/oh-my-pi-slim/monitor-widget.ts", import.meta.url).href,
   "./loop-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/loop-transcript-renderer.ts", import.meta.url).href,
   "./loop-widget.js": new URL("../extensions/oh-my-pi-slim/loop-widget.ts", import.meta.url).href,
   "./prompt-context.js": new URL("../extensions/oh-my-pi-slim/prompt-context.ts", import.meta.url).href,
@@ -77,16 +86,20 @@ const {
 } = await import("../extensions/oh-my-pi-slim/index.ts");
 const {
   atomicWriteJson,
+  getGoalStatsRoot,
+  getGoalStatsSidecarPaths,
   getProcessIdentity,
   getRunPaths,
   getRunRoot,
   isDetachedLaunchConfig,
   isDetachedRunnerIdentity,
   listOwnerRunIds,
+  readGoalStatsSidecar,
   readLaunchConfig,
   removeRunFiles,
   safeReadJson,
   writeControl,
+  writeGoalStatsSidecar,
 } = await import("../extensions/oh-my-pi-slim/subagent-run-files.ts");
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -172,6 +185,8 @@ function createHarness({
   keepAliveAfterKill = false,
   keepAliveAfterTerm = false,
   rejectGroupSignal = false,
+  readGoalStats,
+  writeGoalStats,
 } = {}) {
   const tempDir = mkdtempSync(join(CACHE, "runtime-harness-"));
   chmodSync(tempDir, 0o700);
@@ -232,6 +247,8 @@ function createHarness({
     },
     clearInterval(timer) { clearedIntervals.push(timer); },
     sleep,
+    readGoalStats,
+    writeGoalStats,
   });
   runtime.registerTools();
   const ui = {
@@ -961,6 +978,76 @@ test("run-directory helpers list safe owner children and remove only contained r
     removeRunFiles(paths);
     assert.equal(existsSync(paths.runDir), false);
   } finally { rmSync(tempDir, { recursive: true, force: true }); }
+});
+
+test("Goal stats sidecars enforce private paths, permissions, validation, and symlink safety", () => {
+  const tempDir = mkdtempSync(join(CACHE, "goal-stats-sidecar-"));
+  try {
+    const root = getGoalStatsRoot(join(tempDir, "sessions"));
+    const stats = { version: 1, runId: "run-safe", tokens: 120, tools: 3, turns: 4, compactions: 1 };
+    assert.equal(writeGoalStatsSidecar(root, "owner-safe", stats), true);
+    const paths = getGoalStatsSidecarPaths(root, "owner-safe", "run-safe");
+    assert.equal(statSync(paths.root).mode & 0o777, 0o700);
+    assert.equal(statSync(paths.ownerDir).mode & 0o777, 0o700);
+    assert.equal(statSync(paths.file).mode & 0o777, 0o600);
+    assert.deepEqual(readGoalStatsSidecar(root, "owner-safe", "run-safe"), stats);
+    assert.throws(() => getGoalStatsSidecarPaths(root, "../escape", "run-safe"), /safe path segment/);
+    assert.equal(writeGoalStatsSidecar(root, "owner-safe", { ...stats, runId: "../escape" }), false);
+
+    writeFileSync(paths.file, "{malformed", { mode: 0o600 });
+    assert.equal(readGoalStatsSidecar(root, "owner-safe", "run-safe"), undefined);
+    rmSync(paths.file, { force: true });
+    const target = join(tempDir, "outside.json");
+    writeFileSync(target, JSON.stringify(stats));
+    symlinkSync(target, paths.file);
+    assert.equal(readGoalStatsSidecar(root, "owner-safe", "run-safe"), undefined);
+    assert.equal(writeGoalStatsSidecar(root, "owner-safe", stats), false);
+    assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), stats);
+  } finally { rmSync(tempDir, { recursive: true, force: true }); }
+});
+
+test("Goal stats capture writes only actual changes and treats sidecar I/O failure as best-effort", async () => {
+  const writes = [];
+  const harness = createHarness({
+    writeGoalStats(root, ownerSessionId, stats) {
+      writes.push({ root, ownerSessionId, stats: structuredClone(stats) });
+      if (writes.length === 2) throw new Error("simulated sidecar failure");
+      return true;
+    },
+  });
+  try {
+    await harness.restore();
+    const first = stateFor("old-run", "token", { providerTokens: 50, toolUses: 2, turnCount: 3, compactionCount: 1 });
+    harness.runtime.captureGoalActivity("old-run", first);
+    harness.runtime.captureGoalActivity("old-run", structuredClone(first));
+    assert.equal(writes.length, 1, "unchanged stats do not rewrite the sidecar");
+    harness.runtime.captureGoalActivity("old-run", { ...first, providerTokens: 75 });
+    assert.equal(writes.length, 2, "actual stats changes attempt one additional atomic write");
+    assert.deepEqual(harness.runtime.goalStats(["old-run"]), {
+      runCount: 1, tokens: 75, tools: 2, turns: 3, compactions: 1,
+    });
+  } finally { harness.cleanup(); }
+});
+
+test("Goal stats sidecars preserve completed owned-run aggregates across branch restore and run-directory GC", async () => {
+  const branchOne = [];
+  const harness = createHarness({ branch: branchOne });
+  try {
+    await harness.restore();
+    harness.runtime.captureGoalActivity("old-run", stateFor("old-run", "token", {
+      status: "completed", providerTokens: 90, toolUses: 5, turnCount: 6, compactionCount: 2,
+    }));
+    const sidecar = getGoalStatsSidecarPaths(getGoalStatsRoot(harness.sessionDir), harness.ownerSessionId, "old-run").file;
+    assert.equal(existsSync(sidecar), true);
+    assert.equal(harness.runtime.goalStats(["old-run"]).tokens, 90);
+
+    branchOne.splice(0);
+    await harness.restore();
+    assert.deepEqual(harness.runtime.goalStats(["old-run"]), {
+      runCount: 1, tokens: 90, tools: 5, turns: 6, compactions: 2,
+    });
+    assert.equal(existsSync(sidecar), true, "run-directory GC never deletes session-owned Goal stats sidecars");
+  } finally { harness.cleanup(); }
 });
 
 test("create writes secure detached config, journals once, launches, and returns immediately", async () => {
@@ -2449,6 +2536,11 @@ test("main and child share the fixed checkpoint helpers while main keeps settled
     assert.match(childSource, new RegExp(helper));
   }
   assert.match(source, /setImmediate\(\(\) => \{[\s\S]*pi\.sendUserMessage\(CHECKPOINT_RESUME_TEXT, \{ deliverAs: "followUp" \}\)/);
+  const incompleteWarning = source.indexOf("the Goal scheduler will reevaluate continuation after delivery resumes");
+  const incompleteCheckpoint = source.slice(source.lastIndexOf("pendingCheckpoint = undefined", incompleteWarning), incompleteWarning);
+  assert.ok(incompleteCheckpoint.indexOf("notificationGate.releaseDeferred(checkpoint.notificationGeneration)") >= 0);
+  assert.ok(incompleteCheckpoint.indexOf("notificationGate.releaseDeferred(checkpoint.notificationGeneration)") < incompleteCheckpoint.indexOf("setImmediate(() => goal?.reevaluateAfterHostOperation(ctx))"),
+    "incomplete checkpoint releases the shared gate before deferred Goal reevaluation");
   assert.match(childSource, /pi\.on\("session_compact"[\s\S]*pi\.sendUserMessage\(CHECKPOINT_RESUME_TEXT, \{ deliverAs: "followUp" \}\)[\s\S]*pendingCheckpoint = undefined/);
   assert.doesNotMatch(`${source}\n${childSource}`, /checkpoint\.tools|Completed tool calls at the checkpoint|Re-fetch/);
 });

@@ -62,7 +62,7 @@ function checkSteSentence(sentence, label) {
   check(words.length <= 20, `${label} exceeds 20 words: ${sentence}`);
   check(!sentence.includes(";"), `${label} contains a semicolon: ${sentence}`);
   check(!/\b(?:is|are|was|were|be|been|being)\s+\w+(?:ed|en)\b/i.test(sentence), `${label} does not use active voice: ${sentence}`);
-  check(/^(?:Use|Add|Remove|Read|Expect|Do not|Resume|For|In|After|Before|Wait|Continue|Complete|Create|Reply|Select|Provide|Apply)\b/.test(sentence), `${label} does not start with an instruction or condition: ${sentence}`);
+  check(/^(?:Use|Add|Remove|Read|Expect|Do not|Resume|For|In|After|Before|Wait|Continue|Complete|Create|Reply|Select|Provide|Apply|Ask|Allow|Describe|Pause|Cancel)\b/.test(sentence), `${label} does not start with an instruction or condition: ${sentence}`);
 }
 
 function checkSteBlock(block, label) {
@@ -110,10 +110,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.9.4", "package version must be 0.9.4");
-check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, runtime loops, and session todos.", "package description must include the three built-in runtime surfaces");
-check(["pi-package", "pi", "orchestration", "subagents", "loops", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Loop discovery terms");
-check(lock.version === "0.9.4" && lock.packages?.[""]?.version === "0.9.4", "package-lock version must be 0.9.4");
+check(packageJson.version === "0.10.0", "package version must be 0.10.0");
+check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
+check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
+check(lock.version === "0.10.0" && lock.packages?.[""]?.version === "0.10.0", "package-lock version must be 0.10.0");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -140,7 +140,16 @@ for (const name of AGENTS) {
 }
 
 const extension = read("extensions/oh-my-pi-slim/index.ts");
+const askRuntime = read("extensions/oh-my-pi-slim/ask-runtime.ts");
+const askTui = read("extensions/oh-my-pi-slim/ask-tui.ts");
+const askTranscriptRenderer = read("extensions/oh-my-pi-slim/ask-transcript-renderer.ts");
+const goalRuntime = read("extensions/oh-my-pi-slim/goal-runtime.ts");
+const goalWidget = read("extensions/oh-my-pi-slim/goal-widget.ts");
+const goalTranscriptRenderer = read("extensions/oh-my-pi-slim/goal-transcript-renderer.ts");
 const loopRuntime = read("extensions/oh-my-pi-slim/loop-runtime.ts");
+const monitorRuntime = read("extensions/oh-my-pi-slim/monitor-runtime.ts");
+const monitorWidget = read("extensions/oh-my-pi-slim/monitor-widget.ts");
+const monitorTranscriptRenderer = read("extensions/oh-my-pi-slim/monitor-transcript-renderer.ts");
 const loopWidget = read("extensions/oh-my-pi-slim/loop-widget.ts");
 const loopTranscriptRenderer = read("extensions/oh-my-pi-slim/loop-transcript-renderer.ts");
 const checkpoint = read("extensions/oh-my-pi-slim/subagent-checkpoint.ts");
@@ -159,8 +168,9 @@ const todoWidget = read("extensions/todo/widget.ts");
 const functionStart = extension.indexOf("export default function ohMyPiSlim");
 const childGate = extension.indexOf('process.env.PI_SUBAGENT_CHILD === "1" || process.env.OMPS_SUBAGENT_CHILD === "1"', functionStart);
 const loopRegistration = extension.indexOf("registerLoopRuntime(pi)", functionStart);
+const monitorRegistration = extension.indexOf("registerMonitorRuntime(pi)", functionStart);
 const runtimeRegistration = extension.indexOf("registerSubagentRuntime(pi)", functionStart);
-check(functionStart >= 0 && childGate > functionStart && childGate < loopRegistration && loopRegistration < runtimeRegistration, "main extension must return before Loop and subagent registration");
+check(functionStart >= 0 && childGate > functionStart && childGate < loopRegistration && loopRegistration < monitorRegistration && monitorRegistration < runtimeRegistration, "main extension must return before Loop, Monitor, and subagent registration");
 hasAll(extension, [
   "assertNoLegacyBackend(pi)",
   "ensurePackageSetup(PACKAGE_ROOT)",
@@ -181,10 +191,16 @@ hasAll(extension, [
   "SettingsManager.create(",
   "contextUsageNeedsCheckpoint(",
   "NotificationDeliveryPauseGate", "setNotificationDeliveryPaused(paused)", "loops.setDeliveryPaused(paused)",
-  "notificationGate.releaseDeferred", "notificationGate.clearWithoutDelivery", "registerLoopRuntime(pi)",
+  "monitors?.setDeliveryPaused(paused)", "notificationGate.releaseDeferred", "notificationGate.clearWithoutDelivery",
+  "registerAskRuntime(pi)", "new AskTuiDriver(ctx.ui)", "bindAskDriver(ctx)", "bindAskDriver()",
+  "registerGoalRuntime(pi", "asks.setGoalActiveResolver", "subagents.subscribeRunCreated", "goal?.onAgentSettled(ctx)",
+  "registerLoopRuntime(pi)", "registerMonitorRuntime(pi)",
   "treeNotificationHold", "releaseTreeNotificationHoldDeferred", "subagents.restore(ctx, notificationGate.isPaused())",
-  "loops.reset()", "loops.shutdown()", 'loops.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)',
-  "loops.refreshUI()",
+  "loops.reset()", "loops.shutdown()", "await monitors?.reset()", "await monitors?.shutdown()",
+  'loops.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)', "loops.refreshUI()",
+  'monitors?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)', "monitors?.refreshUI()",
+  'goal?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)', "goal?.setUICtx(undefined)", "goal?.refreshFromBranch(ctx)",
+  "monitors?.acknowledgeNotificationMessage(message)", "monitors?.retryQueuedNotificationsAfterAgentSettled()",
 ], "main extension contract");
 const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
 const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
@@ -197,33 +213,217 @@ const beforeSwitchHandler = extension.slice(beforeSwitchStart, beforeForkStart);
 const beforeForkHandler = extension.slice(beforeForkStart, beforeTreeStart);
 const beforeTreeHandler = extension.slice(beforeTreeStart, sessionTreeStart);
 const sessionTreeHandler = extension.slice(sessionTreeStart, inputStart);
-hasAll(sessionStartHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "loops.reset()"], "session-start tree abort ownership cleanup");
-hasAll(beforeSwitchHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "loops.shutdown()"], "session-switch tree abort ownership cleanup");
-hasAll(beforeForkHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "loops.shutdown()"], "fork loop shutdown");
+const beforeAgentStartHandlerStart = extension.indexOf('pi.on("before_agent_start"');
+const beforeAgentStartHandlerEnd = extension.indexOf('pi.on("agent_start"', beforeAgentStartHandlerStart);
+const beforeAgentStartHandler = extension.slice(beforeAgentStartHandlerStart, beforeAgentStartHandlerEnd);
+hasAll(beforeAgentStartHandler, [
+  "const goalReminder = goal?.phaseReminder()", "goalReminder ? `${PHASE_REMINDER}\\n\\n${goalReminder}` : PHASE_REMINDER",
+  "if (!active || !activePreset || !activePresetName) return goalReminder ? { message } : undefined",
+  "systemPrompt: `${systemPrompt}\\n\\n${ORCHESTRATOR_PROMPT}`",
+], "Goal independent phase-message and fixed orchestrator prompt boundary");
+check(!/systemPrompt:\s*[^\n]*goalReminder/.test(beforeAgentStartHandler), "Goal phase reminder must not dynamically rewrite the system prompt");
+hasNone(goalRuntime, ['pi.on("context"', "systemPrompt:", "systemPromptOptions", "before_provider_request"], "Goal dynamic system and context injection boundary");
+hasAll(sessionStartHandler, [
+  "invalidateCheckpoint(false)", "clearTreeNotificationHold()", "asks.reset()", "bindAskDriver(ctx)", "asks.reconcileHostMode(ctx)",
+  "loops.reset()", "await monitors?.reset()",
+  'monitors?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)', "monitors?.refreshUI()",
+  "goal?.restore(ctx", 'goal?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)',
+], "session-start tree abort ownership cleanup and Goal/Monitor UI binding");
+hasAll(beforeSwitchHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "asks.abortAll(", "bindAskDriver()", "loops.shutdown()", "goal?.setUICtx(undefined)", "await monitors?.shutdown()"], "session-switch runtime cleanup");
+hasAll(beforeForkHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "asks.abortAll(", "bindAskDriver()", "loops.shutdown()", "goal?.setUICtx(undefined)", "await monitors?.shutdown()"], "fork runtime cleanup");
 hasAll(beforeTreeHandler, [
-  "invalidateCheckpoint(false)", "clearTreeNotificationHold()", "const generation = notificationGate.pause()",
+  "invalidateCheckpoint(false)", "clearTreeNotificationHold()", "asks.abortAll(", "bindAskDriver()", "goal?.setUICtx(undefined)", "const generation = notificationGate.pause()",
   'event.signal.addEventListener("abort", abortListener, { once: true })', "event.signal.aborted", "abortPending",
   "await subagents.shutdown()", "hold.shutdownComplete = true", "releaseTreeNotificationHoldDeferred(hold)", "throw error",
 ], "tree shared delivery pause and abort compensation");
 check(beforeTreeHandler.indexOf("await subagents.shutdown()") < beforeTreeHandler.indexOf("hold.shutdownComplete = true"), "tree abort compensation must wait for shutdown completion");
 const treeShutdownCatch = beforeTreeHandler.slice(beforeTreeHandler.indexOf("} catch (error)"));
 check(treeShutdownCatch.indexOf("releaseTreeNotificationHoldDeferred(hold)") < treeShutdownCatch.indexOf("throw error"), "tree shutdown failure must schedule deferred release before propagation");
-hasNone(beforeTreeHandler, ["clearWithoutDelivery", "loops.shutdown()", "loops.reset()"], "tree state preservation");
-hasAll(sessionTreeHandler, ["const hold = takeTreeNotificationHold()", "subagents.restore(ctx, notificationGate.isPaused())", "finally", "notificationGate.releaseDeferred(hold.generation)"], "tree deferred matching release");
+hasNone(beforeTreeHandler, ["clearWithoutDelivery", "loops.shutdown()", "loops.reset()", "monitors?.shutdown()", "monitors?.reset()"], "tree state preservation");
+hasAll(sessionTreeHandler, [
+  "bindAskDriver(ctx)", "asks.reconcileHostMode(ctx)",
+  "const hold = takeTreeNotificationHold()", "subagents.restore(ctx, notificationGate.isPaused())", "finally", "notificationGate.releaseDeferred(hold.generation)",
+  'monitors?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)', "monitors?.refreshUI()",
+  "goal?.restore(ctx, true)", 'goal?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)',
+], "tree deferred matching release and Goal/Monitor UI rebinding");
 hasNone(sessionTreeHandler, ["clearWithoutDelivery", "loops.setDeliveryPaused(false)", "notificationGate.release(generation)"], "tree synchronous release");
 const shutdownHandler = extension.slice(extension.indexOf('pi.on("session_shutdown"'));
-hasAll(shutdownHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "loops.shutdown()"], "session-shutdown tree abort ownership cleanup");
+hasAll(shutdownHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "asks.abortAll(", "bindAskDriver()", "loops.shutdown()", "goal?.shutdown()", "monitors?.shutdown()"], "session-shutdown runtime cleanup");
 hasAll(extension.slice(inputStart, extension.indexOf('pi.on("session_before_compact"')), ["releaseCurrentNotificationsDeferred()"], "ordinary-input canceled-tree fallback");
-hasNone(extension, REMOVED_CAPABILITIES, "main extension");
-const productionToolNames = [...`${extension}\n${loopRuntime}\n${runtime}\n${child}\n${todoExtension}`.matchAll(/registerTool\(\{[\s\S]*?\bname:\s*"([^"]+)"/g)]
-  .map((match) => match[1])
+hasNone(extension, [...REMOVED_CAPABILITIES, "oh-my-pi-slim:file-nudge", "fileToolSeenThisTurn", "nudgeSentThisUserTurn", "FILE_TOOLS"], "main extension");
+const productionToolNames = [...`${extension}\n${askRuntime}\n${goalRuntime}\n${loopRuntime}\n${monitorRuntime}\n${runtime}\n${child}\n${todoExtension}`.matchAll(/registerTool\(\{[\s\S]*?\bname:\s*(?:ASK_TOOL_NAME|"([^"]+)")/g)]
+  .map((match) => match[1] ?? "ask_user_question")
   .sort();
-check(JSON.stringify(productionToolNames) === JSON.stringify(["contact_supervisor", "loop", "subagent", "todo"]), "production extensions must register exactly the four audited model tools");
+check(JSON.stringify(productionToolNames) === JSON.stringify(["ask_user_question", "contact_supervisor", "goal", "loop", "monitor", "subagent", "todo"]), "production extensions must register exactly the seven audited model tools");
+const productionSources = `${extension}\n${askRuntime}\n${askTui}\n${askTranscriptRenderer}\n${goalRuntime}\n${goalWidget}\n${goalTranscriptRenderer}\n${loopRuntime}\n${monitorRuntime}\n${monitorWidget}\n${monitorTranscriptRenderer}\n${runtime}\n${core}\n${child}\n${runFiles}\n${detachedRunner}\n${todoExtension}\n${todoCore}\n${todoWidget}`;
+hasNone(productionSources, ["file-nudge", "npm:@juicesharp/rpiv-ask-user-question", "npm:@aliou/pi-processes"], "production external-migration and removed file-nudge boundary");
+hasNone(monitorRuntime, ["process.stdin", "node-pty", "forkpty", "openpty", "stdin: \"pipe\"", 'stdio: ["pipe", "pipe", "pipe"]'], "Monitor stdin and PTY boundary");
+check(!/\b(?:notes?|collapse|config|i18n)\b/i.test(`${askRuntime}\n${askTui}`), "Ask production must not add notes, collapse, config, or i18n surfaces");
+
+hasAll(goalRuntime, [
+  'export const GOAL_ACTIONS = ["create", "modify", "status", "pause", "resume", "complete", "cancel"] as const',
+  'GOAL_STATE_ENTRY_TYPE = "oh-my-pi-slim:goal-state"', 'GOAL_CONTINUATION_MESSAGE_TYPE', 'GOAL_STATE_MESSAGE_TYPE',
+  "export const goalParameters = Type.Object({", "}, { additionalProperties: false });", 'executionMode: "sequential"', 'name: "goal"',
+  'this.pi.registerCommand("goal"', 'expandPromptTemplates: false', 'deliverAs: "steer" as const',
+  "parseGoalSnapshot", "replayGoalBranch", "ctx.sessionManager.getBranch()", "this.pi.appendEntry(GOAL_STATE_ENTRY_TYPE",
+  '"retry_wait"', "GOAL_RETRY_BACKOFF_MS", "retryDelayMs", "hasActiveSubagents", "hasBlockingMonitors", "askWaitingCount",
+  "goalActivationContent", "goalContinuationContent", "goalPhaseReminder", "goalView()", "subscribe(listener", "setUICtx(", "refreshUI()",
+  "registerMessageRenderer(GOAL_CONTINUATION_MESSAGE_TYPE, renderGoalContinuation)", "registerMessageRenderer(GOAL_STATE_MESSAGE_TYPE, renderGoalState)",
+  "renderCall: renderGoalCall", "renderResult: renderGoalResult", "continuationNumber", "parseGoalContinuationMessageDetails", "this.widget.update()", "this.refreshDerivedView()",
+  "Pursue this Goal now.", "Do not ask the user questions while this Goal is active.",
+  "Continue until every criterion has concrete evidence.", "Continue making concrete progress toward every criterion.",
+  "Use Todo, Monitor, and Subagents when useful.", "If safe progress is blocked, call `goal pause` with a concrete reason.",
+  "Call `goal complete` only with one evidence entry for every criterion.",
+], "Goal durable core, cached UI, renderer registration, and continuation numbering contract");
+hasNone(goalRuntime, ["\"Rules:\"", '"- Pursue this Goal now."', '"- Make concrete progress in this run."'], "Goal frozen model text rewrite boundary");
+hasNone(goalRuntime, ["registerEntryRenderer", "registerShortcut", "goalId", "revision", "action: \"list\"", "action: \"clear\""], "Goal public-ID and action boundary");
+hasAll(goalWidget, [
+  "GOAL_WIDGET_KEY", "renderGoalWidgetLines", 'theme.bold("● Goal")', '"↻"', '"Ⅱ"', '"◷"', '"✓"', '"×"',
+  '`${view.continuationCount} cont`', 'countLabel(view.ownedChildRunCount, "run")', 'statsLabel("main"', 'statsLabel("child"',
+  'setIntervalFn(() => {', "1_000", "unref?.()", "requestRender()", "truncateToWidth", "visibleWidth", "invalidate() {}", 'placement: "aboveEditor"',
+  "sanitizeGoalText", "sanitizeGoalBody", "dispose()",
+], "Goal fixed two-line width-safe cached widget contract");
+hasNone(goalWidget, ["\\u001b[", "registerShortcut", "setStatus("], "Goal widget theme-only contract");
+hasAll(goalTranscriptRenderer, [
+  "renderGoalCall", "renderGoalResult", "renderGoalContinuation", "renderGoalState", 'theme.bold("goal")',
+  '`· ${sanitizeGoalText(action)}${expanded ? "" : " (ctrl+o to expand)"}`', "new Spacer(1)", "addCompleteGoal", "addCriterionEvidence",
+  "ExpandableNotificationLine", 'theme.fg("muted", " (ctrl+o to expand)")', "visibleWidth(this.hint)", "options.expanded === true",
+  '"Continuation content"', '"Criterion evidence:"', '"Model result"', "safeFirstLine", "sanitizeGoalBody",
+], "Goal Ctrl+O call, result, continuation, and state renderer contract");
+hasNone(goalTranscriptRenderer, ["\\u001b[", "registerShortcut", "notify(", "overlay", '"Action"'], "Goal renderer theme-only visual contract");
+const goalStatusBlock = goalRuntime.slice(goalRuntime.indexOf('if (action === "status")'), goalRuntime.indexOf('if (action === "create")'));
+hasNone(goalStatusBlock, ["this.store(", "generation +=", "pendingContinuation", "activitySerial", "goalView", "cachedMainStats", "cachedChildStats", "ownedRunIds", "continuationCount"], "Goal status pure read-only and stats-private contract");
+const goalPauseNoOp = goalRuntime.slice(goalRuntime.indexOf('if (snapshot.goal.status === "paused")'), goalRuntime.indexOf("const next = cloneSnapshot(snapshot)", goalRuntime.indexOf('if (snapshot.goal.status === "paused")')));
+hasNone(goalPauseNoOp, ["this.store(", "generation +="], "Goal repeated pause no-op contract");
+const goalResumeNoOp = goalRuntime.slice(goalRuntime.indexOf('if (snapshot.goal.status === "active")', goalRuntime.indexOf("private resume")), goalRuntime.indexOf("const next = cloneSnapshot(snapshot)", goalRuntime.indexOf("private resume")));
+hasNone(goalResumeNoOp, ["this.store(", "generation +="], "Goal repeated resume no-op contract");
+hasAll(goalRuntime.slice(goalRuntime.indexOf("private clearRetryAfterSuccess"), goalRuntime.indexOf("private hasRetryMetadata")), ['status !== "active"', 'status !== "retry_wait"'], "Goal retry-success internal status guard");
+const goalSchemaStart = goalRuntime.indexOf("export const goalParameters");
+const goalSchemaEnd = goalRuntime.indexOf("function toolText", goalSchemaStart);
+const goalSchema = goalRuntime.slice(goalSchemaStart, goalSchemaEnd);
+hasNone(goalSchema, ["id:", "goalId", "revision", "generation", "instanceKey", "stats", "ownedRunIds", "continuationCount"], "Goal public schema ID, revision, ownership, and stats boundary");
+check(!goalSchema.includes("anyOf:") && !goalSchema.includes("oneOf:"), "Goal schema root must not declare anyOf or oneOf");
+const goalSchemaDescriptions = [...goalSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
+check(goalSchemaDescriptions.length === 6, "Goal schema must define six field descriptions");
+for (const description of goalSchemaDescriptions) checkSteBlock(description, "Goal schema description");
+hasAll(goalSchema, [
+  'action: Type.Union(GOAL_ACTIONS.map((action) => Type.Literal(action))',
+  "minItems: 1", "maxItems: 8",
+  'description: "For create or modify, provide from one through eight completion criteria."',
+  'description: "For complete, provide one evidence item per completion criterion."',
+], "Goal schema actions, fields, and limits");
+const goalToolStart = goalRuntime.indexOf('name: "goal"');
+const goalGuidelinesStart = goalRuntime.indexOf("promptGuidelines: [", goalToolStart);
+const goalGuidelinesEnd = goalRuntime.indexOf("      ],", goalGuidelinesStart);
+const goalToolMetadata = goalRuntime.slice(goalToolStart, goalGuidelinesEnd);
+const goalDescription = propertyString(goalToolMetadata, "description", "Goal tool metadata");
+const goalPromptSnippet = propertyString(goalToolMetadata, "promptSnippet", "Goal tool metadata");
+checkSteBlock(goalDescription, "Goal description");
+checkSteBlock(goalPromptSnippet, "Goal promptSnippet");
+const goalGuidelines = staticStrings(goalRuntime.slice(goalGuidelinesStart, goalGuidelinesEnd), "Goal promptGuidelines");
+check(goalGuidelines.length === 11, "Goal promptGuidelines must keep the complete 11-sentence model contract");
+checkSteGuidelines(goalGuidelines, "Goal promptGuideline");
+hasAll(goalGuidelines.join("\n"), [
+  "Use only `action`, `abstract`, `objective`, and `criteria` for `create` or `modify`.",
+  "Use only `action` for `status` or `resume`.",
+  "Use only `action` and `reason` for `pause` or `cancel`.",
+  "Use only `action` and `evidence` for `complete`.",
+  "Use `create` only when the latest user message starts with `/goal`.",
+  "Do not create Goals from ordinary natural-language requests.",
+  "For a bare `/goal`, call `status` and explain `/goal <objective>`.",
+  "Use `modify` for an existing nonterminal Goal and provide its complete replacement contract.",
+  "Pause the Goal when a blocker prevents further progress.",
+  "Cancel the Goal only when the user explicitly requests cancellation.",
+  "Complete the Goal only with one evidence item per completion criterion.",
+], "Goal promptGuidelines action and lifecycle semantics");
+hasNone(`${goalDescription}\n${goalPromptSnippet}\n${goalGuidelines.join("\n")}\n${goalSchemaDescriptions.join("\n")}`, [
+  "instanceKey", "generation", "deliveryKey", "cursor", "sidecar", "revision", "goalId", "ownedRunIds", "statistics",
+], "Goal model metadata private boundary");
+hasAll(goalRuntime.slice(goalRuntime.indexOf("const ACTION_FIELDS"), goalRuntime.indexOf("export const goalParameters")), [
+  'create: ["action", "abstract", "objective", "criteria"]',
+  'modify: ["action", "abstract", "objective", "criteria"]',
+  'status: ["action"]', 'pause: ["action", "reason"]', 'resume: ["action"]',
+  'complete: ["action", "evidence"]', 'cancel: ["action", "reason"]',
+], "Goal exact action-field boundary");
+const activationTail = /\.\.\.goalContractFields\(goal\),([\s\S]*?)\]\.join\("\\n"\);/.exec(goalRuntime.slice(goalRuntime.indexOf("export function goalActivationContent"), goalRuntime.indexOf("export function goalContinuationContent")));
+const continuationTail = /\.\.\.goalContractFields\(goal\),([\s\S]*?)\]\.join\("\\n"\);/.exec(goalRuntime.slice(goalRuntime.indexOf("export function goalContinuationContent"), goalRuntime.indexOf("export function goalPhaseReminder")));
+const expectedActivationTail = [
+  "", "Pursue this Goal now.", "Do not ask the user questions while this Goal is active.",
+  "Continue until every criterion has concrete evidence.", "Use Todo, Monitor, and Subagents when useful.",
+  "If safe progress is blocked, call `goal pause` with a concrete reason.",
+  "Call `goal complete` only with one evidence entry for every criterion.",
+];
+const expectedContinuationTail = [
+  "", "Do not ask the user questions while this Goal is active.",
+  "Continue making concrete progress toward every criterion.", "Use Todo, Monitor, and Subagents when useful.",
+  "If safe progress is blocked, call `goal pause` with a concrete reason.",
+  "Call `goal complete` only with one evidence entry for every criterion.",
+];
+check(Boolean(activationTail) && JSON.stringify(staticStrings(activationTail?.[1] ?? "", "Goal activation prompt tail")) === JSON.stringify(expectedActivationTail), "Goal activation prompt tail must remain frozen");
+check(Boolean(continuationTail) && JSON.stringify(staticStrings(continuationTail?.[1] ?? "", "Goal continuation prompt tail")) === JSON.stringify(expectedContinuationTail), "Goal continuation prompt tail must remain frozen");
+hasAll(goalRuntime.slice(goalRuntime.indexOf("export function goalPhaseReminder"), goalRuntime.indexOf("function statusReceipt")), [
+  "<system-reminder>\\n!IMPORTANT! You are pursuing the active Goal: ${abstract}. Keep this run aligned with it and continue making concrete progress. !END!\\n</system-reminder>",
+], "Goal frozen phase reminder");
+
+const askGuidelineStart = askRuntime.indexOf("export const ASK_PROMPT_GUIDELINES = [");
+const askGuidelineEnd = askRuntime.indexOf("] as const;", askGuidelineStart);
+const askGuidelines = staticStrings(askRuntime.slice(askGuidelineStart, askGuidelineEnd), "Ask promptGuidelines");
+checkSteGuidelines(askGuidelines, "Ask promptGuideline");
+check(askGuidelines.length === 10, "Ask promptGuidelines must keep the complete 10-sentence model contract");
+hasAll(askGuidelines.join("\n"), [
+  "Use ask_user_question for ordinary user decisions.",
+  "Provide from one through four questions.",
+  "Provide from two through four options for each question.",
+  "For a recommended option, place it first and append `(Recommended)` to its label.",
+  "Expect the user to select an authored option or provide a custom response.",
+  "Use `multiSelect` only when the user may choose multiple authored options.",
+  "Use `preview` only for single-select options.",
+  "Expect active Goals to make ask_user_question unavailable.",
+], "Ask promptGuidelines external contract");
+const askSchemaStart = askRuntime.indexOf("const askOptionSchema");
+const askSchemaEnd = askRuntime.indexOf("export interface AskOption", askSchemaStart);
+const askSchema = askRuntime.slice(askSchemaStart, askSchemaEnd);
+const askSchemaDescriptions = [...askSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
+check(askSchemaDescriptions.length === 8, "Ask schema must define eight field descriptions");
+for (const description of askSchemaDescriptions) checkSteBlock(description, "Ask schema description");
+hasAll(askSchema, [
+  "minItems: 1", "maxItems: 4", "minItems: 2", "maxLength: 16", "maxLength: 60",
+  'description: "For single-select only, provide optional preview content."',
+  'description: "Allow selection of multiple authored options."',
+], "Ask schema question, option, preview, and selection limits");
+const askToolStart = askRuntime.indexOf("name: ASK_TOOL_NAME");
+const askToolMetadata = askRuntime.slice(askToolStart, askRuntime.indexOf("parameters: askUserQuestionParameters", askToolStart));
+const askDescription = propertyString(askToolMetadata, "description", "Ask tool metadata");
+const askPromptSnippetMatch = /export const ASK_PROMPT_SNIPPET = ("(?:\\.|[^"\\])*")/.exec(askRuntime);
+const askPromptSnippet = askPromptSnippetMatch ? JSON.parse(askPromptSnippetMatch[1]) : "";
+check(Boolean(askPromptSnippetMatch), "Ask tool metadata must define a static promptSnippet");
+checkSteBlock(askDescription, "Ask description");
+checkSteBlock(askPromptSnippet, "Ask promptSnippet");
+hasNone(`${askDescription}\n${askPromptSnippet}\n${askGuidelines.join("\n")}\n${askSchemaDescriptions.join("\n")}`, [
+  "generation", "instance", "deliveryKey", "cursor", "sidecar", "notes", "collapse", "config", "i18n",
+], "Ask model metadata private and excluded-surface boundary");
+hasAll(askRuntime, [
+  'renderCall: renderAskCall', 'renderResult: renderAskResult', "this.tuiDriver = undefined",
+  'ASK_RPC_SUBMIT_LABEL = "Submit questionnaire"',
+  'ASK_RPC_CANCEL_LABEL = "Cancel questionnaire"',
+  'ASK_RPC_DONE_LABEL = "Done with this question"',
+  "if (choice === ASK_RPC_SUBMIT_LABEL) return { answers, cancelled: false }",
+  "if (choice === undefined || choice === ASK_RPC_CANCEL_LABEL) return { answers, cancelled: true }",
+], "Ask RPC submit and cancel contract");
+hasAll(askTui, [
+  "export class AskTuiDriver", "this.ui.custom", "overlay: true", 'width: "100%"', 'maxHeight: "90%"', 'anchor: "bottom-center"',
+  "AskQuestionnaireComponent", "implements Component, Focusable", "this.editor.focused", "signal.addEventListener", "signal.removeEventListener",
+  "ASK_CUSTOM_LABEL", "ASK_NEXT_LABEL", "WIDE_PREVIEW_MIN_WIDTH", "new Markdown(", "stripTerminalSequences", "safeAuthoredBody", "safeAuthoredInline", "truncateToWidth",
+], "Ask tabbed TUI driver, modal, focus, preview, abort, and width contract");
+hasNone(askTui, ["process.stdin", "setRawMode", "setWidget", "setStatus", "notify(", "external editor"], "Ask TUI forbidden side channels");
+hasAll(askTranscriptRenderer, [
+  "renderAskCall", "renderAskResult", "ask_user_question", "(ctrl+o to expand)", "Selected preview", "Unanswered", "Cancel reason", "new Spacer(1)",
+], "Ask Ctrl+O transcript rendering contract");
 const notificationMessageEndStart = extension.indexOf('pi.on("message_end"');
-const notificationMessageEndEnd = extension.indexOf('pi.on("tool_execution_end"', notificationMessageEndStart);
+const notificationMessageEndEnd = extension.indexOf('pi.on("tool_execution_start"', notificationMessageEndStart);
 const notificationMessageEnd = extension.slice(notificationMessageEndStart, notificationMessageEndEnd);
 hasAll(notificationMessageEnd, [
-  'event.message.role !== "custom"', "event.message.customType !== SUBAGENT_NOTIFICATION_TYPE",
+  'event.message.role !== "custom"', "message.customType !== SUBAGENT_NOTIFICATION_TYPE",
   "deliveryEpoch = sessionEpoch", "deliverySessionId = ctx.sessionManager.getSessionId()", "setImmediate(() =>",
   "deliveryEpoch !== sessionEpoch", "sessionCtx?.sessionManager.getSessionId() !== deliverySessionId",
   "subagents.acknowledgeNotificationMessage(message)",
@@ -270,7 +470,8 @@ hasAll(runtime, [
   "acknowledgeNotificationMessage",
   "retryQueuedNotificationsAfterAgentSettled",
   "setNotificationDeliveryPaused(paused: boolean)", "notificationDeliveryPaused",
-  "collectRunDirectoryGarbage",
+  "collectRunDirectoryGarbage", "getGoalStatsRoot", "readGoalStatsSidecar", "writeGoalStatsSidecar",
+  "loadedGoalStatsSidecars", "loadGoalStatsSidecar", "captureGoalActivity", "goalStats(runIds",
   "Create or manage specialist runs by ID.",
   "For `create`, use `abstract` for a short run summary.",
   "For `create`, use `task` for the complete objective.",
@@ -309,6 +510,75 @@ hasAll(retryNotification, [
   "this.deliverPendingNotification(delivery.runId)",
 ], "agent-settled notification retry");
 check(!runtime.includes("appendEntry(SUBAGENT_NOTIFICATION_TYPE"), "notification delivery must not append a second TUI entry");
+hasAll(monitorRuntime, [
+  'export const MONITOR_ACTIONS = ["create", "delete", "list", "status"] as const',
+  "export const monitorParameters = Type.Object({", "}, { additionalProperties: false });",
+  'executionMode: "sequential"', 'name: "monitor"', 'spawnFn(shell, ["-lc", command]',
+  'stdio: ["ignore", "pipe", "pipe"]', 'detached: true', "child.unref()", "StringDecoder", "notificationCursor",
+  "hasRunning(): boolean", "hasBlockingWork(): boolean", "Reserved for Goal", "setDeliveryPaused(paused: boolean)",
+  "acknowledgeNotificationMessage", "retryQueuedNotificationsAfterAgentSettled", 'deliverAs: "steer", triggerTurn: true',
+  "finalKillWaitMs", "forceTerminal(record", "trySignal(record", "safeGroupAlive(record", "try", "finally",
+  "recentLines", "scanLogTail", "STATUS_SCAN_CHUNK", "renameSync(tempPath, record.logPath)",
+  "returned", "omitted", "truncated", "notificationContentMaxBytes", "notificationDetailsMaxBytes", "toolContentMaxBytes",
+  "truncatedBytes", "bytes]", "summaryItems", "buildSummaryNotification", "isAbsolute(shell)", "SIGTERM", "SIGKILL",
+  "droppedBytes", "droppedLines", "MONITOR_NOTIFICATION_TYPE",
+  "registerMessageRenderer(MONITOR_NOTIFICATION_TYPE, renderMonitorNotification)", "renderCall: renderMonitorCall", "renderResult: renderMonitorResult",
+  "setUICtx(ui: ExtensionUIContext | undefined)", "refreshUI(): void", "this.widget.handleChange(change)", "this.widget.dispose()",
+], "Monitor runtime and visual wiring contract");
+hasNone(monitorRuntime, ["registerCommand", "registerShortcut", "setWidget", "notify(", "nohup parser", "readFileSync", "writeFileSync", "partialLineMaxChars"], "Monitor delegated visual boundary");
+hasAll(monitorWidget, [
+  'MONITOR_WIDGET_KEY = "oh-my-pi-slim:monitors"', "MAX_MONITOR_WIDGET_LINES = 12", "MAX_VISIBLE_MONITORS = 10",
+  "MONITOR_RENDER_THROTTLE_MS = 110", 'theme.bold(`● Monitors (${running}/${sorted.length})`)', '"↻"', '"✓"', '"!"', '"×"',
+  "sortMonitorsForDisplay", "createdAt", "endedAt", 'theme.fg("dim", `… ${hidden} more`)', "lines.slice(0, MAX_MONITOR_WIDGET_LINES)",
+  'placement: "aboveEditor"', "change.reason === \"output\"", "scheduleRender()", "requestRender()", "invalidate() {}", "dispose()",
+], "Monitor foreground widget visual and throttle contract");
+hasNone(monitorWidget, ["notify(", "setStatus", "registerShortcut", "overlay", "setInterval("], "Monitor widget excluded UI");
+hasAll(monitorTranscriptRenderer, [
+  "renderMonitorCall", "renderMonitorResult", "renderMonitorNotification", 'theme.bold("monitor")',
+  '`· ${safeAction}${expanded ? "" : " (ctrl+o to expand)"}`', "spacedResult", "safeFirstLine", "sanitizeMonitorBody",
+  'theme.bold(`● Monitors (${running}/${monitors.length})`)', "renderOperationalState", 'addCombinedLines(container, theme, "Combined lines"',
+  'details?.kind === "matcher"', 'details?.kind === "terminal"', 'details?.kind === "summary"',
+  'Monitors · rate limited', 'matched ${details.matched.length}', "Incremental lines", "Forced deletion",
+  "ExpandableNotificationLine", 'theme.fg("muted", " (ctrl+o to expand)")', "visibleWidth(this.hint)",
+], "Monitor Ctrl+O, result, and notification visual contract");
+hasNone(monitorTranscriptRenderer, ["\\u001b", "registerShortcut", "notify(", "overlay", '"Action"'], "Monitor renderer theme-only visual contract");
+const trustedBashStart = monitorRuntime.indexOf('candidates.push(\n    "/bin/bash"');
+const pathBashFallback = monitorRuntime.indexOf('String(process.env.PATH ?? "").split(delimiter)', trustedBashStart);
+check(trustedBashStart >= 0 && trustedBashStart < pathBashFallback, "Monitor must prefer trusted absolute bash candidates before PATH fallback");
+const monitorSchemaStart = monitorRuntime.indexOf("export const monitorParameters");
+const monitorSchemaEnd = monitorRuntime.indexOf("export class MonitorRuntime", monitorSchemaStart);
+const monitorSchema = monitorRuntime.slice(monitorSchemaStart, monitorSchemaEnd);
+check(!monitorSchema.includes("anyOf:") && !monitorSchema.includes("oneOf:"), "Monitor schema root must not declare anyOf or oneOf");
+const monitorSchemaDescriptions = [...monitorSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
+check(monitorSchemaDescriptions.length === 8, "Monitor schema must define eight field descriptions");
+for (const description of monitorSchemaDescriptions) checkSteBlock(description, "Monitor schema description");
+const monitorToolStart = monitorRuntime.indexOf('name: "monitor"');
+const monitorGuidelinesStart = monitorRuntime.indexOf("promptGuidelines: [", monitorToolStart);
+const monitorGuidelinesEnd = monitorRuntime.indexOf("      ],", monitorGuidelinesStart);
+const monitorToolMetadata = monitorRuntime.slice(monitorToolStart, monitorGuidelinesEnd);
+const monitorDescription = propertyString(monitorToolMetadata, "description", "Monitor tool metadata");
+const monitorPromptSnippet = propertyString(monitorToolMetadata, "promptSnippet", "Monitor tool metadata");
+checkSteBlock(monitorDescription, "Monitor description");
+checkSteBlock(monitorPromptSnippet, "Monitor promptSnippet");
+const monitorGuidelines = staticStrings(monitorRuntime.slice(monitorGuidelinesStart, monitorGuidelinesEnd), "Monitor promptGuidelines");
+check(monitorGuidelines.length === 10, "Monitor promptGuidelines must keep the complete 10-sentence model contract");
+checkSteGuidelines(monitorGuidelines, "Monitor promptGuideline");
+hasAll(monitorGuidelines.join("\n"), [
+  "Use `monitor` for long-running commands that should continue while Pi works.",
+  "Provide a foreground command and let monitor own its process group.",
+  "Do not use nohup, setsid, disown, a trailing ampersand, or another daemon escape.",
+  "After a terminal notification, use `status` to inspect results and then use `delete`.",
+  "Do not poll running monitors.",
+  "Use ordinary `status` reverse pagination to inspect additional log lines.",
+  "Use only `action`, `abstract`, `command`, optional `cwd`, and optional `notifyOn` for `create`.",
+  "Use only `action` and `id` for `delete`.",
+  "Use only `action` for `list`.",
+  "Use only `action`, `id`, optional `start`, and optional `end` for `status`.",
+], "Monitor promptGuidelines actions and operational boundary");
+hasNone(`${monitorDescription}\n${monitorPromptSnippet}\n${monitorGuidelines.join("\n")}\n${monitorSchemaDescriptions.join("\n")}`, [
+  "generation", "instance", "deliveryKey", "cursor", "sidecar", "notificationCursor",
+], "Monitor model metadata private boundary");
+
 hasAll(loopRuntime, [
   'export const LOOP_ACTIONS = ["create", "delete", "modify", "list", "pause", "resume"] as const',
   "export const loopParameters = Type.Object({", "}, { additionalProperties: false });",
@@ -351,6 +621,7 @@ hasAll(loopTranscriptRenderer, [
   "context.expanded === true", "options.expanded === true", "spacedResult", "safeFirstLine", "sanitizeLoopBody",
   'theme.bold(`● Loops (${active}/${sorted.length})`)', "addCompleteLoop", 'addSection(container, theme, "Prompt"',
   'addField(container, theme, "Fired at"', "LoopFireLine", '· fire ${this.details.fireCount}',
+  "ExpandableNotificationLine", 'theme.fg("muted", " (ctrl+o to expand)")', "visibleWidth(this.hint)",
   'verbs: Record<Exclude<LoopAction, "list">, string>', '"Created"', '"Deleted"', '"Modified"', '"Paused"', '"Resumed"',
   'No change · loop', "fallbackResult(result, options, theme)",
 ], "Loop Ctrl+O and fire renderer visual contract");
@@ -557,6 +828,8 @@ hasAll(runFiles, [
   "getRunPaths", "ensureRunPaths", "listOwnerRunIds", "removeRunFiles", "atomicWriteJson", "safeReadJson", "tailLog", "isPidAlive", "getProcessIdentity",
   "getPiInvocation", "getDetachedRunnerInvocation", "launchDetachedRunner", "readLaunchConfig", "readRunState",
   "writeControl", "readControlInbox", "DetachedLaunchConfig", "DetachedRunState", "waitingSeq", '"requestId" in value',
+  'GOAL_STATS_DIR_NAME = "omps-goal-stats"', "getGoalStatsRoot", "getGoalStatsSidecarPaths", "writeGoalStatsSidecar", "readGoalStatsSidecar",
+  "ensurePrivateDirectory", "0o700", "0o600", "isSymbolicLink", "GoalRunStatsSidecar",
   "normalizeDetachedLaunchConfig", "legacyRunAbstract(value.task)", "value.abstract.trim()",
   "Canonical predicate for newly written launch.json files", "normalized only by readLaunchConfig()",
 ], "detached run files");
@@ -591,14 +864,15 @@ hasAll(contextTokens, [
   "tokenResetPending = false", "Number.isFinite(state.tokens)", "Math.max(current, candidate)", "state.tokens = next",
 ], "epoch-aware runner context-token helper");
 hasAll(updateStatsTokens, [
+  "stats.tokens.total", "state.providerTokens = Math.max(state.providerTokens, stats.tokens.total - providerTokenBaseline)", "providerTokenBaseline",
   "const usage = stats.contextUsage", "updateContextTokens(usage.tokens)", "Number.isFinite(usage.percent)",
   "Number.isFinite(usage.tokens)", "usage.tokens > 0", "Number.isFinite(usage.contextWindow)", "usage.contextWindow > 0",
-], "final current-context stats path");
-hasNone(updateStatsTokens, ["stats.tokens.total", "updateContextTokens(stats.tokens"], "cumulative session stats exclusion");
+], "separate cumulative-provider and current-context stats paths");
+hasNone(updateStatsTokens, ["updateContextTokens(stats.tokens"], "provider totals must not replace context occupancy");
 hasAll(collectMetadata, ["client.getSessionStats()", "updateStats(stats)"], "final metadata context-token path");
 hasAll(messageUpdateTokens, ["updateContextTokens(event.usage.totalTokens)", "patch.tokens = state.tokens"], "streaming current-context token path");
 hasNone(messageUpdateTokens, ["patch.tokens = event.usage.totalTokens"], "streaming current-context token path");
-hasAll(messageEndTokens, ["updateContextTokens(event.message.usage.totalTokens)", "state.tokens > 0"], "message-end current-context token path");
+hasAll(messageEndTokens, ["updateContextTokens(event.message.usage.totalTokens)", "state.providerTokens += providerUsageTokens(event.message.usage)", "state.tokens > 0"], "message-end context and cumulative-provider token paths");
 hasNone(messageEndTokens, ["state.tokens = event.message.usage.totalTokens"], "message-end current-context token path");
 hasAll(compactionTokens, [
   'event.aborted === false', "isRecord(event.result)", "tokenResetPending = true",
@@ -607,6 +881,13 @@ hasAll(compactionTokens, [
 check((detachedRunner.match(/state\.tokens\s*=(?!=)/g) ?? []).length === 2, "runner token state must only be assigned by the epoch-aware context-token helper");
 check(existsSync(join(ROOT, "tests/fixtures/stub-pi-rpc.mjs")), "detached RPC test fixture must exist");
 check(existsSync(join(ROOT, "tests/detached-runner.test.mjs")), "detached runner integration tests must exist");
+const detachedRunnerTests = read("tests/detached-runner.test.mjs");
+hasAll(detachedRunnerTests, ["provider token reconciliation preserves a higher message-event total", "completed.providerTokens, 100"], "runner provider-token high-water reconciliation test");
+const subagentRuntimeTests = read("tests/subagent-runtime.test.mjs");
+hasAll(subagentRuntimeTests, [
+  "Goal stats sidecars enforce private paths", "Goal stats capture writes only actual changes", "Goal stats sidecars preserve completed owned-run aggregates across branch restore",
+  "getGoalStatsSidecarPaths", "writeGoalStatsSidecar", "readGoalStatsSidecar", "run-directory GC never deletes session-owned Goal stats sidecars",
+], "Subagent Goal stats sidecar security, bounded-write, and cross-branch tests");
 
 hasAll(bootstrap, [
   "Seed the user preset once",
@@ -739,14 +1020,18 @@ check(existsSync(join(ROOT, "tests/todo.test.mjs")), "Todo contract tests must e
 check(existsSync(join(ROOT, "tests/provider-schema.test.mjs")), "provider schema compatibility tests must exist");
 check(existsSync(join(ROOT, "tests/loop.test.mjs")), "Loop core contract tests must exist");
 check(existsSync(join(ROOT, "tests/loop-ui.test.mjs")), "Loop visual contract tests must exist");
+check(existsSync(join(ROOT, "tests/goal-ui.test.mjs")), "Goal visual contract tests must exist");
+check(existsSync(join(ROOT, "tests/monitor-ui.test.mjs")), "Monitor visual contract tests must exist");
 check(existsSync(join(ROOT, "tests/fixtures/todo-load-probe.ts")), "Todo real-Pi load probe must exist");
 check(existsSync(join(ROOT, "tests/fixtures/omps-load-probe.ts")), "OMPS real-Pi load probe must exist");
+check(existsSync(join(ROOT, "tests/fixtures/ask-rpc-probe.ts")), "Ask native RPC dialog probe must exist");
 check(existsSync(join(ROOT, "tests/loop-load.test.mjs")), "Loop real-Pi load tests must exist");
 const loopUiTests = read("tests/loop-ui.test.mjs");
 hasAll(loopUiTests, [
   "exact heading, glyph priority, counts, order", "caps at 12 lines", "one shared 1s timer",
   "all six actions", "uniform collapsed hints", "(ctrl+o to expand)", "Action:",
   "compact receipts", "result fallback", "fire renderer", "without mutation",
+  "· fire 3 (ctrl+o to expand)", "Legacy first  line (ctrl+o to expand)",
 ], "Loop focused visual tests");
 const loopCoreTests = read("tests/loop.test.mjs");
 hasAll(loopCoreTests, [
@@ -754,6 +1039,25 @@ hasAll(loopCoreTests, [
   "scheduler unavailable", "tree abort waits for shutdown completion", "abort cannot release delivery before subagent shutdown completes",
   "shutdown failure schedules deferred gate release before propagating", "ordinary input releases a canceled tree gate",
 ], "Loop scheduler seam and tree abort compensation tests");
+const askRuntimeTests = read("tests/ask-runtime.test.mjs");
+const askUiTests = read("tests/ask-ui.test.mjs");
+const askTranscriptTests = read("tests/ask-transcript-renderer.test.mjs");
+hasAll(askRuntimeTests, [
+  "single-flight queue runs one dialog at a time", "queued and active aborts reject exactly once", "RPC exposes complete, partial, empty, and cancelled",
+  "headless reconciliation removes and restores only Ask", "typeof tool.renderCall", "typeof tool.renderResult",
+], "Ask core schema, result, RPC, single-flight, abort, headless, and renderer registration tests");
+hasAll(askUiTests, [
+  "tabs wrap in both directions", "single-select cycles", "multi-select toggles", "per-tab drafts", "partial and zero answers",
+  "wide two-column", "narrow stacked", "Abort closes the overlay exactly once", "RPC never uses custom overlay", "main lifecycle binds fresh TUI drivers",
+  "CURSOR_MARKER", "visibleWidth(line) <=", "pasted\\n汉字", "authored Ask fields strip ANSI, OSC, C0, and C1", "originalParams", "originalValidated",
+], "Ask focused modal, tabs, input, draft, preview, abort, cleanup, RPC, focus, and width tests");
+hasAll(askTranscriptTests, [
+  "ask_user_question · 3 questions (ctrl+o to expand)", "full expanded schema", "one leading blank line", "Selected preview",
+  "data invariance", "safely falls back", "package-isomorphic call and result renderers", "Action:",
+], "Ask focused Ctrl+O call, result, fallback, spacing, and invariance tests");
+for (const file of ["tests/loop.test.mjs", "tests/provider-schema.test.mjs", "tests/subagent-runtime.test.mjs"]) {
+  hasAll(read(file), ["./ask-runtime.js", "./ask-transcript-renderer.js", "./ask-tui.js"], `${file} Ask TypeScript load mappings`);
+}
 const todoTests = read("tests/todo.test.mjs");
 hasAll(todoTests, [
   'todo · list (ctrl+o to expand)', 'todo · update (ctrl+o to expand)',
@@ -765,21 +1069,63 @@ const subagentTranscriptTests = read("tests/subagent-transcript-renderer.test.mj
 hasAll(subagentTranscriptTests, [
   "without duplicate Action rows", "(ctrl+o to expand)", "Action:",
   'assert.doesNotMatch(value, /\\(ctrl\\+o to expand\\)|Action:/)',
-], "Subagent focused Ctrl+O visual tests");
+  'waiting (ctrl+o to expand)', '${value.status} (ctrl+o to expand)', 'running (ctrl+o to expand)',
+], "Subagent focused Ctrl+O tool and notification visual tests");
 const providerSchemaTests = read("tests/provider-schema.test.mjs");
 hasAll(providerSchemaTests, [
-  "loopParameters", "subagentParameters", "contactSupervisorParameters", "todoParameters",
+  "goalParameters", "loopParameters", "monitorParameters", "subagentParameters", "contactSupervisorParameters", "todoParameters",
   'schema.type, "object"', 'schema.additionalProperties, false', "schema.anyOf, undefined", "schema.oneOf, undefined",
   "operationBranches", 'branch.type, "object"', "branch.additionalProperties, false", "modify.minProperties, undefined",
 ], "provider schema JSON audit");
+const monitorTests = read("tests/monitor.test.mjs");
+hasAll(monitorTests, [
+  "real detached descendant holding a pipe cannot block sequential delete",
+  "delete and shutdown isolate EPERM or unknown process-group errors",
+  "bounded recent-line ring without reading the JSONL file",
+  "status scans JSONL from the tail in chunks",
+  "write, rename, and rollover reopen failures",
+  "deleting one monitor rebuilds a gated global rate summary",
+  "partial-line truncation reports dropped UTF-8 bytes",
+  "matcher and terminal payloads include abstract",
+  "hasBlockingWork()",
+], "Monitor focused process, logging, delivery, payload, and Goal-reservation tests");
+const monitorUiTests = read("tests/monitor-ui.test.mjs");
+hasAll(monitorUiTests, [
+  "exact heading, glyphs, running/terminal order, overflow, width safety, and empty state",
+  "throttles and coalesces output", "registers once", "invalidate a no-op", "rebinds", "disposes",
+  "all four actions", "uniform hints", "full operational state", "forced warnings", "global summary notifications",
+  "matched 2 (ctrl+o to expand)", "rate limited (ctrl+o to expand)", '${status} (ctrl+o to expand)',
+  "fallbacks and errors sanitize controls", "model-facing list data invariant", "without a TUI context",
+  "narrow.map((line) => stripVTControlCharacters(line))", '"printf done"',
+], "Monitor focused widget, Ctrl+O, result, notification, fallback, invariant, and RPC visual tests");
 const loopLoadTests = read("tests/loop-load.test.mjs");
 hasAll(loopLoadTests, [
   "real Pi isolated RPC main and child sessions expose exact package tools without widgets",
-  '["loop", "subagent", "todo"]', '["contact_supervisor", "todo"]',
+  '["ask_user_question", "goal", "loop", "monitor", "subagent", "todo"]', '["contact_supervisor", "todo"]',
   'events.some((event) => event.type === "extension_ui_request" && event.method === "setWidget")',
-  "real Pi RPC forwards slash text once as extension input without command recursion or a model call",
-  'text: "/loop   review the exact raw request"', 'source: "extension"',
-], "Loop isolated real-Pi main, child, widget, and slash forwarding smoke");
+  "real Pi RPC Ask dialog completes through native extension UI without a model call", "ASK_RPC_PROBE ",
+  'event.method === "select"', '"Option 1: Safe"', '"Done with this question"',
+  "real Pi RPC forwards Loop and Goal slash text once as extension input without command recursion or a model call",
+  '"/loop   review the exact raw request"', '"/goal   deliver the exact frozen core"', 'source: "extension"',
+], "Loop and Goal isolated real-Pi main, child, widget, and slash forwarding smoke");
+const goalTests = read("tests/goal.test.mjs");
+const goalUiTests = read("tests/goal-ui.test.mjs");
+hasAll(goalTests, [
+  "Goal schema is a strict portable object", "create, modify, terminal replacement", "status and repeated pause or resume no-ops", "retry-success cleanup is internally guarded", "snapshot replay is strict",
+  "phase and model-facing continuation text", "continuation waits for the full safe gate", "provider failures use unbounded frozen backoff",
+  "user abort pauses, host abort does not", "no-progress counts only automatic continuation runs", "ownership and Goal view stats",
+  "slash command resends a real user message", "continuationNumber", "refreshUI()",
+], "Goal focused durable state, lifecycle, gate, retry, abort, ownership, stats, numbering, and registration tests");
+hasAll(goalUiTests, [
+  "five statuses, exact two-line order, stats, elapsed, retry, paused reason, width, and empty state",
+  "one shared 1s timer", "Component.invalidate is a no-op", "caches branch stats across timer ticks", "RPC or print widget",
+  "all seven calls", "uniform collapsed hints", "status none/goal", "pause/resume no-change", "evidence, cancel, retry fields",
+  "continuation and state notifications", "fallback hints", "data invariance", "continuation 7 (ctrl+o to expand)",
+  "no_progress: no_progress (ctrl+o to expand)",
+], "Goal focused widget, lifecycle, Ctrl+O, result, notification, fallback, invariant, and RPC visual tests");
+for (const file of ["tests/loop.test.mjs", "tests/provider-schema.test.mjs", "tests/subagent-runtime.test.mjs"]) {
+  hasAll(read(file), ["./goal-runtime.js", "./goal-transcript-renderer.js", "./goal-widget.js"], `${file} Goal TypeScript load mappings`);
+}
 hasAll(todoTests, [
   "PI_CODING_AGENT_DIR", '"--no-extensions"', '"--extension", join(root, "extensions/todo/index.ts")',
   "TODO_LOAD_PROBE", "runtime not initialized", "executionMode", "setWidget",
@@ -822,19 +1168,38 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "复制同一 preset 的 `explorer` 配置", "每次 create 与 resume 前都会重新读取 deny",
         "下一个安全模型边界", "同一条消息", "折叠的 TUI 视图只显示紧凑 run header",
         "按 Ctrl+O", "Ctrl+O 只改变 TUI 渲染",
-      ], `${file} 0.9.4 contract`);
+      ], `${file} 0.10.0 contract`);
+  hasAll(text, file === "README.md"
+    ? [
+        "## Tool availability", "main session gets exactly the six package tools", "ask_user_question", "goal", "loop", "monitor", "subagent", "todo",
+        "A detached child gets exactly `contact_supervisor` and `todo`", "Monitor is omitted on Windows",
+        "register as soon as the package loads", "do not depend on `/omps on`", "phase reminder can therefore appear", "orchestrator preset is inactive",
+        "never register package widgets", "JSON and print modes remove Ask", "(ctrl+o to expand)",
+        "## Migration from external packages", "npm:@juicesharp/rpiv-ask-user-question", "npm:@aliou/pi-processes",
+        "pi remove npm:@juicesharp/rpiv-ask-user-question", "pi remove npm:@aliou/pi-processes",
+        "remove `ask_user_question` from any user specialist deny lists", "never runs `pi remove`", "rewrites user deny lists automatically",
+      ]
+    : [
+        "## 工具可用性", "main session 精确获得本 package 的六个工具", "ask_user_question", "goal", "loop", "monitor", "subagent", "todo",
+        "detached child 精确获得 `contact_supervisor` 与 `todo`", "Windows 不注册 Monitor",
+        "在 package load 时立即注册", "不依赖 `/omps on`", "Goal phase reminder", "orchestrator preset inactive",
+        "绝不注册 package widget", "JSON 与 print mode", "(ctrl+o to expand)",
+        "## 外部 package 迁移", "npm:@juicesharp/rpiv-ask-user-question", "npm:@aliou/pi-processes",
+        "pi remove npm:@juicesharp/rpiv-ask-user-question", "pi remove npm:@aliou/pi-processes",
+        "从任何用户 specialist deny list 中移除 `ask_user_question`", "绝不会自动运行 `pi remove`", "重写用户 deny list",
+      ], `${file} tool availability and external migration contract`);
   hasAll(text, file === "README.md"
     ? [
         "## Built-in Todo", '{ action: "list" }', '{ action: "update"', "commits once",
         "Multiple items may be `in_progress`", "versioned successful", "at most 12 total lines", "Each item shows only its subject",
         "⛓ subject1, subject2", "Abstracts stay out of the widget", "● Todos (completed/total)",
-        "Collapsed update calls", "Expanded results", "changed and no-change counts", "cannot coexist", "run `pi remove`", "never removes or uninstalls external packages",
+        "Collapsed list and update calls show only the title and action", "operation summary", "expanded results add", "changed", "no-change", "cannot coexist", "run `pi remove`", "never removes or uninstalls external packages",
       ]
     : [
         "## 内置 Todo", '{ action: "list" }', '{ action: "update"', "只 commit 一次",
         "多个 item 可以同时为 `in_progress`", "新版本 tool-result details", "总计最多 12 行", "每个 item 只显示 subject",
         "⛓ subject1, subject2", "abstract 不进入 widget", "● Todos (completed/total)",
-        "折叠的 update call", "展开后显示", "changed 与 no-change 计数", "不能与内置工具共存", "执行 `pi remove`", "不会主动删除或卸载任何外部 package",
+        "折叠的 list 与 update call 都只显示标题与 action", "operation summary", "展开后再增加", "changed", "no-change", "不能与内置工具共存", "执行 `pi remove`", "不会主动删除或卸载任何外部 package",
       ], `${file} built-in Todo contract`);
   hasAll(text, file === "README.md"
     ? [
@@ -863,11 +1228,65 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         '"nextFireAt"', '"failureCount"', '"lastError"', "● Loops (active/total)", "不可拆分的两行 tree entry",
         "active loop 先按 `nextFireAt` 排序", "最多 12 行", "每秒刷新一次的 countdown", "Ctrl+O data invariant",
       ], `${file} built-in Loop contract`);
+  hasAll(text, file === "README.md"
+    ? [
+        "## Built-in Monitor", "main-session-only POSIX tool", "four sequential actions", '{ action: "create", abstract, command, cwd?, notifyOn? }',
+        "at most 20", "500 characters", "There is no monitor-count limit", "detached POSIX process group", "ignores stdin", "never provides stdin, a PTY",
+        "guidance, not a shell parser or sandbox", "reverse-offset based", "default window is `0..100`", "maximum window is 2,000 lines",
+        "OS temporary directory", "64 MiB", "32 MiB", "64 KiB", "100 ms batches", "20 batches per rolling minute",
+        "deliverAs: \"steer\"", "triggerTurn: true", "Terminal records and logs remain available", "explicit `delete`", "cannot retract that message",
+        "blocks Goal continuation", "● Monitors (running/total)", "at most ten monitors and twelve total lines", "Ctrl+O hint",
+      ]
+    : [
+        "## 内置 Monitor", "main-session-only 的 POSIX 工具", "四个 sequential action", '{ action: "create", abstract, command, cwd?, notifyOn? }',
+        "最多接受 20", "500 字符", "Monitor 数量没有上限", "detached POSIX process group", "stdin 被 ignore", "绝不提供 stdin、PTY",
+        "只是 guideline，不是 shell parser 或 sandbox", "reverse offset", "默认窗口为 `0..100`", "最大窗口 2,000 行",
+        "OS temporary directory", "64 MiB", "32 MiB", "64 KiB", "100 ms batch", "rolling minute 内 20 个 batch",
+        "deliverAs: \"steer\"", "triggerTurn: true", "terminal record 与 log 会保留", "显式 `delete`", "不能撤回该消息",
+        "阻塞 Goal continuation", "● Monitors (running/total)", "最多显示十个 monitor、总计十二行", "Ctrl+O hint",
+      ], `${file} built-in Monitor contract`);
+  hasAll(text, file === "README.md"
+    ? [
+        "## Built-in Ask", "main-session-only `ask_user_question`", "one through four questions", "two through four authored options",
+        "at most 16 characters", "at most 60 characters", "preview", "single-select only", "multiSelect", "exact-unique",
+        "tab", "single-select", "multi-select", "custom inline response", "empty selection", "partial", "empty-submit",
+        "Pi's native `select` and `input`", "never tries to instantiate the TUI overlay", "single-flight", "AbortError", "hard-rejected",
+        "no persistence", "no-UI execution backstop", "no paid or nested model call", "no persistence, notification message, widget, slash command, configuration, i18n layer, notes field", "Ctrl+O expansion hint",
+      ]
+    : [
+        "## 内置 Ask", "main-session-only 的 sequential `ask_user_question`", "一到四个 question", "二到四个 authored option",
+        "最多 16 字符", "最多 60 字符", "preview", "仅 single-select", "multiSelect", "exact-unique",
+        "tab", "single-select", "multi-select", "custom inline response", "empty selection", "partial", "empty-submit",
+        "Pi native `select` 与 `input`", "绝不会尝试实例化 TUI overlay", "single-flight", "AbortError", "hard reject",
+        "没有 persistence", "no-UI", "不存在付费或 nested model call", "没有 persistence、notification message、widget、slash command、configuration、i18n layer、notes 字段", "Ctrl+O expansion hint",
+      ], `${file} built-in Ask contract`);
+  hasAll(text, file === "README.md"
+    ? [
+        "## Built-in Goal", "main-session-only durable scheduler", "exactly seven actions", '{ action: "complete", evidence }',
+        "zero or one Goal on the current branch", "one through eight", "exactly one non-empty evidence item", "no public Goal ID, revision",
+        "version-1 branch-local snapshots", "paused` with reason `session_restored`", "provider error", "10 s, 30 s, 1 min, 5 min, 15 min", "one-hour ceiling",
+        "user abort", "Three automatic continuation runs", "lowest-priority package scheduler", "no active subagent", "no running Monitor", "no waiting Ask",
+        "Pursue this Goal now.", "Continue making concrete progress toward every criterion.", "You are pursuing the active Goal: <abstract>",
+        "does not dynamically rewrite the system prompt", "does not register a `context` mutation hook", "file-tool nudge mechanism has been removed completely",
+        "Goal-owned", "private, session-owned mode-0600 sidecar records", "never `goal status`", "exactly two lines", "main token/tool/turn/compaction totals", "child totals",
+        "Ctrl+O hint", "Known risks",
+      ]
+    : [
+        "## 内置 Goal", "main-session-only 的 durable scheduler", "精确七个 action", '{ action: "complete", evidence }',
+        "零个或一个 Goal", "一到八条", "精确一条非空 evidence", "不暴露公开 Goal ID、revision",
+        "version-1 branch-local snapshot", "`paused`，reason 为 `session_restored`", "provider error", "10 秒、30 秒、1 分钟、5 分钟、15 分钟", "一小时 ceiling",
+        "user abort", "连续三次 automatic continuation run", "最低优先级的 scheduler", "active subagent", "running Monitor", "waiting Ask",
+        "Pursue this Goal now.", "Continue making concrete progress toward every criterion.", "You are pursuing the active Goal: <abstract>",
+        "不会为该 reminder 动态改写 system prompt", "不注册 `context` mutation hook", "file-tool nudge mechanism 已被彻底移除",
+        "Goal-owned", "private、session-owned、mode-0600 sidecar record", "绝不进入 `goal status`", "精确为两行", "main token/tool/turn/compaction total", "child total",
+        "Ctrl+O hint", "已知风险",
+      ], `${file} built-in Goal contract`);
   hasNone(text, file === "README.md" ? ["At most one item may be `in_progress`"] : ["最多一个 item 可为 `in_progress`"], `${file} removed single-in-progress contract`);
   hasNone(text, [
     "RpcClient", "RPC-client seam", "hidden follow-up", "隐藏 follow-up", "The five agents", "五个 agent",
     "all five specialist roles", "五个 specialist", "### Fresh runs", "fresh child calls", "fresh child",
-    'subagent({ agent:', "`--tools`", "model/tools",
+    'subagent({ agent:', "`--tools`", "model/tools", "v0.9.2",
+    "Collapsed update calls show the operation total", "折叠的 update call 显示 operation 总数",
   ], file);
   check(!text.includes(REMOVED_WAIT_TOOL), `${file} must not mention the removed wait tool`);
 }
@@ -890,6 +1309,7 @@ hasAll(transcriptRenderer, [
   "renderSubagentCall", "renderSubagentResult", "styledTitle(", '"subagent"',
   '`· ${action}${expanded ? "" : " (ctrl+o to expand)"}`',
   "renderSubagentNotification", "details?.run", "details?.runs", "details?.request",
+  "ExpandableNotificationLine", 'theme.fg("muted", " (ctrl+o to expand)")', "visibleWidth(this.hint)",
   'actionFromContext(context, "create")',
   "immediateAck", "renderRunList", "addFinalOutput", "spacedToolResult", '"Live response"',
   '"Active subagent run status"', "run.abstract", "run.reason", 'addField(container, theme, "Abstract", args.abstract',
@@ -900,6 +1320,17 @@ hasNone(transcriptRenderer, [
   "gotgenes", "Nico", "preview", "truncated", '"Subagent result"', "renderRunSection", "addActivity",
   "renderSupervisorCall", "renderSupervisorResult", "subagent_supervisor", "replyTo", '"Action"',
 ], "subagent transcript renderer ownership and focused-output contract");
+for (const [name, source] of [
+  ["Subagent", transcriptRenderer],
+  ["Loop", loopTranscriptRenderer],
+  ["Monitor", monitorTranscriptRenderer],
+  ["Goal", goalTranscriptRenderer],
+]) {
+  hasAll(source, [
+    "ExpandableNotificationLine", 'theme.fg("muted", " (ctrl+o to expand)")',
+    "options.expanded === true", "truncateToWidth", "visibleWidth(this.hint)",
+  ], `${name} package-owned expandable notification hint contract`);
+}
 const listRendererStart = transcriptRenderer.indexOf("function renderRunList");
 const listRendererEnd = transcriptRenderer.indexOf("export function renderSubagentCall", listRendererStart);
 const listRenderer = transcriptRenderer.slice(listRendererStart, listRendererEnd);
@@ -955,10 +1386,31 @@ if (packCheck.status === 0) {
     check(files.includes("extensions/oh-my-pi-slim/loop-runtime.ts"), "npm pack must include the Loop runtime");
     check(files.includes("extensions/oh-my-pi-slim/loop-widget.ts"), "npm pack must include the Loop widget");
     check(files.includes("extensions/oh-my-pi-slim/loop-transcript-renderer.ts"), "npm pack must include the Loop transcript renderer");
+    check(files.includes("extensions/oh-my-pi-slim/ask-runtime.ts"), "npm pack must include the Ask runtime");
+    check(files.includes("extensions/oh-my-pi-slim/ask-tui.ts"), "npm pack must include the Ask TUI");
+    check(files.includes("extensions/oh-my-pi-slim/ask-transcript-renderer.ts"), "npm pack must include the Ask transcript renderer");
+    check(files.includes("extensions/oh-my-pi-slim/monitor-runtime.ts"), "npm pack must include the Monitor runtime");
+    check(files.includes("extensions/oh-my-pi-slim/monitor-widget.ts"), "npm pack must include the Monitor widget");
+    check(files.includes("extensions/oh-my-pi-slim/monitor-transcript-renderer.ts"), "npm pack must include the Monitor transcript renderer");
+    check(files.includes("extensions/oh-my-pi-slim/goal-runtime.ts"), "npm pack must include the Goal runtime");
+    check(files.includes("extensions/oh-my-pi-slim/goal-widget.ts"), "npm pack must include the Goal widget");
+    check(files.includes("extensions/oh-my-pi-slim/goal-transcript-renderer.ts"), "npm pack must include the Goal transcript renderer");
+    check(files.includes("extensions/oh-my-pi-slim/subagent-run-files.ts"), "npm pack must include the Goal stats sidecar helper");
+    check(files.includes("extensions/oh-my-pi-slim/subagent-runtime.ts"), "npm pack must include the Goal child ownership and sidecar runtime");
     check(files.includes("tests/loop.test.mjs"), "npm pack must include the Loop core tests");
     check(files.includes("tests/loop-ui.test.mjs"), "npm pack must include the Loop visual tests");
     check(files.includes("tests/loop-load.test.mjs"), "npm pack must include the Loop real-Pi load tests");
     check(files.includes("tests/fixtures/omps-load-probe.ts"), "npm pack must include the OMPS real-Pi load probe");
+    check(files.includes("tests/fixtures/ask-rpc-probe.ts"), "npm pack must include the Ask native RPC dialog probe");
+    check(files.includes("tests/fixtures/stub-pi-rpc.mjs"), "npm pack must include the detached RPC fixture used by Goal stats tests");
+    check(files.includes("tests/ask-runtime.test.mjs"), "npm pack must include the Ask runtime tests");
+    check(files.includes("tests/ask-ui.test.mjs"), "npm pack must include the Ask TUI tests");
+    check(files.includes("tests/ask-transcript-renderer.test.mjs"), "npm pack must include the Ask transcript tests");
+    check(files.includes("tests/monitor.test.mjs"), "npm pack must include the Monitor runtime tests");
+    check(files.includes("tests/monitor-ui.test.mjs"), "npm pack must include the Monitor UI tests");
+    check(files.includes("tests/goal.test.mjs"), "npm pack must include the Goal runtime tests");
+    check(files.includes("tests/goal-ui.test.mjs"), "npm pack must include the Goal UI tests");
+    check(files.includes("tests/subagent-runtime.test.mjs"), "npm pack must include the Goal child stats sidecar tests");
     check(files.includes("extensions/todo/index.ts"), "npm pack must include the Todo extension entry");
     check(files.includes("extensions/todo/core.ts"), "npm pack must include the Todo state core");
     check(files.includes("extensions/todo/widget.ts"), "npm pack must include the Todo widget");

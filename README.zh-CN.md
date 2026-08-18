@@ -1,6 +1,6 @@
 # oh-my-pi-slim
 
-> Pi 的 preset 驱动编排层，内置后台 run、runtime loop 与 session todo。
+> Pi 的 preset 驱动编排层，内置后台 run、loop、monitor、结构化提问、durable Goal 与 session todo。
 
 [English](./README.md) | **中文**
 
@@ -34,6 +34,25 @@ pi install git:github.com/YanzuoLu/oh-my-pi-slim
 
 package manifest 加载 `./extensions/oh-my-pi-slim/index.ts`，以及独立的内置 Todo 入口 `./extensions/todo/index.ts`；不再包含 `pi-subagents` dependency 或 extension entry。
 
+## 工具可用性
+
+在受支持的 POSIX 系统上，main session 精确获得本 package 的六个工具：`ask_user_question`、`goal`、`loop`、`monitor`、`subagent` 与 `todo`。detached child 精确获得 `contact_supervisor` 与 `todo`。Ask、Goal、Monitor、Loop 和 subagent 都只属于 main，因为 main extension 在 child 环境中会先 return；Todo 是 main/child 都加载的独立入口，`contact_supervisor` 只由 child launcher 加载。Windows 不注册 Monitor。
+
+Ask、Goal 与 Monitor 在 package load 时立即注册，不依赖 `/omps on`、`--omps` 或 active preset；Loop 也具有相同的 load-time independence。因此 active Goal 的 phase reminder 即使在 orchestrator preset inactive 时也可独立出现；它是每次 run 前的 invisible message，不是 Goal 专属的动态 system-prompt rewrite，也不是 `context` hook。RPC session 暴露相同的受支持工具，但绝不注册 package widget。JSON 与 print mode 因无法服务 dialog，会从 active tool set 移除 Ask。
+
+所有 package 自有的 expandable tool row 或 custom notification 使用同一 data invariant：折叠渲染包含 `(ctrl+o to expand)` 提示；展开后显示完整公开细节；Ctrl+O 绝不改变工具参数、模型可见 content、result details 或持久化状态。
+
+## 外部 package 迁移
+
+内置 Ask 与 `npm:@juicesharp/rpiv-ask-user-question` 注册同一个工具名，因此两者不能共存。内置 Monitor 替代 `npm:@aliou/pi-processes`，不会 import 或调用该 package。本地安装前，请分开执行以下 Pi 操作移除外部 package：
+
+```bash
+pi remove npm:@juicesharp/rpiv-ask-user-question
+pi remove npm:@aliou/pi-processes
+```
+
+还应从任何用户 specialist deny list 中移除 `ask_user_question`。detached child 根本不会注册 Ask，因此在 child policy 中 deny 该名称已经没有意义。这些都属于用户显式执行的迁移步骤：本 package 绝不会自动运行 `pi remove`、编辑用户 package settings 或重写用户 deny list。
+
 ## 内置 Todo
 
 package 在 main 与 child session 中始终注册一个名为 `todo` 的模型工具。Todo 不依赖 OMPS 是否激活，也不依赖 preset；它不增加 command、shortcut 或配置。
@@ -57,7 +76,7 @@ package 在 main 与 child session 中始终注册一个名为 `todo` 的模型�
 
 前台 TUI session 会在 editor 上方显示 tree widget。每个 item 只显示 subject；存在依赖时，行尾显示 `⛓ subject1, subject2`。abstract 不进入 widget，并继续保留在模型可见的完整 `list` JSON 中。widget 显示 `● Todos (completed/total)` 与状态 glyph，总计最多 12 行。overflow 会优先隐藏 completed item，并准确分别统计隐藏状态。空状态会移除 widget。
 
-Todo call/result renderer 与 subagent transcript 使用相同的 Ctrl+O 规则。折叠的 list call 只显示标题与 action；折叠的 update call 显示 operation 总数和 append/modify/clear 计数。展开的 update call 按输入顺序显示每个 operation 的完整字段、abstract 与依赖列表。折叠的 update result 只显示 changed 与 no-change 计数，不重复输入；展开后显示编号稳定的逐项 receipt。折叠的 list result 只显示 `● Todos (completed/total)`；展开后显示每个 task 的 subject、abstract、status 与依赖。fallback 折叠为安全首行，展开为完整文本。Ctrl+O 只改变 TUI 渲染，不改变 list JSON、update receipt content 或 tool-result details。
+Todo call/result renderer 与 subagent transcript 使用相同的 Ctrl+O 规则。折叠的 list 与 update call 都只显示标题与 action。展开的 update call 按输入顺序显示每个 operation 的完整字段、abstract 与依赖列表。折叠的 update result 显示 operation summary：`Applied <append> append · <modify> modify · <clear> clear → <changed> changed · <no-change> no-change`；展开后再增加编号稳定的逐项 receipt。折叠的 list result 只显示 `● Todos (completed/total)`；展开后显示每个 task 的 subject、abstract、status 与依赖。fallback 折叠为安全首行，展开为完整文本。Ctrl+O 只改变 TUI 渲染，不改变 list JSON、update receipt content 或 tool-result details。
 
 任何同样注册 `todo` 的外部 package 都不能与内置工具共存。本地迁移时，请在加载 OMPS 前单独对该外部 package 执行 `pi remove`。本 package 不会主动删除或卸载任何外部 package。
 
@@ -114,6 +133,111 @@ Loop 状态只存在于 runtime memory，绝不使用 `appendEntry`、journal、
 
 package 自有 call、result 与 fire renderer 遵守 Ctrl+O data invariant。折叠视图保持紧凑并显示展开提示；展开视图显示完整 action-specific input、全部公开 list 字段、完整 error 与完整 prompt。Ctrl+O 只改变 TUI rendering，绝不改变 tool-call arguments、模型可见 content、custom-message details、list JSON 或 mutation receipt。
 
+## 内置 Monitor
+
+Monitor 是 main-session-only 的 POSIX 工具，包含四个 sequential action：
+
+```ts
+{ action: "create", abstract, command, cwd?, notifyOn? }
+{ action: "delete", id }
+{ action: "list" }
+{ action: "status", id, start?, end? }
+```
+
+`create` 要求 trim 后非空的人类可读 `abstract` 与一个 foreground Bash `command`；`cwd` 默认使用 session cwd。`notifyOn` 最多接受 20 个 unique、非空、区分大小写的 literal string，每个最多 500 字符。Monitor ID 是精确八位小写十六进制字符串。Monitor 数量没有上限。
+
+runtime 解析 absolute executable Bash，通过新的 detached POSIX process group 启动 `bash -lc <command>`，并由 Monitor 持有该 group；stdin 被 ignore，stdout/stderr 通过 pipe 捕获。它绝不提供 stdin、PTY 或 interactive terminal 语义。模型 guideline 要求 foreground command，并禁止 `nohup`、`setsid`、`disown`、尾随 `&` 或其他 daemon escape。这只是 guideline，不是 shell parser 或 sandbox：command 仍可故意 detach descendant，而有界 TERM/KILL cleanup 可能返回该 descendant 仍存活的 warning。
+
+`list` 是紧凑结果，只返回 `{ id, status, abstract }`。running monitor 先按创建顺序排列，terminal monitor 再按结束时间倒序排列。`status` 返回完整但有界的 operational record，包括 command、cwd、PID、lifecycle timestamp、exit/signal/error、match/notification counter、log rollover counter 与 combined stdout/stderr lines。分页使用 reverse offset：`start` 跳过这么多条最新 retained record，`end` 是 exclusive reverse offset；默认窗口为 `0..100`，最大窗口 2,000 行；返回行会恢复为 chronological order。
+
+Monitor state 由 runtime 持有，绝不进入 Pi session journal。log 位于 OS temporary directory 下新建的 mode-0700 目录，JSONL 文件为 mode-0600。每个 combined log 到 64 MiB 时 rollover，并保留大约最新 32 MiB 的完整 record 加 rollover marker；counter 报告 dropped bytes/lines。partial line 在 64 KiB 截断并附 suffix。tool content 上限 50 KiB，notification content 上限 50 KiB，notification details 上限 96 KiB；status line collection 在 serialization 前还有额外边界。
+
+literal match 以 100 ms batch 聚合；每个 batch 最多携带 100 条新增 combined line。matcher delivery 全局限制为 rolling minute 内 20 个 batch；被 suppress 的 batch 会在窗口重新开放后汇总。match、rate-summary 与 terminal event 都使用 visible custom message，并设置 `deliverAs: "steer"` 与 `triggerTurn: true`；它们共用 package notification pause gate，在 agent settled 后安全 retry，并一直 pending 到 delivered message acknowledgement。terminal record 与 log 会保留到显式 `delete` 或 session teardown。`delete` 会取消该 monitor 仍被 gate 的 notification，需要时对 process group 做有界 TERM 再 KILL，移除 record 与 log，并报告 forced-cleanup warning。notification 一旦已经交给 Pi，删除 monitor 也不能撤回该消息。
+
+running monitor 或尚未 acknowledgement 的 terminal Monitor notification 会阻塞 Goal continuation，避免 Goal 在后台工作 terminal evidence 交付前越过它。reload、new/resumed/forked session transition 与 quit 会关闭所有 monitor、删除 temporary log root，并清空全部 Monitor state。
+
+前台 TUI 在 editor 上方显示 `● Monitors (running/total)`。running entry 位于 terminal entry 前；widget 最多显示十个 monitor、总计十二行；output-driven refresh 会 throttle/coalesce。RPC session 没有 widget。Monitor call、result、matcher、summary 与 terminal renderer 都由 package 自有：折叠视图包含 Ctrl+O hint，展开后显示 action 字段、operational state、combined lines、matches、omission、truncation 与 forced-delete warning，且不修改模型可见数据。
+
+## 内置 Ask
+
+Ask 是 main-session-only 的 sequential `ask_user_question` 工具。其 strict provider-portable schema 兼容一到四个 question，每个 question 含二到四个 authored option：
+
+```ts
+{
+  questions: [{
+    question,
+    header,          // 最多 16 字符
+    options: [{
+      label,         // 最多 60 字符
+      description,
+      preview?       // 仅 single-select
+    }],
+    multiSelect?
+  }]
+}
+```
+
+question 与 option label 在各自 scope 内必须 exact-unique。`Other`、`Type something.` 与 `Next` 是 reserved option label。recommended option 应放在第一项，并在 label 后附 `(Recommended)`。multi-select question 使用 `preview` 会被拒绝。
+
+前台 TUI 使用一个 bottom-centered、full-width overlay，并为全部 question 提供 tab。tab 可双向 wrap，并保存各 question draft。single-select question 可选择一个 authored option 或提交 custom inline response。multi-select question 按 authored order toggle option，允许 empty selection，也可用一个 custom response 替换 selection。single-select preview 在宽 terminal 中显示于 option list 旁边，在窄 terminal 中堆叠到下方。questionnaire 可返回 complete、partial、cancelled-with-partial、empty multi-select、empty custom 或 zero-answer/empty-submit 结果；empty submit 表示为带 `cancelReason: "empty_submit"` 的 cancelled partial result，而不是 tool error。
+
+RPC mode 使用 Pi native `select` 与 `input` extension UI request，并提供显式 Submit、Cancel、Done control；绝不会尝试实例化 TUI overlay。JSON 与 print mode 会 deactivate Ask，同时保留 no-UI execute backstop。Ask 内部不存在付费或 nested model call。
+
+Ask 是 single-flight：最多一个 dialog active，后续调用排队，只有 active dialog 计为 waiting。tool abort、session switch/fork/tree navigation、reset 与 shutdown 会用 `AbortError` 精确一次 reject active 和 queued call。用户 cancel 是正常 result，不是 abort。只要 Goal active，合法 Ask call 也会在打开 UI 前 hard reject，因为 active Goal prompt 禁止向用户提问。
+
+Ask 没有 persistence、notification message、widget、slash command、configuration、i18n layer、notes 字段或 Ask-specific answer-collapse 功能，只拥有 call/result transcript renderer。折叠 row 包含 Ctrl+O expansion hint；展开后显示全部 question、option、description、single-select preview、confirmed answer、unanswered question 与 cancellation reason，且不改变 tool envelope。
+
+## 内置 Goal
+
+Goal 是 main-session-only 的 durable scheduler surface，由 raw-forwarding `/goal` command 与一个含精确七个 action 的 sequential `goal` 工具组成：
+
+```ts
+{ action: "create", abstract, objective, criteria }
+{ action: "modify", abstract, objective, criteria }
+{ action: "status" }
+{ action: "pause", reason }
+{ action: "resume" }
+{ action: "complete", evidence }
+{ action: "cancel", reason }
+```
+
+`/goal ...` 不解析 request，而是关闭 prompt-template expansion，把精确原文作为真实 user message 转发；仅在 Pi busy 时使用 `deliverAs: "steer"`。模型 guideline 只允许在最新 user message 以 `/goal` 开头时调用 `create`；裸 `/goal` 会调用 `status` 并说明 `/goal <objective>`。
+
+当前 branch 上存在零个或一个 Goal。`create` 要求 short abstract、complete objective 与一到八条非空 completion criteria；仅在不存在 Goal 或旧 Goal 已 terminal 时允许。`modify` 完整替换任意 nonterminal Goal 的 contract，并使其 active。`complete` 只在 active 时合法，且必须为每条 criterion 提供精确一条非空 evidence。公开 Goal status 包含 contract、lifecycle timestamp、retry/no-progress 字段、pause/cancel reason 与 completion evidence；不暴露公开 Goal ID、revision、ownership list、continuation count 或 execution statistics。
+
+Goal state 使用 strict version-1 branch-local snapshot，并以不进入 context 的 custom entry append。replay 选择 active branch 上最后一个合法 snapshot，并跳过 malformed record。reload/startup、resumed/forked session 与 tree restore 会把 `active` 或 `retry_wait` Goal 转为 `paused`，reason 为 `session_restored`；Goal 在 host restore 后绝不会静默继续。complete 与 cancel 是 terminal，但之后显式的新 `/goal` create 可替换 terminal Goal。
+
+公开 state transition 为：
+
+- `create` → `active`；`modify` 与有效 `resume` → `active`。
+- `pause` 把 `active` 或 `retry_wait` 变为 `paused`；重复 pause 是成功的 no-change。
+- active 时重复 resume 是成功的 no-change；从 paused 或 retry wait resume 会清除 retry/no-progress metadata。
+- `complete` 只把 `active` 变为 `completed`；`cancel` 把任意 nonterminal state 变为 `cancelled`。
+- provider error 会把 pursuing Goal 变为 `retry_wait`。冻结 backoff 为 10 秒、30 秒、1 分钟、5 分钟、15 分钟，之后每次 1 小时；后续成功 run 会清除 retry metadata。
+- user abort 会以 `user_abort` pause；OMPS 自己的 checkpoint abort 不会。连续三次 automatic continuation run 没有 tool call、package lifecycle change 或 external user input 时，会以 `no_progress` pause。
+
+Goal continuation 是 package 中最低优先级的 scheduler。它会等待 Pi idle 且没有 pending message、checkpoint、tree/compaction notification pause、active subagent、pending subagent notification、running Monitor、未 acknowledgement 的 terminal Monitor notification 或 waiting Ask。deferred work 还绑定当前 session、branch leaf、Goal snapshot 与 external-input generation。continuation 本身是一条 visible custom message，使用 `deliverAs: "steer"` 与 `triggerTurn: true`；acknowledgement 防止重复交付。
+
+冻结 activation 与 continuation prompt 始终重述 abstract、objective 与编号 criteria，之后使用以下规则：
+
+```text
+Pursue this Goal now.                         # 仅 activation
+Do not ask the user questions while this Goal is active.
+Continue until every criterion has concrete evidence.  # activation
+Continue making concrete progress toward every criterion.  # continuation
+Use Todo, Monitor, and Subagents when useful.
+If safe progress is blocked, call `goal pause` with a concrete reason.
+Call `goal complete` only with one evidence entry for every criterion.
+```
+
+active Goal 的每次 run 前，package 会增加一条独立 invisible phase message，其中包含 `You are pursuing the active Goal: <abstract>` 与 concrete-progress reminder。即使 OMPS orchestration inactive，该 Goal phase reminder 也可出现。Goal 不会为该 reminder 动态改写 system prompt，也不注册 `context` mutation hook。旧 file-tool nudge mechanism 已被彻底移除。
+
+Goal active 时创建的每个 subagent 都成为 Goal-owned。main statistics 来自 pursuing state 期间 branch assistant/tool-result/compaction usage。child token/tool/turn/compaction total 来自 private、session-owned、mode-0600 sidecar record；即使 terminal run directory cleanup，aggregate 仍可保留；write 是 best-effort，绝不影响 child lifecycle。ownership 与 statistics 只驱动 Goal widget 和 scheduler bookkeeping，绝不进入 `goal status`。
+
+前台 widget 精确为两行并保持以下顺序。第一行是 `● Goal · <status glyph> <status> · <abstract>`。第二行依次是 elapsed time、continuation count、owned run count、可选 retry countdown 或 pause reason、main token/tool/turn/compaction total，最后是 child total。它每秒刷新 countdown/elapsed，分别用 `↻`、`◷`、`Ⅱ`、`✓`、`×` 表示 active、retry wait、paused、completed 与 cancelled；不存在 Goal 时消失。RPC 与 print session 没有 widget。
+
+Goal call/result、continuation 与 automatic-state notification 都使用 package 自有 expandable renderer。折叠 row 包含 Ctrl+O hint；展开后显示完整 contract、criteria、evidence、retry 字段、reason 与模型可见 continuation content。Ctrl+O 绝不显示 private scheduler key，也不改变 snapshot。已知风险属于 deliberate contract：provider backoff 会在一小时 ceiling 上无限持续，直到成功或显式 pause/cancel；no-progress 是保守 activity heuristic；child statistics 是 observational best-effort 数据；restore 后始终需要显式 resume。
+
 ## 命令
 
 | 命令 | 作用 |
@@ -124,6 +248,7 @@ package 自有 call、result 与 fire renderer 遵守 Ctrl+O data invariant。�
 | `/omps presets` | 列出 preset |
 | `/preset [name]` | 切换 preset；不带参数时列出 |
 | `/loop [request]` | 把原样 request 转发给模型以管理 runtime loop |
+| `/goal [request]` | 把原样 request 转发给模型以管理 durable Goal |
 | `/omps uninstall` | 清理旧 OMPS backend migration state，并显示 package 删除命令 |
 
 `/reload` 通过一次性进程内槽位恢复 active preset。新建、恢复或 fork 的 parent session 不继承该槽位。

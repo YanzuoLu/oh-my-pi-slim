@@ -21,6 +21,7 @@ registerHooks({
   },
 });
 
+const { visibleWidth } = await import("@earendil-works/pi-tui");
 const {
   renderSubagentCall,
   renderSubagentNotification,
@@ -339,7 +340,7 @@ test("Ctrl+O collapses waiting notification details without changing model conte
   };
   const before = structuredClone(message);
   const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
-  assert.equal(collapsed, " ! fixer [run-1] · waiting");
+  assert.equal(collapsed, " ! fixer [run-1] · waiting (ctrl+o to expand)");
   assert.doesNotMatch(collapsed, /Request|need_decision|request payload|Choose|A or B|Created|Model-facing/);
 
   const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
@@ -347,7 +348,7 @@ test("Ctrl+O collapses waiting notification details without changing model conte
     "! fixer [run-1] · waiting", "Request", "need_decision", "<results>request payload</results>",
     "Choose", "A or B?", "Created: 2026-04-17T00:01:00.000Z",
   ]);
-  assert.doesNotMatch(expanded, /Task:|Low-value task|Live response|activity payload|Output:|stored output|Error:|stored error|Model:|Cwd:|Tools:|Session:|waitingSeq|Model-facing/);
+  assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)|Task:|Low-value task|Live response|activity payload|Output:|stored output|Error:|stored error|Model:|Cwd:|Tools:|Session:|waitingSeq|Model-facing/);
   assert.deepEqual(message, before);
   assert.equal(message.content, before.content);
 });
@@ -366,13 +367,13 @@ test("Ctrl+O expands completed, failed, and interrupted notification output or e
     };
     const before = structuredClone(message);
     const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
-    assert.equal(collapsed, ` ${value.glyph} fixer [run-1] · ${value.status}`);
+    assert.equal(collapsed, ` ${value.glyph} fixer [run-1] · ${value.status} (ctrl+o to expand)`);
     assert.doesNotMatch(collapsed, /COMPLETED_OUTPUT|FAILED_ERROR|INTERRUPTED_OUTPUT|INTERRUPTED_ERROR|Model-facing/);
 
     const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
     assertFull(expanded, [`${value.glyph} fixer [run-1] · ${value.status}`, value.body]);
     if (value.status === "interrupted") assert.match(expanded, /INTERRUPTED_ERROR/);
-    assert.doesNotMatch(expanded, /Task:|Low-value task|Live response|activity payload|Model:|Cwd:|Tools:|Request|Model-facing/);
+    assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)|Task:|Low-value task|Live response|activity payload|Model:|Cwd:|Tools:|Request|Model-facing/);
     assert.deepEqual(message, before);
   }
 });
@@ -385,22 +386,26 @@ test("Ctrl+O collapses active activity and expands complete live details", () =>
   };
   const before = structuredClone(message);
   const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
-  assert.equal(collapsed, " ● fixer [run-1] · running");
+  assert.equal(collapsed, " ● fixer [run-1] · running (ctrl+o to expand)");
+  const narrow = renderLines(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme), 52);
+  assert.ok(narrow.every((line) => visibleWidth(line) <= 52));
+  assert.match(render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme), 52).trim(), /· running \(ctrl\+o to expand\)$/);
   assert.doesNotMatch(collapsed, /Live response|activity payload|toolA|Model-facing/);
 
   const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
   assertFull(expanded, ["● fixer [run-1] · running", "Live response:", "<results>activity payload</results>", "Active tools:", "toolA"]);
-  assert.doesNotMatch(expanded, /Task:|Low-value task|Output:|Error:|Model:|Cwd:|Request|Model-facing/);
+  assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)|Task:|Low-value task|Output:|Error:|Model:|Cwd:|Request|Model-facing/);
   assert.deepEqual(message, before);
 });
 
 test("notification fallback collapses to a safe first line and expands full content", () => {
   const message = { content: "Fallback first line\n<results>fallback full payload</results>\nFallback last line" };
   const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
-  assert.equal(collapsed, " Fallback first line");
+  assert.equal(collapsed, " Fallback first line (ctrl+o to expand)");
   assert.doesNotMatch(collapsed, /fallback full payload|Fallback last line/);
   const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
   assertFull(expanded, ["Fallback first line", "<results>fallback full payload</results>", "Fallback last line"]);
+  assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)/);
 });
 
 test("tool-result fallback collapses safely and expands full content", () => {

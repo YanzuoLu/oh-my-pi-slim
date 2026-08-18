@@ -1,8 +1,8 @@
 {
   "name": "oh-my-pi-slim",
-  "version": "0.9.4",
+  "version": "0.10.0",
   "private": true,
-  "description": "Preset-driven Pi orchestration with built-in subagents, runtime loops, and session todos.",
+  "description": "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.",
   "type": "module",
   "license": "MIT",
   "author": "YanzuoLu",
@@ -20,6 +20,10 @@
     "orchestration",
     "subagents",
     "loops",
+    "monitoring",
+    "ask-user-question",
+    "goals",
+    "todos",
     "scheduling"
   ],
   "peerDependencies": {

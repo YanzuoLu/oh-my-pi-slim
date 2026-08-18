@@ -15,8 +15,17 @@ const moduleUrls = {
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
 };
 const localMap = {
+  "./ask-runtime.js": new URL("../extensions/oh-my-pi-slim/ask-runtime.ts", import.meta.url).href,
+  "./ask-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts", import.meta.url).href,
+  "./ask-tui.js": new URL("../extensions/oh-my-pi-slim/ask-tui.ts", import.meta.url).href,
   "./bootstrap.js": new URL("../extensions/oh-my-pi-slim/bootstrap.ts", import.meta.url).href,
+  "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
+  "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
+  "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
   "./loop-runtime.js": new URL("../extensions/oh-my-pi-slim/loop-runtime.ts", import.meta.url).href,
+  "./monitor-runtime.js": new URL("../extensions/oh-my-pi-slim/monitor-runtime.ts", import.meta.url).href,
+  "./monitor-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/monitor-transcript-renderer.ts", import.meta.url).href,
+  "./monitor-widget.js": new URL("../extensions/oh-my-pi-slim/monitor-widget.ts", import.meta.url).href,
   "./loop-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/loop-transcript-renderer.ts", import.meta.url).href,
   "./loop-widget.js": new URL("../extensions/oh-my-pi-slim/loop-widget.ts", import.meta.url).href,
   "./prompt-context.js": new URL("../extensions/oh-my-pi-slim/prompt-context.ts", import.meta.url).href,
@@ -45,7 +54,10 @@ registerHooks({
   },
 });
 
+const { askUserQuestionParameters } = await import("../extensions/oh-my-pi-slim/ask-runtime.ts");
+const { goalParameters } = await import("../extensions/oh-my-pi-slim/goal-runtime.ts");
 const { loopParameters } = await import("../extensions/oh-my-pi-slim/loop-runtime.ts");
+const { monitorParameters } = await import("../extensions/oh-my-pi-slim/monitor-runtime.ts");
 const { subagentParameters } = await import("../extensions/oh-my-pi-slim/subagent-runtime.ts");
 const { contactSupervisorParameters } = await import("../extensions/oh-my-pi-slim/child-supervisor.ts");
 const { todoParameters } = await import("../extensions/todo/index.ts");
@@ -65,12 +77,15 @@ function assertPortableObjectRoot(name, schema) {
 
 test("all production model-tool schemas serialize with provider-portable object roots", () => {
   const schemas = {
+    ask_user_question: providerJson(askUserQuestionParameters),
+    goal: providerJson(goalParameters),
     subagent: providerJson(subagentParameters),
     contact_supervisor: providerJson(contactSupervisorParameters),
     loop: providerJson(loopParameters),
+    monitor: providerJson(monitorParameters),
     todo: providerJson(todoParameters),
   };
-  assert.deepEqual(Object.keys(schemas).sort(), ["contact_supervisor", "loop", "subagent", "todo"]);
+  assert.deepEqual(Object.keys(schemas).sort(), ["ask_user_question", "contact_supervisor", "goal", "loop", "monitor", "subagent", "todo"]);
   for (const [name, schema] of Object.entries(schemas)) assertPortableObjectRoot(name, schema);
 
   const operationBranches = schemas.todo.properties.operations.items.anyOf;

@@ -13,8 +13,17 @@ const dependencyMap = {
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
+  "./ask-runtime.js": new URL("../extensions/oh-my-pi-slim/ask-runtime.ts", import.meta.url).href,
+  "./ask-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts", import.meta.url).href,
+  "./ask-tui.js": new URL("../extensions/oh-my-pi-slim/ask-tui.ts", import.meta.url).href,
   "./bootstrap.js": new URL("../extensions/oh-my-pi-slim/bootstrap.ts", import.meta.url).href,
+  "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
+  "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
+  "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
   "./loop-runtime.js": new URL("../extensions/oh-my-pi-slim/loop-runtime.ts", import.meta.url).href,
+  "./monitor-runtime.js": new URL("../extensions/oh-my-pi-slim/monitor-runtime.ts", import.meta.url).href,
+  "./monitor-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/monitor-transcript-renderer.ts", import.meta.url).href,
+  "./monitor-widget.js": new URL("../extensions/oh-my-pi-slim/monitor-widget.ts", import.meta.url).href,
   "./loop-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/loop-transcript-renderer.ts", import.meta.url).href,
   "./loop-widget.js": new URL("../extensions/oh-my-pi-slim/loop-widget.ts", import.meta.url).href,
   "./prompt-context.js": new URL("../extensions/oh-my-pi-slim/prompt-context.ts", import.meta.url).href,
@@ -812,7 +821,7 @@ test("tree abort waits for shutdown completion and shutdown errors release the m
   }
 });
 
-test("main sessions register loop command/tool while child sessions return before registration", async () => {
+test("main sessions register Ask and runtime tools while child sessions return before registration", async () => {
   function registrationHarness() {
     const tools = [];
     const commands = [];
@@ -825,7 +834,9 @@ test("main sessions register loop command/tool while child sessions return befor
         registerMessageRenderer() {},
         registerFlag() {},
         on(name, handler) { handlers.set(name, handler); },
-        getAllTools() { return []; },
+        getAllTools() { return tools.map((name) => ({ name })); },
+        getActiveTools() { return [...tools]; },
+        setActiveTools() {},
         sendMessage() {},
         sendUserMessage() {},
       },
@@ -839,9 +850,14 @@ test("main sessions register loop command/tool while child sessions return befor
     delete process.env.OMPS_SUBAGENT_CHILD;
     const main = registrationHarness();
     ohMyPiSlim(main.pi);
+    assert.ok(main.tools.includes("ask_user_question"));
+    assert.ok(main.tools.includes("goal"));
     assert.ok(main.tools.includes("loop"));
+    assert.ok(main.tools.includes("monitor"));
     assert.ok(main.tools.includes("subagent"));
+    assert.ok(main.commands.includes("goal"));
     assert.ok(main.commands.includes("loop"));
+    assert.equal(main.commands.includes("monitor"), false);
     assert.ok(main.handlers.has("session_before_fork"));
     assert.ok(main.handlers.has("session_before_tree"));
     assert.ok(main.handlers.has("session_tree"));
@@ -851,8 +867,8 @@ test("main sessions register loop command/tool while child sessions return befor
     const beforeFork = source.slice(source.indexOf('pi.on("session_before_fork"'), source.indexOf('pi.on("session_before_tree"'));
     const beforeTree = source.slice(source.indexOf('pi.on("session_before_tree"'), source.indexOf('pi.on("session_tree"'));
     const afterTree = source.slice(source.indexOf('pi.on("session_tree"'), source.indexOf('pi.on("input"'));
-    assert.match(beforeFork, /invalidateCheckpoint\(false\)[\s\S]*loops\.shutdown\(\)/, "fork preparation must stop loops before the host operation");
-    assert.doesNotMatch(beforeTree, /loops\.shutdown|loops\.reset|clearWithoutDelivery/, "tree preparation must preserve loop runtime state and records");
+    assert.match(beforeFork, /invalidateCheckpoint\(false\)[\s\S]*loops\.shutdown\(\)[\s\S]*monitors\?\.shutdown\(\)/, "fork preparation must stop loops and monitors before the host operation");
+    assert.doesNotMatch(beforeTree, /loops\.shutdown|loops\.reset|monitors\?\.shutdown|monitors\?\.reset|clearWithoutDelivery/, "tree preparation must preserve loop and monitor runtime state and records");
     assert.match(beforeTree, /const generation = notificationGate\.pause\(\)/, "tree preparation must pause the shared delivery gate");
     assert.match(beforeTree, /event\.signal\.addEventListener\("abort", abortListener, \{ once: true \}\)/, "tree preparation must bind one abort compensation listener");
     assert.match(beforeTree, /await subagents\.shutdown\(\)[\s\S]*hold\.shutdownComplete = true[\s\S]*hold\.abortPending/, "tree abort release must wait for subagent shutdown");

@@ -1,6 +1,6 @@
 # oh-my-pi-slim
 
-> Preset-driven Pi orchestration with built-in background runs, runtime loops, and session todos.
+> Preset-driven Pi orchestration with built-in background runs, loops, monitors, structured questions, durable goals, and session todos.
 
 **English** | [中文](./README.zh-CN.md)
 
@@ -34,6 +34,25 @@ pi install git:github.com/YanzuoLu/oh-my-pi-slim
 
 The package manifest loads `./extensions/oh-my-pi-slim/index.ts` and the independent built-in Todo entry at `./extensions/todo/index.ts`. There is no `pi-subagents` dependency or extension entry.
 
+## Tool availability
+
+On supported POSIX systems, a main session gets exactly the six package tools `ask_user_question`, `goal`, `loop`, `monitor`, `subagent`, and `todo`. A detached child gets exactly `contact_supervisor` and `todo` from this package. Ask, Goal, Monitor, Loop, and subagent are main-only because the main extension returns before registration in child environments; Todo is an independent entry loaded in both environments, and `contact_supervisor` is loaded only by the child launcher. Monitor is omitted on Windows.
+
+Ask, Goal, and Monitor register as soon as the package loads; they do not depend on `/omps on`, `--omps`, or an active preset. Loop has the same load-time independence. Goal's phase reminder can therefore appear for an active Goal even while the orchestrator preset is inactive; it is an invisible per-run message, not Goal-specific dynamic system-prompt rewriting or a `context` hook. RPC sessions expose the same supported tools but never register package widgets. JSON and print modes remove Ask from the active tool set because they cannot service dialogs.
+
+Every package-owned expandable tool row or custom notification uses the same data invariant: collapsed rendering includes a `(ctrl+o to expand)` hint, expanded rendering reveals the complete public detail, and Ctrl+O never changes tool arguments, model-visible content, result details, or persisted state.
+
+## Migration from external packages
+
+The built-in Ask registers the same tool name as `npm:@juicesharp/rpiv-ask-user-question`, so the two packages cannot coexist. Built-in Monitor replaces `npm:@aliou/pi-processes`; it does not import or call that package. Before a local install, remove the external packages in separate Pi operations:
+
+```bash
+pi remove npm:@juicesharp/rpiv-ask-user-question
+pi remove npm:@aliou/pi-processes
+```
+
+Also remove `ask_user_question` from any user specialist deny lists. Detached children do not register Ask at all, so denying that name in child policy is obsolete. These are explicit user migration steps: this package never runs `pi remove`, edits user package settings, or rewrites user deny lists automatically.
+
 ## Built-in Todo
 
 The package always registers one model tool named `todo` in main and child sessions. Todo does not depend on OMPS activation or preset selection. It adds no command, shortcut, or configuration.
@@ -57,7 +76,7 @@ State belongs to each Pi session and persists only through versioned successful 
 
 Foreground TUI sessions show a tree widget above the editor. Each item shows only its subject, followed by `⛓ subject1, subject2` when dependencies exist. Abstracts stay out of the widget and remain in the complete model-facing `list` JSON. The widget displays `● Todos (completed/total)`, status glyphs, and at most 12 total lines. Overflow hides completed items first and reports exact hidden status counts. An empty state removes the widget.
 
-Todo call and result renderers follow the same Ctrl+O contract as subagent transcripts. Collapsed list calls show only the title and action. Collapsed update calls show the operation total and append/modify/clear counts. Expanded update calls show every operation in input order with complete fields, abstracts, and dependency lists. Collapsed update results show changed and no-change counts without repeating input. Expanded results show stable numbered receipts. Collapsed list results show only `● Todos (completed/total)`; expanded results show each task's subject, abstract, status, and dependencies. Fallbacks collapse to a safe first line and expand to complete text. Ctrl+O changes only TUI rendering and never changes list JSON, update receipt content, or tool-result details.
+Todo call and result renderers follow the same Ctrl+O contract as subagent transcripts. Collapsed list and update calls show only the title and action. Expanded update calls show every operation in input order with complete fields, abstracts, and dependency lists. Collapsed update results show the operation summary `Applied <append> append · <modify> modify · <clear> clear → <changed> changed · <no-change> no-change`; expanded results add stable numbered receipts. Collapsed list results show only `● Todos (completed/total)`; expanded results show each task's subject, abstract, status, and dependencies. Fallbacks collapse to a safe first line and expand to complete text. Ctrl+O changes only TUI rendering and never changes list JSON, update receipt content, or tool-result details.
 
 An external package that also registers `todo` cannot coexist with the built-in tool. For a local migration, run `pi remove` for that external package separately before loading OMPS. This package never removes or uninstalls external packages automatically.
 
@@ -114,6 +133,111 @@ Foreground TUI sessions show a package-owned widget above the editor. Its headin
 
 Package-owned call, result, and fire renderers follow the Ctrl+O data invariant. Collapsed views stay compact and show the expansion hint. Expanded views show complete action-specific input, all public list fields, full errors, and complete prompts. Ctrl+O changes only TUI rendering; it never changes tool-call arguments, model-facing content, custom-message details, list JSON, or mutation receipts.
 
+## Built-in Monitor
+
+Monitor is a main-session-only POSIX tool with four sequential actions:
+
+```ts
+{ action: "create", abstract, command, cwd?, notifyOn? }
+{ action: "delete", id }
+{ action: "list" }
+{ action: "status", id, start?, end? }
+```
+
+`create` requires a trimmed human-readable `abstract` and one foreground Bash `command`; `cwd` defaults to the session cwd. `notifyOn` accepts at most 20 unique, non-empty, case-sensitive literal strings, each at most 500 characters. Monitor IDs are exact eight-character lowercase hexadecimal strings. There is no monitor-count limit.
+
+The runtime resolves an absolute executable Bash, starts `bash -lc <command>` in a new detached POSIX process group, owns that group, ignores stdin, and captures stdout and stderr through pipes. It never provides stdin, a PTY, or interactive terminal semantics. The model guidelines require a foreground command and prohibit `nohup`, `setsid`, `disown`, a trailing `&`, or another daemon escape. This is guidance, not a shell parser or sandbox: a command can still deliberately detach descendants, and bounded TERM/KILL cleanup may return a warning that such a descendant remains.
+
+`list` is compact and returns only `{ id, status, abstract }`. Running monitors come first in creation order; terminal monitors follow in reverse end-time order. `status` returns the complete bounded operational record, including command, cwd, PID, lifecycle timestamps, exit/signal/error, match and notification counters, log rollover counters, and combined stdout/stderr lines. Pagination is reverse-offset based: `start` skips that many newest retained records, `end` is the exclusive reverse offset, the default window is `0..100`, the maximum window is 2,000 lines, and returned lines are restored to chronological order.
+
+Monitor state is runtime-owned and never enters the Pi session journal. Logs live in a mode-0700 directory created under the OS temporary directory, with mode-0600 JSONL files. Each combined log rolls at 64 MiB and keeps approximately the newest 32 MiB of complete records plus a rollover marker; counters report dropped bytes and lines. A partial line is bounded to 64 KiB before a truncation suffix. Tool content is bounded to 50 KiB, notification content to 50 KiB, notification details to 96 KiB, and status line collection is additionally bounded before serialization.
+
+Literal matches are collected into 100 ms batches. A batch can carry at most 100 new combined lines. Matcher delivery is globally limited to 20 batches per rolling minute; suppressed batches are summarized after the window reopens. Match, rate-summary, and terminal events use visible custom messages with `deliverAs: "steer"` and `triggerTurn: true`, share the package notification pause gate, retry safely after agent settlement, and remain pending until the delivered message is acknowledged. Terminal records and logs remain available for `status` until explicit `delete` or session teardown. `delete` cancels still-gated notifications for that monitor, sends bounded process-group TERM then KILL when needed, removes the record and log, and reports forced-cleanup warnings. Once a notification has already been handed to Pi, deleting the monitor cannot retract that message.
+
+A running monitor or an unacknowledged terminal monitor notification blocks Goal continuation. This prevents Goal from racing past background work before its terminal evidence is delivered. Reload, new/resumed/forked session transitions, and quit shut down every monitor, remove the temporary log root, and clear all Monitor state.
+
+Foreground TUI sessions show `● Monitors (running/total)` above the editor. Running entries sort before terminal entries, the widget shows at most ten monitors and twelve total lines, and output-driven refreshes are throttled/coalesced. RPC sessions have no widget. Monitor call, result, matcher, summary, and terminal renderers are package-owned: collapsed views include the Ctrl+O hint, while expanded views show action fields, operational state, combined lines, matches, omissions, truncation, and forced-delete warnings without mutating model-facing data.
+
+## Built-in Ask
+
+Ask is the main-session-only `ask_user_question` sequential tool. Its strict provider-portable schema is compatible with one through four questions and two through four authored options per question:
+
+```ts
+{
+  questions: [{
+    question,
+    header,          // at most 16 characters
+    options: [{
+      label,         // at most 60 characters
+      description,
+      preview?       // single-select only
+    }],
+    multiSelect?
+  }]
+}
+```
+
+Questions and option labels must be exact-unique within their scopes. `Other`, `Type something.`, and `Next` are reserved option labels. A recommended option is authored first and appends `(Recommended)` to its label. `preview` is rejected on a multi-select question.
+
+The foreground TUI uses one bottom-centered full-width overlay with tabs for all questions. Tabs wrap in both directions and preserve per-question drafts. A single-select question accepts one authored option or a custom inline response. A multi-select question toggles authored options in authored order, permits an empty selection, or replaces the selection with one custom response. Single-select previews render beside the option list on wide terminals and stack below it on narrow terminals. The questionnaire can return complete, partial, cancelled-with-partial, empty multi-select, empty custom, or zero-answer/empty-submit outcomes; an empty submit is represented as a cancelled partial result with `cancelReason: "empty_submit"` rather than as a tool error.
+
+RPC mode uses Pi's native `select` and `input` extension UI requests, including explicit Submit, Cancel, and Done controls; it never tries to instantiate the TUI overlay. JSON and print modes deactivate Ask and retain a no-UI execution backstop. There is no paid or nested model call inside Ask.
+
+Ask is single-flight: at most one dialog is active, later calls queue, and only the active dialog counts as waiting. Tool abort, session switch/fork/tree navigation, reset, and shutdown reject active and queued calls with `AbortError` exactly once. User cancellation is a normal result, not an abort. A validated call is hard-rejected before opening UI whenever a Goal is active, because active Goal prompts prohibit user questions.
+
+Ask has no persistence, notification message, widget, slash command, configuration, i18n layer, notes field, or Ask-specific answer-collapse feature. It only owns its call/result transcript renderers. Collapsed rows include the Ctrl+O expansion hint; expanded rows show all questions, options, descriptions, single-select previews, confirmed answers, unanswered questions, and cancellation reason without changing the tool envelope.
+
+## Built-in Goal
+
+Goal is a main-session-only durable scheduler surface consisting of the raw-forwarding `/goal` command and one sequential `goal` tool with exactly seven actions:
+
+```ts
+{ action: "create", abstract, objective, criteria }
+{ action: "modify", abstract, objective, criteria }
+{ action: "status" }
+{ action: "pause", reason }
+{ action: "resume" }
+{ action: "complete", evidence }
+{ action: "cancel", reason }
+```
+
+`/goal ...` does not parse the request. It forwards the exact text as a real user message with prompt-template expansion disabled, using `deliverAs: "steer"` only when Pi is busy. Model guidance permits `create` only when the latest user message starts with `/goal`; a bare `/goal` calls `status` and explains `/goal <objective>`.
+
+There is zero or one Goal on the current branch. `create` requires a short abstract, a complete objective, and one through eight non-empty completion criteria. It is allowed only when no Goal exists or the previous Goal is terminal. `modify` replaces the complete contract of any nonterminal Goal and makes it active. `complete` is valid only while active and requires exactly one non-empty evidence item for every criterion. The public Goal status contains the contract, lifecycle timestamps, retry/no-progress fields, pause or cancel reason, and completion evidence; it exposes no public Goal ID, revision, ownership list, continuation count, or execution statistics.
+
+Goal state uses strict version-1 branch-local snapshots appended as non-context custom entries. Replay selects the latest valid snapshot on the active branch and skips malformed records. Reload/startup, resumed/forked sessions, and tree restoration convert an `active` or `retry_wait` Goal to `paused` with reason `session_restored`; Goal never silently resumes after host restoration. Completion and cancellation are terminal, although a later explicit `/goal` create may replace a terminal Goal.
+
+The public state transitions are:
+
+- `create` → `active`; `modify` and effective `resume` → `active`.
+- `pause` moves `active` or `retry_wait` to `paused`; repeated pause is a successful no-change.
+- Repeated resume while active is a successful no-change. Resume from paused or retry wait clears retry/no-progress metadata.
+- `complete` moves only `active` to `completed`; `cancel` moves any nonterminal state to `cancelled`.
+- A provider error moves a pursuing Goal to `retry_wait`. Frozen backoff delays are 10 s, 30 s, 1 min, 5 min, 15 min, then 1 hour for every later attempt. A successful later run clears retry metadata.
+- A user abort pauses with `user_abort`; OMPS's own checkpoint abort does not. Three automatic continuation runs with no tool call, package lifecycle change, or external user input pause with `no_progress`.
+
+Goal continuation is the lowest-priority package scheduler. It waits until Pi is idle with no pending messages, no checkpoint, no tree/compaction notification pause, no active subagent, no pending subagent notification, no running Monitor, no unacknowledged terminal Monitor notification, and no waiting Ask. It also binds deferred work to the current session, branch leaf, Goal snapshot, and external-input generation. The continuation itself is one visible custom message with `deliverAs: "steer"` and `triggerTurn: true`; acknowledgement prevents duplicate delivery.
+
+The frozen activation and continuation prompts always restate the abstract, objective, and numbered criteria, followed by these rules:
+
+```text
+Pursue this Goal now.                         # activation only
+Do not ask the user questions while this Goal is active.
+Continue until every criterion has concrete evidence.  # activation
+Continue making concrete progress toward every criterion.  # continuation
+Use Todo, Monitor, and Subagents when useful.
+If safe progress is blocked, call `goal pause` with a concrete reason.
+Call `goal complete` only with one evidence entry for every criterion.
+```
+
+Before every run for an active Goal, the package adds a separate invisible phase message containing `You are pursuing the active Goal: <abstract>` and a concrete-progress reminder. This Goal phase reminder can appear even when OMPS orchestration is inactive. Goal does not dynamically rewrite the system prompt for this reminder and does not register a `context` mutation hook. The older file-tool nudge mechanism has been removed completely.
+
+Every subagent created while a Goal is active becomes Goal-owned. Main statistics are derived from branch assistant/tool-result/compaction usage during pursuing states. Child token/tool/turn/compaction totals are aggregated from private, session-owned mode-0600 sidecar records and survive terminal run-directory cleanup; writes are best-effort and never affect child lifecycle. Ownership and statistics drive only the Goal widget and scheduler bookkeeping, never `goal status`.
+
+The foreground widget is exactly two lines and keeps this order. Line one is `● Goal · <status glyph> <status> · <abstract>`. Line two is elapsed time, continuation count, owned run count, optional retry countdown or pause reason, then main token/tool/turn/compaction totals, then child totals. It refreshes countdown/elapsed text once per second, uses `↻`, `◷`, `Ⅱ`, `✓`, and `×` for active, retry wait, paused, completed, and cancelled, and disappears when no Goal exists. RPC and print sessions have no widget.
+
+Goal call/result, continuation, and automatic-state notifications are package-owned expandable renderers. Collapsed rows include the Ctrl+O hint; expanded rows show the complete contract, criteria, evidence, retry fields, reasons, and model-visible continuation content. Ctrl+O never reveals private scheduler keys or changes snapshots. Known risks are deliberate: provider backoff is unbounded at the one-hour ceiling until success or explicit pause/cancel, no-progress is a conservative activity heuristic, child statistics are observational best-effort data, and restoration always requires an explicit resume.
+
 ## Commands
 
 | Command | Effect |
@@ -124,6 +248,7 @@ Package-owned call, result, and fire renderers follow the Ctrl+O data invariant.
 | `/omps presets` | List presets |
 | `/preset [name]` | Switch preset; bare command lists presets |
 | `/loop [request]` | Forward the unchanged request to the model for runtime loop management |
+| `/goal [request]` | Forward the unchanged request to the model for durable Goal management |
 | `/omps uninstall` | Clean old OMPS backend migration state, then show the package removal command |
 
 `/reload` restores the active preset through a one-shot in-process slot. New, resumed, or forked parent sessions do not inherit that slot.

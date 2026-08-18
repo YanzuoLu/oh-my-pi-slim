@@ -28,6 +28,8 @@ export const RUN_STATUSES = [
   "interrupted",
 ] as const;
 export const CONTROL_TYPES = ["interrupt", "steer", "reply"] as const;
+export const GOAL_STATS_DIR_NAME = "omps-goal-stats";
+export const GOAL_STATS_VERSION = 1 as const;
 
 let controlSequence = 0;
 
@@ -78,6 +80,8 @@ export interface DetachedRunnerIdentity {
 }
 
 export interface DetachedRunState extends DetachedRunActivity {
+  /** Cumulative provider usage for Goal accounting; tokens remains context occupancy for the existing widget contract. */
+  providerTokens?: number;
   v: 1;
   token: string;
   runId: string;
@@ -109,6 +113,21 @@ export interface RunPaths {
   identityFile: string;
   controlDir: string;
   logFile: string;
+}
+
+export interface GoalRunStatsSidecar {
+  version: 1;
+  runId: string;
+  tokens: number;
+  tools: number;
+  turns: number;
+  compactions: number;
+}
+
+export interface GoalStatsSidecarPaths {
+  root: string;
+  ownerDir: string;
+  file: string;
 }
 
 export interface InvocationSeams {
@@ -147,6 +166,22 @@ function requireSafePathSegment(value: string, label: string): void {
 
 export function getRunRoot(ownerSessionDir: string): string {
   return resolve(ownerSessionDir, "omps-subagent-runs");
+}
+
+export function getGoalStatsRoot(ownerSessionDir: string): string {
+  return resolve(ownerSessionDir, GOAL_STATS_DIR_NAME);
+}
+
+export function getGoalStatsSidecarPaths(root: string, ownerSessionId: string, runId: string): GoalStatsSidecarPaths {
+  requireSafePathSegment(ownerSessionId, "ownerSessionId");
+  requireSafePathSegment(runId, "runId");
+  const normalizedRoot = resolve(root);
+  const ownerDir = resolve(normalizedRoot, ownerSessionId);
+  const file = resolve(ownerDir, `${runId}.json`);
+  if (dirname(ownerDir) !== normalizedRoot || dirname(file) !== ownerDir || basename(file) !== `${runId}.json`) {
+    throw new Error("Goal stats sidecar path escaped its session-owned root.");
+  }
+  return { root: normalizedRoot, ownerDir, file };
 }
 
 export function getRunPaths(runRoot: string, ownerSessionId: string, runId: string): RunPaths {
@@ -213,19 +248,74 @@ export function removeRunFiles(paths: RunPaths): void {
   rmSync(runDir, { recursive: true, force: true });
 }
 
+function isGoalRunStatsSidecar(value: unknown): value is GoalRunStatsSidecar {
+  if (!isRecord(value) || Object.keys(value).sort().join(",") !== "compactions,runId,tokens,tools,turns,version") return false;
+  if (value.version !== GOAL_STATS_VERSION || !isNonEmptyString(value.runId) || !isSafePathSegment(value.runId)) return false;
+  return [value.tokens, value.tools, value.turns, value.compactions]
+    .every((item) => typeof item === "number" && Number.isSafeInteger(item) && item >= 0);
+}
+
+function ensurePrivateDirectory(path: string): void {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`Refusing unsafe private directory: ${path}`);
+  chmodSync(path, 0o700);
+}
+
+export function writeGoalStatsSidecar(
+  root: string,
+  ownerSessionId: string,
+  stats: GoalRunStatsSidecar,
+): boolean {
+  try {
+    if (!isGoalRunStatsSidecar(stats)) return false;
+    const paths = getGoalStatsSidecarPaths(root, ownerSessionId, stats.runId);
+    ensurePrivateDirectory(paths.root);
+    ensurePrivateDirectory(paths.ownerDir);
+    if (existsSync(paths.file)) {
+      const current = lstatSync(paths.file);
+      if (current.isSymbolicLink() || !current.isFile()) return false;
+    }
+    atomicWriteJson(paths.file, stats);
+    const written = lstatSync(paths.file);
+    if (written.isSymbolicLink() || !written.isFile()) return false;
+    chmodSync(paths.file, 0o600);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function readGoalStatsSidecar(root: string, ownerSessionId: string, runId: string): GoalRunStatsSidecar | undefined {
+  try {
+    const paths = getGoalStatsSidecarPaths(root, ownerSessionId, runId);
+    for (const directory of [paths.root, paths.ownerDir]) {
+      const stat = lstatSync(directory);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) return;
+    }
+    const stat = lstatSync(paths.file);
+    if (stat.isSymbolicLink() || !stat.isFile()) return;
+    const value = safeReadJson(paths.file, isGoalRunStatsSidecar);
+    return value?.runId === runId ? value : undefined;
+  } catch {
+    return;
+  }
+}
+
 export function atomicWriteJson(filePath: string, value: unknown): void {
   mkdirSync(dirname(filePath), { recursive: true, mode: 0o700 });
   const temporary = join(dirname(filePath), `.${basename(filePath)}.${process.pid}.${randomUUID()}.tmp`);
-  const descriptor = openSync(temporary, "wx", 0o600);
+  let descriptor = openSync(temporary, "wx", 0o600);
   try {
     writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  } finally {
     closeSync(descriptor);
-  }
-  try {
+    descriptor = -1;
     renameSync(temporary, filePath);
     chmodSync(filePath, 0o600);
   } catch (error) {
+    if (descriptor >= 0) {
+      try { closeSync(descriptor); } catch { /* cleanup continues */ }
+    }
     try { unlinkSync(temporary); } catch { /* already renamed or removed */ }
     throw error;
   }
@@ -348,6 +438,7 @@ export function isDetachedRunState(value: unknown): value is DetachedRunState {
     !isRecord(value.activeTools) ||
     typeof value.responseText !== "string" ||
     typeof value.tokens !== "number" || !Number.isFinite(value.tokens) || Number(value.tokens) < 0 ||
+    (value.providerTokens !== undefined && (typeof value.providerTokens !== "number" || !Number.isFinite(value.providerTokens) || Number(value.providerTokens) < 0)) ||
     (value.contextPercent !== undefined && (typeof value.contextPercent !== "number" || !Number.isFinite(value.contextPercent))) ||
     !Number.isInteger(value.compactionCount) || Number(value.compactionCount) < 0
   ) return false;

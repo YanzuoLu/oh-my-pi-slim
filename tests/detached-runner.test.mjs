@@ -345,6 +345,18 @@ test("runner context tokens stay monotonic within an epoch and ignore cumulative
   }
 });
 
+test("runner provider token reconciliation preserves a higher message-event total than final session stats", async () => {
+  const run = makeRun("provider-token-high-water");
+  try {
+    const completed = await waitForStatus(run, "completed");
+    assert.equal(completed.output, "provider token high water complete");
+    assert.equal(completed.providerTokens, 100, "final session delta 30 cannot regress the message-event high water 100");
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    await cleanup(run);
+  }
+});
+
 test("successful compaction starts a new context-token epoch without hiding the old value", async () => {
   const run = makeRun("token-compaction-success");
   try {

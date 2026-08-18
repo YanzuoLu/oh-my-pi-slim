@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const AUDITED_TOOLS = new Set(["contact_supervisor", "loop", "subagent", "todo"]);
+const AUDITED_TOOLS = new Set(["ask_user_question", "contact_supervisor", "goal", "loop", "monitor", "subagent", "todo"]);
 
 function schemaSummary(parameters: unknown) {
   const schema = parameters && typeof parameters === "object" ? parameters as {
@@ -29,7 +29,7 @@ export default function ompsLoadProbe(pi: ExtensionAPI): void {
       ctx.ui.notify(`OMPS_LOAD_PROBE ${JSON.stringify({
         tools: tools.map((tool) => tool.name).sort(),
         activeTools: pi.getActiveTools().filter((name) => AUDITED_TOOLS.has(name)).sort(),
-        commands: pi.getCommands().map((command) => command.name).filter((name) => name === "loop").sort(),
+        commands: pi.getCommands().map((command) => command.name).filter((name) => name === "goal" || name === "loop").sort(),
         schemas: Object.fromEntries([...AUDITED_TOOLS].sort().map((name) => [
           name,
           byName.has(name) ? schemaSummary(byName.get(name)?.parameters) : null,
@@ -39,8 +39,12 @@ export default function ompsLoadProbe(pi: ExtensionAPI): void {
   });
 
   pi.on("input", (event, ctx) => {
-    if (event.source !== "extension" || !event.text.startsWith("/loop")) return;
-    ctx.ui.notify(`LOOP_FORWARD_PROBE ${JSON.stringify({
+    if (event.source !== "extension") return;
+    const prefix = event.text.startsWith("/loop")
+      ? "LOOP_FORWARD_PROBE "
+      : event.text.startsWith("/goal") ? "GOAL_FORWARD_PROBE " : undefined;
+    if (!prefix) return;
+    ctx.ui.notify(`${prefix}${JSON.stringify({
       text: event.text,
       source: event.source,
       streamingBehavior: event.streamingBehavior,

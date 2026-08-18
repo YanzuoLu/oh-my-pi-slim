@@ -26,6 +26,7 @@ import {
 import {
   atomicWriteJson,
   ensureRunPaths,
+  getGoalStatsRoot,
   getPiInvocation,
   getProcessIdentity,
   getRunPaths,
@@ -33,15 +34,18 @@ import {
   isPidAlive,
   launchDetachedRunner,
   listOwnerRunIds,
+  readGoalStatsSidecar,
   readLaunchConfig,
   readRunnerIdentity,
   readRunState,
   removeRunFiles,
   tailLog,
   writeControl,
+  writeGoalStatsSidecar,
   type DetachedLaunchConfig,
   type DetachedRunActivity,
   type DetachedRunState,
+  type GoalRunStatsSidecar,
   type InvocationSeams,
   type RunPaths,
 } from "./subagent-run-files.js";
@@ -95,6 +99,8 @@ interface RuntimeOptions {
   setInterval?: (callback: () => void, ms: number) => TimerHandle;
   clearInterval?: (timer: TimerHandle) => void;
   sleep?: (ms: number) => Promise<void>;
+  readGoalStats?: typeof readGoalStatsSidecar;
+  writeGoalStats?: typeof writeGoalStatsSidecar;
 }
 
 interface RuntimeInput {
@@ -138,6 +144,21 @@ interface NotificationDelivery {
   event: RunStatus;
   waitingSeq?: number;
   deliveryKey: string;
+}
+
+export interface SubagentGoalStats {
+  runCount: number;
+  tokens: number;
+  tools: number;
+  turns: number;
+  compactions: number;
+}
+
+interface GoalRunActivity {
+  tokens: number;
+  tools: number;
+  turns: number;
+  compactions: number;
 }
 
 function normalizeDeniedTools(value: readonly string[]): string[] {
@@ -278,6 +299,24 @@ function stateActivity(state: DetachedRunState): DetachedRunActivity {
   };
 }
 
+function parseGoalRunActivity(value: unknown): { runId: string; activity: GoalRunActivity } | undefined {
+  const journal = asRecord(value);
+  const run = asRecord(journal?.run);
+  const stats = asRecord(journal?.goalStats);
+  if (journal?.version !== 2 || typeof run?.id !== "string" || !stats) return;
+  const fields = ["tokens", "tools", "turns", "compactions"] as const;
+  if (fields.some((field) => typeof stats[field] !== "number" || !Number.isFinite(stats[field]) || Number(stats[field]) < 0 || !Number.isInteger(stats[field]))) return;
+  return {
+    runId: run.id,
+    activity: {
+      tokens: Number(stats.tokens),
+      tools: Number(stats.tools),
+      turns: Number(stats.turns),
+      compactions: Number(stats.compactions),
+    },
+  };
+}
+
 export const subagentParameters = Type.Object({
   agent: Type.Optional(Type.String({ description: "For create, select the specialist role." })),
   abstract: Type.Optional(Type.String({ description: "For create or resume, provide a short run summary." })),
@@ -314,8 +353,13 @@ export class OmpsSubagentRuntime {
   private readonly setIntervalFn: (callback: () => void, ms: number) => TimerHandle;
   private readonly clearIntervalFn: (timer: TimerHandle) => void;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly readGoalStats: typeof readGoalStatsSidecar;
+  private readonly writeGoalStats: typeof writeGoalStatsSidecar;
   private readonly widget: SubagentWidget;
   private readonly activity = new Map<string, DetachedRunActivity>();
+  private readonly goalActivity = new Map<string, GoalRunActivity>();
+  private readonly loadedGoalStatsSidecars = new Set<string>();
+  private readonly runCreatedListeners = new Set<(runId: string) => void>();
   private readonly health = new Map<string, RunHealth>();
   private readonly repliedSeqs = new Map<string, RepliedSeq>();
   private readonly queuedNotifications = new Set<string>();
@@ -325,6 +369,7 @@ export class OmpsSubagentRuntime {
   private ctx?: ExtensionContext;
   private ownerSessionId?: string;
   private runRoot?: string;
+  private goalStatsRoot?: string;
   private modelResolver?: ModelResolver;
   private denyResolver?: DenyResolver;
   private poller?: TimerHandle;
@@ -347,6 +392,8 @@ export class OmpsSubagentRuntime {
     this.setIntervalFn = options.setInterval ?? ((callback, ms) => setInterval(callback, ms));
     this.clearIntervalFn = options.clearInterval ?? ((timer) => clearInterval(timer));
     this.sleep = options.sleep ?? ((ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)));
+    this.readGoalStats = options.readGoalStats ?? readGoalStatsSidecar;
+    this.writeGoalStats = options.writeGoalStats ?? writeGoalStatsSidecar;
     this.widget = new SubagentWidget(() => this.registry.list().map((run) => ({ ...run, activity: this.activity.get(run.id) })));
     this.unsubscribeRegistry = this.registry.subscribe(() => this.widget.update());
   }
@@ -364,6 +411,34 @@ export class OmpsSubagentRuntime {
     this.notificationDeliveryPaused = paused;
     if (paused || this.shuttingDown) return;
     for (const run of this.registry.list()) this.deliverPendingNotification(run.id);
+  }
+
+  hasActiveRuns(): boolean {
+    return this.registry.list().some((run) => ACTIVE_STATUSES.has(run.status));
+  }
+
+  hasPendingNotifications(): boolean {
+    return this.queuedNotifications.size > 0 || this.registry.list().some((run) => this.pendingNotificationDelivery(run) !== undefined);
+  }
+
+  subscribeRunCreated(listener: (runId: string) => void): () => void {
+    this.runCreatedListeners.add(listener);
+    return () => this.runCreatedListeners.delete(listener);
+  }
+
+  goalStats(runIds: readonly string[]): SubagentGoalStats {
+    const ids = [...new Set(runIds)];
+    const result: SubagentGoalStats = { runCount: ids.length, tokens: 0, tools: 0, turns: 0, compactions: 0 };
+    for (const id of ids) {
+      this.loadGoalStatsSidecar(id);
+      const stats = this.goalActivity.get(id);
+      if (!stats) continue;
+      result.tokens += stats.tokens;
+      result.tools += stats.tools;
+      result.turns += stats.turns;
+      result.compactions += stats.compactions;
+    }
+    return result;
   }
 
   registerTools(): void {
@@ -417,6 +492,8 @@ export class OmpsSubagentRuntime {
     this.stopPoller();
     this.widget.dispose();
     this.activity.clear();
+    this.goalActivity.clear();
+    this.loadedGoalStatsSidecars.clear();
     this.health.clear();
     this.repliedSeqs.clear();
     this.queuedNotifications.clear();
@@ -424,6 +501,7 @@ export class OmpsSubagentRuntime {
     this.ctx = ctx;
     this.ownerSessionId = ctx.sessionManager.getSessionId();
     this.runRoot = getRunRoot(ctx.sessionManager.getSessionDir());
+    this.goalStatsRoot = getGoalStatsRoot(ctx.sessionManager.getSessionDir());
     this.modelResolver = undefined;
     this.denyResolver = undefined;
     this.shuttingDown = false;
@@ -432,7 +510,11 @@ export class OmpsSubagentRuntime {
     const entries: unknown[] = [];
     const deliveredNotifications = new Map<string, NotificationDelivery>();
     for (const entry of ctx.sessionManager.getBranch()) {
-      if (entry.type === "custom" && entry.customType === SNAPSHOT_TYPE) entries.push(entry.data);
+      if (entry.type === "custom" && entry.customType === SNAPSHOT_TYPE) {
+        entries.push(entry.data);
+        const goalActivity = parseGoalRunActivity(entry.data);
+        if (goalActivity) this.goalActivity.set(goalActivity.runId, goalActivity.activity);
+      }
       if (entry.type === "custom_message" && entry.customType === SUBAGENT_NOTIFICATION_TYPE) {
         const delivery = notificationDeliveryFromDetails(entry.details);
         if (delivery) deliveredNotifications.set(delivery.deliveryKey, delivery);
@@ -440,6 +522,7 @@ export class OmpsSubagentRuntime {
     }
     const restored = restoreRunJournal(entries, this.now());
     this.registry.restore(restored.runs);
+    for (const run of restored.runs) this.loadGoalStatsSidecar(run.id);
     for (const delivery of deliveredNotifications.values()) this.acknowledgeNotificationDelivery(delivery);
     await this.collectRunDirectoryGarbage(new Set(restored.runs.map((run) => run.id)));
 
@@ -473,6 +556,8 @@ export class OmpsSubagentRuntime {
     await Promise.all(activeIds.map((id) => this.terminateRun(id, "Parent session shut down.", false)));
     this.widget.dispose();
     this.activity.clear();
+    this.goalActivity.clear();
+    this.loadedGoalStatsSidecars.clear();
     this.health.clear();
     this.repliedSeqs.clear();
     this.queuedNotifications.clear();
@@ -480,6 +565,7 @@ export class OmpsSubagentRuntime {
     this.ctx = undefined;
     this.ownerSessionId = undefined;
     this.runRoot = undefined;
+    this.goalStatsRoot = undefined;
   }
 
   private startPoller(): void {
@@ -498,7 +584,64 @@ export class OmpsSubagentRuntime {
   }
 
   private persistRun(run: PersistedRun): void {
-    if (this.ctx) this.pi.appendEntry(SNAPSHOT_TYPE, runJournalEntry(run));
+    if (!this.ctx) return;
+    const journal = runJournalEntry(run);
+    const goalStats = this.goalActivity.get(run.id);
+    this.pi.appendEntry(SNAPSHOT_TYPE, goalStats ? { ...journal, goalStats: { ...goalStats } } : journal);
+  }
+
+  private loadGoalStatsSidecar(id: string): void {
+    if (this.loadedGoalStatsSidecars.has(id)) return;
+    this.loadedGoalStatsSidecars.add(id);
+    if (!this.goalStatsRoot || !this.ownerSessionId) return;
+    let sidecar: GoalRunStatsSidecar | undefined;
+    try { sidecar = this.readGoalStats(this.goalStatsRoot, this.ownerSessionId, id); }
+    catch { return; }
+    if (!sidecar) return;
+    const current = this.goalActivity.get(id);
+    const restored: GoalRunActivity = {
+      tokens: sidecar.tokens,
+      tools: sidecar.tools,
+      turns: sidecar.turns,
+      compactions: sidecar.compactions,
+    };
+    this.goalActivity.set(id, current ? {
+      tokens: Math.max(current.tokens, restored.tokens),
+      tools: Math.max(current.tools, restored.tools),
+      turns: Math.max(current.turns, restored.turns),
+      compactions: Math.max(current.compactions, restored.compactions),
+    } : restored);
+  }
+
+  private captureGoalActivity(id: string, state: DetachedRunState): void {
+    this.loadGoalStatsSidecar(id);
+    const current = this.goalActivity.get(id);
+    const observed: GoalRunActivity = {
+      tokens: Number.isFinite(state.providerTokens) && Number(state.providerTokens) >= 0 ? Number(state.providerTokens) : 0,
+      tools: state.toolUses,
+      turns: state.turnCount,
+      compactions: state.compactionCount,
+    };
+    const next: GoalRunActivity = current ? {
+      tokens: Math.max(current.tokens, observed.tokens),
+      tools: Math.max(current.tools, observed.tools),
+      turns: Math.max(current.turns, observed.turns),
+      compactions: Math.max(current.compactions, observed.compactions),
+    } : observed;
+    if (current && current.tokens === next.tokens && current.tools === next.tools &&
+        current.turns === next.turns && current.compactions === next.compactions) return;
+    this.goalActivity.set(id, next);
+    this.loadedGoalStatsSidecars.add(id);
+    if (!this.goalStatsRoot || !this.ownerSessionId) return;
+    try {
+      this.writeGoalStats(this.goalStatsRoot, this.ownerSessionId, {
+        version: 1,
+        runId: id,
+        ...next,
+      });
+    } catch {
+      // Goal stats persistence is best-effort and must never affect subagent lifecycle.
+    }
   }
 
   private updateRun(id: string, patch: Partial<PersistedRun>): PersistedRun {
@@ -748,6 +891,7 @@ export class OmpsSubagentRuntime {
       current.waitingSeq !== waitingSeq || current.output !== state.output || current.error !== state.error ||
       !sameRequest(current.request, request) ||
       current.notificationPending !== notificationPending;
+    this.captureGoalActivity(id, state);
     let next = current;
     if (logicalChange) {
       next = this.updateRun(id, {
@@ -1003,6 +1147,7 @@ export class OmpsSubagentRuntime {
     atomicWriteJson(paths.configFile, config);
     this.registry.add(run, false);
     this.persistRun(run);
+    for (const listener of [...this.runCreatedListeners]) listener(run.id);
     this.health.set(run.id, { trackedAt: this.nowMs() });
     let launchedPid: number | undefined;
     try {
