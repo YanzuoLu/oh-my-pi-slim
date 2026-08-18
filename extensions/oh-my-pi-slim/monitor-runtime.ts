@@ -389,23 +389,23 @@ function parseStructuredLine(buffer: Buffer): StructuredLogLine | undefined {
 
 export const monitorParameters = Type.Object({
   action: Type.Union(MONITOR_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Select the monitor action. Create uses abstract, command, optional cwd, and optional notifyOn. Delete uses id. Status uses id and optional start and end. List uses no other fields.",
+    description: "Choose an action. create requires abstract and command, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.",
   }),
-  abstract: Type.Optional(Type.String({ description: "For create, provide a short command summary." })),
+  abstract: Type.Optional(Type.String({ description: "Short command summary for create." })),
   command: Type.Optional(Type.String({
-    description: "Provide one foreground Bash command. Do not use nohup, setsid, disown, a trailing ampersand, or another daemon escape.",
+    description: "Foreground Bash command for create. Do not use nohup, setsid, disown, trailing &, or another detach escape.",
   })),
-  cwd: Type.Optional(Type.String({ description: "For create, provide an optional working directory." })),
+  cwd: Type.Optional(Type.String({ description: "Working directory for create. Defaults to the current session directory." })),
   notifyOn: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), {
     maxItems: 20,
     uniqueItems: true,
-    description: "For create, provide unique case-sensitive literal matchers.",
+    description: "Up to 20 unique case-sensitive literal matchers for create. Each matcher is at most 500 characters.",
   })),
-  id: Type.Optional(Type.String({ description: "For delete or status, provide the exact monitor ID." })),
-  start: Type.Optional(Type.Integer({ minimum: 0, description: "For status, skip this many newest log lines." })),
+  id: Type.Optional(Type.String({ description: "Exact eight-character lowercase hexadecimal monitor ID for delete or status." })),
+  start: Type.Optional(Type.Integer({ minimum: 0, description: "Newest retained log lines to skip for status. Defaults to 0." })),
   end: Type.Optional(Type.Integer({
     minimum: 1,
-    description: "For status, read through this reverse log offset. Set `start` to the prior `end` for older lines.",
+    description: "Reverse log offset ending the status window. Defaults to 100 and must exceed start by at most 2000.",
   })),
 }, { additionalProperties: false });
 
@@ -499,17 +499,12 @@ export class MonitorRuntime {
       name: "monitor",
       label: "Monitor",
       executionMode: "sequential",
-      description: "Create and manage foreground long-running Bash commands while Pi remains available. Monitor owns each process group. Terminal results remain available until deletion or runtime shutdown.",
-      promptSnippet: "Manage foreground long-running commands by monitor ID.",
+      description: "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher, summary, and terminal notifications report noteworthy output and completion. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one detailed record with retained combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.",
+      promptSnippet: "Supervise long-running foreground commands.",
       promptGuidelines: [
-        "Create a monitor for foreground long-running commands that should continue while Pi remains available.",
-        "Let monitor own the complete process group for every monitored command.",
-        "Never detach a monitor command with nohup, setsid, disown, or a background ampersand.",
-        "Use monitor `notifyOn` for case-sensitive literal alerts that merit attention before completion.",
-        "Use `monitor list` to inspect current monitors without polling command output.",
-        "Do not poll running monitors with repeated `monitor status` calls.",
-        "After a monitor terminal notification, call `monitor status` to inspect results, then call `monitor delete`.",
-        "Expect runtime shutdown to terminate monitor process groups and discard retained terminal results.",
+        "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
+        "Do not poll a running monitor with repeated `monitor status` calls.",
+        "`monitor list` summarizes all records, while `monitor status` returns one record's detailed state and logs.",
       ],
       parameters: monitorParameters,
       execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => this.execute(params as MonitorInput, ctx),

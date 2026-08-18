@@ -126,6 +126,11 @@ test("Ctrl+O expands complete action-specific call input without duplicate Actio
   const replyExpanded = render(renderSubagentCall(replyArgs, theme, { expanded: true }));
   assertFull(replyExpanded, ["subagent · reply", "Run: run-full", "Reply line one", "<results>reply payload</results>", "Reply line three"]);
 
+  const statusCollapsed = render(renderSubagentCall({ action: "status", id: "run-status-full" }, theme, { expanded: false }));
+  const statusExpanded = render(renderSubagentCall({ action: "status", id: "run-status-full" }, theme, { expanded: true }));
+  assert.equal(statusCollapsed, "subagent · status · run-status-full (ctrl+o to expand)");
+  assert.equal(statusExpanded, "subagent · status\nRun: run-status-full");
+
   const interruptCollapsed = render(renderSubagentCall({ action: "interrupt", id: "run-interrupt-full" }, theme, { expanded: false }));
   const interruptExpanded = render(renderSubagentCall({ action: "interrupt", id: "run-interrupt-full" }, theme, { expanded: true }));
   assert.equal(interruptCollapsed, "subagent · interrupt (ctrl+o to expand)\nRun: run-interrupt-full");
@@ -134,19 +139,20 @@ test("Ctrl+O expands complete action-specific call input without duplicate Actio
   const listCollapsed = render(renderSubagentCall({ action: "list" }, theme, { expanded: false }));
   assert.equal(listCollapsed, "subagent · list (ctrl+o to expand)");
   const listExpanded = render(renderSubagentCall({ action: "list" }, theme, { expanded: true }));
-  assertFull(listExpanded, ["subagent · list", "every retained run status", "abstract", "waiting reason", "terminal output or error"]);
-  assert.doesNotMatch(listExpanded, /activity|task/i);
+  assertFull(listExpanded, ["subagent · list", "compact public state", "every retained run", "without terminal results"]);
+  assert.doesNotMatch(listExpanded, /activity|task|output|error/i);
 
   const clearCollapsed = render(renderSubagentCall({ action: "clear" }, theme, { expanded: false }));
   assert.equal(clearCollapsed, "subagent · clear (ctrl+o to expand)");
   const clearExpanded = render(renderSubagentCall({ action: "clear" }, theme, { expanded: true }));
-  assertFull(clearExpanded, ["subagent · clear", "Removes every retained run record", "child session file", "Goal-owned stats sidecar"]);
+  assertFull(clearExpanded, ["subagent · clear", "Clears retained Subagent history", "run files", "child session files", "warnings"]);
+  assert.doesNotMatch(clearExpanded, /Goal|sidecar/i);
 
-  for (const value of [createCollapsed, resumeCollapsed, steerCollapsed, replyCollapsed, interruptCollapsed, listCollapsed, clearCollapsed]) {
+  for (const value of [createCollapsed, resumeCollapsed, steerCollapsed, replyCollapsed, statusCollapsed, interruptCollapsed, listCollapsed, clearCollapsed]) {
     assert.match(value.split("\n")[0], /\(ctrl\+o to expand\)$/);
     assert.doesNotMatch(value, /Action:/);
   }
-  for (const value of [createExpanded, resumeExpanded, steerExpanded, replyExpanded, interruptExpanded, listExpanded, clearExpanded]) {
+  for (const value of [createExpanded, resumeExpanded, steerExpanded, replyExpanded, statusExpanded, interruptExpanded, listExpanded, clearExpanded]) {
     assert.doesNotMatch(value, /\(ctrl\+o to expand\)|Action:/);
   }
 });
@@ -242,8 +248,9 @@ test("terminal immediate results expand only final output and error", () => {
   assert.doesNotMatch(expanded, /Task:|Cwd:|Model:|Activity|Response:|Live response|Session:/);
 });
 
-test("Ctrl+O expands list waiting reasons and terminal results without exposing excluded run data", () => {
+test("Ctrl+O expands list public summary fields without leaking terminal results or internal run data", () => {
   const result = {
+    content: [{ type: "text", text: "LIST_MODEL_CONTENT_SENTINEL" }],
     details: {
       runs: [
         run({
@@ -298,29 +305,28 @@ test("Ctrl+O expands list waiting reasons and terminal results without exposing 
   assertFull(collapsed, [
     "Retained subagent run status · 3",
     "✓  fixer [terminal-id] · completed  TERMINAL_ABSTRACT_SENTINEL",
-    "Output: OUTPUT_SENTINEL",
-    "Error: ERROR_SENTINEL",
     "●  explorer [active-id] · running  active abstract",
     "!  fixer [waiting-id] · waiting  waiting abstract",
   ]);
-  assert.doesNotMatch(collapsed, /Reason:|interview_request/);
+  assert.doesNotMatch(collapsed, /Reason:|Source run:|Live:|interview_request|OUTPUT_SENTINEL|ERROR_SENTINEL/);
   assert.doesNotMatch(collapsed, /[✓●!] [^ ]|[✓●!] {3}/);
   const expanded = render(renderSubagentResult(result, { expanded: true, isPartial: false }, theme, { args: { action: "list" } }));
   assertFull(expanded, [
     "Retained subagent run status · 3",
     "✓  fixer [terminal-id] · completed  TERMINAL_ABSTRACT_SENTINEL",
-    "Output:",
-    "OUTPUT_SENTINEL",
-    "Error:",
-    "ERROR_SENTINEL",
+    "Live: false",
+    "Source run: SOURCE_SENTINEL",
     "●  explorer [active-id] · running  active abstract",
     "!  fixer [waiting-id] · waiting  waiting abstract",
     "Reason: interview_request",
   ]);
+  assert.doesNotMatch(expanded, /OUTPUT_SENTINEL|ERROR_SENTINEL|ACTIVE_OUTPUT_SENTINEL|ACTIVE_ERROR_SENTINEL|WAITING_OUTPUT_SENTINEL|WAITING_ERROR_SENTINEL/);
   assert.deepEqual(result, before);
+  assert.doesNotMatch(collapsed, /LIST_MODEL_CONTENT_SENTINEL/);
+  assert.doesNotMatch(expanded, /LIST_MODEL_CONTENT_SENTINEL/);
   for (const sentinel of [
     "TASK_SENTINEL", "CWD_SENTINEL", "MODEL_SENTINEL", "TOOLS_SENTINEL", "CREATED_SENTINEL",
-    "UPDATED_SENTINEL", "SESSION_SENTINEL", "SOURCE_SENTINEL", "ACTIVITY_SENTINEL", "ACTIVITY_TOOL_SENTINEL",
+    "UPDATED_SENTINEL", "SESSION_SENTINEL", "ACTIVITY_SENTINEL", "ACTIVITY_TOOL_SENTINEL",
     "NOTIFICATION_SENTINEL", "ACTIVE_TASK_SENTINEL",
     "ACTIVE_ACTIVITY_SENTINEL", "ACTIVE_OUTPUT_SENTINEL", "ACTIVE_ERROR_SENTINEL", "WAITING_TASK_SENTINEL",
     "WAITING_ACTIVITY_SENTINEL", "WAITING_OUTPUT_SENTINEL", "WAITING_ERROR_SENTINEL",
@@ -329,7 +335,51 @@ test("Ctrl+O expands list waiting reasons and terminal results without exposing 
     assert.doesNotMatch(collapsed, new RegExp(sentinel));
     assert.doesNotMatch(expanded, new RegExp(sentinel));
   }
-  assert.doesNotMatch(expanded, /Task:|Cwd:|Tools:|Model:|Created:|Updated:|Session:|Source run:|Live response:|Message:|Interview:/);
+  assert.doesNotMatch(expanded, /Task:|Cwd:|Tools:|Model:|Created:|Updated:|Session:|Live response:|Message:|Interview:|Output:|Error:/);
+});
+
+test("status result stays single-line collapsed and expands only public summary fields plus terminal results", () => {
+  const terminal = {
+    content: [{ type: "text", text: JSON.stringify({ model: "content must stay invariant" }) }],
+    details: { run: run({
+      id: "status-terminal", status: "failed", abstract: "status terminal abstract", live: false,
+      sourceRunId: "status-source", reason: undefined,
+      output: "STATUS_OUTPUT_SENTINEL\n<results>status output payload</results>",
+      error: "STATUS_ERROR_SENTINEL\n<results>status error payload</results>",
+    }) },
+  };
+  const before = structuredClone(terminal);
+  const context = { args: { action: "status", id: "status-terminal" } };
+  const collapsed = render(renderSubagentResult(terminal, { expanded: false, isPartial: false }, theme, context));
+  assert.equal(collapsed, "✗  fixer [status-terminal] · failed  status terminal abstract");
+  assert.doesNotMatch(collapsed, /Live:|Source run:|STATUS_OUTPUT|STATUS_ERROR|Task:|Model:/);
+  const expanded = render(renderSubagentResult(terminal, { expanded: true, isPartial: false }, theme, context));
+  assertFull(expanded, [
+    "✗  fixer [status-terminal] · failed  status terminal abstract",
+    "Live: false", "Source run: status-source",
+    "<results>status output payload</results>", "<results>status error payload</results>",
+  ]);
+  assert.doesNotMatch(expanded, /Task:|Cwd:|Model:|Tools:|Created:|Updated:|Session:|Activity|Request:|waitingSeq|notificationPending|content must stay invariant/);
+  assert.deepEqual(terminal, before);
+
+  const waiting = {
+    content: [{ type: "text", text: "waiting model content" }],
+    details: { run: {
+      id: "status-waiting", agent: "explorer", abstract: "status waiting abstract",
+      status: "waiting", live: true, reason: "progress_update",
+      output: "NONTERMINAL_OUTPUT_SENTINEL", error: "NONTERMINAL_ERROR_SENTINEL",
+    } },
+  };
+  const waitingBefore = structuredClone(waiting);
+  const waitingExpanded = render(renderSubagentResult(
+    waiting, { expanded: true, isPartial: false }, theme, { args: { action: "status", id: "status-waiting" } },
+  ));
+  assertFull(waitingExpanded, [
+    "!  explorer [status-waiting] · waiting  status waiting abstract",
+    "Live: true", "Reason: progress_update",
+  ]);
+  assert.doesNotMatch(waitingExpanded, /NONTERMINAL_OUTPUT|NONTERMINAL_ERROR|Output:|Error:|waiting model content/);
+  assert.deepEqual(waiting, waitingBefore);
 });
 
 test("clear receipts stay compact when collapsed and list every retained-item warning when expanded", () => {
@@ -339,7 +389,7 @@ test("clear receipts stay compact when collapsed and list every retained-item wa
       clearedCount: 3,
       warnings: [
         "Retained child session file for run-a: SESSION_WARNING_SENTINEL",
-        "Retained Goal stats sidecars because this branch has no Goal snapshot.",
+        "Retained run directory for run-b: RUN_DIRECTORY_WARNING_SENTINEL",
       ],
       changed: true,
     },
@@ -353,8 +403,9 @@ test("clear receipts stay compact when collapsed and list every retained-item wa
     "✓  Cleared 3 retained runs · 2 retained items",
     "Warnings:",
     "• Retained child session file for run-a: SESSION_WARNING_SENTINEL",
-    "• Retained Goal stats sidecars because this branch has no Goal snapshot.",
+    "• Retained run directory for run-b: RUN_DIRECTORY_WARNING_SENTINEL",
   ]);
+  assert.doesNotMatch(expanded, /Goal|sidecar/i);
 
   const unchanged = {
     content: [{ type: "text", text: "No retained subagent runs to clear." }],
@@ -476,6 +527,15 @@ test("tool-result fallback collapses safely and expands full content", () => {
   ));
   assertFull(expanded, ["Fallback", "<results>fallback payload</results>", "Fallback line three"]);
   assert.deepEqual(result, before);
+
+  const statusCollapsed = render(renderSubagentResult(
+    result, { expanded: false, isPartial: true }, theme, { args: { action: "status", id: "missing-shape" } },
+  ));
+  const statusExpanded = render(renderSubagentResult(
+    result, { expanded: true, isPartial: true }, theme, { args: { action: "status", id: "missing-shape" } },
+  ));
+  assert.equal(statusCollapsed, collapsed);
+  assert.equal(statusExpanded, expanded);
 
   const emptyPartial = render(renderSubagentResult(
     { content: [] }, { expanded: false, isPartial: true }, theme, { args: { action: "create" } },

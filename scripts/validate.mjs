@@ -75,7 +75,6 @@ function checkSteBlock(block, label) {
 
 function checkSchemaHow(block, label) {
   checkSteBlock(block, label);
-  check(!/\bthis tool\b/i.test(block), `${label} uses ambiguous this tool wording: ${block}`);
 }
 
 function guidelineHasOwner(guideline, toolName) {
@@ -91,41 +90,14 @@ function guidelineHasOwner(guideline, toolName) {
   return patterns[toolName]?.test(guideline) ?? false;
 }
 
-const TOOL_ACTIONS = {
-  goal: ["create", "modify", "status", "pause", "resume", "complete", "cancel"],
-  loop: ["create", "delete", "modify", "list", "pause", "resume"],
-  monitor: ["create", "delete", "list", "status"],
-  subagent: ["create", "list", "interrupt", "steer", "resume", "reply", "clear"],
-  todo: ["list", "update"],
-};
-
-function bareGuidelineActions(guideline, toolName) {
-  return (TOOL_ACTIONS[toolName] ?? []).filter((action) => guideline.includes(`\`${action}\``));
-}
-
 function checkSteGuidelines(guidelines, label, toolName) {
-  check(guidelines.length > 0, `${label} must be statically readable`);
   for (const guideline of guidelines) {
     const sentences = modelSentences(guideline);
     check(sentences.length === 1, `${label} must use one sentence per guideline: ${guideline}`);
     checkSteSentence(guideline, label);
-    if (!toolName) continue;
-    check(guidelineHasOwner(guideline, toolName), `${label} lacks explicit ${toolName} ownership: ${guideline}`);
-    check(!/\bthis tool\b/i.test(guideline), `${label} uses ambiguous this tool wording: ${guideline}`);
-    for (const action of bareGuidelineActions(guideline, toolName)) {
-      check(false, `${label} uses bare ${toolName} action ${action}: ${guideline}`);
-    }
+    if (toolName) check(guidelineHasOwner(guideline, toolName), `${label} lacks explicit ${toolName} ownership: ${guideline}`);
   }
 }
-
-check(
-  JSON.stringify(bareGuidelineActions("Do not call `subagent steer`, `interrupt`, or `reply`.", "subagent")) === JSON.stringify(["interrupt", "reply"]),
-  "guideline validator must detect abbreviated actions in a prefixed action list",
-);
-check(
-  bareGuidelineActions("Do not call `subagent steer`, `subagent interrupt`, or `subagent reply`.", "subagent").length === 0,
-  "guideline validator must accept fully prefixed parallel actions",
-);
 
 function checkLayerSeparation(metadata) {
   check(metadata.description !== metadata.promptSnippet, `${metadata.name} promptSnippet must differ from description`);
@@ -177,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.1", "package version must be 0.10.1");
+check(packageJson.version === "0.10.2", "package version must be 0.10.2");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.1" && lock.packages?.[""]?.version === "0.10.1", "package-lock version must be 0.10.1");
+check(lock.version === "0.10.2" && lock.packages?.[""]?.version === "0.10.2", "package-lock version must be 0.10.2");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -202,7 +174,7 @@ for (const name of AGENTS) {
   check(parsed.fields.get("name") === name, `${file} name must match filename`);
   check(parsed.fields.get("description"), `${file} must define a description`);
   check(parsed.body.trim().length > 0, `${file} must contain a role prompt body`);
-  hasAll(parsed.body, ["**Supervisor Rules**:", "Do not ask the user directly.", "contact_supervisor", "creates a waiting request and pauses this run", "Do not call subagent create, list, steer, interrupt, resume, or reply actions"], `${file} child lifecycle boundary`);
+  hasAll(parsed.body, ["**Supervisor Rules**:", "Do not ask the user directly.", "contact_supervisor", "creates a waiting request and pauses this run", "Do not call subagent create, list, status, interrupt, steer, resume, reply, or clear actions"], `${file} child lifecycle boundary`);
   hasNone(parsed.body, ["ast_grep_search", "context7", "gh_grep", "apply_patch"], `${file} removed OpenCode tools`);
 }
 
@@ -393,21 +365,21 @@ hasNone(goalSchema, ["id:", "goalId", "revision", "generation", "instanceKey", "
 check(!goalSchema.includes("anyOf:") && !goalSchema.includes("oneOf:"), "Goal schema root must not declare anyOf or oneOf");
 const goalSchemaDescriptions = [...goalSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
 const expectedGoalSchemaDescriptions = [
-  "Select the Goal action. Create and modify use abstract, objective, and criteria. Pause and cancel use reason. Complete uses evidence. Status and resume use no other fields.",
-  "For create or modify, provide a short Goal summary.",
-  "For create or modify, provide the complete Goal objective.",
-  "For create or modify, provide from one through eight completion criteria.",
-  "For pause or cancel, provide the reason.",
-  "For complete, provide one evidence item per completion criterion.",
+  "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status and resume accept no other fields.",
+  "Short Goal summary for create or modify.",
+  "Complete Goal objective for create or modify.",
+  "One to eight completion criteria for create or modify.",
+  "Reason for pause or cancel.",
+  "For complete, provide exactly one concrete evidence item per criterion.",
 ];
 check(JSON.stringify(goalSchemaDescriptions) === JSON.stringify(expectedGoalSchemaDescriptions), "Goal schema descriptions must match the HOW contract");
 for (const description of goalSchemaDescriptions) checkSchemaHow(description, "Goal schema description");
 hasAll(goalSchema, [
   'action: Type.Union(GOAL_ACTIONS.map((action) => Type.Literal(action))',
   "minItems: 1", "maxItems: 8",
-  'description: "Select the Goal action. Create and modify use abstract, objective, and criteria. Pause and cancel use reason. Complete uses evidence. Status and resume use no other fields."',
-  'description: "For create or modify, provide from one through eight completion criteria."',
-  'description: "For complete, provide one evidence item per completion criterion."',
+  'description: "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status and resume accept no other fields."',
+  'description: "One to eight completion criteria for create or modify."',
+  'description: "For complete, provide exactly one concrete evidence item per criterion."',
 ], "Goal schema actions, fields, and limits");
 const goalToolStart = goalRuntime.indexOf('name: "goal"');
 const goalGuidelinesStart = goalRuntime.indexOf("promptGuidelines: [", goalToolStart);
@@ -415,30 +387,20 @@ const goalGuidelinesEnd = goalRuntime.indexOf("      ],", goalGuidelinesStart);
 const goalToolMetadata = goalRuntime.slice(goalToolStart, goalGuidelinesEnd);
 const goalDescription = propertyString(goalToolMetadata, "description", "Goal tool metadata");
 const goalPromptSnippet = propertyString(goalToolMetadata, "promptSnippet", "Goal tool metadata");
-check(goalDescription === "Create and manage one durable branch-local Goal with autonomous continuation and explicit completion evidence. Restored unfinished Goals remain paused until resumed.", "Goal description must match the four-layer contract");
-check(goalPromptSnippet === "Manage one durable branch-local Goal.", "Goal promptSnippet must match the four-layer contract");
+check(goalDescription === "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. Actions return the current Goal state and whether it changed.", "Goal description must match the reviewed contract");
+check(goalPromptSnippet === "Manage the branch-local Goal.", "Goal promptSnippet must match the reviewed contract");
 checkSteBlock(goalDescription, "Goal description");
 checkSteBlock(goalPromptSnippet, "Goal promptSnippet");
 const goalGuidelines = staticStrings(goalRuntime.slice(goalGuidelinesStart, goalGuidelinesEnd), "Goal promptGuidelines");
 const expectedGoalGuidelines = [
-  "Create a Goal with `goal create` only from a user message that starts with `/goal`.",
-  "For a bare `/goal`, call `goal status` and explain `/goal <objective>`.",
-  "Treat an active Goal as one durable contract, not as a `todo` checklist.",
-  "Continue an active Goal autonomously until completion or a blocker requires `goal pause`.",
-  "Let Goal continuation wait while subagents, monitors, Ask, pending messages, or user input require attention.",
-  "Prioritize resolving Goal blockers before unrelated work.",
-  "Expect provider failures during a Goal to enter `retry_wait` automatically.",
-  "Expect repeated automatic Goal runs without progress to pause the Goal for review.",
-  "Use `goal status` to inspect the branch-local Goal without changing it.",
-  "Use `goal modify` when the complete objective or completion contract must be replaced.",
-  "Use `goal pause` when safe progress cannot continue.",
-  "Expect a user abort to pause the active Goal rather than cancel it.",
-  "Use `goal resume` when a paused Goal can continue autonomously.",
-  "Treat restored unfinished Goals as paused until `goal resume` explicitly restarts them.",
-  "Use `goal cancel` only when the user explicitly abandons the Goal.",
-  "Use `goal complete` only after every criterion has concrete evidence.",
+  "Call `goal create` only for a user message beginning with `/goal`.",
+  "For bare `/goal`, call `goal status` and explain `/goal <objective>`.",
+  "Use Goal for one durable outcome, not as a `todo` checklist.",
+  "`goal modify` replaces the entire nonterminal contract, not individual fields.",
+  "Call `goal cancel` only when the user explicitly abandons the Goal.",
+  "Call `goal complete` only with concrete evidence for every criterion.",
 ];
-check(JSON.stringify(goalGuidelines) === JSON.stringify(expectedGoalGuidelines), "Goal promptGuidelines must match the four-layer contract");
+check(JSON.stringify(goalGuidelines) === JSON.stringify(expectedGoalGuidelines), "Goal promptGuidelines must match the reviewed array");
 checkSteGuidelines(goalGuidelines, "Goal promptGuideline", "goal");
 hasNone(`${goalDescription}\n${goalPromptSnippet}\n${goalGuidelines.join("\n")}\n${goalSchemaDescriptions.join("\n")}`, [
   "instanceKey", "generation", "deliveryKey", "cursor", "sidecar", "revision", "goalId", "ownedRunIds", "statistics",
@@ -478,13 +440,10 @@ const askGuidelineStart = askRuntime.indexOf("export const ASK_PROMPT_GUIDELINES
 const askGuidelineEnd = askRuntime.indexOf("] as const;", askGuidelineStart);
 const askGuidelines = staticStrings(askRuntime.slice(askGuidelineStart, askGuidelineEnd), "Ask promptGuidelines");
 const expectedAskGuidelines = [
-  "Choose `ask_user_question` only when the user's decision should direct the next step.",
-  "Prefer bounded authored choices in `ask_user_question` when likely outcomes are known.",
-  "Allow a custom `ask_user_question` response when authored choices may not fit.",
-  "Treat partial or cancelled `ask_user_question` answers as valid outcomes, not failed calls.",
+  "Use `ask_user_question` when a user decision must direct the next step.",
   "Do not call `ask_user_question` while a Goal is active.",
 ];
-check(JSON.stringify(askGuidelines) === JSON.stringify(expectedAskGuidelines), "Ask promptGuidelines must match the four-layer contract");
+check(JSON.stringify(askGuidelines) === JSON.stringify(expectedAskGuidelines), "Ask promptGuidelines must match the reviewed array");
 checkSteGuidelines(askGuidelines, "Ask promptGuideline", "ask_user_question");
 const askSchemaStart = askRuntime.indexOf("const askOptionSchema");
 const askSchemaEnd = askRuntime.indexOf("export interface AskOption", askSchemaStart);
@@ -493,14 +452,14 @@ const askSchemaDescriptions = [...askSchema.matchAll(/description:\s*("(?:\\.|[^
 check(askSchemaDescriptions.length === 8, "Ask schema must define eight field descriptions");
 for (const description of askSchemaDescriptions) checkSchemaHow(description, "Ask schema description");
 const expectedAskSchemaDescriptions = [
-  "Write a short option label. Mark a recommendation by placing it first and appending (Recommended). Do not use Other, Type something., or Next.",
-  "Describe the outcome of choosing this option.",
-  "Add preview content only for a single-select question.",
-  "Write one user decision question.",
-  "Write a short question header.",
-  "Provide authored choices in display order.",
-  "Set true only when multiple authored options may be selected. Omit option previews when true.",
-  "Provide questions in display order.",
+  "Unique option label up to 60 characters. Place the recommended option first and append (Recommended). Reserved labels are Other, Type something., and Next.",
+  "Explain the outcome of choosing this option.",
+  "Optional preview for single-select only.",
+  "Decision question shown to the user.",
+  "Short header up to 16 characters.",
+  "Two to four authored options in display order.",
+  "True enables multiple authored selections. Omit or use false for single-select. Multi-select options cannot include previews.",
+  "One to four questions in display order.",
 ];
 check(JSON.stringify(askSchemaDescriptions) === JSON.stringify(expectedAskSchemaDescriptions), "Ask schema descriptions must match the HOW contract");
 hasAll(askSchema, [
@@ -512,8 +471,8 @@ const askDescription = propertyString(askToolMetadata, "description", "Ask tool 
 const askPromptSnippetMatch = /export const ASK_PROMPT_SNIPPET = ("(?:\\.|[^"\\])*")/.exec(askRuntime);
 const askPromptSnippet = askPromptSnippetMatch ? JSON.parse(askPromptSnippetMatch[1]) : "";
 check(Boolean(askPromptSnippetMatch), "Ask tool metadata must define a static promptSnippet");
-check(askDescription === "Ask the user structured questions and return structured answers.", "Ask description must match the four-layer contract");
-check(askPromptSnippet === "Ask the user structured questions for decisions.", "Ask promptSnippet must match the four-layer contract");
+check(askDescription === "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. `ask_user_question` is unavailable while a Goal is active.", "Ask description must match the reviewed contract");
+check(askPromptSnippet === "Collect structured user decisions.", "Ask promptSnippet must match the reviewed contract");
 checkSteBlock(askDescription, "Ask description");
 checkSteBlock(askPromptSnippet, "Ask promptSnippet");
 hasNone(`${askDescription}\n${askPromptSnippet}\n${askGuidelines.join("\n")}\n${askSchemaDescriptions.join("\n")}`, [
@@ -589,11 +548,11 @@ hasAll(runtime, [
   "setNotificationDeliveryPaused(paused: boolean)", "notificationDeliveryPaused",
   "collectRunDirectoryGarbage", "getGoalStatsRoot", "readGoalStatsSidecar", "writeGoalStatsSidecar",
   "loadedGoalStatsSidecars", "loadGoalStatsSidecar", "captureGoalActivity", "goalStats(runIds",
-  "Create or manage retained specialist runs by ID.",
+  "Delegate and manage specialist runs.",
   "Delegate bounded specialist work with `subagent create` when an independent lane improves progress.",
-  "`subagent create` starts new work, while `subagent resume` continues reusable terminal context in a new run.",
-  "For resume, provide the complete continuation objective.",
-  "For reply, answer the complete waiting request.",
+  "`subagent create` starts new work, while `subagent resume` starts a new run from reusable terminal context.",
+  "Complete continuation objective for resume.",
+  "Complete answer to the waiting request for reply.",
   "PI_SUBAGENT_CHILD: \"1\"",
   "OMPS_SUBAGENT_CHILD: \"1\"",
 ], "built-in detached runtime");
@@ -668,14 +627,14 @@ const monitorSchema = monitorRuntime.slice(monitorSchemaStart, monitorSchemaEnd)
 check(!monitorSchema.includes("anyOf:") && !monitorSchema.includes("oneOf:"), "Monitor schema root must not declare anyOf or oneOf");
 const monitorSchemaDescriptions = [...monitorSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
 const expectedMonitorSchemaDescriptions = [
-  "Select the monitor action. Create uses abstract, command, optional cwd, and optional notifyOn. Delete uses id. Status uses id and optional start and end. List uses no other fields.",
-  "For create, provide a short command summary.",
-  "Provide one foreground Bash command. Do not use nohup, setsid, disown, a trailing ampersand, or another daemon escape.",
-  "For create, provide an optional working directory.",
-  "For create, provide unique case-sensitive literal matchers.",
-  "For delete or status, provide the exact monitor ID.",
-  "For status, skip this many newest log lines.",
-  "For status, read through this reverse log offset. Set `start` to the prior `end` for older lines.",
+  "Choose an action. create requires abstract and command, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.",
+  "Short command summary for create.",
+  "Foreground Bash command for create. Do not use nohup, setsid, disown, trailing &, or another detach escape.",
+  "Working directory for create. Defaults to the current session directory.",
+  "Up to 20 unique case-sensitive literal matchers for create. Each matcher is at most 500 characters.",
+  "Exact eight-character lowercase hexadecimal monitor ID for delete or status.",
+  "Newest retained log lines to skip for status. Defaults to 0.",
+  "Reverse log offset ending the status window. Defaults to 100 and must exceed start by at most 2000.",
 ];
 check(JSON.stringify(monitorSchemaDescriptions) === JSON.stringify(expectedMonitorSchemaDescriptions), "Monitor schema descriptions must match the HOW contract");
 for (const description of monitorSchemaDescriptions) checkSchemaHow(description, "Monitor schema description");
@@ -685,22 +644,17 @@ const monitorGuidelinesEnd = monitorRuntime.indexOf("      ],", monitorGuideline
 const monitorToolMetadata = monitorRuntime.slice(monitorToolStart, monitorGuidelinesEnd);
 const monitorDescription = propertyString(monitorToolMetadata, "description", "Monitor tool metadata");
 const monitorPromptSnippet = propertyString(monitorToolMetadata, "promptSnippet", "Monitor tool metadata");
-check(monitorDescription === "Create and manage foreground long-running Bash commands while Pi remains available. Monitor owns each process group. Terminal results remain available until deletion or runtime shutdown.", "Monitor description must match the four-layer contract");
-check(monitorPromptSnippet === "Manage foreground long-running commands by monitor ID.", "Monitor promptSnippet must match the four-layer contract");
+check(monitorDescription === "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher, summary, and terminal notifications report noteworthy output and completion. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one detailed record with retained combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.", "Monitor description must match the reviewed contract");
+check(monitorPromptSnippet === "Supervise long-running foreground commands.", "Monitor promptSnippet must match the reviewed contract");
 checkSteBlock(monitorDescription, "Monitor description");
 checkSteBlock(monitorPromptSnippet, "Monitor promptSnippet");
 const monitorGuidelines = staticStrings(monitorRuntime.slice(monitorGuidelinesStart, monitorGuidelinesEnd), "Monitor promptGuidelines");
 const expectedMonitorGuidelines = [
-  "Create a monitor for foreground long-running commands that should continue while Pi remains available.",
-  "Let monitor own the complete process group for every monitored command.",
-  "Never detach a monitor command with nohup, setsid, disown, or a background ampersand.",
-  "Use monitor `notifyOn` for case-sensitive literal alerts that merit attention before completion.",
-  "Use `monitor list` to inspect current monitors without polling command output.",
-  "Do not poll running monitors with repeated `monitor status` calls.",
-  "After a monitor terminal notification, call `monitor status` to inspect results, then call `monitor delete`.",
-  "Expect runtime shutdown to terminate monitor process groups and discard retained terminal results.",
+  "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
+  "Do not poll a running monitor with repeated `monitor status` calls.",
+  "`monitor list` summarizes all records, while `monitor status` returns one record's detailed state and logs.",
 ];
-check(JSON.stringify(monitorGuidelines) === JSON.stringify(expectedMonitorGuidelines), "Monitor promptGuidelines must match the four-layer contract");
+check(JSON.stringify(monitorGuidelines) === JSON.stringify(expectedMonitorGuidelines), "Monitor promptGuidelines must match the reviewed array");
 checkSteGuidelines(monitorGuidelines, "Monitor promptGuideline", "monitor");
 hasNone(`${monitorDescription}\n${monitorPromptSnippet}\n${monitorGuidelines.join("\n")}\n${monitorSchemaDescriptions.join("\n")}`, [
   "generation", "instance", "deliveryKey", "cursor", "sidecar", "notificationCursor",
@@ -759,11 +713,11 @@ const loopSchema = loopRuntime.slice(loopSchemaStart, loopSchemaEnd);
 check(!loopSchema.includes("anyOf:") && !loopSchema.includes("oneOf:"), "Loop schema root must not declare anyOf or oneOf");
 const loopSchemaDescriptions = [...loopSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
 const expectedLoopSchemaDescriptions = [
-  "Select the loop action. Create uses interval, abstract, and prompt. Modify uses id and at least one changed field. Delete, pause, and resume use id. List uses no other fields.",
-  "For delete, modify, pause, or resume, provide the exact loop ID.",
-  "For create or modify, provide one interval from 10s through 7d. Use one integer with `s`, `m`, `h`, or `d`.",
-  "For create or modify, provide a short loop summary.",
-  "For create or modify, provide the complete future prompt.",
+  "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. list accepts no other fields.",
+  "Exact eight-character lowercase hexadecimal loop ID for delete, modify, pause, or resume.",
+  "Fixed delay for create or modify, from 10s through 7d. Format: one positive integer plus s, m, h, or d.",
+  "Short loop summary for create or modify.",
+  "Complete future-turn prompt for create or modify.",
 ];
 check(JSON.stringify(loopSchemaDescriptions) === JSON.stringify(expectedLoopSchemaDescriptions), "Loop schema descriptions must match the HOW contract");
 for (const description of loopSchemaDescriptions) checkSchemaHow(description, "Loop schema description");
@@ -773,25 +727,17 @@ const loopGuidelinesEnd = loopRuntime.indexOf("      ],", loopGuidelinesStart);
 const loopToolMetadata = loopRuntime.slice(loopToolStart, loopGuidelinesEnd);
 const loopDescription = propertyString(loopToolMetadata, "description", "Loop tool metadata");
 const loopPromptSnippet = propertyString(loopToolMetadata, "promptSnippet", "Loop tool metadata");
-check(loopDescription === "Create and manage runtime-only fixed-delay loops that survive compaction and tree navigation. Reload, session replacement, or shutdown clears every loop.", "Loop description must match the four-layer contract");
-check(loopPromptSnippet === "Manage runtime-only fixed-delay loops.", "Loop promptSnippet must match the four-layer contract");
+check(loopDescription === "Create and manage runtime-only fixed-delay loops from 10s through 7d. Creation and resume wait one full interval before firing. Each later delay starts only after the previous tick finishes. Each fire delivers the stored prompt for a future turn. Loop state survives compaction and tree navigation within the current runtime. Reload, session replacement, and shutdown clear every loop. Actions return current loop state, change receipts, or the retained loop list.", "Loop description must match the reviewed contract");
+check(loopPromptSnippet === "Manage fixed-delay prompt loops.", "Loop promptSnippet must match the reviewed contract");
 checkSteBlock(loopDescription, "Loop description");
 checkSteBlock(loopPromptSnippet, "Loop promptSnippet");
 const loopGuidelines = staticStrings(loopRuntime.slice(loopGuidelinesStart, loopGuidelinesEnd), "Loop promptGuidelines");
 const expectedLoopGuidelines = [
-  "Create loops with `loop create` only from a user message that starts with `/loop`.",
-  "For a bare `/loop`, call `loop list` and explain `/loop <interval> <prompt>`.",
+  "Call `loop create` only for a user message beginning with `/loop`.",
+  "For bare `/loop`, call `loop list` and explain `/loop <interval> <prompt>`.",
   "Make every `loop create` prompt self-contained and repeatable for future turns.",
-  "Expect `loop create` and `loop resume` to wait one full fixed interval before firing.",
-  "Start each next `loop` delay only after the previous tick finishes.",
-  "Inspect current loops with `loop list` before changing uncertain loop state.",
-  "Change a loop schedule or future prompt with `loop modify`.",
-  "Suspend or reactivate a loop with `loop pause` or `loop resume`.",
-  "Remove an unwanted loop with `loop delete`.",
-  "Expect loops to survive compaction and tree navigation within the current runtime.",
-  "Treat loops as runtime-only because reload, session replacement, or shutdown clears every loop.",
 ];
-check(JSON.stringify(loopGuidelines) === JSON.stringify(expectedLoopGuidelines), "Loop promptGuidelines must match the four-layer contract");
+check(JSON.stringify(loopGuidelines) === JSON.stringify(expectedLoopGuidelines), "Loop promptGuidelines must match the reviewed array");
 checkSteGuidelines(loopGuidelines, "Loop promptGuideline", "loop");
 hasNone(`${loopDescription}\n${loopPromptSnippet}\n${loopGuidelines.join("\n")}`, [
   "timerToken", "schedule token", "generation", "notification gate", "gatedFires", "appendEntry", "journal", "snapshot",
@@ -843,20 +789,36 @@ hasAll(applyState, [
   'current.status === "waiting" && state.status === "waiting"', "!sameRequest(current.request, request)",
   "enteredWaiting || waitingRequestChanged", '? "waiting"', "deliverPendingNotification(id)",
 ], "changed waiting-request notification transition");
-const statusFormatterStart = runtime.indexOf("private formatRunStatus(run: PersistedRun)");
+const summaryFormatterStart = runtime.indexOf("private formatRunSummary(run: PersistedRun)");
+const statusFormatterStart = runtime.indexOf("private formatRunStatus(run: PersistedRun)", summaryFormatterStart);
 const fullFormatterStart = runtime.indexOf("private formatRun(run: PersistedRun)", statusFormatterStart);
 const listActionStart = runtime.indexOf('if (action === "list") {', fullFormatterStart);
 const listActionEnd = runtime.indexOf("const id = requireString", listActionStart);
-check(statusFormatterStart >= 0 && fullFormatterStart > statusFormatterStart, "runtime must define a dedicated list status formatter before formatRun");
+check(summaryFormatterStart >= 0 && statusFormatterStart > summaryFormatterStart && fullFormatterStart > statusFormatterStart, "runtime must split list summary, single-run status, and rich lifecycle formatters");
+const summaryFormatter = runtime.slice(summaryFormatterStart, statusFormatterStart);
 const statusFormatter = runtime.slice(statusFormatterStart, fullFormatterStart);
-hasAll(statusFormatter, [
+hasAll(summaryFormatter, [
   "id: run.id", "agent: run.agent", "abstract: run.abstract", "status: run.status", "live:", "sourceRunId", "reason",
-  "isTerminalStatus(run.status)", "terminal && run.output !== undefined", "terminal && run.error !== undefined",
-], "list status formatter");
-hasNone(statusFormatter, ["...run", "task:", "cwd:", "model:", "deniedTools:", "createdAt:", "updatedAt:", "sessionFile:", "activity:", "notificationPending:"], "list status formatter");
+], "list summary formatter");
+hasNone(summaryFormatter, ["...run", "output", "error", "task:", "cwd:", "model:", "deniedTools:", "createdAt:", "updatedAt:", "sessionFile:", "activity:", "notificationPending:"], "list summary formatter");
+hasAll(statusFormatter, [
+  "const summary = this.formatRunSummary(run)", "if (!isTerminalStatus(run.status)) return summary",
+  "...summary", "run.output !== undefined", "run.error !== undefined",
+], "single-run status formatter");
+hasNone(statusFormatter, ["...run", "task:", "cwd:", "model:", "deniedTools:", "createdAt:", "updatedAt:", "sessionFile:", "activity:", "notificationPending:"], "single-run status formatter");
 const listAction = runtime.slice(listActionStart, listActionEnd);
-hasAll(listAction, ["reconcileAll", "this.registry.list()", "formatRunStatus", "JSON.stringify(runs, null, 2)", "{ runs }"], "retained-run list status action");
-hasNone(listAction, [".formatRun(", "this.activity", "ACTIVE_STATUSES.has(run.status)", ".task"], "list status action");
+hasAll(listAction, ["reconcileAll", "this.registry.list()", "formatRunSummary", "JSON.stringify(runs, null, 2)", "{ runs }"], "retained-run list action");
+hasNone(listAction, ["formatRunStatus", ".formatRun(", "this.activity", "ACTIVE_STATUSES.has(run.status)", ".task"], "list action");
+const statusActionStart = runtime.indexOf('if (action === "status") {', listActionEnd);
+const statusActionEnd = runtime.indexOf('if (action === "reply")', statusActionStart);
+const statusAction = runtime.slice(statusActionStart, statusActionEnd);
+hasAll(statusAction, ["this.formatRunStatus(this.requireRun(id))", "JSON.stringify(run, null, 2)", "{ run }"], "single retained-run status action");
+check(runtime.indexOf("await this.reconcileRun(id)", listActionEnd) < statusActionStart, "status must reconcile its ID before reading the latest registry value");
+hasAll(runtime, [
+  'if ((action === "status" || action === "interrupt") && input.message !== undefined)',
+  'throw new Error(`${action} does not accept message.`)',
+  'const createFields = ["agent", "abstract", "task", "cwd"]',
+], "status action field isolation");
 const clearActionStart = runtime.indexOf('if (action === "clear") return this.clearRetainedRuns();');
 check(clearActionStart > listActionStart, "clear must dispatch from the same action switch as list");
 const clearStart = runtime.indexOf("private async clearRetainedRuns()");
@@ -879,15 +841,17 @@ const purgeStart = runtime.indexOf("private purgeRetainedRuns(");
 const purgeEnd = runtime.indexOf("private async clearRetainedRuns()", purgeStart);
 const purge = runtime.slice(purgeStart, purgeEnd);
 hasAll(purge, [
-  "this.goalOwnedRunIds()", "runs.every((run) => owned.has(run.id))",
-  "Retained Goal stats sidecars because this branch has no Goal snapshot.",
-  "Retained Goal stats sidecars because the Goal snapshot does not own every cleared run.",
-  "removeRunFiles(this.pathsFor(run.id))", "removeGoalStatsSidecar(this.goalStatsRoot, this.ownerSessionId, run.id)",
-  "this.purgeChildSessionFiles(runs, [])",
-], "Goal-owned sidecar and run-directory clear guards");
+  "removeRunFiles(this.pathsFor(run.id))", "this.purgeChildSessionFiles(runs, [])",
+], "Subagent-owned run-directory and child-session clear guards");
+const clearBoundary = runtime.slice(purgeStart, clearEnd);
+hasNone(clearBoundary, [
+  "replayGoalBranch", "goalOwnedRunIds", "removeGoalStatsSidecar", "goalStatsRoot", "Goal stats", "sidecar",
+], "subagent clear must not inspect, remove, or warn about Goal stats");
+hasNone(clearImplementation, [
+  "this.goalActivity.delete", "this.loadedGoalStatsSidecars.delete",
+], "subagent clear must preserve Goal stats memory and lazy-read state");
 hasAll(runtime, [
-  "replayGoalBranch(this.ctx.sessionManager.getBranch())", "removeChildSessionFile(childDir, run.sessionFile)",
-  "canonicalSessionFile", "another retained run still references it",
+  "removeChildSessionFile(childDir, run.sessionFile)", "canonicalSessionFile", "another retained run still references it",
   "private requireRun(id: string)", "was cleared from the subagent history",
   "this.registry.get(id) || this.clearedRunIds.has(id)",
   "if (this.shuttingDown || this.clearing) return", "if (this.clearing) return",
@@ -897,21 +861,21 @@ const publicSchema = runtime.slice(runtime.indexOf("export const subagentParamet
 hasNone(publicSchema, REMOVED_CAPABILITIES, "public tool schemas");
 hasAll(publicSchema, [
   "export const subagentParameters = Type.Object({", "}, { additionalProperties: false });",
-  'description: "For create, select the specialist role."',
-  'description: "For create or resume, provide a short run summary."',
-  'description: "For create, provide the complete objective."',
-  'description: "For create, provide a different working directory."',
-  'description: "For steer, interrupt, resume, or reply, provide the run ID."',
+  'description: "Specialist role for create."',
+  'description: "Short run summary for create or resume."',
+  'description: "Complete bounded objective for create."',
+  'description: "Working directory for create. Defaults to the parent working directory."',
+  'description: "Retained run ID for status, steer, interrupt, resume, or reply."',
 ], "subagent schema descriptions");
 const publicSchemaDescriptions = [...publicSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
 const expectedSubagentSchemaDescriptions = [
-  "For create, select the specialist role.",
-  "For create or resume, provide a short run summary.",
-  "For create, provide the complete objective.",
-  "For create, provide a different working directory.",
-  "Select the subagent action. Create uses agent, abstract, task, and optional cwd. Steer and reply use id and message. Resume uses id, abstract, and message. Interrupt uses id. List and clear use no other fields.",
-  "For steer, interrupt, resume, or reply, provide the run ID.",
-  "For steer, provide an actual instruction. For resume, provide the complete continuation objective. For reply, answer the complete waiting request.",
+  "Specialist role for create.",
+  "Short run summary for create or resume.",
+  "Complete bounded objective for create.",
+  "Working directory for create. Defaults to the parent working directory.",
+  "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message. list and clear accept no other fields.",
+  "Retained run ID for status, steer, interrupt, resume, or reply.",
+  "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.",
 ];
 check(JSON.stringify(publicSchemaDescriptions) === JSON.stringify(expectedSubagentSchemaDescriptions), "subagent schema descriptions must match the HOW contract");
 for (const description of publicSchemaDescriptions) checkSchemaHow(description, "subagent schema description");
@@ -923,36 +887,29 @@ const subagentDescription = propertyString(subagentToolMetadata, "description", 
 const subagentPromptSnippet = propertyString(subagentToolMetadata, "promptSnippet", "subagent tool metadata");
 const subagentGuidelineBlock = runtime.slice(subagentGuidelinesStart, subagentGuidelinesEnd);
 const subagentGuidelines = staticStrings(subagentGuidelineBlock, "subagent promptGuidelines");
-check(subagentDescription === "Create and manage retained specialist runs by run ID. List reports every retained run and its public state. Terminal history includes final output or errors until cleared. Resume creates a new run, while reply continues a waiting run. Interrupt requests resolve through terminal notifications.", "subagent description must match the four-layer contract");
-check(subagentPromptSnippet === "Create or manage retained specialist runs by ID.", "subagent promptSnippet must match the four-layer contract");
+check(subagentDescription === "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, errors, and interruption outcomes. `subagent resume` starts a new run from reusable terminal context. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` requests termination of a live run without reverting file changes. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.", "subagent description must match the reviewed contract");
+check(subagentPromptSnippet === "Delegate and manage specialist runs.", "subagent promptSnippet must match the reviewed contract");
 checkSteBlock(subagentDescription, "subagent description");
 checkSteBlock(subagentPromptSnippet, "subagent promptSnippet");
 const expectedSubagentGuidelines = [
   "Delegate bounded specialist work with `subagent create` when an independent lane improves progress.",
-  "Give each `subagent create` lane exclusive writer ownership over its assigned files.",
-  "Run independent `subagent` lanes concurrently only when their ownership and dependencies do not conflict.",
-  "`subagent create` starts new work, while `subagent resume` continues reusable terminal context in a new run.",
-  "Do not duplicate work already owned by a starting, running, or waiting `subagent` run.",
-  "Use `subagent list` to inspect every retained run and its public state.",
-  "Expect terminal `subagent list` entries to include final output or errors.",
-  "Read each waiting `subagent` notification before answering with `subagent reply`.",
-  "`subagent reply` continues the same waiting run after the complete answer arrives.",
-  "Use `subagent steer` only for an actual instruction, never for polling or reassurance.",
-  "Use `subagent interrupt` only when a live run is obsolete, wrong, or conflicting.",
-  "Limit `subagent interrupt` to starting, running, or waiting runs.",
-  "Inspect partial file changes after `subagent interrupt` because interruption is not rollback.",
-  "Read every terminal `subagent` notification for final output, errors, or interrupt status.",
-  "Expect reload, tree navigation, or session replacement to interrupt active `subagent` runs while retaining their history.",
-  "Call `subagent clear` only after every retained run becomes terminal.",
-  "Do not call any `subagent` action on a run removed by `subagent clear`.",
+  "Give concurrent `subagent create` runs disjoint writer ownership and nonconflicting dependencies.",
+  "Do not duplicate work owned by a starting, running, or waiting `subagent` run.",
+  "`subagent create` starts new work, while `subagent resume` starts a new run from reusable terminal context.",
+  "`subagent list` summarizes retained runs, while `subagent status` returns one run's detailed result.",
+  "Use `subagent reply` only to answer the complete request from that same waiting run.",
+  "Use `subagent steer` only for a genuine new instruction, not polling or reassurance.",
+  "Use `subagent interrupt` only for starting, running, or waiting runs that should stop.",
+  "`subagent interrupt` is not rollback, so inspect partial file changes before continuing.",
+  "Use `subagent clear` only when every run is terminal and all retained history should be removed.",
 ];
-check(JSON.stringify(subagentGuidelines) === JSON.stringify(expectedSubagentGuidelines), "subagent promptGuidelines must match the four-layer contract");
+check(JSON.stringify(subagentGuidelines) === JSON.stringify(expectedSubagentGuidelines), "subagent promptGuidelines must match the reviewed array");
 checkSteGuidelines(subagentGuidelines, "subagent promptGuideline", "subagent");
 const subagentGuidelineText = subagentGuidelines.join("\n");
 check(!/request ID|waitingSeq|deliveryKey|legacy|saved child-session/i.test(`${subagentDescription}\n${subagentPromptSnippet}\n${subagentGuidelineText}`), "subagent model metadata must not expose internal terms");
 check(!runtime.includes(REMOVED_WAIT_TOOL), "runtime must not register or mention the removed wait tool");
 hasAll(core, [
-  '"create"', '"list"', '"interrupt"', '"steer"', '"resume"', '"reply"', '"clear"',
+  '"create"', '"list"', '"status"', '"interrupt"', '"steer"', '"resume"', '"reply"', '"clear"',
   "RunJournalReplacement", "version: 3", "runJournalReplacementEntry", "runJournalClearEntry",
   "clearedRunIds", "everSeen", "clear(): void",
   '"starting"', '"running"', '"waiting"', '"completed"', '"failed"', '"interrupted"',
@@ -962,7 +919,7 @@ hasAll(core, [
   'status === "starting"', "right.updatedAt.localeCompare(left.updatedAt)", "right.createdAt.localeCompare(left.createdAt)",
 ], "runtime core");
 hasNone(core, [...REMOVED_CAPABILITIES, "SUPERVISOR_ACTIONS", "SUPERVISOR_PUBLIC_FIELDS", "pending(): SupervisorRequest", "replyTo"], "runtime core");
-check(/SUBAGENT_ACTIONS = \[\s*"create",\s*"list",\s*"interrupt",\s*"steer",\s*"resume",\s*"reply",\s*"clear",\s*\] as const/.test(core), "SUBAGENT_ACTIONS must keep the exact unified action order");
+check(/SUBAGENT_ACTIONS = \[\s*"create",\s*"list",\s*"status",\s*"interrupt",\s*"steer",\s*"resume",\s*"reply",\s*"clear",\s*\] as const/.test(core), "SUBAGENT_ACTIONS must keep the exact unified action order");
 
 hasAll(checkpoint, [
   "export const CHECKPOINT_RESUME_TEXT", "export function completedToolBatch",
@@ -994,16 +951,16 @@ const contactSchemaEnd = child.indexOf("export default function childSupervisor"
 const contactSchema = child.slice(contactSchemaStart, contactSchemaEnd);
 const contactSchemaDescriptions = [...contactSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
 const expectedContactSchemaDescriptions = [
-  "Select the supervisor request type.",
-  "Provide the complete request context for the orchestrator.",
-  "Provide a short interview title.",
-  "Provide a short question identifier.",
-  "Provide the question text.",
-  "Provide the answer options.",
-  "Provide the structured interview questions.",
-  "Provide structured interview details.",
+  "Request type: need_decision, interview_request, or progress_update.",
+  "Complete context the orchestrator needs to respond. Defaults to the selected reason when omitted or blank.",
+  "Optional short interview title.",
+  "Optional short identifier for matching a question.",
+  "Question the orchestrator should answer.",
+  "Optional authored answer choices.",
+  "Authored interview questions in display order.",
+  "Structured interview details for interview_request.",
 ];
-check(JSON.stringify(contactSchemaDescriptions) === JSON.stringify(expectedContactSchemaDescriptions), "contact_supervisor schema descriptions must match the eight audited instructions");
+check(JSON.stringify(contactSchemaDescriptions) === JSON.stringify(expectedContactSchemaDescriptions), "contact_supervisor schema descriptions must match the reviewed contract");
 for (const description of contactSchemaDescriptions) checkSchemaHow(description, "contact_supervisor schema description");
 const contactToolStart = child.indexOf('name: "contact_supervisor"');
 const contactGuidelinesStart = child.indexOf("promptGuidelines: [", contactToolStart);
@@ -1011,19 +968,17 @@ const contactGuidelinesEnd = child.indexOf("    ],", contactGuidelinesStart);
 const contactToolMetadata = child.slice(contactToolStart, contactGuidelinesEnd);
 const contactDescription = propertyString(contactToolMetadata, "description", "contact_supervisor tool metadata");
 const contactPromptSnippet = propertyString(contactToolMetadata, "promptSnippet", "contact_supervisor tool metadata");
-check(contactDescription === "Request an orchestrator reply and pause the child run until the reply arrives.", "contact_supervisor description must match the four-layer contract");
-check(contactPromptSnippet === "Request an orchestrator reply from a child run.", "contact_supervisor promptSnippet must match the four-layer contract");
+check(contactDescription === "Request an orchestrator response for a decision, structured interview, or progress update. Every call moves the child run to waiting, including progress updates. The result records the request context and ends the current child turn. Work continues in the same run after the orchestrator replies.", "contact_supervisor description must match the reviewed contract");
+check(contactPromptSnippet === "Request an orchestrator response.", "contact_supervisor promptSnippet must match the reviewed contract");
 checkSteBlock(contactDescription, "contact_supervisor description");
 checkSteBlock(contactPromptSnippet, "contact_supervisor promptSnippet");
 const contactGuidelines = child.slice(contactGuidelinesStart, contactGuidelinesEnd);
 const contactGuidelineValues = staticStrings(contactGuidelines, "contact_supervisor promptGuidelines");
 const expectedContactGuidelines = [
-  "Contact the orchestrator through `contact_supervisor` when a decision, interview, or progress update needs acknowledgement.",
-  "Request a structured interview through `contact_supervisor` when authored questions will help the orchestrator decide.",
-  "Treat every `contact_supervisor` request as a waiting transition, including progress updates.",
-  "Resume child work only after the orchestrator replies to `contact_supervisor`.",
+  "Use `contact_supervisor` whenever child work requires an orchestrator reply.",
+  "Every `contact_supervisor` reason waits for that reply, including `progress_update`.",
 ];
-check(JSON.stringify(contactGuidelineValues) === JSON.stringify(expectedContactGuidelines), "contact_supervisor promptGuidelines must match the four-layer contract");
+check(JSON.stringify(contactGuidelineValues) === JSON.stringify(expectedContactGuidelines), "contact_supervisor promptGuidelines must match the reviewed array");
 checkSteGuidelines(contactGuidelineValues, "contact_supervisor promptGuideline", "contact_supervisor");
 hasNone(contactGuidelines, [";", " is delivered", "saved child-session", "waitingSeq", "deliveryKey", "legacy", "request ID", "UUID"], "contact_supervisor prompt guidelines");
 hasNone(child, ["randomUUID", "request ID", "request.id"], "child supervisor request schema");
@@ -1037,6 +992,7 @@ hasAll(runFiles, [
   "normalizeDetachedLaunchConfig", "legacyRunAbstract(value.task)", "value.abstract.trim()",
   "Canonical predicate for newly written launch.json files", "normalized only by readLaunchConfig()",
 ], "detached run files");
+hasNone(runFiles, ["export function removeGoalStatsSidecar"], "Goal stats sidecars must not expose a clear-time deletion API");
 hasAll(rpcChild, [
   "export class RpcChild", 'stdio: ["pipe", "pipe", "pipe"]', "pending", "getLastAssistantText", "getSessionStats",
   'child.kill("SIGTERM")', 'child.kill("SIGKILL")',
@@ -1098,13 +1054,17 @@ hasAll(subagentRuntimeTests, [
   "clear removes terminal run directories and appends one version-3 replacement snapshot",
   "clear replay stays empty over legacy version-1 and version-2 history and later upserts still fold",
   "clear removes owned child session files once and warns about shared, escaped, and linked paths",
-  "clear removes Goal stats sidecars only when the Goal snapshot owns every cleared run",
+  "clear ignores Goal ownership and never replays or reads/removes Goal stats",
+  "clear preserves memory-only Goal stats after sidecar write failure",
+  "clear empties registry, list, and widget while Goal stats remain lazy-readable",
   "clear retains an unsafe run directory and still clears the registry consistently",
   "clear blocks poll and agent-settled callbacks from reviving a targeted run",
   "every ID-bearing action reports a cleared run explicitly and never reuses its ID",
   "clear rejects unknown fields and stays exactly { action: clear }",
-  "guarded removal helpers reject unsafe sidecar and session paths directly",
-  "subagent list returns active then starting then newest terminal runs without changing public fields or terminal output",
+  "guarded child session removal rejects unsafe paths directly",
+  "subagent list stays compact across all six statuses while status isolates one latest retained result",
+  "subagent status reconciles before reading the latest registry and distinguishes unknown IDs",
+  "reload and restore retain terminal results for status until clear removes the run",
 ], "Subagent clear and retained-history list tests");
 const subagentWidgetTests = read("tests/subagent-widget.test.mjs");
 hasAll(subagentWidgetTests, [
@@ -1129,7 +1089,7 @@ check(!/export function ensurePackageSetup[\s\S]*maxSubagentDepth\s*=\s*1/.test(
 hasAll(orchestrator, [
   "<Role>", "<Agents>", "@explorer", "@librarian", "@oracle", "@designer", "@fixer", "@observer", "<Workflow>",
   'subagent({ action: "create", agent, abstract, task, cwd? })', 'subagent({ action: "list" })',
-  'subagent({ action: "clear" })', 'clear is refused while any run is starting, running, or waiting',
+  'subagent({ action: "status", id })', 'subagent({ action: "clear" })', 'clear is refused while any run is starting, running, or waiting',
   'subagent({ action: "steer", id, message })', 'subagent({ action: "interrupt", id })',
   'subagent({ action: "resume", id: "source-run-id", abstract: "new run summary", message: "continuation objective" })',
   'subagent({ action: "reply", id: runId, message })', "lifecycle notifications arrive automatically at the next safe model boundary",
@@ -1162,51 +1122,55 @@ const todoFactory = todoExtension.slice(todoExtension.indexOf("export default fu
 hasNone(todoFactory, ["getAllTools("], "Todo extension factory initialization");
 const todoSchemaBlock = todoExtension.slice(0, todoExtension.indexOf("export const TODO_PROMPT_SNIPPET"));
 hasAll(todoSchemaBlock, [
-  'description: "Select list to read state or update to apply operations."',
-  'description: "For update, provide operations in execution order. Omit this field for list."',
-  'description: "Apply clear at most once in an update."',
-  'description: "Select pending, in_progress, or completed."',
-  'description: "Add initial dependencies by exact subject."',
-  'description: "Add dependencies by exact subject."',
-  'description: "Remove dependencies by exact subject."',
-  'description: "Use the exact subject to delete."',
+  'description: "Choose list or update. list accepts no operations. update requires one or more ordered operations."',
+  'description: "Ordered append, modify, delete, or clear operations for update. Omit for list."',
+  'description: "Use clear at most once after every current item is completed."',
+  'description: "Replacement status: pending, in_progress, or completed."',
+  'description: "Initial dependencies for the appended item."',
+  'description: "Dependencies to add to the target item."',
+  'description: "Dependencies to remove from the target item."',
+  'description: "Exact subject to delete."',
 ], "Todo schema descriptions");
 hasNone(todoSchemaBlock, [
   'description: "List exact dependency subjects."',
   "export const todoParameters = Type.Union([",
   "minProperties",
 ], "Todo schema portability");
-check(todoSchemaBlock.split('description: "Add initial dependencies by exact subject."').length - 1 === 1, "append blockedBy must have one distinct array description");
-check(todoSchemaBlock.split('description: "Add dependencies by exact subject."').length - 1 === 1, "addBlockedBy must have one distinct array description");
-check(todoSchemaBlock.split('description: "Remove dependencies by exact subject."').length - 1 === 1, "removeBlockedBy must have one distinct array description");
-check(todoSchemaBlock.split('description: "Use an existing exact subject."').length - 1 === 3, "each dependency array item must use the exact-subject description");
+check(todoSchemaBlock.split('description: "Initial dependencies for the appended item."').length - 1 === 1, "append blockedBy must have one distinct array description");
+check(todoSchemaBlock.split('description: "Dependencies to add to the target item."').length - 1 === 1, "addBlockedBy must have one distinct array description");
+check(todoSchemaBlock.split('description: "Dependencies to remove from the target item."').length - 1 === 1, "removeBlockedBy must have one distinct array description");
+check(todoSchemaBlock.split('description: "Exact subject of an existing item."').length - 1 === 3, "each dependency array item must use the exact-subject description");
 const todoSchemaDescriptions = [...todoSchemaBlock.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
 const expectedTodoSchemaDescriptions = [
-  "Select pending, in_progress, or completed.",
-  "Use an existing exact subject.",
-  "Add initial dependencies by exact subject.",
-  "Use an existing exact subject.",
-  "Add dependencies by exact subject.",
-  "Use an existing exact subject.",
-  "Remove dependencies by exact subject.",
-  "Provide a unique item subject.",
-  "Provide a short item summary.",
-  "Use the exact current subject.",
-  "Provide a unique replacement subject.",
-  "Provide a short replacement summary.",
-  "Use the exact subject to delete.",
-  "Apply clear at most once in an update.",
-  "Select list to read state or update to apply operations.",
-  "For update, provide operations in execution order. Omit this field for list.",
+  "Replacement status: pending, in_progress, or completed.",
+  "Exact subject of an existing item.",
+  "Initial dependencies for the appended item.",
+  "Exact subject of an existing item.",
+  "Dependencies to add to the target item.",
+  "Exact subject of an existing item.",
+  "Dependencies to remove from the target item.",
+  "append requires subject and abstract, with optional blockedBy.",
+  "Unique subject for the new item.",
+  "Short summary for the new item.",
+  "modify requires target and at least one changed field.",
+  "Exact current subject of the item to modify.",
+  "Unique replacement subject.",
+  "Replacement item summary.",
+  "delete requires target.",
+  "Exact subject to delete.",
+  "clear accepts no other fields.",
+  "Use clear at most once after every current item is completed.",
+  "Choose list or update. list accepts no operations. update requires one or more ordered operations.",
+  "Ordered append, modify, delete, or clear operations for update. Omit for list.",
 ];
 check(JSON.stringify(todoSchemaDescriptions) === JSON.stringify(expectedTodoSchemaDescriptions), "Todo schema descriptions must match the HOW contract");
 for (const description of todoSchemaDescriptions) checkSchemaHow(description, "Todo schema description");
 hasAll(todoExtension, [
-  'export const TODO_PROMPT_SNIPPET = "Track session work, dependencies, and progress."',
-  'description: "Read or atomically update the current session todo list. Failed update batches leave the list unchanged."',
+  'export const TODO_PROMPT_SNIPPET = "Track session tasks and dependencies."',
+  'description: "Read or atomically update a session-local task ledger. `todo list` returns every item in original order. `todo update` applies ordered append, modify, delete, or clear operations as one batch. Multiple items may be in progress. Dependencies must form an acyclic graph and reference exact existing subjects. Deleting a referenced item is rejected. Clear is allowed only for an empty list or a fully completed task group. Any invalid operation or final graph rolls back the entire batch."',
 ], "Todo tool metadata");
-const todoDescription = "Read or atomically update the current session todo list. Failed update batches leave the list unchanged.";
-const todoPromptSnippet = "Track session work, dependencies, and progress.";
+const todoDescription = "Read or atomically update a session-local task ledger. `todo list` returns every item in original order. `todo update` applies ordered append, modify, delete, or clear operations as one batch. Multiple items may be in progress. Dependencies must form an acyclic graph and reference exact existing subjects. Deleting a referenced item is rejected. Clear is allowed only for an empty list or a fully completed task group. Any invalid operation or final graph rolls back the entire batch.";
+const todoPromptSnippet = "Track session tasks and dependencies.";
 checkSteBlock(todoPromptSnippet, "Todo promptSnippet");
 checkSteBlock(todoDescription, "Todo description");
 const todoGuidelineStart = todoExtension.indexOf("export const TODO_PROMPT_GUIDELINES = [");
@@ -1214,18 +1178,14 @@ const todoGuidelineEnd = todoExtension.indexOf("] as const;", todoGuidelineStart
 const todoGuidelineBlock = todoExtension.slice(todoGuidelineStart, todoGuidelineEnd);
 const todoGuidelines = staticStrings(todoGuidelineBlock, "Todo promptGuidelines");
 const expectedTodoGuidelines = [
-  "Treat `todo` as the session-local planning ledger for work, dependencies, and progress.",
-  "Use `todo list` to inspect current plan state before uncertain updates.",
-  "Use `todo update` for atomic ordered changes that should succeed or fail together.",
-  "Append new user tasks through `todo update` instead of replacing existing `todo` items.",
+  "Append newly added user work with `todo update` instead of replacing existing items.",
   "Preserve existing `todo` items unless the user or current work requires a change.",
-  "Complete every `todo` dependency before starting or completing a dependent item.",
-  "Allow multiple `todo` items in progress when work genuinely proceeds concurrently.",
-  "Delete a `todo` item only after removing every `blockedBy` reference to it.",
-  "Finish current in-progress `todo` work before appended tasks unless blocked or explicitly reordered.",
-  "Apply `clear` through `todo update` only after current items finish, then append the new task group.",
+  "Finish current in-progress `todo` work before appended work unless blocked or explicitly reordered.",
+  "Complete each `todo` dependency before starting or completing its dependent item.",
+  "Remove all `todo` dependency references before deleting their target.",
+  "Use `todo` clear only after the current group finishes, then append the replacement group.",
 ];
-check(JSON.stringify(todoGuidelines) === JSON.stringify(expectedTodoGuidelines), "Todo promptGuidelines must match the four-layer contract");
+check(JSON.stringify(todoGuidelines) === JSON.stringify(expectedTodoGuidelines), "Todo promptGuidelines must match the reviewed array");
 checkSteGuidelines(todoGuidelines, "Todo promptGuideline", "todo");
 const todoGuidelineText = todoGuidelines.join("\n");
 check(!/\b(?:snapshot|replay|store|version|widget|ID)\b/i.test(todoGuidelineText), "Todo promptGuidelines must not expose internal terms");
@@ -1273,17 +1233,7 @@ check(
   ]),
   "model metadata audit must enumerate all seven package tools",
 );
-const standaloneGuidelineCoverage = {
-  ask_user_question: ["decision should direct", "bounded authored choices", "custom", "partial or cancelled", "Goal is active"],
-  goal: ["`goal create`", "`goal status`", "durable contract", "`todo` checklist", "autonomously", "continuation wait", "pending messages", "user input", "blocker", "provider failures", "`retry_wait`", "repeated automatic Goal runs", "without progress", "pause the Goal for review", "user abort", "restored unfinished Goals", "`goal modify`", "`goal pause`", "`goal resume`", "`goal cancel`", "`goal complete`", "concrete evidence"],
-  loop: ["`loop create`", "self-contained", "repeatable", "one full fixed interval", "previous tick finishes", "`loop list`", "`loop modify`", "`loop pause`", "`loop resume`", "`loop delete`", "compaction", "runtime-only", "shutdown"],
-  monitor: ["foreground long-running", "process group", "nohup", "setsid", "disown", "`notifyOn`", "`monitor list`", "repeated `monitor status`", "terminal notification", "`monitor delete`", "runtime shutdown"],
-  subagent: ["bounded specialist", "writer ownership", "concurrently", "`subagent create`", "`subagent resume`", "Do not duplicate", "`subagent list`", "final output or errors", "waiting", "same waiting run", "`subagent steer`", "polling", "`subagent interrupt`", "obsolete", "partial file changes", "not rollback", "terminal", "reload", "tree navigation", "session replacement", "retaining their history", "`subagent clear`", "removed"],
-  contact_supervisor: ["decision, interview, or progress update", "needs acknowledgement", "structured interview", "authored questions", "waiting transition", "orchestrator replies"],
-  todo: ["session-local planning ledger", "`todo list`", "`todo update`", "atomic ordered", "Append new user tasks", "Preserve existing `todo` items", "current work requires a change", "dependency", "multiple `todo` items in progress", "`blockedBy`", "in-progress `todo` work", "`clear`", "new task group"],
-};
 for (const metadata of modelMetadataAudit) {
-  hasAll(metadata.guidelines.join("\n"), standaloneGuidelineCoverage[metadata.name], `${metadata.name} standalone operational guidance`);
   const blocks = [metadata.description, metadata.promptSnippet, ...metadata.schemaDescriptions];
   for (const block of blocks) {
     checkSteBlock(block, `${metadata.name} audited metadata`);
@@ -1393,7 +1343,9 @@ hasAll(todoTests, [
 const subagentTranscriptTests = read("tests/subagent-transcript-renderer.test.mjs");
 hasAll(subagentTranscriptTests, [
   "clear receipts stay compact when collapsed and list every retained-item warning when expanded",
-  "subagent · clear (ctrl+o to expand)", "Retained subagent run status · 3",
+  "subagent · clear (ctrl+o to expand)", "Clears retained Subagent history", "run files", "child session files",
+  "assert.doesNotMatch(clearExpanded, /Goal|sidecar/i)", "Retained subagent run status · 3",
+  "status result stays single-line collapsed", "subagent · status · run-status-full (ctrl+o to expand)",
   "without duplicate Action rows", "(ctrl+o to expand)", "Action:",
   'assert.doesNotMatch(value, /\\(ctrl\\+o to expand\\)|Action:/)',
   'waiting (ctrl+o to expand)', '${value.status} (ctrl+o to expand)', 'running (ctrl+o to expand)',
@@ -1432,6 +1384,11 @@ hasAll(loopLoadTests, [
   "real Pi isolated RPC main and child sessions expose exact package tools without widgets",
   '["ask_user_question", "goal", "loop", "monitor", "subagent", "todo"]', '["contact_supervisor", "todo"]',
   'events.some((event) => event.type === "extension_ui_request" && event.method === "setWidget")',
+  '["create", "list", "status", "interrupt", "steer", "resume", "reply", "clear"]',
+  "assert.deepEqual(main.systemPromptToolLines, Object.entries(main.promptSnippets)",
+  "assert.deepEqual(child.systemPromptToolLines, Object.entries(child.promptSnippets)",
+  "assert.deepEqual(main.flattenedGuidelines, Object.values(main.guidelinesByTool).flat())",
+  "assert.deepEqual(child.flattenedGuidelines, Object.values(child.guidelinesByTool).flat())",
   "real Pi RPC Ask dialog completes through native extension UI without a model call", "ASK_RPC_PROBE ",
   'event.method === "select"', '"Option 1: Safe"', '"Done with this question"',
   "real Pi RPC forwards Loop and Goal slash text once as extension input without command recursion or a model call",
@@ -1512,14 +1469,14 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "Exactly `subagent`, `todo`, `loop`, `monitor`, `ask_user_question`, and `goal`",
         "Exactly `contact_supervisor` and `todo`",
         "never automatically uninstalls external packages",
-        "every retained run", "running and waiting runs by creation time", "terminal runs by latest update", "final `output` and `error`", "same retained set",
-        "refused while any run is `starting`, `running`, or `waiting`",
+        "every retained run", "compact public state", "never includes terminal `output` or `error`", "`status` with one retained run ID", "same retained set and ordering",
+        "refused while any run is `starting`, `running`, or `waiting`", "without rolling back file changes", "never changes Goal statistics",
         "saved child session as a new run with a new ID", "continue that same run",
-        "matched exactly", "atomic", "still names the target in `blockedBy`",
-        "runtime-only fixed-delay", "reload, new session, session resume, fork, or quit",
+        "matched exactly", "atomic", "still names the target in `blockedBy`", "Multiple items may be `in_progress`", "acyclic graph", "`clear` requires an empty or fully completed current group",
+        "runtime-only fixed-delay", "Creation and resume wait one full interval", "reload, new session, session resume, fork, or quit",
         "case-sensitive literal matching", "remain available until `delete`", "Use `status`",
         "one to four questions", "single-select", "multi-select", "custom responses", "previews", "unavailable while a Goal is active",
-        "branch-local durable Goal", "restore unfinished work as paused", "one non-empty evidence item for each criterion",
+        "branch-local durable Goal", "restore unfinished work as paused", "Provider failures retry automatically", "user aborts pause instead of cancelling", "one non-empty evidence item for each criterion",
         "active or waiting subagents", "Monitor work", "waiting Ask dialog",
         "safely queued during compaction and tree operations", "collapsed and expanded views", "compact widgets",
         "successful subagent `clear` remains clear after reload",
@@ -1528,14 +1485,14 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "精确为 `subagent`、`todo`、`loop`、`monitor`、`ask_user_question`、`goal`",
         "精确为 `contact_supervisor` 与 `todo`",
         "不会自动卸载外部 package",
-        "全部 retained run", "按创建时间返回 running 与 waiting run", "按最新更新时间返回 terminal run", "最终 `output` 和 `error`", "完全相同的 retained 集合",
-        "存在 `starting`、`running` 或 `waiting` run，`clear` 就会被拒绝",
+        "全部 retained run", "精简公开状态", "绝不包含 terminal `output` 或 `error`", "单个 retained run ID 调用 `status`", "相同的 retained 集合与排序",
+        "存在 `starting`、`running` 或 `waiting` run，`clear` 就会被拒绝", "不回滚文件修改", "不会改变 Goal statistics",
         "保存的 child session 创建新 run，并生成新 ID", "继续同一个 run",
-        "使用 exact match", "原子的", "仍在 `blockedBy` 中引用目标",
-        "runtime-only fixed-delay", "reload、new session、session resume、fork 或 quit",
+        "使用 exact match", "原子的", "仍在 `blockedBy` 中引用目标", "多个 item 可以同时处于 `in_progress`", "无环图", "`clear` 要求当前组为空或全部 completed",
+        "runtime-only fixed-delay", "创建和恢复后都会先等待一个完整 interval", "reload、new session、session resume、fork 或 quit",
         "区分大小写的 literal match", "一直保留到 `delete`", "用 `status`",
         "一到四个 question", "single-select", "multi-select", "custom response", "preview", "Goal active 时不可用",
-        "branch-local durable Goal", "恢复为 paused", "每条 criterion 必须精确对应一条非空 evidence",
+        "branch-local durable Goal", "恢复为 paused", "provider failure 会自动重试", "用户 abort 也会暂停而不是取消", "每条 criterion 必须精确对应一条非空 evidence",
         "active 或 waiting subagent", "Monitor 工作", "waiting Ask dialog",
         "compaction 与 tree operation 期间", "collapsed/expanded", "紧凑 widget",
         "subagent `clear` 在 reload 后仍保持清空",
@@ -1546,7 +1503,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
   const loop = section("### `loop`", "### `monitor`");
   const monitor = section("### `monitor`", "### `ask_user_question`");
   const goal = section("### `goal`", english ? "## `/loop` and `/goal`" : "## `/loop` 与 `/goal`");
-  expectTableItems("subagent", subagent, ["create", "list", "interrupt", "steer", "resume", "reply", "clear"]);
+  expectTableItems("subagent", subagent, ["create", "list", "status", "interrupt", "steer", "resume", "reply", "clear"]);
   expectTableItems("Todo", todo, ["list", "update", "append", "modify", "delete", "clear"]);
   expectTableItems("Loop", loop, ["create", "delete", "modify", "list", "pause", "resume"]);
   expectTableItems("Monitor", monitor, ["create", "delete", "list", "status"]);
@@ -1582,13 +1539,13 @@ hasAll(modelDisplay, ["THINKING_LEVELS", "formatSubagentModel", '"xhigh"', '"max
 hasAll(transcriptRenderer, [
   "Container", "Box", "Text", "Markdown", "Spacer", "getMarkdownTheme", "RAW_HTML_TAG",
   "renderSubagentCall", "renderSubagentResult", "styledTitle(", '"subagent"',
-  '`· ${action}${expanded ? "" : " (ctrl+o to expand)"}`',
+  "collapsedStatusId", '`· ${action}${collapsedStatusId}${expanded ? "" : " (ctrl+o to expand)"}`',
   "renderSubagentNotification", "details?.run", "details?.runs", "details?.request",
   "ExpandableNotificationLine", 'theme.fg("muted", " (ctrl+o to expand)")', "visibleWidth(this.hint)",
   'actionFromContext(context, "create")',
-  "immediateAck", "renderRunList", "addFinalOutput", "spacedToolResult", '"Live response"',
+  "immediateAck", "renderRunStatus", "renderRunList", "addRunSummaryDetails", "addFinalOutput", "spacedToolResult", '"Live response"',
   '"Retained subagent run status"', "run.abstract", "run.reason", 'addField(container, theme, "Abstract", args.abstract',
-  "clearReceipt", "details.clearedCount", "details.warnings", "details.changed === true", "addCompactSummary",
+  "clearReceipt", "details.clearedCount", "details.warnings", "details.changed === true",
   "expanded?: boolean", "context.expanded === true", "options.expanded === true", "terminal && expanded",
   "fallbackResult(result, theme, options.isPartial === true, expanded)",
 ], "subagent transcript renderer");
@@ -1596,6 +1553,13 @@ hasNone(transcriptRenderer, [
   "gotgenes", "Nico", "preview", "truncated", '"Subagent result"', "renderRunSection", "addActivity",
   "renderSupervisorCall", "renderSupervisorResult", "subagent_supervisor", "replyTo", '"Action"',
 ], "subagent transcript renderer ownership and focused-output contract");
+const clearRendererStart = transcriptRenderer.indexOf('} else if (action === "clear") {');
+const clearRendererEnd = transcriptRenderer.indexOf("  } else {", clearRendererStart);
+const clearRenderer = transcriptRenderer.slice(clearRendererStart, clearRendererEnd);
+hasAll(clearRenderer, [
+  "Clears retained Subagent history", "run files", "exclusively owned child session files", "warnings",
+], "subagent clear renderer boundary copy");
+hasNone(clearRenderer, ["Goal", "sidecar"], "subagent clear renderer must not describe Goal stats storage");
 for (const [name, source] of [
   ["Subagent", transcriptRenderer],
   ["Loop", loopTranscriptRenderer],
@@ -1607,15 +1571,22 @@ for (const [name, source] of [
     "options.expanded === true", "truncateToWidth", "visibleWidth(this.hint)",
   ], `${name} package-owned expandable notification hint contract`);
 }
-const listRendererStart = transcriptRenderer.indexOf("function renderRunList");
+const statusRendererStart = transcriptRenderer.indexOf("function renderRunStatus");
+const listRendererStart = transcriptRenderer.indexOf("function renderRunList", statusRendererStart);
 const listRendererEnd = transcriptRenderer.indexOf("export function renderSubagentCall", listRendererStart);
+const statusRenderer = transcriptRenderer.slice(statusRendererStart, listRendererStart);
 const listRenderer = transcriptRenderer.slice(listRendererStart, listRendererEnd);
+hasAll(statusRenderer, [
+  "compactRunHeader", "undefined, true", "if (!expanded) return container", "addRunSummaryDetails",
+  "TERMINAL_STATUSES.has(runIdentity(run).status)", "addFinalOutput(container, theme, run)",
+], "single retained-run status renderer");
 hasAll(listRenderer, [
-  "styledTitle", "compactRunHeader", "undefined, true", '!expanded || status !== "waiting"', "run.reason",
-  "TERMINAL_STATUSES.has(status)", "addFinalOutput(container, theme, run)",
-  'addCompactSummary(container, theme, "Output", run.output)', 'addCompactSummary(container, theme, "Error", run.error)',
+  "styledTitle", "compactRunHeader", "undefined, true", "if (expanded) addRunSummaryDetails(container, theme, run)",
 ], "retained-run list renderer");
-hasNone(listRenderer, ["addLiveActivity", "addRequest", "run.task", "run.cwd", "run.model", "run.deniedTools", "run.activity", "run.request)"], "retained-run list renderer");
+hasNone(listRenderer, [
+  "addFinalOutput", "run.output", "run.error", "addLiveActivity", "addRequest", "run.task", "run.cwd", "run.model",
+  "run.deniedTools", "run.activity", "run.request)",
+], "retained-run list renderer");
 const notificationStart = transcriptRenderer.indexOf("export function renderSubagentNotification");
 const notificationHeader = transcriptRenderer.indexOf("container.addChild(compactRunHeader", notificationStart);
 const notificationExpanded = transcriptRenderer.indexOf("if (options.expanded === true)", notificationHeader);

@@ -104,11 +104,19 @@ test("all production model-tool schemas survive the Kimi strict-provider portabi
   assert.deepEqual(remove.required.slice().sort(), ["op", "target"]);
   assert.equal(remove.anyOf, undefined, "delete branch must not use a nested union");
   assert.equal(remove.oneOf, undefined, "delete branch must not use a nested union");
-  assert.equal(remove.properties.target.description, "Use the exact subject to delete.");
+  assert.equal(remove.properties.target.description, "Exact subject to delete.");
   const clear = operationBranches.find((branch) => branch.properties.op.const === "clear");
-  assert.equal(clear.description, "Apply clear at most once in an update.");
-  assert.equal(schemas.todo.properties.action.description, "Select list to read state or update to apply operations.");
-  assert.equal(schemas.todo.properties.operations.description, "For update, provide operations in execution order. Omit this field for list.");
+  assert.equal(clear.description, "Use clear at most once after every current item is completed.");
+  assert.deepEqual(Object.fromEntries(operationBranches.map((branch) => [
+    branch.properties.op.const, branch.properties.op.description,
+  ])), {
+    append: "append requires subject and abstract, with optional blockedBy.",
+    modify: "modify requires target and at least one changed field.",
+    delete: "delete requires target.",
+    clear: "clear accepts no other fields.",
+  });
+  assert.equal(schemas.todo.properties.action.description, "Choose list or update. list accepts no operations. update requires one or more ordered operations.");
+  assert.equal(schemas.todo.properties.operations.description, "Ordered append, modify, delete, or clear operations for update. Omit for list.");
 
   const ask = schemas.ask_user_question.properties.questions;
   assert.deepEqual({
@@ -121,24 +129,28 @@ test("all production model-tool schemas survive the Kimi strict-provider portabi
     preview: ask.items.properties.options.items.properties.preview.description,
     multiSelect: ask.items.properties.multiSelect.description,
   }, {
-    questions: "Provide questions in display order.",
-    question: "Write one user decision question.",
-    header: "Write a short question header.",
-    options: "Provide authored choices in display order.",
-    label: "Write a short option label. Mark a recommendation by placing it first and appending (Recommended). Do not use Other, Type something., or Next.",
-    optionDescription: "Describe the outcome of choosing this option.",
-    preview: "Add preview content only for a single-select question.",
-    multiSelect: "Set true only when multiple authored options may be selected. Omit option previews when true.",
+    questions: "One to four questions in display order.",
+    question: "Decision question shown to the user.",
+    header: "Short header up to 16 characters.",
+    options: "Two to four authored options in display order.",
+    label: "Unique option label up to 60 characters. Place the recommended option first and append (Recommended). Reserved labels are Other, Type something., and Next.",
+    optionDescription: "Explain the outcome of choosing this option.",
+    preview: "Optional preview for single-select only.",
+    multiSelect: "True enables multiple authored selections. Omit or use false for single-select. Multi-select options cannot include previews.",
   });
 
-  assert.equal(schemas.goal.properties.action.description, "Select the Goal action. Create and modify use abstract, objective, and criteria. Pause and cancel use reason. Complete uses evidence. Status and resume use no other fields.");
-  assert.equal(schemas.loop.properties.action.description, "Select the loop action. Create uses interval, abstract, and prompt. Modify uses id and at least one changed field. Delete, pause, and resume use id. List uses no other fields.");
-  assert.equal(schemas.loop.properties.interval.description, "For create or modify, provide one interval from 10s through 7d. Use one integer with `s`, `m`, `h`, or `d`.");
-  assert.equal(schemas.monitor.properties.action.description, "Select the monitor action. Create uses abstract, command, optional cwd, and optional notifyOn. Delete uses id. Status uses id and optional start and end. List uses no other fields.");
-  assert.equal(schemas.monitor.properties.command.description, "Provide one foreground Bash command. Do not use nohup, setsid, disown, a trailing ampersand, or another daemon escape.");
-  assert.equal(schemas.monitor.properties.end.description, "For status, read through this reverse log offset. Set `start` to the prior `end` for older lines.");
-  assert.equal(schemas.subagent.properties.action.description, "Select the subagent action. Create uses agent, abstract, task, and optional cwd. Steer and reply use id and message. Resume uses id, abstract, and message. Interrupt uses id. List and clear use no other fields.");
-  assert.equal(schemas.subagent.properties.message.description, "For steer, provide an actual instruction. For resume, provide the complete continuation objective. For reply, answer the complete waiting request.");
+  assert.equal(schemas.goal.properties.action.description, "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status and resume accept no other fields.");
+  assert.equal(schemas.loop.properties.action.description, "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. list accepts no other fields.");
+  assert.equal(schemas.loop.properties.interval.description, "Fixed delay for create or modify, from 10s through 7d. Format: one positive integer plus s, m, h, or d.");
+  assert.equal(schemas.monitor.properties.action.description, "Choose an action. create requires abstract and command, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.");
+  assert.equal(schemas.monitor.properties.command.description, "Foreground Bash command for create. Do not use nohup, setsid, disown, trailing &, or another detach escape.");
+  assert.equal(schemas.monitor.properties.end.description, "Reverse log offset ending the status window. Defaults to 100 and must exceed start by at most 2000.");
+  assert.deepEqual(schemas.subagent.properties.action.anyOf.map(({ const: action }) => action), [
+    "create", "list", "status", "interrupt", "steer", "resume", "reply", "clear",
+  ]);
+  assert.equal(schemas.subagent.properties.action.description, "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message. list and clear accept no other fields.");
+  assert.equal(schemas.subagent.properties.id.description, "Retained run ID for status, steer, interrupt, resume, or reply.");
+  assert.equal(schemas.subagent.properties.message.description, "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.");
 
   const contact = schemas.contact_supervisor.properties;
   assert.deepEqual({
@@ -151,13 +163,13 @@ test("all production model-tool schemas survive the Kimi strict-provider portabi
     prompt: contact.interview.properties.questions.items.properties.prompt.description,
     options: contact.interview.properties.questions.items.properties.options.description,
   }, {
-    reason: "Select the supervisor request type.",
-    message: "Provide the complete request context for the orchestrator.",
-    interview: "Provide structured interview details.",
-    questions: "Provide the structured interview questions.",
-    title: "Provide a short interview title.",
-    id: "Provide a short question identifier.",
-    prompt: "Provide the question text.",
-    options: "Provide the answer options.",
+    reason: "Request type: need_decision, interview_request, or progress_update.",
+    message: "Complete context the orchestrator needs to respond. Defaults to the selected reason when omitted or blank.",
+    interview: "Structured interview details for interview_request.",
+    questions: "Authored interview questions in display order.",
+    title: "Optional short interview title.",
+    id: "Optional short identifier for matching a question.",
+    prompt: "Question the orchestrator should answer.",
+    options: "Optional authored answer choices.",
   });
 });

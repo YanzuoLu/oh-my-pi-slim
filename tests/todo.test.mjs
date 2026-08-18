@@ -177,10 +177,10 @@ test("registers exactly one todo tool with exact actions and strict schemas", ()
   assert.deepEqual(todoParameters.required, ["action"]);
   assert.deepEqual(Object.keys(todoParameters.properties).sort(), ["action", "operations"]);
   assert.deepEqual(schemaObjects(todoParameters.properties.action).map((schema) => schema.const).sort(), ["list", "update"]);
-  assert.equal(todoParameters.properties.action.description, "Select list to read state or update to apply operations.");
+  assert.equal(todoParameters.properties.action.description, "Choose list or update. list accepts no operations. update requires one or more ordered operations.");
   assert.equal(todoParameters.properties.operations.minItems, 1);
   assert.equal(todoParameters.properties.operations.maxItems, undefined);
-  assert.equal(todoParameters.properties.operations.description, "For update, provide operations in execution order. Omit this field for list.");
+  assert.equal(todoParameters.properties.operations.description, "Ordered append, modify, delete, or clear operations for update. Omit for list.");
   const operations = schemaObjects(todoParameters.properties.operations.items);
   assert.deepEqual(operations.map((schema) => schema.properties.op.const).sort(), ["append", "clear", "delete", "modify"]);
   assert.ok(operations.every((schema) => schema.additionalProperties === false));
@@ -188,29 +188,35 @@ test("registers exactly one todo tool with exact actions and strict schemas", ()
   const modify = operations.find((schema) => schema.properties.op.const === "modify");
   const remove = operations.find((schema) => schema.properties.op.const === "delete");
   const clear = operations.find((schema) => schema.properties.op.const === "clear");
-  assert.equal(clear.description, "Apply clear at most once in an update.");
+  assert.equal(clear.description, "Use clear at most once after every current item is completed.");
+  assert.deepEqual(Object.fromEntries(operations.map((schema) => [schema.properties.op.const, schema.properties.op.description])), {
+    append: "append requires subject and abstract, with optional blockedBy.",
+    modify: "modify requires target and at least one changed field.",
+    delete: "delete requires target.",
+    clear: "clear accepts no other fields.",
+  });
   assert.equal(modify.minProperties, undefined);
   assert.equal(remove.type, "object");
   assert.equal(remove.anyOf, undefined);
   assert.equal(remove.oneOf, undefined);
   assert.deepEqual(Object.keys(remove.properties).sort(), ["op", "target"]);
   assert.deepEqual(remove.required.slice().sort(), ["op", "target"]);
-  assert.equal(remove.properties.target.description, "Use the exact subject to delete.");
+  assert.equal(remove.properties.target.description, "Exact subject to delete.");
   const dependencyDescriptions = [
     append.properties.blockedBy.description,
     modify.properties.addBlockedBy.description,
     modify.properties.removeBlockedBy.description,
   ];
   assert.deepEqual(dependencyDescriptions, [
-    "Add initial dependencies by exact subject.",
-    "Add dependencies by exact subject.",
-    "Remove dependencies by exact subject.",
+    "Initial dependencies for the appended item.",
+    "Dependencies to add to the target item.",
+    "Dependencies to remove from the target item.",
   ]);
   assert.equal(new Set(dependencyDescriptions).size, 3);
   for (const schema of [append.properties.blockedBy, modify.properties.addBlockedBy, modify.properties.removeBlockedBy]) {
-    assert.equal(schema.items.description, "Use an existing exact subject.");
+    assert.equal(schema.items.description, "Exact subject of an existing item.");
   }
-  assert.equal(modify.properties.status.description, "Select pending, in_progress, or completed.");
+  assert.equal(modify.properties.status.description, "Replacement status: pending, in_progress, or completed.");
   assert.throws(() => applyTodoUpdate([], [{ op: "append", subject: "A", abstract: "a", unknown: true }]), /unknown fields/);
   assert.throws(() => applyTodoUpdate([task("A")], [{ op: "delete", target: "A", unknown: true }]), /delete contains unknown fields/);
   assert.throws(() => applyTodoUpdate([task("A")], [{ op: "delete", target: "A", status: "completed" }]), /delete contains unknown fields/);
@@ -836,19 +842,15 @@ test("Todo model metadata matches the exact standalone operational contract", ()
   for (const block of [harness.tool.description, harness.tool.promptSnippet, ...harness.tool.promptGuidelines]) {
     assertSteBlock(block);
   }
-  assert.equal(harness.tool.description, "Read or atomically update the current session todo list. Failed update batches leave the list unchanged.");
-  assert.equal(harness.tool.promptSnippet, "Track session work, dependencies, and progress.");
+  assert.equal(harness.tool.description, "Read or atomically update a session-local task ledger. `todo list` returns every item in original order. `todo update` applies ordered append, modify, delete, or clear operations as one batch. Multiple items may be in progress. Dependencies must form an acyclic graph and reference exact existing subjects. Deleting a referenced item is rejected. Clear is allowed only for an empty list or a fully completed task group. Any invalid operation or final graph rolls back the entire batch.");
+  assert.equal(harness.tool.promptSnippet, "Track session tasks and dependencies.");
   const expectedGuidelines = [
-    "Treat `todo` as the session-local planning ledger for work, dependencies, and progress.",
-    "Use `todo list` to inspect current plan state before uncertain updates.",
-    "Use `todo update` for atomic ordered changes that should succeed or fail together.",
-    "Append new user tasks through `todo update` instead of replacing existing `todo` items.",
+    "Append newly added user work with `todo update` instead of replacing existing items.",
     "Preserve existing `todo` items unless the user or current work requires a change.",
-    "Complete every `todo` dependency before starting or completing a dependent item.",
-    "Allow multiple `todo` items in progress when work genuinely proceeds concurrently.",
-    "Delete a `todo` item only after removing every `blockedBy` reference to it.",
-    "Finish current in-progress `todo` work before appended tasks unless blocked or explicitly reordered.",
-    "Apply `clear` through `todo update` only after current items finish, then append the new task group.",
+    "Finish current in-progress `todo` work before appended work unless blocked or explicitly reordered.",
+    "Complete each `todo` dependency before starting or completing its dependent item.",
+    "Remove all `todo` dependency references before deleting their target.",
+    "Use `todo` clear only after the current group finishes, then append the replacement group.",
   ];
   assert.deepEqual(TODO_PROMPT_GUIDELINES, expectedGuidelines);
   assert.doesNotMatch(TODO_PROMPT_GUIDELINES.join("\n"), /\b(?:snapshot|replay|store|version|widget|ID)\b/i);

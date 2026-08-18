@@ -127,14 +127,14 @@ test("Ask schema is strict, provider-portable, and preserves RPIV field bounds",
     multiSelect: question.properties.multiSelect.description,
     questions: schema.properties.questions.description,
   }, {
-    label: "Write a short option label. Mark a recommendation by placing it first and appending (Recommended). Do not use Other, Type something., or Next.",
-    description: "Describe the outcome of choosing this option.",
-    preview: "Add preview content only for a single-select question.",
-    question: "Write one user decision question.",
-    header: "Write a short question header.",
-    options: "Provide authored choices in display order.",
-    multiSelect: "Set true only when multiple authored options may be selected. Omit option previews when true.",
-    questions: "Provide questions in display order.",
+    label: "Unique option label up to 60 characters. Place the recommended option first and append (Recommended). Reserved labels are Other, Type something., and Next.",
+    description: "Explain the outcome of choosing this option.",
+    preview: "Optional preview for single-select only.",
+    question: "Decision question shown to the user.",
+    header: "Short header up to 16 characters.",
+    options: "Two to four authored options in display order.",
+    multiSelect: "True enables multiple authored selections. Omit or use false for single-select. Multi-select options cannot include previews.",
+    questions: "One to four questions in display order.",
   });
 });
 
@@ -144,13 +144,10 @@ test("Ask tool metadata and action fields match the frozen contract", () => {
   runtime.registerTool();
   const tool = harness.tools.get("ask_user_question");
   assert.equal(tool.executionMode, "sequential");
-  assert.equal(tool.description, "Ask the user structured questions and return structured answers.");
-  assert.equal(tool.promptSnippet, "Ask the user structured questions for decisions.");
+  assert.equal(tool.description, "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. `ask_user_question` is unavailable while a Goal is active.");
+  assert.equal(tool.promptSnippet, "Collect structured user decisions.");
   assert.deepEqual(tool.promptGuidelines, [
-    "Choose `ask_user_question` only when the user's decision should direct the next step.",
-    "Prefer bounded authored choices in `ask_user_question` when likely outcomes are known.",
-    "Allow a custom `ask_user_question` response when authored choices may not fit.",
-    "Treat partial or cancelled `ask_user_question` answers as valid outcomes, not failed calls.",
+    "Use `ask_user_question` when a user decision must direct the next step.",
     "Do not call `ask_user_question` while a Goal is active.",
   ]);
   assert.deepEqual(ASK_RESERVED_LABELS, ["Other", "Type something.", "Next"]);

@@ -167,19 +167,19 @@ export function parseLoopInterval(value: unknown): ParsedLoopInterval {
 
 export const loopParameters = Type.Object({
   action: Type.Union(LOOP_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Select the loop action. Create uses interval, abstract, and prompt. Modify uses id and at least one changed field. Delete, pause, and resume use id. List uses no other fields.",
+    description: "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. list accepts no other fields.",
   }),
   id: Type.Optional(Type.String({
-    description: "For delete, modify, pause, or resume, provide the exact loop ID.",
+    description: "Exact eight-character lowercase hexadecimal loop ID for delete, modify, pause, or resume.",
   })),
   interval: Type.Optional(Type.String({
-    description: "For create or modify, provide one interval from 10s through 7d. Use one integer with `s`, `m`, `h`, or `d`.",
+    description: "Fixed delay for create or modify, from 10s through 7d. Format: one positive integer plus s, m, h, or d.",
   })),
   abstract: Type.Optional(Type.String({
-    description: "For create or modify, provide a short loop summary.",
+    description: "Short loop summary for create or modify.",
   })),
   prompt: Type.Optional(Type.String({
-    description: "For create or modify, provide the complete future prompt.",
+    description: "Complete future-turn prompt for create or modify.",
   })),
 }, { additionalProperties: false });
 
@@ -219,20 +219,12 @@ export class LoopRuntime {
       name: "loop",
       label: "Loop",
       executionMode: "sequential",
-      description: "Create and manage runtime-only fixed-delay loops that survive compaction and tree navigation. Reload, session replacement, or shutdown clears every loop.",
-      promptSnippet: "Manage runtime-only fixed-delay loops.",
+      description: "Create and manage runtime-only fixed-delay loops from 10s through 7d. Creation and resume wait one full interval before firing. Each later delay starts only after the previous tick finishes. Each fire delivers the stored prompt for a future turn. Loop state survives compaction and tree navigation within the current runtime. Reload, session replacement, and shutdown clear every loop. Actions return current loop state, change receipts, or the retained loop list.",
+      promptSnippet: "Manage fixed-delay prompt loops.",
       promptGuidelines: [
-        "Create loops with `loop create` only from a user message that starts with `/loop`.",
-        "For a bare `/loop`, call `loop list` and explain `/loop <interval> <prompt>`.",
+        "Call `loop create` only for a user message beginning with `/loop`.",
+        "For bare `/loop`, call `loop list` and explain `/loop <interval> <prompt>`.",
         "Make every `loop create` prompt self-contained and repeatable for future turns.",
-        "Expect `loop create` and `loop resume` to wait one full fixed interval before firing.",
-        "Start each next `loop` delay only after the previous tick finishes.",
-        "Inspect current loops with `loop list` before changing uncertain loop state.",
-        "Change a loop schedule or future prompt with `loop modify`.",
-        "Suspend or reactivate a loop with `loop pause` or `loop resume`.",
-        "Remove an unwanted loop with `loop delete`.",
-        "Expect loops to survive compaction and tree navigation within the current runtime.",
-        "Treat loops as runtime-only because reload, session replacement, or shutdown clears every loop.",
       ],
       parameters: loopParameters,
       execute: async (_toolCallId, params) => this.execute(params as LoopInput),

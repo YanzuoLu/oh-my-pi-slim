@@ -23,47 +23,49 @@ const statusSchema = Type.Union([
   Type.Literal("pending"),
   Type.Literal("in_progress"),
   Type.Literal("completed"),
-], { description: "Select pending, in_progress, or completed." });
+], { description: "Replacement status: pending, in_progress, or completed." });
 
-const appendDependencySchema = Type.Array(Type.String({ description: "Use an existing exact subject." }), {
-  description: "Add initial dependencies by exact subject.",
+const appendDependencySchema = Type.Array(Type.String({ description: "Exact subject of an existing item." }), {
+  description: "Initial dependencies for the appended item.",
 });
 
-const addDependencySchema = Type.Array(Type.String({ description: "Use an existing exact subject." }), {
-  description: "Add dependencies by exact subject.",
+const addDependencySchema = Type.Array(Type.String({ description: "Exact subject of an existing item." }), {
+  description: "Dependencies to add to the target item.",
 });
 
-const removeDependencySchema = Type.Array(Type.String({ description: "Use an existing exact subject." }), {
-  description: "Remove dependencies by exact subject.",
+const removeDependencySchema = Type.Array(Type.String({ description: "Exact subject of an existing item." }), {
+  description: "Dependencies to remove from the target item.",
 });
 
 export const appendOperationSchema = Type.Object({
-  op: Type.Literal("append"),
-  subject: Type.String({ description: "Provide a unique item subject." }),
-  abstract: Type.String({ description: "Provide a short item summary." }),
+  op: Type.Literal("append", { description: "append requires subject and abstract, with optional blockedBy." }),
+  subject: Type.String({ description: "Unique subject for the new item." }),
+  abstract: Type.String({ description: "Short summary for the new item." }),
   blockedBy: Type.Optional(appendDependencySchema),
 }, { additionalProperties: false });
 
 export const modifyOperationSchema = Type.Object({
-  op: Type.Literal("modify"),
-  target: Type.String({ description: "Use the exact current subject." }),
-  newSubject: Type.Optional(Type.String({ description: "Provide a unique replacement subject." })),
-  abstract: Type.Optional(Type.String({ description: "Provide a short replacement summary." })),
+  op: Type.Literal("modify", {
+    description: "modify requires target and at least one changed field.",
+  }),
+  target: Type.String({ description: "Exact current subject of the item to modify." }),
+  newSubject: Type.Optional(Type.String({ description: "Unique replacement subject." })),
+  abstract: Type.Optional(Type.String({ description: "Replacement item summary." })),
   status: Type.Optional(statusSchema),
   addBlockedBy: Type.Optional(addDependencySchema),
   removeBlockedBy: Type.Optional(removeDependencySchema),
 }, { additionalProperties: false });
 
 export const deleteOperationSchema = Type.Object({
-  op: Type.Literal("delete"),
-  target: Type.String({ description: "Use the exact subject to delete." }),
+  op: Type.Literal("delete", { description: "delete requires target." }),
+  target: Type.String({ description: "Exact subject to delete." }),
 }, { additionalProperties: false });
 
 export const clearOperationSchema = Type.Object({
-  op: Type.Literal("clear"),
+  op: Type.Literal("clear", { description: "clear accepts no other fields." }),
 }, {
   additionalProperties: false,
-  description: "Apply clear at most once in an update.",
+  description: "Use clear at most once after every current item is completed.",
 });
 
 export const todoOperationSchema = Type.Union([
@@ -77,25 +79,21 @@ export const todoParameters = Type.Object({
   action: Type.Union([
     Type.Literal("list"),
     Type.Literal("update"),
-  ], { description: "Select list to read state or update to apply operations." }),
+  ], { description: "Choose list or update. list accepts no operations. update requires one or more ordered operations." }),
   operations: Type.Optional(Type.Array(todoOperationSchema, {
     minItems: 1,
-    description: "For update, provide operations in execution order. Omit this field for list.",
+    description: "Ordered append, modify, delete, or clear operations for update. Omit for list.",
   })),
 }, { additionalProperties: false });
 
-export const TODO_PROMPT_SNIPPET = "Track session work, dependencies, and progress.";
+export const TODO_PROMPT_SNIPPET = "Track session tasks and dependencies.";
 export const TODO_PROMPT_GUIDELINES = [
-  "Treat `todo` as the session-local planning ledger for work, dependencies, and progress.",
-  "Use `todo list` to inspect current plan state before uncertain updates.",
-  "Use `todo update` for atomic ordered changes that should succeed or fail together.",
-  "Append new user tasks through `todo update` instead of replacing existing `todo` items.",
+  "Append newly added user work with `todo update` instead of replacing existing items.",
   "Preserve existing `todo` items unless the user or current work requires a change.",
-  "Complete every `todo` dependency before starting or completing a dependent item.",
-  "Allow multiple `todo` items in progress when work genuinely proceeds concurrently.",
-  "Delete a `todo` item only after removing every `blockedBy` reference to it.",
-  "Finish current in-progress `todo` work before appended tasks unless blocked or explicitly reordered.",
-  "Apply `clear` through `todo update` only after current items finish, then append the new task group.",
+  "Finish current in-progress `todo` work before appended work unless blocked or explicitly reordered.",
+  "Complete each `todo` dependency before starting or completing its dependent item.",
+  "Remove all `todo` dependency references before deleting their target.",
+  "Use `todo` clear only after the current group finishes, then append the replacement group.",
 ] as const;
 
 interface TodoListDetails {
@@ -185,7 +183,7 @@ export default function todoExtension(pi: ExtensionAPI): void {
     name: "todo",
     label: "Todo",
     executionMode: "sequential",
-    description: "Read or atomically update the current session todo list. Failed update batches leave the list unchanged.",
+    description: "Read or atomically update a session-local task ledger. `todo list` returns every item in original order. `todo update` applies ordered append, modify, delete, or clear operations as one batch. Multiple items may be in progress. Dependencies must form an acyclic graph and reference exact existing subjects. Deleting a referenced item is rejected. Clear is allowed only for an empty list or a fully completed task group. Any invalid operation or final graph rolls back the entire batch.",
     promptSnippet: TODO_PROMPT_SNIPPET,
     promptGuidelines: [...TODO_PROMPT_GUIDELINES],
     parameters: todoParameters,

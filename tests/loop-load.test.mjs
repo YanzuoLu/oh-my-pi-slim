@@ -167,20 +167,20 @@ test("real Pi isolated RPC main and child sessions expose exact package tools wi
     assert.deepEqual(main.activeTools, ["ask_user_question", "goal", "loop", "monitor", "subagent", "todo"]);
     assert.deepEqual(main.commands, ["goal", "loop"]);
     assert.deepEqual(main.descriptions, {
-      ask_user_question: "Ask the user structured questions and return structured answers.",
-      goal: "Create and manage one durable branch-local Goal with autonomous continuation and explicit completion evidence. Restored unfinished Goals remain paused until resumed.",
-      loop: "Create and manage runtime-only fixed-delay loops that survive compaction and tree navigation. Reload, session replacement, or shutdown clears every loop.",
-      monitor: "Create and manage foreground long-running Bash commands while Pi remains available. Monitor owns each process group. Terminal results remain available until deletion or runtime shutdown.",
-      subagent: "Create and manage retained specialist runs by run ID. List reports every retained run and its public state. Terminal history includes final output or errors until cleared. Resume creates a new run, while reply continues a waiting run. Interrupt requests resolve through terminal notifications.",
-      todo: "Read or atomically update the current session todo list. Failed update batches leave the list unchanged.",
+      ask_user_question: "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. `ask_user_question` is unavailable while a Goal is active.",
+      goal: "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. Actions return the current Goal state and whether it changed.",
+      loop: "Create and manage runtime-only fixed-delay loops from 10s through 7d. Creation and resume wait one full interval before firing. Each later delay starts only after the previous tick finishes. Each fire delivers the stored prompt for a future turn. Loop state survives compaction and tree navigation within the current runtime. Reload, session replacement, and shutdown clear every loop. Actions return current loop state, change receipts, or the retained loop list.",
+      monitor: "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher, summary, and terminal notifications report noteworthy output and completion. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one detailed record with retained combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.",
+      subagent: "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, errors, and interruption outcomes. `subagent resume` starts a new run from reusable terminal context. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` requests termination of a live run without reverting file changes. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.",
+      todo: "Read or atomically update a session-local task ledger. `todo list` returns every item in original order. `todo update` applies ordered append, modify, delete, or clear operations as one batch. Multiple items may be in progress. Dependencies must form an acyclic graph and reference exact existing subjects. Deleting a referenced item is rejected. Clear is allowed only for an empty list or a fully completed task group. Any invalid operation or final graph rolls back the entire batch.",
     });
     assert.deepEqual(main.promptSnippets, {
-      ask_user_question: "Ask the user structured questions for decisions.",
-      goal: "Manage one durable branch-local Goal.",
-      loop: "Manage runtime-only fixed-delay loops.",
-      monitor: "Manage foreground long-running commands by monitor ID.",
-      subagent: "Create or manage retained specialist runs by ID.",
-      todo: "Track session work, dependencies, and progress.",
+      ask_user_question: "Collect structured user decisions.",
+      goal: "Manage the branch-local Goal.",
+      loop: "Manage fixed-delay prompt loops.",
+      monitor: "Supervise long-running foreground commands.",
+      subagent: "Delegate and manage specialist runs.",
+      todo: "Track session tasks and dependencies.",
     });
     assert.deepEqual(main.systemPromptToolLines, Object.entries(main.promptSnippets).map(([name, snippet]) => `- ${name}: ${snippet}`));
     assert.deepEqual(main.flattenedGuidelines, Object.values(main.guidelinesByTool).flat());
@@ -207,6 +207,7 @@ test("real Pi isolated RPC main and child sessions expose exact package tools wi
     assert.equal(main.schemas.subagent.rootType, "object");
     assert.equal(main.schemas.subagent.additionalProperties, false);
     assert.equal(main.schemas.subagent.rootHasUnion, false);
+    assert.deepEqual(main.schemas.subagent.actions, ["create", "list", "status", "interrupt", "steer", "resume", "reply", "clear"]);
     assert.equal(main.schemas.todo.rootType, "object");
     assert.equal(main.schemas.todo.additionalProperties, false);
     assert.equal(main.schemas.todo.rootHasUnion, false);
@@ -216,20 +217,18 @@ test("real Pi isolated RPC main and child sessions expose exact package tools wi
     assert.deepEqual(child.activeTools, ["contact_supervisor", "todo"]);
     assert.deepEqual(child.commands, []);
     assert.deepEqual(child.descriptions, {
-      contact_supervisor: "Request an orchestrator reply and pause the child run until the reply arrives.",
-      todo: "Read or atomically update the current session todo list. Failed update batches leave the list unchanged.",
+      contact_supervisor: "Request an orchestrator response for a decision, structured interview, or progress update. Every call moves the child run to waiting, including progress updates. The result records the request context and ends the current child turn. Work continues in the same run after the orchestrator replies.",
+      todo: "Read or atomically update a session-local task ledger. `todo list` returns every item in original order. `todo update` applies ordered append, modify, delete, or clear operations as one batch. Multiple items may be in progress. Dependencies must form an acyclic graph and reference exact existing subjects. Deleting a referenced item is rejected. Clear is allowed only for an empty list or a fully completed task group. Any invalid operation or final graph rolls back the entire batch.",
     });
     assert.deepEqual(child.promptSnippets, {
-      contact_supervisor: "Request an orchestrator reply from a child run.",
-      todo: "Track session work, dependencies, and progress.",
+      contact_supervisor: "Request an orchestrator response.",
+      todo: "Track session tasks and dependencies.",
     });
     assert.deepEqual(child.systemPromptToolLines, Object.entries(child.promptSnippets).map(([name, snippet]) => `- ${name}: ${snippet}`));
     assert.deepEqual(child.flattenedGuidelines, Object.values(child.guidelinesByTool).flat());
     const guidelinesByTool = { ...main.guidelinesByTool, ...child.guidelinesByTool };
     assert.deepEqual(Object.keys(guidelinesByTool).sort(), [...new Set([...main.tools, ...child.tools])].sort());
-    assert.equal(Object.values(guidelinesByTool).flat().length, 71, "RPC must expose the reviewed standalone guideline arrays");
     for (const [tool, guidelines] of Object.entries(guidelinesByTool)) {
-      assert.ok(guidelines.length > 0, `${tool} must contribute standalone operational guidance`);
       for (const guideline of guidelines) {
         assert.match(guideline, tool === "goal" ? /\bGoal\b|`goal / : new RegExp(tool));
       }

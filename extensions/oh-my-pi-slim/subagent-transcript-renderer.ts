@@ -230,13 +230,19 @@ function immediateAck(run: UnknownRecord, action: string, args: UnknownRecord, t
   return container;
 }
 
-function addCompactSummary(container: Container, theme: Theme, label: string, value: unknown): void {
-  if (typeof value !== "string") return;
-  container.addChild(new Text(
-    `${theme.fg("dim", `${label}:`)} ${theme.fg("toolOutput", safeFirstLine(value) || "—")}`,
-    0,
-    0,
-  ));
+function addRunSummaryDetails(container: Container, theme: Theme, run: UnknownRecord): void {
+  addField(container, theme, "Live", run.live);
+  if (run.sourceRunId !== undefined) addField(container, theme, "Source run", run.sourceRunId);
+  if (run.reason !== undefined) addField(container, theme, "Reason", run.reason);
+}
+
+function renderRunStatus(run: UnknownRecord, theme: Theme, expanded: boolean): Container {
+  const container = new Container();
+  container.addChild(compactRunHeader(run, theme, undefined, true));
+  if (!expanded) return container;
+  addRunSummaryDetails(container, theme, run);
+  if (TERMINAL_STATUSES.has(runIdentity(run).status)) addFinalOutput(container, theme, run);
+  return container;
 }
 
 function renderRunList(runs: unknown[], theme: Theme, expanded: boolean): Container {
@@ -248,20 +254,9 @@ function renderRunList(runs: unknown[], theme: Theme, expanded: boolean): Contai
   }
   runs.forEach((value) => {
     const run = asRecord(value) ?? {};
-    const { status } = runIdentity(run);
     container.addChild(new Spacer(1));
     container.addChild(compactRunHeader(run, theme, undefined, true));
-    if (TERMINAL_STATUSES.has(status)) {
-      if (expanded) addFinalOutput(container, theme, run);
-      else {
-        addCompactSummary(container, theme, "Output", run.output);
-        addCompactSummary(container, theme, "Error", run.error);
-      }
-      return;
-    }
-    if (!expanded || status !== "waiting") return;
-    const reason = asString(run.reason);
-    if (reason) addField(container, theme, "Reason", reason);
+    if (expanded) addRunSummaryDetails(container, theme, run);
   });
   return container;
 }
@@ -291,10 +286,13 @@ export function renderSubagentCall(argsValue: unknown, theme: Theme, context: To
   const action = asString(args.action) ?? "create";
   const expanded = context.expanded === true;
   const container = new Container();
+  const collapsedStatusId = action === "status" && !expanded && typeof args.id === "string"
+    ? ` · ${safeFirstLine(args.id)}`
+    : "";
   container.addChild(styledTitle(
     theme,
     "subagent",
-    `· ${action}${expanded ? "" : " (ctrl+o to expand)"}`,
+    `· ${action}${collapsedStatusId}${expanded ? "" : " (ctrl+o to expand)"}`,
   ));
 
   if (action === "create") {
@@ -318,8 +316,8 @@ export function renderSubagentCall(argsValue: unknown, theme: Theme, context: To
       if (typeof args.message === "string") addFullSection(container, theme, "Guidance", args.message);
       else addField(container, theme, "Guidance", undefined, "(pending)");
     }
-  } else if (action === "interrupt") {
-    addField(container, theme, "Run", args.id, "(pending)");
+  } else if (action === "status" || action === "interrupt") {
+    if (action !== "status" || expanded) addField(container, theme, "Run", args.id, "(pending)");
   } else if (action === "reply") {
     addField(container, theme, "Run", args.id, "(pending)");
     if (expanded) {
@@ -330,7 +328,7 @@ export function renderSubagentCall(argsValue: unknown, theme: Theme, context: To
     if (expanded) {
       container.addChild(new Spacer(1));
       container.addChild(new Text(
-        theme.fg("toolOutput", "Returns every retained run status with abstract, optional waiting reason, and terminal output or error."),
+        theme.fg("toolOutput", "Returns compact public state for every retained run without terminal results."),
         0,
         0,
       ));
@@ -339,7 +337,7 @@ export function renderSubagentCall(argsValue: unknown, theme: Theme, context: To
     if (expanded) {
       container.addChild(new Spacer(1));
       container.addChild(new Text(
-        theme.fg("toolOutput", "Removes every retained run record, run directory, child session file, and Goal-owned stats sidecar."),
+        theme.fg("toolOutput", "Clears retained Subagent history, run files, and exclusively owned child session files. Unsafe removals remain as warnings."),
         0,
         0,
       ));
@@ -366,6 +364,7 @@ export function renderSubagentResult(
   }
   if (action === "list" && Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme, expanded));
   const run = asRecord(details?.run);
+  if (action === "status" && run) return spacedToolResult(renderRunStatus(run, theme, expanded));
   if (run) return spacedToolResult(immediateAck(run, action, args, theme, expanded));
   if (Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme, expanded));
   return spacedToolResult(fallbackResult(result, theme, options.isPartial === true, expanded));

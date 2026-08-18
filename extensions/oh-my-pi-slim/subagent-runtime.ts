@@ -8,7 +8,6 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { replayGoalBranch } from "./goal-runtime.js";
 import {
   SPECIALIST_NAMES,
   SUBAGENT_ACTIONS,
@@ -23,6 +22,8 @@ import {
   type PersistedRun,
   type RunStatus,
   type SpecialistName,
+  type SubagentRunStatus,
+  type SubagentRunSummary,
   type SupervisorRequest,
 } from "./subagent-core.js";
 import {
@@ -41,7 +42,6 @@ import {
   readRunnerIdentity,
   readRunState,
   removeChildSessionFile,
-  removeGoalStatsSidecar,
   removeRunFiles,
   tailLog,
   writeControl,
@@ -131,18 +131,6 @@ interface RunHealth {
 interface RepliedSeq {
   waitingSeq: number;
   sentAt: number;
-}
-
-interface RunStatusSummary {
-  id: string;
-  agent: SpecialistName;
-  abstract: string;
-  status: RunStatus;
-  live: boolean;
-  sourceRunId?: string;
-  reason?: SupervisorRequest["reason"];
-  output?: string;
-  error?: string;
 }
 
 export interface SubagentClearReceipt {
@@ -330,16 +318,16 @@ function parseGoalRunActivity(value: unknown): { runId: string; activity: GoalRu
 }
 
 export const subagentParameters = Type.Object({
-  agent: Type.Optional(Type.String({ description: "For create, select the specialist role." })),
-  abstract: Type.Optional(Type.String({ description: "For create or resume, provide a short run summary." })),
-  task: Type.Optional(Type.String({ description: "For create, provide the complete objective." })),
-  cwd: Type.Optional(Type.String({ description: "For create, provide a different working directory." })),
+  agent: Type.Optional(Type.String({ description: "Specialist role for create." })),
+  abstract: Type.Optional(Type.String({ description: "Short run summary for create or resume." })),
+  task: Type.Optional(Type.String({ description: "Complete bounded objective for create." })),
+  cwd: Type.Optional(Type.String({ description: "Working directory for create. Defaults to the parent working directory." })),
   action: Type.Union(SUBAGENT_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Select the subagent action. Create uses agent, abstract, task, and optional cwd. Steer and reply use id and message. Resume uses id, abstract, and message. Interrupt uses id. List and clear use no other fields.",
+    description: "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message. list and clear accept no other fields.",
   }),
-  id: Type.Optional(Type.String({ description: "For steer, interrupt, resume, or reply, provide the run ID." })),
+  id: Type.Optional(Type.String({ description: "Retained run ID for status, steer, interrupt, resume, or reply." })),
   message: Type.Optional(Type.String({
-    description: "For steer, provide an actual instruction. For resume, provide the complete continuation objective. For reply, answer the complete waiting request.",
+    description: "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.",
   })),
 }, { additionalProperties: false });
 
@@ -460,26 +448,19 @@ export class OmpsSubagentRuntime {
     this.pi.registerTool({
       name: "subagent",
       label: "Subagent",
-      description: "Create and manage retained specialist runs by run ID. List reports every retained run and its public state. Terminal history includes final output or errors until cleared. Resume creates a new run, while reply continues a waiting run. Interrupt requests resolve through terminal notifications.",
-      promptSnippet: "Create or manage retained specialist runs by ID.",
+      description: "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, errors, and interruption outcomes. `subagent resume` starts a new run from reusable terminal context. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` requests termination of a live run without reverting file changes. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.",
+      promptSnippet: "Delegate and manage specialist runs.",
       promptGuidelines: [
         "Delegate bounded specialist work with `subagent create` when an independent lane improves progress.",
-        "Give each `subagent create` lane exclusive writer ownership over its assigned files.",
-        "Run independent `subagent` lanes concurrently only when their ownership and dependencies do not conflict.",
-        "`subagent create` starts new work, while `subagent resume` continues reusable terminal context in a new run.",
-        "Do not duplicate work already owned by a starting, running, or waiting `subagent` run.",
-        "Use `subagent list` to inspect every retained run and its public state.",
-        "Expect terminal `subagent list` entries to include final output or errors.",
-        "Read each waiting `subagent` notification before answering with `subagent reply`.",
-        "`subagent reply` continues the same waiting run after the complete answer arrives.",
-        "Use `subagent steer` only for an actual instruction, never for polling or reassurance.",
-        "Use `subagent interrupt` only when a live run is obsolete, wrong, or conflicting.",
-        "Limit `subagent interrupt` to starting, running, or waiting runs.",
-        "Inspect partial file changes after `subagent interrupt` because interruption is not rollback.",
-        "Read every terminal `subagent` notification for final output, errors, or interrupt status.",
-        "Expect reload, tree navigation, or session replacement to interrupt active `subagent` runs while retaining their history.",
-        "Call `subagent clear` only after every retained run becomes terminal.",
-        "Do not call any `subagent` action on a run removed by `subagent clear`.",
+        "Give concurrent `subagent create` runs disjoint writer ownership and nonconflicting dependencies.",
+        "Do not duplicate work owned by a starting, running, or waiting `subagent` run.",
+        "`subagent create` starts new work, while `subagent resume` starts a new run from reusable terminal context.",
+        "`subagent list` summarizes retained runs, while `subagent status` returns one run's detailed result.",
+        "Use `subagent reply` only to answer the complete request from that same waiting run.",
+        "Use `subagent steer` only for a genuine new instruction, not polling or reassurance.",
+        "Use `subagent interrupt` only for starting, running, or waiting runs that should stop.",
+        "`subagent interrupt` is not rollback, so inspect partial file changes before continuing.",
+        "Use `subagent clear` only when every run is terminal and all retained history should be removed.",
       ],
       parameters: subagentParameters,
       execute: async (_toolCallId, params) => this.executeSubagent(params as RuntimeInput),
@@ -1073,9 +1054,8 @@ export class OmpsSubagentRuntime {
     if (notify) this.deliverPendingNotification(id);
   }
 
-  private formatRunStatus(run: PersistedRun): RunStatusSummary {
+  private formatRunSummary(run: PersistedRun): SubagentRunSummary {
     const request = run.status === "waiting" ? run.request : undefined;
-    const terminal = isTerminalStatus(run.status);
     return {
       id: run.id,
       agent: run.agent,
@@ -1084,8 +1064,16 @@ export class OmpsSubagentRuntime {
       live: this.registry.isLive(run.id),
       ...(run.sourceRunId !== undefined ? { sourceRunId: run.sourceRunId } : {}),
       ...(request !== undefined ? { reason: request.reason } : {}),
-      ...(terminal && run.output !== undefined ? { output: run.output } : {}),
-      ...(terminal && run.error !== undefined ? { error: run.error } : {}),
+    };
+  }
+
+  private formatRunStatus(run: PersistedRun): SubagentRunStatus {
+    const summary = this.formatRunSummary(run);
+    if (!isTerminalStatus(run.status)) return summary;
+    return {
+      ...summary,
+      ...(run.output !== undefined ? { output: run.output } : {}),
+      ...(run.error !== undefined ? { error: run.error } : {}),
     };
   }
 
@@ -1207,11 +1195,13 @@ export class OmpsSubagentRuntime {
     if ((action === "list" || action === "clear") && (input.id !== undefined || input.message !== undefined)) {
       throw new Error(`${action} does not accept id or message.`);
     }
-    if (action === "interrupt" && input.message !== undefined) throw new Error("interrupt does not accept message.");
+    if ((action === "status" || action === "interrupt") && input.message !== undefined) {
+      throw new Error(`${action} does not accept message.`);
+    }
 
     if (action === "list") {
       await this.reconcileAll();
-      const runs = this.registry.list().map((run) => this.formatRunStatus(run));
+      const runs = this.registry.list().map((run) => this.formatRunSummary(run));
       return toolText(JSON.stringify(runs, null, 2), { runs });
     }
 
@@ -1219,6 +1209,10 @@ export class OmpsSubagentRuntime {
 
     const id = requireString(input.id, "id");
     await this.reconcileRun(id);
+    if (action === "status") {
+      const run = this.formatRunStatus(this.requireRun(id));
+      return toolText(JSON.stringify(run, null, 2), { run });
+    }
     if (action === "reply") return this.reply(id, requireString(input.message, "message"));
     const run = this.requireRun(id);
     if (isTerminalStatus(run.status)) return toolText(`${id} is already ${run.status}.`, { run: this.formatRun(run) });
@@ -1259,13 +1253,6 @@ export class OmpsSubagentRuntime {
     return this.launchRun(run);
   }
 
-  /** Collects the latest Goal snapshot's owned run IDs for this branch, or undefined when the branch has no Goal. */
-  private goalOwnedRunIds(): Set<string> | undefined {
-    if (!this.ctx) return;
-    const snapshot = replayGoalBranch(this.ctx.sessionManager.getBranch());
-    return snapshot ? new Set(snapshot.ownedRunIds) : undefined;
-  }
-
   private purgeChildSessionFiles(cleared: readonly PersistedRun[], retained: readonly PersistedRun[]): string[] {
     const warnings: string[] = [];
     const childDir = this.childSessionDir();
@@ -1289,26 +1276,16 @@ export class OmpsSubagentRuntime {
   }
 
   /**
-   * Executes the atomic clear plan: run directories, Goal-owned sidecars, and child session files.
+   * Removes retained Subagent run directories and exclusively owned child session files.
    * Anything that cannot be removed safely stays on disk and only produces a warning.
    */
   private purgeRetainedRuns(runs: readonly PersistedRun[]): string[] {
     const warnings: string[] = [];
-    const owned = this.goalOwnedRunIds();
-    const sidecarsRemovable = owned !== undefined && runs.every((run) => owned.has(run.id));
-    if (owned === undefined) {
-      warnings.push("Retained Goal stats sidecars because this branch has no Goal snapshot.");
-    } else if (!sidecarsRemovable) {
-      warnings.push("Retained Goal stats sidecars because the Goal snapshot does not own every cleared run.");
-    }
     for (const run of runs) {
       try { removeRunFiles(this.pathsFor(run.id)); }
       catch (error) {
         warnings.push(`Retained run directory for ${run.id}: ${error instanceof Error ? error.message : String(error)}`);
       }
-      if (!sidecarsRemovable || !this.goalStatsRoot || !this.ownerSessionId) continue;
-      const removal = removeGoalStatsSidecar(this.goalStatsRoot, this.ownerSessionId, run.id);
-      if (!removal.removed) warnings.push(`Retained Goal stats sidecar for ${run.id}: ${removal.reason}`);
     }
     warnings.push(...this.purgeChildSessionFiles(runs, []));
     return warnings;
@@ -1335,8 +1312,6 @@ export class OmpsSubagentRuntime {
       for (const run of runs) {
         this.clearedRunIds.add(run.id);
         this.activity.delete(run.id);
-        this.goalActivity.delete(run.id);
-        this.loadedGoalStatsSidecars.delete(run.id);
         this.health.delete(run.id);
         this.repliedSeqs.delete(run.id);
       }

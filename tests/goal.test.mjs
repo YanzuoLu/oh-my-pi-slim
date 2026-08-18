@@ -168,27 +168,17 @@ test("Goal schema is a strict portable object with isolated public actions", asy
   const harness = createHarness();
   const tool = harness.tools.get("goal");
   assert.equal(tool.executionMode, "sequential");
-  assert.equal(tool.description, "Create and manage one durable branch-local Goal with autonomous continuation and explicit completion evidence. Restored unfinished Goals remain paused until resumed.");
-  assert.equal(tool.promptSnippet, "Manage one durable branch-local Goal.");
+  assert.equal(tool.description, "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. Actions return the current Goal state and whether it changed.");
+  assert.equal(tool.promptSnippet, "Manage the branch-local Goal.");
   assert.deepEqual(tool.promptGuidelines, [
-    "Create a Goal with `goal create` only from a user message that starts with `/goal`.",
-    "For a bare `/goal`, call `goal status` and explain `/goal <objective>`.",
-    "Treat an active Goal as one durable contract, not as a `todo` checklist.",
-    "Continue an active Goal autonomously until completion or a blocker requires `goal pause`.",
-    "Let Goal continuation wait while subagents, monitors, Ask, pending messages, or user input require attention.",
-    "Prioritize resolving Goal blockers before unrelated work.",
-    "Expect provider failures during a Goal to enter `retry_wait` automatically.",
-    "Expect repeated automatic Goal runs without progress to pause the Goal for review.",
-    "Use `goal status` to inspect the branch-local Goal without changing it.",
-    "Use `goal modify` when the complete objective or completion contract must be replaced.",
-    "Use `goal pause` when safe progress cannot continue.",
-    "Expect a user abort to pause the active Goal rather than cancel it.",
-    "Use `goal resume` when a paused Goal can continue autonomously.",
-    "Treat restored unfinished Goals as paused until `goal resume` explicitly restarts them.",
-    "Use `goal cancel` only when the user explicitly abandons the Goal.",
-    "Use `goal complete` only after every criterion has concrete evidence.",
+    "Call `goal create` only for a user message beginning with `/goal`.",
+    "For bare `/goal`, call `goal status` and explain `/goal <objective>`.",
+    "Use Goal for one durable outcome, not as a `todo` checklist.",
+    "`goal modify` replaces the entire nonterminal contract, not individual fields.",
+    "Call `goal cancel` only when the user explicitly abandons the Goal.",
+    "Call `goal complete` only with concrete evidence for every criterion.",
   ]);
-  assert.equal(schema.properties.action.description, "Select the Goal action. Create and modify use abstract, objective, and criteria. Pause and cancel use reason. Complete uses evidence. Status and resume use no other fields.");
+  assert.equal(schema.properties.action.description, "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status and resume accept no other fields.");
   for (const invalid of [
     { ...createInput, reason: "extra" },
     { action: "status", evidence: [] },

@@ -137,8 +137,9 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 - Before dispatching a specialist, check retained run status and the current conversation for an existing run that already covers the objective.
 - A terminal lifecycle notification carries the completed specialist's stored output and error. Never resume a terminal run merely to fetch its result, because resume starts new model work in a new run.
 - Before retrying completed work whose result appears missing or incomplete, reconcile the matching lifecycle notification and retained run state. Dispatch again only when the recovered result does not satisfy the objective.
-- For run state inspection, use `subagent({ action: "list" })`, which returns every retained run with its abstract and status-only fields, plus the final output or error of terminal runs. Do not send guidance as a progress check; use `subagent({ action: "steer", id, message })` only when a running run needs an actual instruction.
-- Retained runs accumulate for the whole session. Use `subagent({ action: "clear" })` to discard the whole retained history once every run is terminal and its results are reconciled; clear is refused while any run is starting, running, or waiting, and a cleared run can never be listed, steered, replied to, or resumed again.
+- Use `subagent({ action: "list" })` for compact state across every retained run; list never returns terminal results.
+- Use `subagent({ action: "status", id })` when one retained run's latest state or terminal result matters. Do not send guidance as a progress check; use `subagent({ action: "steer", id, message })` only when a running run needs an actual instruction.
+- Retained runs accumulate for the whole session. Use `subagent({ action: "clear" })` to discard the whole retained history once every run is terminal and its results are reconciled; clear is refused while any run is starting, running, or waiting, and a cleared run can never be listed, inspected, steered, replied to, or resumed again.
 - If available status or observed lack of progress suggests that a running run may be stuck, send one concise `steer` follow-up; never use it as a polling loop.
 - Prefer explicit `subagent({ action: "create", agent, abstract, task, cwd? })` for delegated work that can run independently; `abstract` is required and every create is asynchronous.
 - For work already chosen for delegation, launch independent specialist lanes in the background so the orchestrator stays unblocked and can reconcile results when they return.
@@ -173,7 +174,7 @@ After spawning all independent background runs, continue only useful non-overlap
 - Prefer relevant resumes with explicit new abstracts over creating new runs all the time
 - Only a completed, failed, or interrupted run with a recoverable saved child session may be resumed. Starting, running, and waiting runs are not resumable.
 - When reusing specialist context, call `subagent({ action: "resume", id: "source-run-id", abstract: "new run summary", message: "continuation objective" })` with the retained source run ID and a fresh abstract. Saying "reuse" in prose is not enough.
-- After resume returns, track the new run ID, its supplied abstract, and its `sourceRunId`; subsequent list, steer, interrupt, reply, and resume operations use the new run ID.
+- After resume returns, track the new run ID, its supplied abstract, and its `sourceRunId`; subsequent list, status, steer, interrupt, reply, and resume operations use the new run ID.
 - Creating and resuming are always explicit: use `action: "create"` with agent/abstract/task for a new run and `action: "resume"` with source ID/new abstract/message for a terminal source run.
 
 ## 5. Verify

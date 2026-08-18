@@ -99,16 +99,17 @@ Runs specialists in isolated background child sessions and returns control immed
 | Action | Effect |
 | --- | --- |
 | `create` | Start a new specialist run with an agent, short abstract, task, and optional cwd |
-| `list` | Return running and waiting runs by creation time, then starting runs, then terminal runs by latest update |
-| `interrupt` | Request interruption of a non-terminal run |
+| `list` | Return compact public state for every retained run in retained-run order |
+| `status` | Return one retained run's public state and its terminal result when available |
+| `interrupt` | Request interruption of a non-terminal run without rolling back file changes |
 | `steer` | Send guidance to a running run |
 | `resume` | Continue a terminal run's saved child session as a new run with a new ID |
 | `reply` | Answer a waiting child and continue that same run |
 | `clear` | Remove all retained terminal history |
 
-`list` includes `starting`, `running`, `waiting`, `completed`, `failed`, and `interrupted` runs. Terminal entries include their final `output` and `error`. The subagent widget uses this same retained set, so terminal runs remain visible until `clear`.
+`list` includes `starting`, `running`, `waiting`, `completed`, `failed`, and `interrupted` runs, but never includes terminal `output` or `error`. Use `status` with one retained run ID to inspect the same public fields and recover its terminal result when present. The subagent widget uses the same retained set and ordering, so terminal runs remain visible until `clear`.
 
-`clear` is refused while any run is `starting`, `running`, or `waiting`. Once every retained run is terminal, it can clear the complete history; the cleared state remains empty after reload and restoration.
+`clear` is refused while any run is `starting`, `running`, or `waiting`. Once every retained run is terminal, it can clear the complete history; the cleared state remains empty after reload and restoration. Clearing Subagent history never changes Goal statistics.
 
 A child uses `contact_supervisor` with `need_decision`, `interview_request`, or `progress_update`. Every request moves the child to `waiting`; the main session uses `reply` to continue the same run.
 
@@ -128,7 +129,7 @@ Tracks session tasks, dependencies, and progress in main and child sessions.
 | `delete` | Delete an exact subject |
 | `clear` | Clear an empty or completed task set within the batch |
 
-Subjects are case-sensitive and matched exactly. `delete` is refused when another task still names the target in `blockedBy`. An `update` batch is atomic: if any operation or the final dependency graph is invalid, nothing is committed.
+Subjects are case-sensitive and matched exactly. Multiple items may be `in_progress`. Dependencies must form an acyclic graph. `delete` is refused when another task still names the target in `blockedBy`. `clear` requires an empty or fully completed current group. An `update` batch is atomic: if any operation or the final dependency graph is invalid, nothing is committed.
 
 ### `loop`
 
@@ -143,7 +144,7 @@ Schedules self-contained prompts on a runtime-only fixed-delay timer.
 | `pause` | Pause a loop |
 | `resume` | Resume after one full interval |
 
-Intervals are inclusive from `10s` through `7d`. The next delay begins after the previous tick finishes, so slow work does not build an overlapping schedule.
+Intervals are inclusive from `10s` through `7d`. Creation and resume wait one full interval. Each later delay begins after the previous tick finishes, so slow work does not build an overlapping schedule.
 
 Loops survive compaction and tree navigation, but not reload, new session, session resume, fork, or quit. Those transitions clear every loop.
 
@@ -190,7 +191,7 @@ Manages one branch-local durable Goal with explicit criteria and evidence.
 | `complete` | Complete with evidence aligned to the criteria |
 | `cancel` | Cancel with a reason |
 
-A Goal is durable on its branch. Reload, session resume, fork, and tree restoration restore unfinished work as paused; it never silently resumes. Completion requires exactly one non-empty evidence item for each criterion.
+A Goal is durable on its branch. Reload, session resume, fork, and tree restoration restore unfinished work as paused; it never silently resumes. Provider failures retry automatically, repeated no-progress runs pause the Goal, and user aborts pause instead of cancelling. Completion requires exactly one non-empty evidence item for each criterion.
 
 Autonomous continuation waits until blocking work is gone, including active or waiting subagents, Monitor work and pending terminal delivery, and a waiting Ask dialog. Use `status`, `pause`, `resume`, or `cancel` to stay in control.
 

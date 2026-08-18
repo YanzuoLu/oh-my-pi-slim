@@ -14,17 +14,19 @@ const REASONS = ["need_decision", "interview_request", "progress_update"] as con
 
 export const contactSupervisorParameters = Type.Object({
   reason: Type.Union(REASONS.map((reason) => Type.Literal(reason)), {
-    description: "Select the supervisor request type.",
+    description: "Request type: need_decision, interview_request, or progress_update.",
   }),
-  message: Type.Optional(Type.String({ description: "Provide the complete request context for the orchestrator." })),
+  message: Type.Optional(Type.String({
+    description: "Complete context the orchestrator needs to respond. Defaults to the selected reason when omitted or blank.",
+  })),
   interview: Type.Optional(Type.Object({
-    title: Type.Optional(Type.String({ description: "Provide a short interview title." })),
+    title: Type.Optional(Type.String({ description: "Optional short interview title." })),
     questions: Type.Optional(Type.Array(Type.Object({
-      id: Type.Optional(Type.String({ description: "Provide a short question identifier." })),
-      prompt: Type.String({ description: "Provide the question text." }),
-      options: Type.Optional(Type.Array(Type.String(), { description: "Provide the answer options." })),
-    }), { description: "Provide the structured interview questions." })),
-  }, { description: "Provide structured interview details." })),
+      id: Type.Optional(Type.String({ description: "Optional short identifier for matching a question." })),
+      prompt: Type.String({ description: "Question the orchestrator should answer." }),
+      options: Type.Optional(Type.Array(Type.String(), { description: "Optional authored answer choices." })),
+    }), { description: "Authored interview questions in display order." })),
+  }, { description: "Structured interview details for interview_request." })),
 }, { additionalProperties: false });
 
 export default function childSupervisor(pi: ExtensionAPI): void {
@@ -42,13 +44,11 @@ export default function childSupervisor(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "contact_supervisor",
     label: "Contact Supervisor",
-    description: "Request an orchestrator reply and pause the child run until the reply arrives.",
-    promptSnippet: "Request an orchestrator reply from a child run.",
+    description: "Request an orchestrator response for a decision, structured interview, or progress update. Every call moves the child run to waiting, including progress updates. The result records the request context and ends the current child turn. Work continues in the same run after the orchestrator replies.",
+    promptSnippet: "Request an orchestrator response.",
     promptGuidelines: [
-      "Contact the orchestrator through `contact_supervisor` when a decision, interview, or progress update needs acknowledgement.",
-      "Request a structured interview through `contact_supervisor` when authored questions will help the orchestrator decide.",
-      "Treat every `contact_supervisor` request as a waiting transition, including progress updates.",
-      "Resume child work only after the orchestrator replies to `contact_supervisor`.",
+      "Use `contact_supervisor` whenever child work requires an orchestrator reply.",
+      "Every `contact_supervisor` reason waits for that reply, including `progress_update`.",
     ],
     parameters: contactSupervisorParameters,
     async execute(_toolCallId, params) {

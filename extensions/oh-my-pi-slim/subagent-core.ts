@@ -18,6 +18,7 @@ export const TERMINAL_RUN_STATUSES = new Set<RunStatus>([
 export const SUBAGENT_ACTIONS = [
   "create",
   "list",
+  "status",
   "interrupt",
   "steer",
   "resume",
@@ -90,6 +91,21 @@ export interface RestoredRunJournal {
 
 export interface RunSummary extends PersistedRun {
   live: boolean;
+}
+
+export interface SubagentRunSummary {
+  id: string;
+  agent: SpecialistName;
+  abstract: string;
+  status: RunStatus;
+  live: boolean;
+  sourceRunId?: string;
+  reason?: SupervisorRequest["reason"];
+}
+
+export interface SubagentRunStatus extends SubagentRunSummary {
+  output?: string;
+  error?: string;
 }
 
 export interface SubagentLaunchInput {

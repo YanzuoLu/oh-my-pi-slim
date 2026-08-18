@@ -260,36 +260,6 @@ function removalError(error: unknown): string {
 }
 
 /**
- * Removes one Goal stats sidecar through the same session-owned path guard that writes it.
- * Reuses getGoalStatsSidecarPaths() so clear never reimplements the sidecar containment rules.
- */
-export function removeGoalStatsSidecar(root: string, ownerSessionId: string, runId: string): SafeRemoval {
-  let paths: GoalStatsSidecarPaths;
-  try { paths = getGoalStatsSidecarPaths(root, ownerSessionId, runId); }
-  catch (error) { return { removed: false, reason: removalError(error) }; }
-  for (const directory of [paths.root, paths.ownerDir]) {
-    let stat;
-    try { stat = lstatSync(directory); }
-    catch { return { removed: true }; }
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      return { removed: false, reason: `Goal stats directory ${directory} is a link or not a directory.` };
-    }
-  }
-  let stat;
-  try { stat = lstatSync(paths.file); }
-  catch { return { removed: true }; }
-  if (stat.isSymbolicLink() || !stat.isFile()) {
-    return { removed: false, reason: "Goal stats sidecar is a link or not a regular file." };
-  }
-  try {
-    unlinkSync(paths.file);
-    return { removed: true };
-  } catch (error) {
-    return { removed: false, reason: removalError(error) };
-  }
-}
-
-/**
  * Removes one child session file only when it truly resides inside this parent session's child session root.
  * Resolves the real parent directory first so symlinked parents and `..` segments cannot escape containment.
  */

@@ -99,7 +99,6 @@ const {
   readGoalStatsSidecar,
   readLaunchConfig,
   removeChildSessionFile,
-  removeGoalStatsSidecar,
   removeRunFiles,
   safeReadJson,
   writeControl,
@@ -123,7 +122,7 @@ function assertSteBlock(block) {
 }
 
 function assertStePromptGuidelines(guidelines) {
-  assert.ok(Array.isArray(guidelines) && guidelines.length > 0);
+  assert.ok(Array.isArray(guidelines));
   for (const guideline of guidelines) {
     assert.equal(guideline.split(/(?<=[.!?])\s+/).filter(Boolean).length, 1, `STE guideline must contain one sentence: ${guideline}`);
     assertSteSentence(guideline);
@@ -441,7 +440,7 @@ async function createChildCheckpointHarness() {
 }
 
 test("public schema and package-agent boundaries remain minimal", async () => {
-  assert.deepEqual(SUBAGENT_ACTIONS, ["create", "list", "interrupt", "steer", "resume", "reply", "clear"]);
+  assert.deepEqual(SUBAGENT_ACTIONS, ["create", "list", "status", "interrupt", "steer", "resume", "reply", "clear"]);
   assert.deepEqual(SUBAGENT_PUBLIC_FIELDS, ["agent", "abstract", "task", "cwd", "action", "id", "message"]);
   assert.deepEqual(Object.keys(subagentParameters.properties).sort(), [...SUBAGENT_PUBLIC_FIELDS].sort());
   assert.equal(subagentParameters.additionalProperties, false);
@@ -449,13 +448,13 @@ test("public schema and package-agent boundaries remain minimal", async () => {
   assert.equal(subagentParameters.required.includes("action"), true);
   assert.equal("maxLength" in subagentParameters.properties.abstract, false);
   assert.deepEqual(Object.fromEntries(Object.entries(subagentParameters.properties).map(([field, schema]) => [field, schema.description])), {
-    agent: "For create, select the specialist role.",
-    abstract: "For create or resume, provide a short run summary.",
-    task: "For create, provide the complete objective.",
-    cwd: "For create, provide a different working directory.",
-    action: "Select the subagent action. Create uses agent, abstract, task, and optional cwd. Steer and reply use id and message. Resume uses id, abstract, and message. Interrupt uses id. List and clear use no other fields.",
-    id: "For steer, interrupt, resume, or reply, provide the run ID.",
-    message: "For steer, provide an actual instruction. For resume, provide the complete continuation objective. For reply, answer the complete waiting request.",
+    agent: "Specialist role for create.",
+    abstract: "Short run summary for create or resume.",
+    task: "Complete bounded objective for create.",
+    cwd: "Working directory for create. Defaults to the parent working directory.",
+    action: "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message. list and clear accept no other fields.",
+    id: "Retained run ID for status, steer, interrupt, resume, or reply.",
+    message: "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.",
   });
   for (const schema of Object.values(subagentParameters.properties)) assertSteBlock(schema.description);
   assert.deepEqual(validateCreateInput({ agent: "explorer", abstract: " map auth ", task: " map " }), {
@@ -735,12 +734,24 @@ test("runtime requires explicit create fields and rejects unknown fields", async
       harness.tools.get("subagent").execute("list", { action: "list", async: true }),
       /unknown field.*async/i,
     );
-    for (const action of ["list", "steer", "interrupt", "reply"]) {
+    for (const action of ["list", "status", "steer", "interrupt", "reply"]) {
       await assert.rejects(
         harness.tools.get("subagent").execute(action, { action, abstract: "forbidden" }),
         new RegExp(`${action} does not accept create field\\(s\\): abstract`, "i"),
       );
     }
+    await assert.rejects(
+      harness.tools.get("subagent").execute("status-unknown", { action: "status", id: "source", extra: true }),
+      /subagent does not accept unknown field\(s\): extra/i,
+    );
+    await assert.rejects(
+      harness.tools.get("subagent").execute("status-message", { action: "status", id: "source", message: "forbidden" }),
+      /status does not accept message/i,
+    );
+    await assert.rejects(
+      harness.tools.get("subagent").execute("status-missing-id", { action: "status" }),
+      /id must be a non-empty string/i,
+    );
     await assert.rejects(
       harness.tools.get("subagent").execute("resume-missing-abstract", { action: "resume", id: "source", message: "continue" }),
       /abstract must be a non-empty string/i,
@@ -767,34 +778,29 @@ test("registered subagent metadata describes the unified lifecycle", () => {
   const harness = createHarness();
   try {
     const subagent = harness.tools.get("subagent");
-    assert.equal(subagent.description, "Create and manage retained specialist runs by run ID. List reports every retained run and its public state. Terminal history includes final output or errors until cleared. Resume creates a new run, while reply continues a waiting run. Interrupt requests resolve through terminal notifications.");
-    assert.equal(subagent.promptSnippet, "Create or manage retained specialist runs by ID.");
+    assert.equal(subagent.description, "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, errors, and interruption outcomes. `subagent resume` starts a new run from reusable terminal context. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` requests termination of a live run without reverting file changes. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.");
+    assert.equal(subagent.promptSnippet, "Delegate and manage specialist runs.");
     assertSteBlock(subagent.description);
     assertSteBlock(subagent.promptSnippet);
     assertStePromptGuidelines(subagent.promptGuidelines);
     const expectedGuidelines = [
       "Delegate bounded specialist work with `subagent create` when an independent lane improves progress.",
-      "Give each `subagent create` lane exclusive writer ownership over its assigned files.",
-      "Run independent `subagent` lanes concurrently only when their ownership and dependencies do not conflict.",
-      "`subagent create` starts new work, while `subagent resume` continues reusable terminal context in a new run.",
-      "Do not duplicate work already owned by a starting, running, or waiting `subagent` run.",
-      "Use `subagent list` to inspect every retained run and its public state.",
-      "Expect terminal `subagent list` entries to include final output or errors.",
-      "Read each waiting `subagent` notification before answering with `subagent reply`.",
-      "`subagent reply` continues the same waiting run after the complete answer arrives.",
-      "Use `subagent steer` only for an actual instruction, never for polling or reassurance.",
-      "Use `subagent interrupt` only when a live run is obsolete, wrong, or conflicting.",
-      "Limit `subagent interrupt` to starting, running, or waiting runs.",
-      "Inspect partial file changes after `subagent interrupt` because interruption is not rollback.",
-      "Read every terminal `subagent` notification for final output, errors, or interrupt status.",
-      "Expect reload, tree navigation, or session replacement to interrupt active `subagent` runs while retaining their history.",
-      "Call `subagent clear` only after every retained run becomes terminal.",
-      "Do not call any `subagent` action on a run removed by `subagent clear`.",
+      "Give concurrent `subagent create` runs disjoint writer ownership and nonconflicting dependencies.",
+      "Do not duplicate work owned by a starting, running, or waiting `subagent` run.",
+      "`subagent create` starts new work, while `subagent resume` starts a new run from reusable terminal context.",
+      "`subagent list` summarizes retained runs, while `subagent status` returns one run's detailed result.",
+      "Use `subagent reply` only to answer the complete request from that same waiting run.",
+      "Use `subagent steer` only for a genuine new instruction, not polling or reassurance.",
+      "Use `subagent interrupt` only for starting, running, or waiting runs that should stop.",
+      "`subagent interrupt` is not rollback, so inspect partial file changes before continuing.",
+      "Use `subagent clear` only when every run is terminal and all retained history should be removed.",
     ];
-    assert.equal(subagent.parameters.properties.action.description, "Select the subagent action. Create uses agent, abstract, task, and optional cwd. Steer and reply use id and message. Resume uses id, abstract, and message. Interrupt uses id. List and clear use no other fields.");
-    assert.equal(subagent.parameters.properties.message.description, "For steer, provide an actual instruction. For resume, provide the complete continuation objective. For reply, answer the complete waiting request.");
+    assert.equal(subagent.parameters.properties.action.description, "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message. list and clear accept no other fields.");
+    assert.equal(subagent.parameters.properties.id.description, "Retained run ID for status, steer, interrupt, resume, or reply.");
+    assert.equal(subagent.parameters.properties.message.description, "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.");
     assert.deepEqual(subagent.promptGuidelines, expectedGuidelines);
     const guidelines = subagent.promptGuidelines.join("\n");
+    assert.match(guidelines, /subagent list.*subagent status.*detailed result/i);
     assert.doesNotMatch(`${subagent.description}\n${subagent.promptSnippet}\n${guidelines}`, /subagent_supervisor|pending query|replyTo|request ID|waitingSeq|deliveryKey|legacy|saved child-session/i);
     assert.equal(typeof subagent.renderCall, "function");
     assert.equal(typeof subagent.renderResult, "function");
@@ -803,39 +809,46 @@ test("registered subagent metadata describes the unified lifecycle", () => {
   } finally { harness.cleanup(); }
 });
 
-test("subagent list returns active then starting then newest terminal runs without changing public fields or terminal output", async () => {
+test("subagent list stays compact across all six statuses while status isolates one latest retained result", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
-    harness.runtime.registry.add(persistedRun({
-      id: "status-completed", abstract: "completed abstract", status: "completed",
-      createdAt: "2026-04-16T00:00:00.000Z", updatedAt: "2026-04-16T00:00:00.000Z",
-      task: "TASK_SENTINEL", output: "OUTPUT_SENTINEL", error: "ERROR_SENTINEL",
-      sourceRunId: "older-run",
-    }), false);
-    harness.runtime.registry.add(persistedRun({
-      id: "status-failed-new", abstract: "recent terminal abstract", status: "failed",
-      createdAt: "2026-04-15T00:00:00.000Z", updatedAt: "2026-04-18T00:00:00.000Z",
-      task: "RECENT_TASK_SENTINEL", error: "RECENT_ERROR_SENTINEL",
-    }), false);
+    for (const run of [
+      persistedRun({
+        id: "status-completed", abstract: "completed abstract", status: "completed",
+        createdAt: "2026-04-16T00:00:00.000Z", updatedAt: "2026-04-16T00:00:00.000Z",
+        task: "TASK_SENTINEL", output: "OUTPUT_SENTINEL", error: "ERROR_SENTINEL", sourceRunId: "older-run",
+      }),
+      persistedRun({
+        id: "status-failed-new", abstract: "recent terminal abstract", status: "failed",
+        createdAt: "2026-04-15T00:00:00.000Z", updatedAt: "2026-04-18T00:00:00.000Z",
+        task: "RECENT_TASK_SENTINEL", error: "RECENT_ERROR_SENTINEL",
+      }),
+      persistedRun({
+        id: "status-interrupted", abstract: "interrupted abstract", status: "interrupted",
+        createdAt: "2026-04-14T00:00:00.000Z", updatedAt: "2026-04-17T00:00:00.000Z",
+        output: "INTERRUPTED_OUTPUT_SENTINEL", error: "INTERRUPTED_ERROR_SENTINEL",
+      }),
+    ]) harness.runtime.registry.add(run, false);
+
     const running = await createRun(harness, { abstract: "running abstract", task: "RUNNING_TASK_SENTINEL" });
     const runningId = running.details.run.id;
     const runningConfig = readConfig(harness, runningId);
     harness.alive.add(999);
-    atomicWriteJson(harness.paths(runningId).stateFile, stateFor(runningId, runningConfig.token));
-    await inspect(harness, runningId);
+    atomicWriteJson(harness.paths(runningId).stateFile, stateFor(runningId, runningConfig.token, {
+      output: "ACTIVE_OUTPUT_SENTINEL", error: "ACTIVE_ERROR_SENTINEL",
+    }));
+
     const waiting = await createRun(harness, { abstract: "waiting abstract", task: "WAITING_TASK_SENTINEL" });
     const waitingId = waiting.details.run.id;
     const waitingConfig = readConfig(harness, waitingId);
-    harness.alive.add(999);
     atomicWriteJson(harness.paths(waitingId).stateFile, stateFor(waitingId, waitingConfig.token, {
-      status: "waiting", waitingSeq: 1,
+      status: "waiting", waitingSeq: 1, output: "WAITING_OUTPUT_SENTINEL", error: "WAITING_ERROR_SENTINEL",
       request: {
         runId: waitingId, reason: "need_decision", message: "REQUEST_MESSAGE_SENTINEL",
         interview: { title: "INTERVIEW_SENTINEL" }, createdAt: "REQUEST_TIMESTAMP_SENTINEL",
       },
     }));
-    await inspect(harness, waitingId);
     const starting = await createRun(harness, { abstract: "starting abstract", task: "STARTING_TASK_SENTINEL" });
 
     const result = await harness.tools.get("subagent").execute("list", { action: "list" });
@@ -844,16 +857,21 @@ test("subagent list returns active then starting then newest terminal runs witho
       harness.runtime.registry.require(waitingId),
     ]).map((run) => run.id);
     assert.deepEqual(result.details.runs.map((run) => run.id), [
-      ...activeIds, starting.details.run.id, "status-failed-new", "status-completed",
-    ], "list must use shared active, starting, terminal-newest priority");
+      ...activeIds, starting.details.run.id, "status-failed-new", "status-interrupted", "status-completed",
+    ], "list must preserve shared active, starting, terminal-newest priority");
+    assert.deepEqual(new Set(result.details.runs.map((run) => run.status)), new Set([
+      "starting", "running", "waiting", "completed", "failed", "interrupted",
+    ]));
     const byId = new Map(result.details.runs.map((run) => [run.id, run]));
     assert.deepEqual(byId.get("status-completed"), {
       id: "status-completed", agent: "fixer", abstract: "completed abstract", status: "completed", live: false,
-      sourceRunId: "older-run", output: "OUTPUT_SENTINEL", error: "ERROR_SENTINEL",
+      sourceRunId: "older-run",
     });
     assert.deepEqual(byId.get("status-failed-new"), {
       id: "status-failed-new", agent: "fixer", abstract: "recent terminal abstract", status: "failed", live: false,
-      error: "RECENT_ERROR_SENTINEL",
+    });
+    assert.deepEqual(byId.get("status-interrupted"), {
+      id: "status-interrupted", agent: "fixer", abstract: "interrupted abstract", status: "interrupted", live: false,
     });
     assert.deepEqual(byId.get(runningId), {
       id: runningId, agent: "fixer", abstract: "running abstract", status: "running", live: true,
@@ -864,17 +882,70 @@ test("subagent list returns active then starting then newest terminal runs witho
     assert.deepEqual(byId.get(starting.details.run.id), {
       id: starting.details.run.id, agent: "fixer", abstract: "starting abstract", status: "starting", live: false,
     });
+    for (const run of result.details.runs) {
+      assert.equal("output" in run, false, `${run.status} list entry must not expose output`);
+      assert.equal("error" in run, false, `${run.status} list entry must not expose error`);
+    }
     assert.deepEqual(JSON.parse(result.content[0].text), result.details.runs);
+
+    const statusIds = [...result.details.runs.map((run) => run.id)];
+    for (const id of statusIds) {
+      const statusResult = await harness.tools.get("subagent").execute("status", { action: "status", id });
+      assert.deepEqual(JSON.parse(statusResult.content[0].text), statusResult.details.run);
+      const listed = byId.get(id);
+      const statusBase = Object.fromEntries(Object.entries(statusResult.details.run)
+        .filter(([field]) => field !== "output" && field !== "error"));
+      assert.deepEqual(statusBase, listed, `${id} status base fields must exactly match list`);
+      if (statusResult.details.run.status === "completed") {
+        assert.equal(statusResult.details.run.output, "OUTPUT_SENTINEL");
+        assert.equal(statusResult.details.run.error, "ERROR_SENTINEL");
+      } else if (statusResult.details.run.status === "failed") {
+        assert.equal(statusResult.details.run.error, "RECENT_ERROR_SENTINEL");
+        assert.equal("output" in statusResult.details.run, false);
+      } else if (statusResult.details.run.status === "interrupted") {
+        assert.equal(statusResult.details.run.output, "INTERRUPTED_OUTPUT_SENTINEL");
+        assert.equal(statusResult.details.run.error, "INTERRUPTED_ERROR_SENTINEL");
+      } else {
+        assert.equal("output" in statusResult.details.run, false, `${id} nonterminal status must omit output`);
+        assert.equal("error" in statusResult.details.run, false, `${id} nonterminal status must omit error`);
+      }
+    }
+
     const exposed = JSON.stringify({ content: result.content, details: result.details });
     for (const field of [
-      "task", "cwd", "model", "deniedTools", "createdAt", "updatedAt", "sessionFile", "activity",
+      "output", "error", "task", "cwd", "model", "deniedTools", "createdAt", "updatedAt", "sessionFile", "activity",
       "notificationPending", "request", "message", "interview", "requestId", "waitingSeq",
-    ]) {
-      assert.equal(exposed.includes(`\"${field}\"`), false, `${field} must not enter list output`);
-    }
-    for (const sentinel of ["TASK_SENTINEL", "RECENT_TASK_SENTINEL", "RUNNING_TASK_SENTINEL", "WAITING_TASK_SENTINEL", "STARTING_TASK_SENTINEL", "REQUEST_MESSAGE_SENTINEL", "INTERVIEW_SENTINEL"]) {
-      assert.equal(exposed.includes(sentinel), false);
-    }
+    ]) assert.equal(exposed.includes(`\"${field}\"`), false, `${field} must not enter list output`);
+    for (const sentinel of [
+      "TASK_SENTINEL", "RECENT_TASK_SENTINEL", "RUNNING_TASK_SENTINEL", "WAITING_TASK_SENTINEL",
+      "STARTING_TASK_SENTINEL", "REQUEST_MESSAGE_SENTINEL", "INTERVIEW_SENTINEL", "ACTIVE_OUTPUT_SENTINEL",
+      "ACTIVE_ERROR_SENTINEL", "WAITING_OUTPUT_SENTINEL", "WAITING_ERROR_SENTINEL", "OUTPUT_SENTINEL",
+      "ERROR_SENTINEL", "RECENT_ERROR_SENTINEL", "INTERRUPTED_OUTPUT_SENTINEL", "INTERRUPTED_ERROR_SENTINEL",
+    ]) assert.equal(exposed.includes(sentinel), false);
+  } finally { harness.cleanup(); }
+});
+
+test("subagent status reconciles before reading the latest registry and distinguishes unknown IDs", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const created = await createRun(harness, { abstract: "reconcile status", task: "complete before status" });
+    const id = created.details.run.id;
+    const config = readConfig(harness, id);
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "completed", output: "LATEST_STATUS_OUTPUT", error: "LATEST_STATUS_ERROR",
+    }));
+
+    const result = await harness.tools.get("subagent").execute("status", { action: "status", id });
+    assert.deepEqual(result.details.run, {
+      id, agent: "fixer", abstract: "reconcile status", status: "completed", live: false,
+      output: "LATEST_STATUS_OUTPUT", error: "LATEST_STATUS_ERROR",
+    });
+    assert.equal(harness.runtime.registry.require(id).status, "completed");
+    await assert.rejects(
+      harness.tools.get("subagent").execute("status", { action: "status", id: "never-existed" }),
+      /Unknown subagent run: never-existed/,
+    );
   } finally { harness.cleanup(); }
 });
 
@@ -900,8 +971,8 @@ test("contact_supervisor prompt metadata describes persistent reply-to-continue 
     assert.equal(typeof sessionStart, "function");
     sessionStart();
     assert.deepEqual(activeTools, allTools);
-    assert.equal(definition.description, "Request an orchestrator reply and pause the child run until the reply arrives.");
-    assert.equal(definition.promptSnippet, "Request an orchestrator reply from a child run.");
+    assert.equal(definition.description, "Request an orchestrator response for a decision, structured interview, or progress update. Every call moves the child run to waiting, including progress updates. The result records the request context and ends the current child turn. Work continues in the same run after the orchestrator replies.");
+    assert.equal(definition.promptSnippet, "Request an orchestrator response.");
     assertStePromptGuidelines(definition.promptGuidelines);
     assert.equal(definition.parameters.type, "object");
     assert.equal(definition.parameters.additionalProperties, false);
@@ -919,21 +990,19 @@ test("contact_supervisor prompt metadata describes persistent reply-to-continue 
       options: definition.parameters.properties.interview.properties.questions.items.properties.options.description,
     };
     assert.deepEqual(contactDescriptions, {
-      reason: "Select the supervisor request type.",
-      message: "Provide the complete request context for the orchestrator.",
-      interview: "Provide structured interview details.",
-      questions: "Provide the structured interview questions.",
-      title: "Provide a short interview title.",
-      id: "Provide a short question identifier.",
-      prompt: "Provide the question text.",
-      options: "Provide the answer options.",
+      reason: "Request type: need_decision, interview_request, or progress_update.",
+      message: "Complete context the orchestrator needs to respond. Defaults to the selected reason when omitted or blank.",
+      interview: "Structured interview details for interview_request.",
+      questions: "Authored interview questions in display order.",
+      title: "Optional short interview title.",
+      id: "Optional short identifier for matching a question.",
+      prompt: "Question the orchestrator should answer.",
+      options: "Optional authored answer choices.",
     });
     for (const description of Object.values(contactDescriptions)) assertSteBlock(description);
     assert.deepEqual(definition.promptGuidelines, [
-      "Contact the orchestrator through `contact_supervisor` when a decision, interview, or progress update needs acknowledgement.",
-      "Request a structured interview through `contact_supervisor` when authored questions will help the orchestrator decide.",
-      "Treat every `contact_supervisor` request as a waiting transition, including progress updates.",
-      "Resume child work only after the orchestrator replies to `contact_supervisor`.",
+      "Use `contact_supervisor` whenever child work requires an orchestrator reply.",
+      "Every `contact_supervisor` reason waits for that reply, including `progress_update`.",
     ]);
     const guidelines = definition.promptGuidelines.join("\n");
     assert.doesNotMatch(`${definition.description}\n${definition.promptSnippet}\n${guidelines}`, /request ID|UUID|waitingSeq|deliveryKey|legacy|saved child/i);
@@ -2661,6 +2730,31 @@ test("resume creates a new run ID and a complete --session invocation", async ()
   } finally { harness.cleanup(); }
 });
 
+test("reload and restore retain terminal results for status until clear removes the run", async () => {
+  const restored = createHarness({
+    branch: [branchEntry({ version: 1, runs: [persistedRun({
+      id: "restored-terminal", status: "completed", abstract: "restored result",
+      output: "RESTORED_OUTPUT", error: "RESTORED_ERROR",
+    })] })],
+  });
+  try {
+    await restored.restore();
+    const status = await restored.tools.get("subagent").execute("status", {
+      action: "status", id: "restored-terminal",
+    });
+    assert.deepEqual(status.details.run, {
+      id: "restored-terminal", agent: "fixer", abstract: "restored result",
+      status: "completed", live: false, output: "RESTORED_OUTPUT", error: "RESTORED_ERROR",
+    });
+    assert.deepEqual(JSON.parse(status.content[0].text), status.details.run);
+    await clear(restored);
+    await assert.rejects(
+      restored.tools.get("subagent").execute("status", { action: "status", id: "restored-terminal" }),
+      /was cleared from the subagent history/,
+    );
+  } finally { restored.cleanup(); }
+});
+
 test("clear rejects while any run stays active and changes nothing", async () => {
   const harness = createHarness();
   try {
@@ -2840,76 +2934,107 @@ test("clear removes owned child session files once and warns about shared, escap
   } finally { harness.cleanup(); }
 });
 
-test("clear removes Goal stats sidecars only when the Goal snapshot owns every cleared run", async () => {
-  const statsRoot = (harness) => getGoalStatsRoot(harness.sessionDir);
-  const seedSidecar = (harness, runId) => {
-    assert.equal(writeGoalStatsSidecar(statsRoot(harness), harness.ownerSessionId, {
-      version: 1, runId, tokens: 10, tools: 1, turns: 1, compactions: 0,
-    }), true);
-  };
+test("clear ignores Goal ownership and never replays or reads/removes Goal stats", async () => {
+  const cases = [
+    { name: "Goal snapshot", branch: [goalBranchEntry(["run-a", "run-b"])], runIds: ["run-a", "run-b"] },
+    { name: "no Goal snapshot", branch: [], runIds: ["run-a"] },
+    { name: "partial Goal ownership", branch: [goalBranchEntry(["run-a"])], runIds: ["run-a", "run-b"] },
+  ];
+  for (const scenario of cases) {
+    let statsReads = 0;
+    const harness = createHarness({
+      branch: scenario.branch,
+      readGoalStats() {
+        statsReads += 1;
+        throw new Error(`clear read Goal stats in ${scenario.name}`);
+      },
+    });
+    try {
+      await harness.restore();
+      const sidecars = new Map();
+      for (const [index, runId] of scenario.runIds.entries()) {
+        const stats = { version: 1, runId, tokens: 10 + index, tools: 1, turns: 2, compactions: 0 };
+        assert.equal(writeGoalStatsSidecar(getGoalStatsRoot(harness.sessionDir), harness.ownerSessionId, stats), true);
+        const file = getGoalStatsSidecarPaths(getGoalStatsRoot(harness.sessionDir), harness.ownerSessionId, runId).file;
+        sidecars.set(file, readFileSync(file, "utf8"));
+        seedTerminalRun(harness, { id: runId });
+      }
+      harness.ctx.sessionManager.getBranch = () => {
+        throw new Error(`clear replayed the ${scenario.name} branch`);
+      };
 
-  const superset = createHarness({ branch: [goalBranchEntry(["own-a", "own-b", "not-in-registry"])] });
-  try {
-    await superset.restore();
-    for (const id of ["own-a", "own-b", "not-in-registry"]) seedSidecar(superset, id);
-    seedTerminalRun(superset, { id: "own-a" });
-    seedTerminalRun(superset, { id: "own-b" });
-    const result = await clear(superset);
-    assert.deepEqual(result.details.warnings, []);
-    for (const id of ["own-a", "own-b"]) {
-      assert.equal(readGoalStatsSidecar(statsRoot(superset), superset.ownerSessionId, id), undefined);
-    }
-    assert.equal(
-      readGoalStatsSidecar(statsRoot(superset), superset.ownerSessionId, "not-in-registry")?.tokens,
-      10,
-      "a Goal-owned run outside the registry keeps its stats",
-    );
-  } finally { superset.cleanup(); }
+      const result = await clear(harness);
+      assert.deepEqual(result.details.warnings, [], scenario.name);
+      assert.equal(statsReads, 0, `${scenario.name} clear must not read Goal stats`);
+      for (const [file, before] of sidecars) {
+        assert.equal(readFileSync(file, "utf8"), before, `${scenario.name} sidecar must stay byte-for-byte unchanged`);
+      }
+    } finally { harness.cleanup(); }
+  }
+});
 
-  const partial = createHarness({ branch: [goalBranchEntry(["own-a"])] });
-  try {
-    await partial.restore();
-    for (const id of ["own-a", "own-b"]) seedSidecar(partial, id);
-    seedTerminalRun(partial, { id: "own-a" });
-    seedTerminalRun(partial, { id: "own-b" });
-    const result = await clear(partial);
-    assert.deepEqual(result.details.warnings, [
-      "Retained Goal stats sidecars because the Goal snapshot does not own every cleared run.",
-    ]);
-    for (const id of ["own-a", "own-b"]) {
-      assert.equal(readGoalStatsSidecar(statsRoot(partial), partial.ownerSessionId, id)?.tokens, 10);
-    }
-  } finally { partial.cleanup(); }
-
-  const noGoal = createHarness();
-  try {
-    await noGoal.restore();
-    seedSidecar(noGoal, "own-a");
-    seedTerminalRun(noGoal, { id: "own-a" });
-    const result = await clear(noGoal);
-    assert.deepEqual(result.details.warnings, [
-      "Retained Goal stats sidecars because this branch has no Goal snapshot.",
-    ]);
-    assert.equal(readGoalStatsSidecar(statsRoot(noGoal), noGoal.ownerSessionId, "own-a")?.tokens, 10);
-  } finally { noGoal.cleanup(); }
-
-  const newerGoal = createHarness({
-    branch: [goalBranchEntry(["old-a"], "old-goal"), goalBranchEntry(["new-only"], "new-goal")],
+test("clear preserves memory-only Goal stats after sidecar write failure", async () => {
+  let statsReads = 0;
+  let statsWrites = 0;
+  const harness = createHarness({
+    readGoalStats() {
+      statsReads += 1;
+      return undefined;
+    },
+    writeGoalStats() {
+      statsWrites += 1;
+      throw new Error("simulated sidecar write failure");
+    },
   });
   try {
-    await newerGoal.restore();
-    seedSidecar(newerGoal, "old-a");
-    seedTerminalRun(newerGoal, { id: "old-a" });
-    const result = await clear(newerGoal);
-    assert.deepEqual(result.details.warnings, [
-      "Retained Goal stats sidecars because the Goal snapshot does not own every cleared run.",
-    ]);
-    assert.equal(
-      readGoalStatsSidecar(statsRoot(newerGoal), newerGoal.ownerSessionId, "old-a")?.tokens,
-      10,
-      "a newer Goal history must not delete an older sub-run's stats",
-    );
-  } finally { newerGoal.cleanup(); }
+    await harness.restore();
+    seedTerminalRun(harness, { id: "memory-only" });
+    harness.runtime.captureGoalActivity("memory-only", stateFor("memory-only", "token", {
+      status: "completed", providerTokens: 73, toolUses: 4, turnCount: 5, compactionCount: 2,
+    }));
+    const before = harness.runtime.goalStats(["memory-only"]);
+    const readsBeforeClear = statsReads;
+    assert.equal(statsWrites, 1);
+
+    const result = await clear(harness);
+    assert.deepEqual(result.details.warnings, []);
+    assert.deepEqual(harness.runtime.goalStats(["memory-only"]), before);
+    assert.equal(statsReads, readsBeforeClear, "clear and the preserved in-memory value must not reread Goal stats");
+  } finally { harness.cleanup(); }
+});
+
+test("clear empties registry, list, and widget while Goal stats remain lazy-readable", async () => {
+  const statsReads = [];
+  const harness = createHarness({
+    mode: "tui",
+    readGoalStats(root, ownerSessionId, runId) {
+      statsReads.push(runId);
+      return readGoalStatsSidecar(root, ownerSessionId, runId);
+    },
+  });
+  try {
+    await harness.restore();
+    const expected = [
+      { version: 1, runId: "lazy-a", tokens: 40, tools: 2, turns: 3, compactions: 1 },
+      { version: 1, runId: "lazy-b", tokens: 60, tools: 5, turns: 7, compactions: 2 },
+    ];
+    for (const stats of expected) {
+      assert.equal(writeGoalStatsSidecar(getGoalStatsRoot(harness.sessionDir), harness.ownerSessionId, stats), true);
+      seedTerminalRun(harness, { id: stats.runId });
+    }
+
+    const result = await clear(harness);
+    assert.deepEqual(result.details.warnings, []);
+    assert.deepEqual(harness.runtime.registry.list(), []);
+    const listed = await harness.tools.get("subagent").execute("list", { action: "list" });
+    assert.deepEqual(listed.details.runs, []);
+    assert.equal(harness.widgetCalls.at(-1).content, undefined);
+    assert.deepEqual(statsReads, [], "clear and list must not read Goal stats");
+    assert.deepEqual(harness.runtime.goalStats(expected.map((stats) => stats.runId)), {
+      runCount: 2, tokens: 100, tools: 7, turns: 10, compactions: 3,
+    });
+    assert.deepEqual(statsReads.sort(), ["lazy-a", "lazy-b"]);
+  } finally { harness.cleanup(); }
 });
 
 test("clear retains an unsafe run directory and still clears the registry consistently", async () => {
@@ -2990,6 +3115,7 @@ test("every ID-bearing action reports a cleared run explicitly and never reuses 
 
     const subagent = harness.tools.get("subagent");
     const cleared = /Run gone-run was cleared from the subagent history and is no longer available/;
+    await assert.rejects(subagent.execute("status", { action: "status", id: "gone-run" }), cleared);
     await assert.rejects(subagent.execute("resume", { action: "resume", id: "gone-run", abstract: "a", message: "m" }), cleared);
     await assert.rejects(subagent.execute("steer", { action: "steer", id: "gone-run", message: "m" }), cleared);
     await assert.rejects(subagent.execute("interrupt", { action: "interrupt", id: "gone-run" }), cleared);
@@ -3017,21 +3143,9 @@ test("clear rejects unknown fields and stays exactly { action: clear }", async (
   } finally { harness.cleanup(); }
 });
 
-test("guarded removal helpers reject unsafe sidecar and session paths directly", () => {
+test("guarded child session removal rejects unsafe paths directly", () => {
   const tempDir = mkdtempSync(join(CACHE, "safe-removal-"));
   try {
-    const statsRoot = join(tempDir, "omps-goal-stats");
-    assert.equal(writeGoalStatsSidecar(statsRoot, "owner-a", {
-      version: 1, runId: "run-a", tokens: 1, tools: 0, turns: 0, compactions: 0,
-    }), true);
-    assert.deepEqual(removeGoalStatsSidecar(statsRoot, "owner-a", "run-a"), { removed: true });
-    assert.deepEqual(removeGoalStatsSidecar(statsRoot, "owner-a", "run-a"), { removed: true });
-    assert.equal(removeGoalStatsSidecar(statsRoot, "../escape", "run-a").removed, false);
-    assert.equal(removeGoalStatsSidecar(statsRoot, "owner-a", "../escape").removed, false);
-    const linkedSidecar = getGoalStatsSidecarPaths(statsRoot, "owner-a", "linked").file;
-    symlinkSync(join(tempDir, "sidecar-target.json"), linkedSidecar);
-    assert.match(removeGoalStatsSidecar(statsRoot, "owner-a", "linked").reason, /link or not a regular file/);
-
     const childDir = join(tempDir, "children");
     mkdirSync(childDir, { recursive: true, mode: 0o700 });
     const file = join(childDir, "session.jsonl");

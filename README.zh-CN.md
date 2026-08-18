@@ -99,16 +99,17 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 | Action | 作用 |
 | --- | --- |
 | `create` | 用 agent、简短 abstract、task 和可选 cwd 创建新 run |
-| `list` | 先按创建时间返回 running 与 waiting run，再返回 starting run，最后按最新更新时间返回 terminal run |
-| `interrupt` | 请求中断未结束的 run |
+| `list` | 按 retained-run 顺序返回全部 retained run 的精简公开状态 |
+| `status` | 返回单个 retained run 的公开状态，并在 terminal 时返回已有结果 |
+| `interrupt` | 请求中断未结束的 run，但不回滚文件修改 |
 | `steer` | 向 running run 发送补充指导 |
 | `resume` | 从 terminal run 保存的 child session 创建新 run，并生成新 ID |
 | `reply` | 回复 waiting child，并继续同一个 run |
 | `clear` | 删除全部 retained terminal history |
 
-`list` 包含 `starting`、`running`、`waiting`、`completed`、`failed` 与 `interrupted` run；terminal entry 还包含最终 `output` 和 `error`。subagent widget 使用完全相同的 retained 集合，因此 terminal run 会一直显示到 `clear`。
+`list` 包含 `starting`、`running`、`waiting`、`completed`、`failed` 与 `interrupted` run，但绝不包含 terminal `output` 或 `error`。使用单个 retained run ID 调用 `status`，可查看相同公开字段，并在结果存在时取回 terminal 结果。subagent widget 使用相同的 retained 集合与排序，因此 terminal run 会一直显示到 `clear`。
 
-只要存在 `starting`、`running` 或 `waiting` run，`clear` 就会被拒绝。全部 retained run 都进入 terminal 后才可清理完整历史；清理结果在 reload 和 restore 后仍保持为空。
+只要存在 `starting`、`running` 或 `waiting` run，`clear` 就会被拒绝。全部 retained run 都进入 terminal 后才可清理完整历史；清理结果在 reload 和 restore 后仍保持为空。清理 Subagent history 不会改变 Goal statistics。
 
 child 可用 `contact_supervisor` 发送 `need_decision`、`interview_request` 或 `progress_update`。每次请求都会让 child 进入 `waiting`；main 用 `reply` 继续同一个 run。
 
@@ -128,7 +129,7 @@ child 可用 `contact_supervisor` 发送 `need_decision`、`interview_request` �
 | `delete` | 按 exact subject 删除任务 |
 | `clear` | 在 batch 内清空空任务集或已完成任务集 |
 
-subject 区分大小写并使用 exact match。如果其他任务仍在 `blockedBy` 中引用目标，`delete` 会被拒绝。`update` batch 是原子的：任一 operation 或最终依赖图非法，都不会提交任何修改。
+subject 区分大小写并使用 exact match。多个 item 可以同时处于 `in_progress`。依赖必须构成无环图。如果其他任务仍在 `blockedBy` 中引用目标，`delete` 会被拒绝。`clear` 要求当前组为空或全部 completed。`update` batch 是原子的：任一 operation 或最终依赖图非法，都不会提交任何修改。
 
 ### `loop`
 
@@ -143,7 +144,7 @@ subject 区分大小写并使用 exact match。如果其他任务仍在 `blocked
 | `pause` | 暂停 loop |
 | `resume` | 恢复后等待一个完整 interval |
 
-interval 闭区间为 `10s` 到 `7d`。每次 tick 完成后才开始下一段 delay，因此慢任务不会形成重叠调度。
+interval 闭区间为 `10s` 到 `7d`。创建和恢复后都会先等待一个完整 interval。此后每次 tick 完成才开始下一段 delay，因此慢任务不会形成重叠调度。
 
 Loop 会跨 compaction 与 tree navigation 保留，但 reload、new session、session resume、fork 或 quit 都会清空全部 loop。
 
@@ -190,7 +191,7 @@ Ask 仅 main 可用，并要求交互式 UI；JSON 与 print mode 不提供该�
 | `complete` | 提交与 criteria 对应的 evidence 并完成 |
 | `cancel` | 带 reason 取消 |
 
-Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree restore 会把未完成 Goal 恢复为 paused，绝不会静默继续。完成时，每条 criterion 必须精确对应一条非空 evidence。
+Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree restore 会把未完成 Goal 恢复为 paused，绝不会静默继续。provider failure 会自动重试，重复无进展会暂停 Goal，用户 abort 也会暂停而不是取消。完成时，每条 criterion 必须精确对应一条非空 evidence。
 
 自主 continuation 会等待阻塞工作消失，包括 active 或 waiting subagent、Monitor 工作与 pending terminal delivery，以及 waiting Ask dialog。你可以随时用 `status`、`pause`、`resume` 或 `cancel` 控制推进。
 
