@@ -54,13 +54,22 @@ export const modifyOperationSchema = Type.Object({
   removeBlockedBy: Type.Optional(removeDependencySchema),
 }, { additionalProperties: false });
 
+export const deleteOperationSchema = Type.Object({
+  op: Type.Literal("delete"),
+  target: Type.String({ description: "Use the exact subject to delete." }),
+}, { additionalProperties: false });
+
 export const clearOperationSchema = Type.Object({
   op: Type.Literal("clear"),
-}, { additionalProperties: false });
+}, {
+  additionalProperties: false,
+  description: "Apply clear at most once in an update.",
+});
 
 export const todoOperationSchema = Type.Union([
   appendOperationSchema,
   modifyOperationSchema,
+  deleteOperationSchema,
   clearOperationSchema,
 ]);
 
@@ -68,34 +77,25 @@ export const todoParameters = Type.Object({
   action: Type.Union([
     Type.Literal("list"),
     Type.Literal("update"),
-  ], { description: "Select list or update." }),
+  ], { description: "Select list to read state or update to apply operations." }),
   operations: Type.Optional(Type.Array(todoOperationSchema, {
     minItems: 1,
-    description: "For update, apply at least one operation in order. For list, omit operations.",
+    description: "For update, provide operations in execution order. Omit this field for list.",
   })),
 }, { additionalProperties: false });
 
-export const TODO_PROMPT_SNIPPET = "Read or update the current session todo list";
+export const TODO_PROMPT_SNIPPET = "Track session work, dependencies, and progress.";
 export const TODO_PROMPT_GUIDELINES = [
-  "Use `todo list` to read the complete todo list for the current session.",
-  "For `list`, omit `operations`.",
-  "Use `todo update` to apply all operations atomically.",
-  "For `update`, provide at least one operation.",
-  "For `append`, provide a unique `subject` and an `abstract`.",
-  "Use `abstract` for a short item summary.",
-  "For `append`, use `blockedBy` to add initial dependencies by exact subject.",
-  "For `modify`, use the exact current subject in `target`.",
-  "For `modify`, provide at least one change.",
-  "Use `newSubject` to rename the item.",
-  "For `modify`, use `abstract` as the replacement summary.",
-  "For `status`, select `pending`, `in_progress`, or `completed`.",
-  "Use `addBlockedBy` to add dependencies by exact subject.",
-  "Use `removeBlockedBy` to remove dependencies by exact subject.",
-  "Complete every dependency before you start or complete an item.",
-  "Before a new task group, use `clear` only after all old items are complete.",
-  "Use one update to complete old items, apply `clear`, and append a new group.",
-  "Use `clear` at most once in each update.",
-  "Expect any failure to cancel the whole update.",
+  "Treat `todo` as the session-local planning ledger for work, dependencies, and progress.",
+  "Use `todo list` to inspect current plan state before uncertain updates.",
+  "Use `todo update` for atomic ordered changes that should succeed or fail together.",
+  "Append new user tasks through `todo update` instead of replacing existing `todo` items.",
+  "Preserve existing `todo` items unless the user or current work requires a change.",
+  "Complete every `todo` dependency before starting or completing a dependent item.",
+  "Allow multiple `todo` items in progress when work genuinely proceeds concurrently.",
+  "Delete a `todo` item only after removing every `blockedBy` reference to it.",
+  "Finish current in-progress `todo` work before appended tasks unless blocked or explicitly reordered.",
+  "Apply `clear` through `todo update` only after current items finish, then append the new task group.",
 ] as const;
 
 interface TodoListDetails {
@@ -185,7 +185,7 @@ export default function todoExtension(pi: ExtensionAPI): void {
     name: "todo",
     label: "Todo",
     executionMode: "sequential",
-    description: "Read or update the current session todo list. Apply updates atomically.",
+    description: "Read or atomically update the current session todo list. Failed update batches leave the list unchanged.",
     promptSnippet: TODO_PROMPT_SNIPPET,
     promptGuidelines: [...TODO_PROMPT_GUIDELINES],
     parameters: todoParameters,
@@ -232,7 +232,11 @@ export default function todoExtension(pi: ExtensionAPI): void {
       addCallField(container, theme, "Operations", operations.length);
       for (let index = 0; index < operations.length; index += 1) {
         const operation = operations[index];
-        const label = operation.op === "append" ? "Append" : operation.op === "modify" ? "Modify" : "Clear";
+        const label = operation.op === "append"
+          ? "Append"
+          : operation.op === "modify"
+            ? "Modify"
+            : operation.op === "delete" ? "Delete" : "Clear";
         container.addChild(new Spacer(1));
         container.addChild(new Text(
           `${theme.fg("dim", `${index + 1}.`)} ${theme.fg("toolTitle", theme.bold(label))}`,
@@ -250,6 +254,8 @@ export default function todoExtension(pi: ExtensionAPI): void {
           if (operation.abstract !== undefined) addCallSection(container, theme, "Abstract", operation.abstract, 2);
           if (operation.addBlockedBy !== undefined) addCallList(container, theme, "Add blocked by", operation.addBlockedBy, 2);
           if (operation.removeBlockedBy !== undefined) addCallList(container, theme, "Remove blocked by", operation.removeBlockedBy, 2);
+        } else if (operation.op === "delete") {
+          addCallField(container, theme, "Target", operation.target, 2);
         }
       }
       return container;

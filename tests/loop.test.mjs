@@ -37,6 +37,7 @@ const dependencyMap = {
   "./subagent-widget-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-renderer.ts", import.meta.url).href,
   "./subagent-widget-display.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-display.ts", import.meta.url).href,
   "./subagent-widget-glyphs.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-glyphs.ts", import.meta.url).href,
+  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -140,28 +141,23 @@ test("loop schema has a provider-portable root and exact public actions", () => 
   const harness = createHarness();
   const tool = harness.tools.get("loop");
   assert.equal(tool.executionMode, "sequential");
-  assert.equal(tool.description, "Create and manage runtime-only repeating fixed-delay prompts.");
-  assert.equal(tool.promptSnippet, "Create or manage runtime-only repeating fixed-delay prompts by loop ID.");
+  assert.equal(tool.description, "Create and manage runtime-only fixed-delay loops that survive compaction and tree navigation. Reload, session replacement, or shutdown clears every loop.");
+  assert.equal(tool.promptSnippet, "Manage runtime-only fixed-delay loops.");
   assert.deepEqual(tool.promptGuidelines, [
-    "Use only `action`, `interval`, `abstract`, and `prompt` for `create`.",
-    "Use only `action` and `id` for `delete`, `pause`, or `resume`.",
-    "Use only `action`, `id`, and optional `interval`, `abstract`, or `prompt` for `modify`.",
-    "Use only `action` for `list`.",
-    "For `modify`, provide at least one of `interval`, `abstract`, or `prompt`.",
-    "Expect a missing or unknown `id` to return an error.",
-    "Expect repeated `pause` or `resume` actions to return no change.",
-    "Use `create` only when the latest user message starts with `/loop`.",
-    "Do not create loops from ordinary natural-language requests.",
-    "Use `list`, `delete`, `modify`, `pause`, or `resume` for ordinary requests.",
-    "For a bare `/loop`, call `list` and explain `/loop <interval> <prompt>`.",
-    "For `create`, generate a short abstract from the requested work.",
-    "For `create`, write a self-contained prompt for every future turn.",
-    "For `interval`, use one positive integer with `s`, `m`, `h`, or `d`.",
-    "Use intervals from `10s` through `7d`.",
-    "Expect each `create` or `resume` to wait one full interval before firing.",
-    "Expect loops to survive compaction and tree navigation.",
-    "Expect reload, new, resume, fork, or quit to clear all loops.",
+    "Create loops with `loop create` only from a user message that starts with `/loop`.",
+    "For a bare `/loop`, call `loop list` and explain `/loop <interval> <prompt>`.",
+    "Make every `loop create` prompt self-contained and repeatable for future turns.",
+    "Expect `loop create` and `loop resume` to wait one full fixed interval before firing.",
+    "Start each next `loop` delay only after the previous tick finishes.",
+    "Inspect current loops with `loop list` before changing uncertain loop state.",
+    "Change a loop schedule or future prompt with `loop modify`.",
+    "Suspend or reactivate a loop with `loop pause` or `loop resume`.",
+    "Remove an unwanted loop with `loop delete`.",
+    "Expect loops to survive compaction and tree navigation within the current runtime.",
+    "Treat loops as runtime-only because reload, session replacement, or shutdown clears every loop.",
   ]);
+  assert.equal(schema.properties.action.description, "Select the loop action. Create uses interval, abstract, and prompt. Modify uses id and at least one changed field. Delete, pause, and resume use id. List uses no other fields.");
+  assert.equal(schema.properties.interval.description, "For create or modify, provide one interval from 10s through 7d. Use one integer with `s`, `m`, `h`, or `d`.");
   assert.equal(typeof tool.renderCall, "function");
   assert.equal(typeof tool.renderResult, "function");
   assert.equal(typeof harness.messageRenderers.get(LOOP_MESSAGE_TYPE), "function");
@@ -618,6 +614,7 @@ test("slash command forwards raw loop text as a real user message with idle and 
   };
   registerLoopRuntime(pi, { randomHex: () => "00000001" });
   const command = commands.get("loop");
+  assert.equal(command.description, "Forward a loop request to the model.");
   await command.handler("", { isIdle: () => true });
   await command.handler("  create every ten seconds", { isIdle: () => false });
   assert.deepEqual(sent, [

@@ -13,6 +13,7 @@ const dependencyMap = {
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
   "./ask-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts", import.meta.url).href,
+  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -116,6 +117,25 @@ test("Ask schema is strict, provider-portable, and preserves RPIV field bounds",
   assert.equal(question.properties.options.items.properties.label.maxLength, 60);
   assert.deepEqual(Object.keys(question.properties).sort(), ["header", "multiSelect", "options", "question"]);
   assert.deepEqual(Object.keys(question.properties.options.items.properties).sort(), ["description", "label", "preview"]);
+  assert.deepEqual({
+    label: question.properties.options.items.properties.label.description,
+    description: question.properties.options.items.properties.description.description,
+    preview: question.properties.options.items.properties.preview.description,
+    question: question.properties.question.description,
+    header: question.properties.header.description,
+    options: question.properties.options.description,
+    multiSelect: question.properties.multiSelect.description,
+    questions: schema.properties.questions.description,
+  }, {
+    label: "Write a short option label. Mark a recommendation by placing it first and appending (Recommended). Do not use Other, Type something., or Next.",
+    description: "Describe the outcome of choosing this option.",
+    preview: "Add preview content only for a single-select question.",
+    question: "Write one user decision question.",
+    header: "Write a short question header.",
+    options: "Provide authored choices in display order.",
+    multiSelect: "Set true only when multiple authored options may be selected. Omit option previews when true.",
+    questions: "Provide questions in display order.",
+  });
 });
 
 test("Ask tool metadata and action fields match the frozen contract", () => {
@@ -124,14 +144,15 @@ test("Ask tool metadata and action fields match the frozen contract", () => {
   runtime.registerTool();
   const tool = harness.tools.get("ask_user_question");
   assert.equal(tool.executionMode, "sequential");
-  assert.equal(tool.description, "Ask the user one through four structured questions.");
-  assert.equal(tool.promptSnippet, "Ask the user structured questions for ordinary decisions.");
-  assert.deepEqual(tool.promptGuidelines, [...ASK_PROMPT_GUIDELINES]);
-  const guidelines = tool.promptGuidelines.join("\n");
-  assert.match(guidelines, /place it first and append `\(Recommended\)` to its label/);
-  assert.match(guidelines, /provide a custom response/);
-  assert.match(guidelines, /Use `multiSelect` only when/);
-  assert.match(guidelines, /Use `preview` only for single-select options/);
+  assert.equal(tool.description, "Ask the user structured questions and return structured answers.");
+  assert.equal(tool.promptSnippet, "Ask the user structured questions for decisions.");
+  assert.deepEqual(tool.promptGuidelines, [
+    "Choose `ask_user_question` only when the user's decision should direct the next step.",
+    "Prefer bounded authored choices in `ask_user_question` when likely outcomes are known.",
+    "Allow a custom `ask_user_question` response when authored choices may not fit.",
+    "Treat partial or cancelled `ask_user_question` answers as valid outcomes, not failed calls.",
+    "Do not call `ask_user_question` while a Goal is active.",
+  ]);
   assert.deepEqual(ASK_RESERVED_LABELS, ["Other", "Type something.", "Next"]);
   assert.equal(tool.parameters.properties.action, undefined);
   assert.equal(typeof tool.renderCall, "function");
@@ -434,13 +455,12 @@ test("RPC authored prefixes keep Submit, Cancel, and Done label collisions unamb
   assert.deepEqual(multiResult.answers[0].answer, [ASK_RPC_DONE_LABEL, ASK_RPC_SUBMIT_LABEL, ASK_RPC_CANCEL_LABEL]);
 });
 
-test("Ask prompt guidelines keep short ASD instruction sentences", () => {
-  const startsWithInstruction = /^(?:Use|Provide|For|Expect|Do not)\b/;
+test("Ask prompt guidelines keep short tool-owned metadata sentences", () => {
   for (const guideline of ASK_PROMPT_GUIDELINES) {
     const words = guideline.match(/[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*/g) ?? [];
     assert.ok(words.length <= 20, guideline);
     assert.equal(guideline.includes(";"), false, guideline);
-    assert.match(guideline, startsWithInstruction);
+    assert.match(guideline, /\bask_user_question\b/);
   }
 });
 

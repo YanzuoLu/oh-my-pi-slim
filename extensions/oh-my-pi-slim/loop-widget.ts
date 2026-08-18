@@ -1,6 +1,7 @@
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { PublicLoop } from "./loop-runtime.js";
+import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
 
 export const LOOP_WIDGET_KEY = "oh-my-pi-slim:loops";
 export const MAX_LOOP_WIDGET_LINES = 12;
@@ -94,7 +95,7 @@ function firstLine(
   width: number,
   branch: "├─" | "└─",
 ): string {
-  const prefix = `${theme.fg("dim", branch)} ${loopGlyph(loop, theme)} `;
+  const prefix = `${theme.fg("dim", branch)} ${formatSemanticGlyphPrefix(loopGlyph(loop, theme))}`;
   const suffix = ` ${theme.fg("dim", `[${sanitizeLoopText(loop.id).slice(0, 8)}]`)}`;
   const abstractWidth = Math.max(0, width - visibleWidth(prefix) - visibleWidth(suffix));
   const abstract = truncateToWidth(sanitizeLoopText(loop.abstract), abstractWidth, "…");
@@ -125,7 +126,9 @@ export function renderLoopWidgetLines(
   const active = sorted.filter((loop) => loop.status === "active").length;
   const visible = sorted.slice(0, MAX_VISIBLE_LOOPS);
   const hidden = sorted.length - visible.length;
-  const lines = [truncateToWidth(theme.fg(active > 0 ? "accent" : "dim", theme.bold(`● Loops (${active}/${sorted.length})`)), safeWidth, "…")];
+  const headingRole = active > 0 ? "accent" : "dim";
+  const heading = `${formatSemanticGlyphPrefix(theme.fg(headingRole, theme.bold("●")))}${theme.fg(headingRole, theme.bold(`Loops (${active}/${sorted.length})`))}`;
+  const lines = [truncateToWidth(heading, safeWidth, "…")];
 
   for (let index = 0; index < visible.length; index += 1) {
     const continues = index < visible.length - 1 || hidden > 0;

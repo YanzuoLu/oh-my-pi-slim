@@ -27,15 +27,20 @@ export interface ModifyOperation {
   removeBlockedBy?: string[];
 }
 
+export interface DeleteOperation {
+  op: "delete";
+  target: string;
+}
+
 export interface ClearOperation {
   op: "clear";
 }
 
-export type TodoOperation = AppendOperation | ModifyOperation | ClearOperation;
+export type TodoOperation = AppendOperation | ModifyOperation | DeleteOperation | ClearOperation;
 
 export interface TodoReceipt {
   operation: number;
-  kind: "append" | "modify" | "rename" | "status" | "no-change" | "clear";
+  kind: "append" | "modify" | "rename" | "status" | "delete" | "no-change" | "clear";
   text: string;
 }
 
@@ -56,7 +61,7 @@ const DETAILS_KEYS = ["operations", "receipts", "state", "type", "version"];
 const STATE_KEYS = ["tasks", "version"];
 const RECEIPT_KEYS = ["kind", "operation", "text"];
 const RECEIPT_KINDS = new Set<TodoReceipt["kind"]>([
-  "append", "modify", "rename", "status", "no-change", "clear",
+  "append", "modify", "rename", "status", "delete", "no-change", "clear",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -94,6 +99,7 @@ function cloneTasks(tasks: readonly TodoTask[]): TodoTask[] {
 
 function cloneOperation(operation: TodoOperation): TodoOperation {
   if (operation.op === "clear") return { op: "clear" };
+  if (operation.op === "delete") return { op: "delete", target: operation.target };
   if (operation.op === "append") {
     return {
       op: "append",
@@ -182,6 +188,11 @@ function normalizeOperation(raw: TodoOperation, number: number): TodoOperation {
       ...(raw.blockedBy === undefined ? {} : { blockedBy: cleanSubjectList(raw.blockedBy, "append blockedBy") }),
     };
   }
+  if (raw.op === "delete") {
+    const allowed = new Set(["op", "target"]);
+    if (Object.keys(raw).some((key) => !allowed.has(key))) throw new Error("delete contains unknown fields.");
+    return { op: "delete", target: cleanText(raw.target, "delete target") };
+  }
   if (raw.op === "modify") {
     const mutable = ["newSubject", "abstract", "status", "addBlockedBy", "removeBlockedBy"] as const;
     const allowed = new Set(["op", "target", ...mutable]);
@@ -203,6 +214,10 @@ function normalizeOperation(raw: TodoOperation, number: number): TodoOperation {
 
 function appendReceipt(number: number, subject: string): TodoReceipt {
   return { operation: number, kind: "append", text: `Appended "${subject}".` };
+}
+
+function deleteReceipt(number: number, subject: string): TodoReceipt {
+  return { operation: number, kind: "delete", text: `Deleted "${subject}".` };
 }
 
 function clearReceipt(number: number, changed: boolean): TodoReceipt {
@@ -282,6 +297,20 @@ export function applyTodoUpdate(
           blockedBy: [...blockedBy],
         });
         receipts.push(appendReceipt(number, operation.subject));
+        continue;
+      }
+
+      if (operation.op === "delete") {
+        const index = draft.findIndex((task) => task.subject === operation.target);
+        if (index < 0) throw new Error(`target "${operation.target}" does not exist.`);
+        const referrers = draft
+          .filter((task) => task.subject !== operation.target && task.blockedBy.includes(operation.target))
+          .map((task) => `"${task.subject}"`);
+        if (referrers.length > 0) {
+          throw new Error(`cannot delete "${operation.target}" because ${referrers.join(", ")} depend on it.`);
+        }
+        draft.splice(index, 1);
+        receipts.push(deleteReceipt(number, operation.target));
         continue;
       }
 

@@ -166,6 +166,24 @@ test("real Pi isolated RPC main and child sessions expose exact package tools wi
     assert.deepEqual(main.tools, ["ask_user_question", "goal", "loop", "monitor", "subagent", "todo"]);
     assert.deepEqual(main.activeTools, ["ask_user_question", "goal", "loop", "monitor", "subagent", "todo"]);
     assert.deepEqual(main.commands, ["goal", "loop"]);
+    assert.deepEqual(main.descriptions, {
+      ask_user_question: "Ask the user structured questions and return structured answers.",
+      goal: "Create and manage one durable branch-local Goal with autonomous continuation and explicit completion evidence. Restored unfinished Goals remain paused until resumed.",
+      loop: "Create and manage runtime-only fixed-delay loops that survive compaction and tree navigation. Reload, session replacement, or shutdown clears every loop.",
+      monitor: "Create and manage foreground long-running Bash commands while Pi remains available. Monitor owns each process group. Terminal results remain available until deletion or runtime shutdown.",
+      subagent: "Create and manage retained specialist runs by run ID. List reports every retained run and its public state. Terminal history includes final output or errors until cleared. Resume creates a new run, while reply continues a waiting run. Interrupt requests resolve through terminal notifications.",
+      todo: "Read or atomically update the current session todo list. Failed update batches leave the list unchanged.",
+    });
+    assert.deepEqual(main.promptSnippets, {
+      ask_user_question: "Ask the user structured questions for decisions.",
+      goal: "Manage one durable branch-local Goal.",
+      loop: "Manage runtime-only fixed-delay loops.",
+      monitor: "Manage foreground long-running commands by monitor ID.",
+      subagent: "Create or manage retained specialist runs by ID.",
+      todo: "Track session work, dependencies, and progress.",
+    });
+    assert.deepEqual(main.systemPromptToolLines, Object.entries(main.promptSnippets).map(([name, snippet]) => `- ${name}: ${snippet}`));
+    assert.deepEqual(main.flattenedGuidelines, Object.values(main.guidelinesByTool).flat());
     assert.equal(main.schemas.ask_user_question.rootType, "object");
     assert.equal(main.schemas.ask_user_question.additionalProperties, false);
     assert.equal(main.schemas.ask_user_question.rootHasUnion, false);
@@ -197,6 +215,25 @@ test("real Pi isolated RPC main and child sessions expose exact package tools wi
     assert.deepEqual(child.tools, ["contact_supervisor", "todo"]);
     assert.deepEqual(child.activeTools, ["contact_supervisor", "todo"]);
     assert.deepEqual(child.commands, []);
+    assert.deepEqual(child.descriptions, {
+      contact_supervisor: "Request an orchestrator reply and pause the child run until the reply arrives.",
+      todo: "Read or atomically update the current session todo list. Failed update batches leave the list unchanged.",
+    });
+    assert.deepEqual(child.promptSnippets, {
+      contact_supervisor: "Request an orchestrator reply from a child run.",
+      todo: "Track session work, dependencies, and progress.",
+    });
+    assert.deepEqual(child.systemPromptToolLines, Object.entries(child.promptSnippets).map(([name, snippet]) => `- ${name}: ${snippet}`));
+    assert.deepEqual(child.flattenedGuidelines, Object.values(child.guidelinesByTool).flat());
+    const guidelinesByTool = { ...main.guidelinesByTool, ...child.guidelinesByTool };
+    assert.deepEqual(Object.keys(guidelinesByTool).sort(), [...new Set([...main.tools, ...child.tools])].sort());
+    assert.equal(Object.values(guidelinesByTool).flat().length, 71, "RPC must expose the reviewed standalone guideline arrays");
+    for (const [tool, guidelines] of Object.entries(guidelinesByTool)) {
+      assert.ok(guidelines.length > 0, `${tool} must contribute standalone operational guidance`);
+      for (const guideline of guidelines) {
+        assert.match(guideline, tool === "goal" ? /\bGoal\b|`goal / : new RegExp(tool));
+      }
+    }
     assert.equal(child.schemas.ask_user_question, null);
     assert.equal(child.schemas.goal, null);
     assert.equal(child.schemas.loop, null);

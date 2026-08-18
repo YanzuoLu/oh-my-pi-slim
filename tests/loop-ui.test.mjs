@@ -16,6 +16,7 @@ const dependencyMap = {
   "./loop-runtime.js": new URL("../extensions/oh-my-pi-slim/loop-runtime.ts", import.meta.url).href,
   "./loop-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/loop-transcript-renderer.ts", import.meta.url).href,
   "./loop-widget.js": new URL("../extensions/oh-my-pi-slim/loop-widget.ts", import.meta.url).href,
+  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -43,6 +44,11 @@ const theme = {
   fg: (_color, text) => text,
   bg: (_color, text) => text,
   bold: (text) => text,
+};
+const vtTheme = {
+  fg: (_color, text) => `\u001b[36m${text}\u001b[0m`,
+  bg: (_color, text) => `\u001b[40m${text}\u001b[0m`,
+  bold: (text) => `\u001b[1m${text}\u001b[22m`,
 };
 
 function loop(overrides = {}) {
@@ -93,14 +99,15 @@ test("Loop widget renders exact heading, glyph priority, counts, order, and two-
     loop({ id: "00000004", abstract: "middle", nextFireAt: "2026-05-01T00:00:20.000Z", fireCount: 1 }),
   ];
   const lines = renderLoopWidgetLines(loops, theme, 120, NOW_MS);
-  assert.equal(lines[0], "● Loops (3/4)");
-  assert.match(lines[1], /^├─ ! failed last time \[00000002\]$/);
+  assert.equal(lines[0], "●  Loops (3/4)");
+  assert.match(lines[1], /^├─ !  failed last time \[00000002\]$/);
   assert.equal(lines[2], "│  └─ Every 10s · next in 10s · 0 fires · 1 failure: queue unavailable");
-  assert.match(lines[3], /^├─ ↻ middle \[00000004\]$/);
+  assert.match(lines[3], /^├─ ↻  middle \[00000004\]$/);
   assert.equal(lines[4], "│  └─ Every 10s · next in 20s · 1 fire");
-  assert.match(lines[5], /^├─ ↻ later \[00000001\]$/);
+  assert.match(lines[5], /^├─ ↻  later \[00000001\]$/);
   assert.equal(lines[6], "│  └─ Every 10s · next in 30s · 2 fires");
-  assert.match(lines[7], /^└─ Ⅱ paused with old error \[00000003\]$/);
+  assert.match(lines[7], /^└─ Ⅱ  paused with old error \[00000003\]$/);
+  assert.doesNotMatch(lines.join("\n"), /[↻!Ⅱ●] [^ ]|[↻!Ⅱ●] {3}/);
   assert.equal(lines[8], "   └─ Every 10s · paused · 1 fire");
   assert.equal(lines.length, 9);
 });
@@ -120,7 +127,10 @@ test("Loop widget caps at 12 lines, preserves entries atomically, and keeps IDs 
   assert.doesNotMatch(overflow.join("\n"), /\[00000006\]/);
   assert.equal(overflow.slice(1, -1).length % 2, 0);
 
-  const narrow = renderLoopWidgetLines([loops[0]], theme, 28, NOW_MS);
+  const wideAnsi = renderLoopWidgetLines([loops[0]], vtTheme, 80, NOW_MS);
+  assert.ok(wideAnsi.every((line) => visibleWidth(line) <= 80));
+  assert.match(stripVTControlCharacters(wideAnsi[1]), /^└─ ↻  /);
+  const narrow = renderLoopWidgetLines([loops[0]], vtTheme, 28, NOW_MS);
   assert.ok(narrow.every((line) => visibleWidth(line) <= 28));
   assert.match(stripVTControlCharacters(narrow[1]), /… \[00000001\]$/);
   assert.equal(renderLoopWidgetLines([], theme, 80, NOW_MS).length, 0);
@@ -162,7 +172,7 @@ test("LoopWidget uses one shared 1s timer and clears widget and timer for empty,
   assert.deepEqual(widgetCalls[0].options, { placement: "aboveEditor" });
   assert.equal(intervals.length, 1);
   assert.equal(intervals[0].milliseconds, 1_000);
-  assert.deepEqual(component.render(80)[0], "● Loops (1/1)");
+  assert.deepEqual(component.render(80)[0], "●  Loops (1/1)");
   component.invalidate();
   const registrationsAfterInvalidate = widgetCalls.length;
   const rendersAfterInvalidate = renders;
@@ -243,14 +253,14 @@ test("Loop runtime refreshes the foreground widget on mutations, tree rebinding,
 
   now += 10_000;
   timers.at(-1).callback();
-  assert.match(stripVTControlCharacters(component.render(100).join("\n")), /↻ runtime changed \[00000001\]/);
+  assert.match(stripVTControlCharacters(component.render(100).join("\n")), /↻  runtime changed \[00000001\]/);
   const afterSuccess = renders;
   failSend = true;
   now += 10_000;
   timers.at(-1).callback();
   const failedLines = stripVTControlCharacters(component.render(100).join("\n"));
   assert.ok(renders > afterSuccess);
-  assert.match(failedLines, /! runtime changed \[00000001\]/);
+  assert.match(failedLines, /!  runtime changed \[00000001\]/);
   assert.match(failedLines, /1 failure: delivery unavailable/);
 
   await execute({ action: "delete", id: "00000001" });
@@ -304,12 +314,12 @@ test("Loop mutation and list results render compact receipts, no-change, full hi
     lastError: "Full failure line one\nFull failure line two",
   });
   const cases = [
-    ["create", { details: { loop: activeLoop, changed: true } }, "✓ Created loop [00000001] · active"],
-    ["modify", { details: { loop: activeLoop, changed: true } }, "✓ Modified loop [00000001] · active"],
-    ["pause", { details: { loop: { ...activeLoop, status: "paused", nextFireAt: null }, changed: true } }, "✓ Paused loop [00000001] · paused"],
-    ["resume", { details: { loop: activeLoop, changed: true } }, "✓ Resumed loop [00000001] · active"],
-    ["delete", { details: { id: "00000001", deleted: true } }, "✓ Deleted loop [00000001]"],
-    ["pause", { details: { loop: { ...activeLoop, status: "paused", nextFireAt: null }, changed: false } }, "○ No change · loop [00000001]"],
+    ["create", { details: { loop: activeLoop, changed: true } }, "✓  Created loop [00000001] · active"],
+    ["modify", { details: { loop: activeLoop, changed: true } }, "✓  Modified loop [00000001] · active"],
+    ["pause", { details: { loop: { ...activeLoop, status: "paused", nextFireAt: null }, changed: true } }, "✓  Paused loop [00000001] · paused"],
+    ["resume", { details: { loop: activeLoop, changed: true } }, "✓  Resumed loop [00000001] · active"],
+    ["delete", { details: { id: "00000001", deleted: true } }, "✓  Deleted loop [00000001]"],
+    ["pause", { details: { loop: { ...activeLoop, status: "paused", nextFireAt: null }, changed: false } }, "○  No change · loop [00000001]"],
   ];
   for (const [action, result, receipt] of cases) {
     const before = structuredClone(result);
@@ -337,12 +347,12 @@ test("Loop mutation and list results render compact receipts, no-change, full hi
   const listResult = { details: { loops: [activeLoop, loop({ id: "00000002", status: "paused", nextFireAt: null, abstract: "Paused loop" })] }, content: [{ type: "text", text: "model list" }] };
   const before = structuredClone(listResult);
   const collapsed = render(renderLoopResult(listResult, { expanded: false }, theme, { args: { action: "list" } }));
-  assert.match(collapsed, /^● Loops \(1\/2\)/);
-  assert.match(collapsed, /! Review the latest project state \[00000001\] · Every 10s · 2 fires/);
-  assert.match(collapsed, /Ⅱ Paused loop \[00000002\] · Every 10s · 0 fires/);
+  assert.match(collapsed, /^●  Loops \(1\/2\)/);
+  assert.match(collapsed, /!  Review the latest project state \[00000001\] · Every 10s · 2 fires/);
+  assert.match(collapsed, /Ⅱ  Paused loop \[00000002\] · Every 10s · 0 fires/);
   assert.doesNotMatch(collapsed, /Prompt:|Full failure line/);
   const expanded = render(renderLoopResult(listResult, { expanded: true }, theme, { args: { action: "list" } }));
-  assert.match(expanded, /● Loops \(1\/2\)/);
+  assert.match(expanded, /●  Loops \(1\/2\)/);
   assert.equal((expanded.match(/Prompt:/g) ?? []).length, 2);
   assert.match(expanded, /Full failure line two/);
   assert.deepEqual(listResult, before);
@@ -377,14 +387,16 @@ test("Loop fire renderer preserves compact target and suffix under width, expand
   };
   const before = structuredClone(message);
   const collapsed = render(renderLoopFire(message, { expanded: false, outputPad: 1 }, theme)).trim();
-  assert.equal(collapsed, "↻ Loop [00000001] · A long fire abstract that should shrink before its suffix disappears · fire 3 (ctrl+o to expand)");
-  const narrowLines = renderLines(renderLoopFire(message, { expanded: false, outputPad: 1 }, theme), 55);
+  assert.equal(collapsed, "↻  Loop [00000001] · A long fire abstract that should shrink before its suffix disappears · fire 3 (ctrl+o to expand)");
+  const wideAnsiLines = renderLoopFire(message, { expanded: false, outputPad: 1 }, vtTheme).render(120);
+  assert.ok(wideAnsiLines.every((line) => visibleWidth(line) <= 120));
+  const narrowLines = renderLoopFire(message, { expanded: false, outputPad: 1 }, vtTheme).render(55);
   assert.ok(narrowLines.every((line) => visibleWidth(line) <= 55));
-  assert.match(render(renderLoopFire(message, { expanded: false, outputPad: 1 }, theme), 55).trim(), /↻ Loop \[00000001\].* · fire 3 \(ctrl\+o to expand\)$/);
+  assert.match(narrowLines.map((line) => stripVTControlCharacters(line)).join("\n").trim(), /↻  Loop \[00000001\].* · fire 3 \(ctrl\+o to expand\)$/);
 
   const expanded = render(renderLoopFire(message, { expanded: true, outputPad: 1 }, theme));
   for (const expected of [
-    "↻ Loop [00000001] · fire 3", "ID: 00000001", "Interval: 10s", "Fire: 3",
+    "↻  Loop [00000001] · fire 3", "ID: 00000001", "Interval: 10s", "Fire: 3",
     "Fired at: 2026-05-01T00:00:30.000Z", "Abstract:", "A long fire abstract",
     "Prompt:", "Full prompt line one", "Full prompt line two",
   ]) assert.match(expanded, escaped(expected));

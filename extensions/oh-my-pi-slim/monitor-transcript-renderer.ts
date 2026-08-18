@@ -12,6 +12,7 @@ import {
   sanitizeMonitorBody,
   sanitizeMonitorText,
 } from "./monitor-widget.js";
+import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
 
 type UnknownRecord = Record<string, unknown>;
 type ToolResultLike = { content?: unknown; details?: unknown };
@@ -254,12 +255,12 @@ function listItemsFromValue(value: unknown): MonitorListItem[] | undefined {
 
 function compactStateLine(state: MonitorOperationalState, theme: Theme): string {
   const suffix = `${theme.fg("dim", `· ${state.status} · ${state.returned} returned · ${state.omitted} omitted${state.truncated ? " · truncated" : ""}`)}`;
-  return `${monitorStatusGlyph(state.status, theme)} ${theme.fg("toolTitle", theme.bold(`Monitor [${sanitizeMonitorText(state.id)}]`))} ${theme.fg("toolOutput", sanitizeMonitorText(state.abstract))} ${suffix}`;
+  return `${formatSemanticGlyphPrefix(monitorStatusGlyph(state.status, theme))}${theme.fg("toolTitle", theme.bold(`Monitor [${sanitizeMonitorText(state.id)}]`))} ${theme.fg("toolOutput", sanitizeMonitorText(state.abstract))} ${suffix}`;
 }
 
 function operationalHeading(state: MonitorOperationalState, theme: Theme): Text {
   return new Text(
-    `${monitorStatusGlyph(state.status, theme)} ${theme.fg("toolTitle", theme.bold(`Monitor [${sanitizeMonitorText(state.id)}]`))} ${theme.fg("muted", `· ${sanitizeMonitorText(state.abstract)} · ${state.status}`)}`,
+    `${formatSemanticGlyphPrefix(monitorStatusGlyph(state.status, theme))}${theme.fg("toolTitle", theme.bold(`Monitor [${sanitizeMonitorText(state.id)}]`))} ${theme.fg("muted", `· ${sanitizeMonitorText(state.abstract)} · ${state.status}`)}`,
     0,
     0,
   );
@@ -305,14 +306,15 @@ function renderOperationalState(
 function renderMonitorList(monitors: readonly MonitorListItem[], theme: Theme): Container {
   const running = monitors.filter((monitor) => monitor.status === "running").length;
   const container = new Container();
+  const headingRole = running > 0 ? "accent" : "dim";
   container.addChild(new Text(
-    theme.fg(running > 0 ? "accent" : "dim", theme.bold(`● Monitors (${running}/${monitors.length})`)),
+    `${formatSemanticGlyphPrefix(theme.fg(headingRole, theme.bold("●")))}${theme.fg(headingRole, theme.bold(`Monitors (${running}/${monitors.length})`))}`,
     0,
     0,
   ));
   for (const monitor of monitors) {
     container.addChild(new Text(
-      `${monitorStatusGlyph(monitor.status, theme)} ${theme.fg("toolOutput", sanitizeMonitorText(monitor.abstract))} ${theme.fg("dim", `[${sanitizeMonitorText(monitor.id)}] · ${monitor.status}`)}`,
+      `${formatSemanticGlyphPrefix(monitorStatusGlyph(monitor.status, theme))}${theme.fg("toolOutput", sanitizeMonitorText(monitor.abstract))} ${theme.fg("dim", `[${sanitizeMonitorText(monitor.id)}] · ${monitor.status}`)}`,
       0,
       0,
     ));
@@ -385,13 +387,13 @@ export function renderMonitorResult(
     const container = new Container();
     if (forced) {
       container.addChild(new Text(
-        `${theme.fg("warning", "!")} ${theme.fg("toolOutput", `Forced deletion · monitor [${sanitizeMonitorText(details.id)}]`)}`,
+        `${formatSemanticGlyphPrefix(theme.fg("warning", "!"))}${theme.fg("toolOutput", `Forced deletion · monitor [${sanitizeMonitorText(details.id)}]`)}`,
         0,
         0,
       ));
     } else {
       container.addChild(new Text(
-        `${theme.fg("success", "✓")} ${theme.fg("toolOutput", `Deleted monitor [${sanitizeMonitorText(details.id)}]`)}`,
+        `${formatSemanticGlyphPrefix(theme.fg("success", "✓"))}${theme.fg("toolOutput", `Deleted monitor [${sanitizeMonitorText(details.id)}]`)}`,
         0,
         0,
       ));
@@ -428,7 +430,7 @@ function matcherNotification(value: UnknownRecord): MatcherNotification | undefi
 }
 
 function renderMatcherNotification(details: MatcherNotification, expanded: boolean, theme: Theme): Component {
-  const head = `${theme.fg("accent", "↻")} ${theme.fg("customMessageText", `Monitor [${sanitizeMonitorText(details.id)}] · ${sanitizeMonitorText(details.abstract)}`)}`;
+  const head = `${formatSemanticGlyphPrefix(monitorStatusGlyph("running", theme))}${theme.fg("customMessageText", `Monitor [${sanitizeMonitorText(details.id)}] · ${sanitizeMonitorText(details.abstract)}`)}`;
   const tail = theme.fg("customMessageText", ` · matched ${details.matched.length}`);
   if (!expanded) return new ExpandableNotificationLine(head, tail, theme);
   const container = new Container();
@@ -465,13 +467,13 @@ function renderSummaryNotification(details: UnknownRecord, expanded: boolean, th
   const omittedMonitors = asNumber(details.omittedMonitors);
   const truncated = asBoolean(details.truncated);
   if (monitors.some((monitor) => !monitor) || omittedMonitors === undefined || truncated === undefined) return;
-  const title = `${theme.fg("warning", "!")} ${theme.fg("customMessageText", "Monitors · rate limited")}`;
+  const title = `${formatSemanticGlyphPrefix(theme.fg("warning", "!"))}${theme.fg("customMessageText", "Monitors · rate limited")}`;
   if (!expanded) return new ExpandableNotificationLine(title, "", theme);
   const container = new Container();
   container.addChild(new Text(title, 0, 0));
   for (const monitor of monitors as SummaryMonitor[]) {
     container.addChild(new Text(
-      `${monitorStatusGlyph(monitor.status, theme)} ${theme.fg("customMessageText", `Monitor [${sanitizeMonitorText(monitor.id)}] · ${sanitizeMonitorText(monitor.abstract)}`)}`,
+      `${formatSemanticGlyphPrefix(monitorStatusGlyph(monitor.status, theme))}${theme.fg("customMessageText", `Monitor [${sanitizeMonitorText(monitor.id)}] · ${sanitizeMonitorText(monitor.abstract)}`)}`,
       0,
       0,
     ));
@@ -491,7 +493,7 @@ function renderTerminalNotification(details: UnknownRecord, expanded: boolean, t
   const omitted = asNumber(details.omitted);
   const truncated = asBoolean(details.truncated);
   if (!id || abstract === undefined || !state || !lines || omitted === undefined || truncated === undefined) return;
-  const head = `${monitorStatusGlyph(state.status, theme)} ${theme.fg("customMessageText", `Monitor [${sanitizeMonitorText(id)}] · ${sanitizeMonitorText(abstract)}`)}`;
+  const head = `${formatSemanticGlyphPrefix(monitorStatusGlyph(state.status, theme))}${theme.fg("customMessageText", `Monitor [${sanitizeMonitorText(id)}] · ${sanitizeMonitorText(abstract)}`)}`;
   const tail = theme.fg("customMessageText", ` · ${state.status}`);
   if (!expanded) return new ExpandableNotificationLine(head, tail, theme);
   const container = new Container();

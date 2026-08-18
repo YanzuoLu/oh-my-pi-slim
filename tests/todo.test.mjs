@@ -14,6 +14,7 @@ const dependencyMap = {
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
   "./core.js": new URL("../extensions/todo/core.ts", import.meta.url).href,
   "./widget.js": new URL("../extensions/todo/widget.ts", import.meta.url).href,
+  "../oh-my-pi-slim/semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -22,6 +23,7 @@ registerHooks({
   },
 });
 
+const { visibleWidth } = await import("@earendil-works/pi-tui");
 const core = await import("../extensions/todo/core.ts");
 const todoModule = await import("../extensions/todo/index.ts");
 const widgetModule = await import("../extensions/todo/widget.ts");
@@ -37,14 +39,21 @@ const {
 } = todoModule;
 const {
   MAX_TODO_WIDGET_LINES,
+  isTodoTaskBlocked,
   renderTodoLines,
   selectTodoWidgetLayout,
+  sortTodoTasksForWidget,
 } = widgetModule;
 
 const theme = {
   fg: (_color, text) => text,
   bold: (text) => text,
   strikethrough: (text) => `~${text}~`,
+};
+const vtTheme = {
+  fg: (_color, text) => `\u001b[36m${text}\u001b[0m`,
+  bold: (text) => `\u001b[1m${text}\u001b[22m`,
+  strikethrough: (text) => `\u001b[9m${text}\u001b[29m`,
 };
 
 function task(subject, status = "pending", blockedBy = [], abstract = `${subject} summary`) {
@@ -69,6 +78,7 @@ function createHarness({
   const shortcuts = [];
   const handlers = new Map();
   const widgetCalls = [];
+  let widgetComponent;
   let renders = 0;
   const pi = {
     getAllTools,
@@ -86,7 +96,8 @@ function createHarness({
     theme,
     setWidget(key, content, options) {
       widgetCalls.push({ key, content, options });
-      if (typeof content === "function") content(tui, theme);
+      if (typeof content === "function") widgetComponent = content(tui, theme);
+      else widgetComponent = undefined;
     },
   };
   const ctx = {
@@ -106,6 +117,7 @@ function createHarness({
     pi, tools, commands, shortcuts, handlers, widgetCalls, ctx, emit,
     setBranch(next) { branch = next; },
     get renders() { return renders; },
+    get widgetComponent() { return widgetComponent; },
     tool: tools[0],
   };
 }
@@ -142,9 +154,8 @@ function schemaObjects(schema) {
 
 function assertSteSentence(sentence) {
   const words = sentence.match(/[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*/g) ?? [];
-  assert.ok(words.length <= 20, `STE sentence exceeds 20 words: ${sentence}`);
-  assert.doesNotMatch(sentence, /;/, `STE sentence must not use a semicolon: ${sentence}`);
-  assert.match(sentence, /^(?:Use|For|Complete|Before|Expect|Read|Apply|Select|Provide|Add|Remove)\b/, `STE sentence must start with an instruction or condition: ${sentence}`);
+  assert.ok(words.length <= 20, `Model sentence exceeds 20 words: ${sentence}`);
+  assert.doesNotMatch(sentence, /;/, `Model sentence must not use a semicolon: ${sentence}`);
 }
 
 function assertSteBlock(block) {
@@ -166,16 +177,25 @@ test("registers exactly one todo tool with exact actions and strict schemas", ()
   assert.deepEqual(todoParameters.required, ["action"]);
   assert.deepEqual(Object.keys(todoParameters.properties).sort(), ["action", "operations"]);
   assert.deepEqual(schemaObjects(todoParameters.properties.action).map((schema) => schema.const).sort(), ["list", "update"]);
-  assert.equal(todoParameters.properties.action.description, "Select list or update.");
+  assert.equal(todoParameters.properties.action.description, "Select list to read state or update to apply operations.");
   assert.equal(todoParameters.properties.operations.minItems, 1);
   assert.equal(todoParameters.properties.operations.maxItems, undefined);
-  assert.equal(todoParameters.properties.operations.description, "For update, apply at least one operation in order. For list, omit operations.");
+  assert.equal(todoParameters.properties.operations.description, "For update, provide operations in execution order. Omit this field for list.");
   const operations = schemaObjects(todoParameters.properties.operations.items);
-  assert.deepEqual(operations.map((schema) => schema.properties.op.const).sort(), ["append", "clear", "modify"]);
+  assert.deepEqual(operations.map((schema) => schema.properties.op.const).sort(), ["append", "clear", "delete", "modify"]);
   assert.ok(operations.every((schema) => schema.additionalProperties === false));
   const append = operations.find((schema) => schema.properties.op.const === "append");
   const modify = operations.find((schema) => schema.properties.op.const === "modify");
+  const remove = operations.find((schema) => schema.properties.op.const === "delete");
+  const clear = operations.find((schema) => schema.properties.op.const === "clear");
+  assert.equal(clear.description, "Apply clear at most once in an update.");
   assert.equal(modify.minProperties, undefined);
+  assert.equal(remove.type, "object");
+  assert.equal(remove.anyOf, undefined);
+  assert.equal(remove.oneOf, undefined);
+  assert.deepEqual(Object.keys(remove.properties).sort(), ["op", "target"]);
+  assert.deepEqual(remove.required.slice().sort(), ["op", "target"]);
+  assert.equal(remove.properties.target.description, "Use the exact subject to delete.");
   const dependencyDescriptions = [
     append.properties.blockedBy.description,
     modify.properties.addBlockedBy.description,
@@ -192,6 +212,9 @@ test("registers exactly one todo tool with exact actions and strict schemas", ()
   }
   assert.equal(modify.properties.status.description, "Select pending, in_progress, or completed.");
   assert.throws(() => applyTodoUpdate([], [{ op: "append", subject: "A", abstract: "a", unknown: true }]), /unknown fields/);
+  assert.throws(() => applyTodoUpdate([task("A")], [{ op: "delete", target: "A", unknown: true }]), /delete contains unknown fields/);
+  assert.throws(() => applyTodoUpdate([task("A")], [{ op: "delete", target: "A", status: "completed" }]), /delete contains unknown fields/);
+  assert.throws(() => applyTodoUpdate([task("A")], [{ op: "delete" }]), /delete target must be a non-empty string/);
 });
 
 test("Todo execute enforces action-specific operations boundaries", () => {
@@ -318,6 +341,93 @@ test("clear works at the start, middle, or end and rejects double or unfinished 
   assert.equal(empty.receipts[0].text, "No change.");
 });
 
+test("delete removes one item by exact subject and reports a changed receipt", () => {
+  const base = [task("A", "completed"), task("B", "in_progress"), task("C")];
+  const result = applyTodoUpdate(base, [{ op: "delete", target: "B" }]);
+  assert.deepEqual(result.tasks, [task("A", "completed"), task("C")]);
+  assert.deepEqual(result.operations, [{ op: "delete", target: "B" }]);
+  assert.equal(result.receipts.length, 1);
+  assert.equal(result.receipts[0].kind, "delete");
+  assert.equal(result.receipts[0].text, 'Deleted "B".');
+  assert.deepEqual(base, [task("A", "completed"), task("B", "in_progress"), task("C")]);
+  assert.deepEqual(applyTodoUpdate(base, [{ op: "delete", target: " A " }]).tasks, [task("B", "in_progress"), task("C")]);
+  const snapshot = makeTodoSnapshot(result.tasks, result.operations, result.receipts);
+  assert.deepEqual(parseTodoSnapshot(snapshot)?.state.tasks, result.tasks);
+
+  assert.throws(() => applyTodoUpdate(base, [{ op: "delete", target: "missing" }]), /todo update failed at operation 1: target "missing" does not exist\./);
+  assert.throws(() => applyTodoUpdate(base, [{ op: "delete", target: "b" }]), /target "b" does not exist\./);
+  assert.throws(() => applyTodoUpdate([], [{ op: "delete", target: "A" }]), /target "A" does not exist\./);
+});
+
+test("delete refuses to break the dependency graph and names every referrer", () => {
+  const base = [task("Core", "completed"), task("Left", "pending", ["Core"]), task("Right", "pending", ["Core"])];
+  const snapshot = structuredClone(base);
+  assert.throws(
+    () => applyTodoUpdate(base, [{ op: "delete", target: "Core" }]),
+    /todo update failed at operation 1: cannot delete "Core" because "Left", "Right" depend on it\./,
+  );
+  assert.deepEqual(base, snapshot);
+  assert.throws(
+    () => applyTodoUpdate(base, [{ op: "append", subject: "New", abstract: "new" }, { op: "delete", target: "Core" }]),
+    /todo update failed at operation 2: cannot delete "Core" because "Left", "Right" depend on it\./,
+  );
+  assert.deepEqual(base, snapshot);
+  const removedOne = applyTodoUpdate(base, [{ op: "modify", target: "Left", removeBlockedBy: ["Core"] }]);
+  assert.throws(
+    () => applyTodoUpdate(removedOne.tasks, [{ op: "delete", target: "Core" }]),
+    /cannot delete "Core" because "Right" depend on it\./,
+  );
+});
+
+test("delete mixes with modify, append, and clear in one ordered atomic batch", () => {
+  const base = [task("Core", "completed"), task("Leaf", "pending", ["Core"])];
+  const freed = applyTodoUpdate(base, [
+    { op: "modify", target: "Leaf", removeBlockedBy: ["Core"] },
+    { op: "delete", target: "Core" },
+    { op: "append", subject: "Next", abstract: "next", blockedBy: [] },
+  ]);
+  assert.deepEqual(freed.tasks.map((item) => item.subject), ["Leaf", "Next"]);
+  assert.deepEqual(freed.tasks[0].blockedBy, []);
+  assert.deepEqual(freed.receipts.map((receipt) => receipt.kind), ["modify", "delete", "append"]);
+
+  const renamed = applyTodoUpdate(base, [
+    { op: "modify", target: "Core", newSubject: "Root" },
+    { op: "modify", target: "Leaf", removeBlockedBy: ["Root"] },
+    { op: "delete", target: "Root" },
+  ]);
+  assert.deepEqual(renamed.tasks, [task("Leaf")]);
+
+  const appendThenDelete = applyTodoUpdate([], [
+    { op: "append", subject: "Temp", abstract: "temp" },
+    { op: "delete", target: "Temp" },
+    { op: "append", subject: "Temp", abstract: "reused" },
+  ]);
+  assert.deepEqual(appendThenDelete.tasks, [task("Temp", "pending", [], "reused")]);
+
+  const cleared = applyTodoUpdate([task("Old", "completed"), task("Draft")], [
+    { op: "delete", target: "Draft" },
+    { op: "clear" },
+    { op: "append", subject: "Fresh", abstract: "fresh" },
+  ]);
+  assert.deepEqual(cleared.tasks, [task("Fresh", "pending", [], "fresh")]);
+
+  const before = structuredClone(base);
+  assert.throws(() => applyTodoUpdate(base, [
+    { op: "modify", target: "Leaf", removeBlockedBy: ["Core"] },
+    { op: "delete", target: "Core" },
+    { op: "delete", target: "missing" },
+  ]), /todo update failed at operation 3: target "missing" does not exist\./);
+  assert.deepEqual(base, before);
+
+  const clearBase = [task("Old", "completed"), task("Draft"), task("Keep")];
+  const clearBefore = structuredClone(clearBase);
+  assert.throws(() => applyTodoUpdate(clearBase, [
+    { op: "delete", target: "Draft" },
+    { op: "clear" },
+  ]), /todo update failed at operation 2: clear requires every current item to be completed\./);
+  assert.deepEqual(clearBase, clearBefore);
+});
+
 test("modify receipts identify the current target and same-value updates keep snapshots", () => {
   const base = [task("A"), task("Dependency")];
   const status = applyTodoUpdate(base, [{ op: "modify", target: "A", status: "completed" }]);
@@ -434,47 +544,149 @@ test("main and child both register Todo while RPC sessions never register widget
   }
 });
 
-test("widget renders exact glyphs, counts, tree lines, overflow, width, and empty removal", () => {
+test("widget priority sorts every state from current dependencies without changing task objects", () => {
   const tasks = [
+    task("completed-old", "completed"),
+    task("blocked-early", "pending", ["open-dependency"]),
+    task("ready-dependency", "completed"),
+    task("ready-later", "pending", ["ready-dependency"]),
+    task("active-first", "in_progress"),
+    task("open-dependency", "pending"),
+    task("active-second", "in_progress"),
+    task("completed-new", "completed"),
+  ];
+  const before = structuredClone(tasks);
+  assert.equal(isTodoTaskBlocked(tasks[1], tasks), true);
+  assert.equal(isTodoTaskBlocked(tasks[3], tasks), false);
+  assert.deepEqual(sortTodoTasksForWidget(tasks).map((item) => item.subject), [
+    "active-first", "active-second", "ready-later", "open-dependency", "blocked-early",
+    "completed-new", "ready-dependency", "completed-old",
+  ]);
+  assert.deepEqual(tasks, before);
+
+  const missingReference = [task("missing-ref", "pending", ["absent"]), task("ready", "pending")];
+  assert.equal(isTodoTaskBlocked(missingReference[0], missingReference), true);
+  assert.deepEqual(sortTodoTasksForWidget(missingReference).map((item) => item.subject), ["ready", "missing-ref"]);
+});
+
+test("widget sorts before slicing, preserves the 12-line budget, counts hidden states, and pads semantic glyphs", () => {
+  const noOverflow = [
+    task("done-old", "completed"),
+    ...Array.from({ length: 7 }, (_, index) => task(`pending-${index}`, "pending")),
+    task("active", "in_progress"),
+    task("done-middle", "completed"),
+    task("done-new", "completed"),
+  ];
+  const direct = selectTodoWidgetLayout(noOverflow);
+  assert.equal(direct.visible.length, 11);
+  assert.deepEqual(direct.hidden, []);
+  assert.deepEqual(direct.visible.map((item) => item.subject), [
+    "active", "pending-0", "pending-1", "pending-2", "pending-3", "pending-4", "pending-5", "pending-6",
+    "done-new", "done-middle", "done-old",
+  ]);
+  assert.equal(renderTodoLines(noOverflow, theme, 100).length, MAX_TODO_WIDGET_LINES);
+
+  const overflowTasks = [
+    ...Array.from({ length: 4 }, (_, index) => task(`done-${index}`, "completed")),
+    ...Array.from({ length: 5 }, (_, index) => task(`ready-${index}`, "pending")),
+    task("dependency", "pending"),
+    ...Array.from({ length: 3 }, (_, index) => task(`blocked-${index}`, "pending", ["dependency"])),
+    task("active", "in_progress"),
+  ];
+  const overflowLayout = selectTodoWidgetLayout(overflowTasks);
+  assert.equal(overflowLayout.visible.length, 10);
+  assert.equal(overflowLayout.hidden.length, 4);
+  assert.deepEqual(overflowLayout.visible.map((item) => item.subject), [
+    "active", "ready-0", "ready-1", "ready-2", "ready-3", "ready-4", "dependency",
+    "blocked-0", "blocked-1", "blocked-2",
+  ]);
+  assert.deepEqual(overflowLayout.hidden.map((item) => item.subject), ["done-3", "done-2", "done-1", "done-0"]);
+  const overflow = renderTodoLines(overflowTasks, theme, 42);
+  assert.equal(overflow.length, MAX_TODO_WIDGET_LINES);
+  assert.equal(overflow[0], "●  Todos (4/14)");
+  assert.equal(overflow.at(-1), "└─ +4 more (4 completed)");
+
+  const exact = renderTodoLines([
     task("Pending", "pending"),
     task("Active", "in_progress"),
     task("Done", "completed"),
-  ];
-  const lines = renderTodoLines(tasks, theme, 80);
-  assert.equal(lines[0], "● Todos (1/3)");
-  assert.match(lines[1], /○ Pending/);
-  assert.match(lines[2], /◐ Active/);
-  assert.match(lines[3], /✓ ~Done~/);
-  assert.equal(lines.length, 4);
+  ], theme, 80);
+  assert.deepEqual(exact, [
+    "●  Todos (1/3)",
+    "├─ ◐  Active",
+    "├─ ○  Pending",
+    "└─ ✓  ~Done~",
+  ]);
   const chained = renderTodoLines([task("Blocked", "pending", ["First", "Second"], "hidden abstract")], theme, 80);
-  assert.match(chained[1], /○ Blocked ⛓ First, Second$/);
+  assert.equal(chained[1], "└─ ○  Blocked ⛓  First, Second");
   assert.doesNotMatch(chained[1], /hidden abstract|blocked by|\[|\]/);
+  assert.match(chained[1], /^└─ /, "tree connector spacing stays structural");
+  assert.doesNotMatch(exact.join("\n") + chained.join("\n"), /[●◐○✓⛓] [^ ]|[●◐○✓⛓] {3}/);
 
-  const many = [];
-  for (let index = 0; index < 8; index += 1) many.push(task(`done-${index}`, "completed"));
-  for (let index = 0; index < 8; index += 1) many.push(task(`pending-${index}`, "pending"));
-  many.push(task("active", "in_progress"));
-  const layout = selectTodoWidgetLayout(many);
-  assert.equal(layout.visible.filter((item) => item.status === "completed").length, 1);
-  assert.equal(layout.visible.filter((item) => item.status !== "completed").length, 9);
-  const overflow = renderTodoLines(many, theme, 34);
-  assert.equal(overflow.length, MAX_TODO_WIDGET_LINES);
-  assert.ok(overflow.every((line) => line.length <= 34));
-  assert.match(overflow.at(-1), /7 completed/);
-  assert.doesNotMatch(overflow.at(-1), /pending|in_progress/);
+  for (const width of [12, 24, 34]) {
+    const ansi = renderTodoLines(overflowTasks, vtTheme, width);
+    assert.ok(ansi.every((line) => visibleWidth(line) <= width));
+  }
+  assert.deepEqual(renderTodoLines([], theme, 80), []);
+});
 
-  const unfinished = Array.from({ length: 14 }, (_, index) => task(`pending-${index}`, "pending"));
-  const truncated = renderTodoLines(unfinished, theme, 80);
-  assert.equal(truncated.length, 12);
-  assert.match(truncated.at(-1), /4 pending/);
-
+test("widget immediately reorders after status, dependency completion or restore, and delete while list order stays append-based", () => {
   const harness = createHarness({ mode: "tui" });
   harness.emit("session_start", { reason: "startup" });
-  assert.deepEqual(harness.widgetCalls, []);
-  runUpdate(harness.tool, harness.ctx, [{ op: "append", subject: "A", abstract: "a" }]);
+  const seeded = runUpdate(harness.tool, harness.ctx, [
+    { op: "append", subject: "completed-old", abstract: "old" },
+    { op: "modify", target: "completed-old", status: "completed" },
+    { op: "append", subject: "completed-new", abstract: "new" },
+    { op: "modify", target: "completed-new", status: "completed" },
+    { op: "append", subject: "ready-dependency", abstract: "ready dependency" },
+    { op: "modify", target: "ready-dependency", status: "completed" },
+    { op: "append", subject: "open-dependency", abstract: "open dependency" },
+    { op: "append", subject: "ready-work", abstract: "ready work", blockedBy: ["ready-dependency"] },
+    { op: "append", subject: "blocked-work", abstract: "blocked work", blockedBy: ["open-dependency"] },
+    { op: "append", subject: "active", abstract: "active" },
+    { op: "modify", target: "active", status: "in_progress" },
+  ]);
   assert.equal(typeof harness.widgetCalls.at(-1).content, "function");
-  runUpdate(harness.tool, harness.ctx, [{ op: "modify", target: "A", status: "completed" }, { op: "clear" }]);
-  assert.equal(harness.widgetCalls.at(-1).content, undefined);
+  assert.deepEqual(stateFrom(seeded).map((item) => item.subject), [
+    "completed-old", "completed-new", "ready-dependency", "open-dependency", "ready-work", "blocked-work", "active",
+  ]);
+  assert.deepEqual(harness.widgetComponent.render(100), [
+    "●  Todos (3/7)",
+    "├─ ◐  active",
+    "├─ ○  open-dependency",
+    "├─ ○  ready-work ⛓  ready-dependency",
+    "├─ ○  blocked-work ⛓  open-dependency",
+    "├─ ✓  ~ready-dependency~",
+    "├─ ✓  ~completed-new~",
+    "└─ ✓  ~completed-old~",
+  ]);
+
+  runUpdate(harness.tool, harness.ctx, [{ op: "modify", target: "open-dependency", status: "completed" }]);
+  assert.equal(harness.renders, 1);
+  assert.match(harness.widgetComponent.render(100)[3], /blocked-work/);
+  assert.match(harness.widgetComponent.render(100)[4], /completed.*open-dependency|open-dependency/);
+
+  runUpdate(harness.tool, harness.ctx, [{ op: "modify", target: "open-dependency", status: "pending" }]);
+  assert.equal(harness.renders, 2);
+  const restored = harness.widgetComponent.render(100).join("\n");
+  assert.ok(restored.indexOf("open-dependency") < restored.indexOf("ready-work"));
+  assert.ok(restored.indexOf("ready-work") < restored.indexOf("blocked-work"));
+
+  runUpdate(harness.tool, harness.ctx, [{ op: "modify", target: "active", status: "completed" }]);
+  assert.equal(harness.renders, 3);
+  assert.match(harness.widgetComponent.render(100)[4], /✓  ~active~/);
+  const removed = runUpdate(harness.tool, harness.ctx, [{ op: "delete", target: "active" }]);
+  assert.equal(harness.renders, 4);
+  assert.doesNotMatch(harness.widgetComponent.render(100).join("\n"), /active/);
+  assert.deepEqual(JSON.parse(runList(harness.tool, harness.ctx).content[0].text).map((item) => item.subject), [
+    "completed-old", "completed-new", "ready-dependency", "open-dependency", "ready-work", "blocked-work",
+  ]);
+
+  const collapsed = renderComponent(harness.tool.renderResult(removed, { expanded: false }, theme, {}));
+  assert.equal(collapsed, "✓  Applied 0 append · 0 modify · 1 delete · 0 clear → 1 changed · 0 no-change");
+  const expanded = renderComponent(harness.tool.renderResult(removed, { expanded: true }, theme, {}));
+  assert.match(expanded, /^✓  Applied 0 append · 0 modify · 1 delete · 0 clear → 1 changed · 0 no-change/);
+  assert.match(expanded, /1\. ✓  Deleted "active"\./);
 });
 
 test("Ctrl+O expands Todo list and update calls without changing call data", () => {
@@ -493,23 +705,24 @@ test("Ctrl+O expands Todo list and update calls without changing call data", () 
       abstract: "Modify abstract line one\nModify abstract line two",
       addBlockedBy: ["Added One", "Added Two"], removeBlockedBy: ["Removed One"],
     },
+    { op: "delete", target: "Stale\tItem" },
     { op: "clear" },
   ];
   const args = { action: "update", operations };
   const before = structuredClone(args);
   const collapsed = renderComponent(harness.tool.renderCall(args, theme, { expanded: false }));
   assert.equal(collapsed, "todo · update (ctrl+o to expand)");
-  assert.doesNotMatch(collapsed, /Action:|Operations:|Append:|Modify:|Clear:|A B|Append abstract|Dependency|New subject|Added One|Removed One/);
+  assert.doesNotMatch(collapsed, /Action:|Operations:|Append:|Modify:|Delete:|Clear:|A B|Append abstract|Dependency|New subject|Added One|Removed One|Stale/);
 
   const expandedComponent = harness.tool.renderCall(args, theme, { expanded: true });
   const expandedLines = renderComponentLines(expandedComponent);
   const expanded = renderComponent(expandedComponent);
   for (const value of [
-    "todo · update", "Operations: 3", "1. Append", "Subject: A B",
+    "todo · update", "Operations: 4", "1. Append", "Subject: A B",
     "Append abstract line one", "Append abstract line two", "Blocked by:", "Dependency One", "Dependency Two",
     "2. Modify", "Target: A B", "New subject: C D", "Status: in_progress",
     "Modify abstract line one", "Modify abstract line two", "Add blocked by:", "Added One", "Added Two",
-    "Remove blocked by:", "Removed One", "3. Clear",
+    "Remove blocked by:", "Removed One", "3. Delete", "Target: Stale Item", "4. Clear",
   ]) assert.match(expanded, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   for (const line of [
     "1. Append",
@@ -532,7 +745,9 @@ test("Ctrl+O expands Todo list and update calls without changing call data", () 
     "    - Added Two",
     "  Remove blocked by:",
     "    - Removed One",
-    "3. Clear",
+    "3. Delete",
+    "  Target: Stale Item",
+    "4. Clear",
   ]) assert.equal(expandedLines.includes(line), true, `missing exact hierarchy line: ${JSON.stringify(line)}`);
   assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)|Action:|\u0000|\t/);
   assert.deepEqual(args, before);
@@ -551,15 +766,16 @@ test("Ctrl+O expands Todo update and list results without changing model data", 
   const updateCollapsedComponent = harness.tool.renderResult(updateResult, { expanded: false }, theme, {});
   assertBlankResultSeparator(updateCollapsedComponent);
   const updateCollapsed = renderComponent(updateCollapsedComponent);
-  assert.equal(updateCollapsed, "✓ Applied 1 append · 2 modify · 0 clear → 2 changed · 1 no-change");
+  assert.equal(updateCollapsed, "✓  Applied 1 append · 2 modify · 0 delete · 0 clear → 2 changed · 1 no-change");
   assert.doesNotMatch(updateCollapsed, /Appended|Modified|No change|Abstract/);
   const updateExpandedComponent = harness.tool.renderResult(updateResult, { expanded: true }, theme, {});
   assertBlankResultSeparator(updateExpandedComponent);
   const updateExpanded = renderComponent(updateExpandedComponent);
-  assert.match(updateExpanded, /^✓ Applied 1 append · 2 modify · 0 clear → 2 changed · 1 no-change/);
-  assert.match(updateExpanded, /1\. ✓ Appended "A"\./);
-  assert.match(updateExpanded, /2\. ○ → ✓ Modified "A": status pending to completed\./);
-  assert.match(updateExpanded, /3\. ○ No change for "A"\./);
+  assert.match(updateExpanded, /^✓  Applied 1 append · 2 modify · 0 delete · 0 clear → 2 changed · 1 no-change/);
+  assert.match(updateExpanded, /1\. ✓  Appended "A"\./);
+  assert.match(updateExpanded, /2\. ○  → ✓  Modified "A": status pending to completed\./);
+  assert.match(updateExpanded, /3\. ○  No change for "A"\./);
+  assert.doesNotMatch(updateExpanded, /[✓○] [^ →]|[✓○] {3}/);
   assert.doesNotMatch(updateExpanded, /oh-my-pi-slim:todo-update|"state"|"tasks"/);
   assert.deepEqual(updateResult, updateBefore);
 
@@ -569,25 +785,25 @@ test("Ctrl+O expands Todo update and list results without changing model data", 
   const listCollapsedComponent = harness.tool.renderResult(listResult, { expanded: false }, theme, {});
   assertBlankResultSeparator(listCollapsedComponent);
   const listCollapsed = renderComponent(listCollapsedComponent);
-  assert.equal(listCollapsed, "● Todos (1/2)");
+  assert.equal(listCollapsed, "●  Todos (1/2)");
   assert.doesNotMatch(listCollapsed, /A|B|Abstract|Status|Blocked/);
   const listExpandedComponent = harness.tool.renderResult(listResult, { expanded: true }, theme, {});
   assertBlankResultSeparator(listExpandedComponent);
   const listExpandedLines = renderComponentLines(listExpandedComponent);
   const listExpanded = renderComponent(listExpandedComponent);
   for (const value of [
-    "● Todos (1/2)", "✓ A", "Status: completed", "Abstract:", "Abstract line one", "Abstract line two",
-    "Blocked by:", "○ B", "Status: pending", "Second abstract", "- A",
+    "●  Todos (1/2)", "✓  A", "Status: completed", "Abstract:", "Abstract line one", "Abstract line two",
+    "Blocked by:", "○  B", "Status: pending", "Second abstract", "- A",
   ]) assert.match(listExpanded, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   for (const line of [
-    "✓ A",
+    "✓  A",
     "  Status: completed",
     "  Abstract:",
     "    Abstract line one",
     "    Abstract line two",
     "  Blocked by:",
     "    —",
-    "○ B",
+    "○  B",
     "  Status: pending",
     "  Abstract:",
     "    Second abstract",
@@ -615,31 +831,24 @@ test("Todo fallback collapses safely and expands full text", () => {
   assert.deepEqual(result, before);
 });
 
-test("Todo model metadata follows the STE sentence rules and includes the complete guidance", () => {
+test("Todo model metadata matches the exact standalone operational contract", () => {
   const harness = createHarness({ mode: "rpc" });
   for (const block of [harness.tool.description, harness.tool.promptSnippet, ...harness.tool.promptGuidelines]) {
     assertSteBlock(block);
   }
+  assert.equal(harness.tool.description, "Read or atomically update the current session todo list. Failed update batches leave the list unchanged.");
+  assert.equal(harness.tool.promptSnippet, "Track session work, dependencies, and progress.");
   const expectedGuidelines = [
-    "Use `todo list` to read the complete todo list for the current session.",
-    "For `list`, omit `operations`.",
-    "Use `todo update` to apply all operations atomically.",
-    "For `update`, provide at least one operation.",
-    "For `append`, provide a unique `subject` and an `abstract`.",
-    "Use `abstract` for a short item summary.",
-    "For `append`, use `blockedBy` to add initial dependencies by exact subject.",
-    "For `modify`, use the exact current subject in `target`.",
-    "For `modify`, provide at least one change.",
-    "Use `newSubject` to rename the item.",
-    "For `modify`, use `abstract` as the replacement summary.",
-    "For `status`, select `pending`, `in_progress`, or `completed`.",
-    "Use `addBlockedBy` to add dependencies by exact subject.",
-    "Use `removeBlockedBy` to remove dependencies by exact subject.",
-    "Complete every dependency before you start or complete an item.",
-    "Before a new task group, use `clear` only after all old items are complete.",
-    "Use one update to complete old items, apply `clear`, and append a new group.",
-    "Use `clear` at most once in each update.",
-    "Expect any failure to cancel the whole update.",
+    "Treat `todo` as the session-local planning ledger for work, dependencies, and progress.",
+    "Use `todo list` to inspect current plan state before uncertain updates.",
+    "Use `todo update` for atomic ordered changes that should succeed or fail together.",
+    "Append new user tasks through `todo update` instead of replacing existing `todo` items.",
+    "Preserve existing `todo` items unless the user or current work requires a change.",
+    "Complete every `todo` dependency before starting or completing a dependent item.",
+    "Allow multiple `todo` items in progress when work genuinely proceeds concurrently.",
+    "Delete a `todo` item only after removing every `blockedBy` reference to it.",
+    "Finish current in-progress `todo` work before appended tasks unless blocked or explicitly reordered.",
+    "Apply `clear` through `todo update` only after current items finish, then append the new task group.",
   ];
   assert.deepEqual(TODO_PROMPT_GUIDELINES, expectedGuidelines);
   assert.doesNotMatch(TODO_PROMPT_GUIDELINES.join("\n"), /\b(?:snapshot|replay|store|version|widget|ID)\b/i);

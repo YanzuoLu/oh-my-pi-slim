@@ -13,6 +13,7 @@ const dependencyMap = {
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
+  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -133,14 +134,19 @@ test("Ctrl+O expands complete action-specific call input without duplicate Actio
   const listCollapsed = render(renderSubagentCall({ action: "list" }, theme, { expanded: false }));
   assert.equal(listCollapsed, "subagent · list (ctrl+o to expand)");
   const listExpanded = render(renderSubagentCall({ action: "list" }, theme, { expanded: true }));
-  assertFull(listExpanded, ["subagent · list", "starting, running, and waiting", "abstract", "waiting reason"]);
-  assert.doesNotMatch(listExpanded, /output|error|activity|task/i);
+  assertFull(listExpanded, ["subagent · list", "every retained run status", "abstract", "waiting reason", "terminal output or error"]);
+  assert.doesNotMatch(listExpanded, /activity|task/i);
 
-  for (const value of [createCollapsed, resumeCollapsed, steerCollapsed, replyCollapsed, interruptCollapsed, listCollapsed]) {
+  const clearCollapsed = render(renderSubagentCall({ action: "clear" }, theme, { expanded: false }));
+  assert.equal(clearCollapsed, "subagent · clear (ctrl+o to expand)");
+  const clearExpanded = render(renderSubagentCall({ action: "clear" }, theme, { expanded: true }));
+  assertFull(clearExpanded, ["subagent · clear", "Removes every retained run record", "child session file", "Goal-owned stats sidecar"]);
+
+  for (const value of [createCollapsed, resumeCollapsed, steerCollapsed, replyCollapsed, interruptCollapsed, listCollapsed, clearCollapsed]) {
     assert.match(value.split("\n")[0], /\(ctrl\+o to expand\)$/);
     assert.doesNotMatch(value, /Action:/);
   }
-  for (const value of [createExpanded, resumeExpanded, steerExpanded, replyExpanded, interruptExpanded, listExpanded]) {
+  for (const value of [createExpanded, resumeExpanded, steerExpanded, replyExpanded, interruptExpanded, listExpanded, clearExpanded]) {
     assert.doesNotMatch(value, /\(ctrl\+o to expand\)|Action:/);
   }
 });
@@ -151,14 +157,14 @@ test("tool results start with one blank separator line", () => {
     { expanded: false, isPartial: false }, theme, { args: { action: "create", agent: "explorer", task: "spacing task" } },
   ));
   assert.equal(subagent[0], "");
-  assert.equal(subagent[1], "✓ Started explorer [spacing-run] · starting");
+  assert.equal(subagent[1], "✓  Started explorer [spacing-run] · starting");
 
   const reply = renderLines(renderSubagentResult(
     { details: { run: run({ id: "spacing-reply", agent: "fixer", status: "running" }) } },
     { expanded: false, isPartial: false }, theme, { args: { action: "reply", id: "spacing-reply", message: "continue" } },
   ));
   assert.equal(reply[0], "");
-  assert.equal(reply[1], "✓ Replied · fixer [spacing-reply] · running");
+  assert.equal(reply[1], "✓  Replied · fixer [spacing-reply] · running");
 });
 
 test("subagent immediate results use accurate compact action acknowledgements", () => {
@@ -166,54 +172,54 @@ test("subagent immediate results use accurate compact action acknowledgements", 
     { details: { run: run({ id: "create-id", agent: "explorer", status: "starting", output: undefined, error: undefined }) } },
     { expanded: false, isPartial: false }, theme, { args: { action: "create", agent: "explorer", task: "full task" } },
   ));
-  assert.equal(created, "✓ Started explorer [create-id] · starting");
+  assert.equal(created, "✓  Started explorer [create-id] · starting");
   assert.doesNotMatch(created, /Subagent result|Task|Cwd|Tools|Model|Activity|Response|Session/);
 
   const resume = render(renderSubagentResult(
     { details: { run: run({ id: "resume-id", agent: "explorer", status: "starting", output: undefined, error: undefined }) } },
     { expanded: false, isPartial: false }, theme, { args: { action: "resume", id: "source-id", abstract: "new summary", message: "continue" } },
   ));
-  assert.equal(resume, "✓ Resumed [source-id] → explorer [resume-id] · starting");
+  assert.equal(resume, "✓  Resumed [source-id] → explorer [resume-id] · starting");
 
   const steer = render(renderSubagentResult(
     { details: { run: run({ id: "steer-id", agent: "explorer", status: "running", output: undefined, error: undefined }) } },
     { expanded: false, isPartial: false }, theme, { args: { action: "steer", id: "steer-id", message: "focus" } },
   ));
-  assert.equal(steer, "✓ Steer requested · explorer [steer-id] · running");
+  assert.equal(steer, "✓  Steer requested · explorer [steer-id] · running");
 
   const reply = render(renderSubagentResult(
     { details: { run: run({ id: "reply-id", agent: "fixer", status: "running", output: undefined, error: undefined }) } },
     { expanded: false, isPartial: false }, theme, { args: { action: "reply", id: "reply-id", message: "continue" } },
   ));
-  assert.equal(reply, "✓ Replied · fixer [reply-id] · running");
+  assert.equal(reply, "✓  Replied · fixer [reply-id] · running");
 
   const interrupt = render(renderSubagentResult(
     { details: { run: run({ id: "interrupt-id", agent: "explorer", status: "running", output: undefined, error: undefined }) } },
     { expanded: false, isPartial: false }, theme, { args: { action: "interrupt", id: "interrupt-id" } },
   ));
-  assert.equal(interrupt, "! Interrupt requested · explorer [interrupt-id] · running");
+  assert.equal(interrupt, "!  Interrupt requested · explorer [interrupt-id] · running");
 
   const terminalResult = { details: { run: run({ id: "done-id", agent: "explorer", status: "completed", output: "terminal output", error: undefined }) } };
   const alreadyTerminalCollapsed = render(renderSubagentResult(
     terminalResult, { expanded: false, isPartial: false }, theme, { args: { action: "interrupt", id: "done-id" } },
   ));
-  assert.equal(alreadyTerminalCollapsed, "✓ explorer [done-id] · already completed");
+  assert.equal(alreadyTerminalCollapsed, "✓  explorer [done-id] · already completed");
   assert.doesNotMatch(alreadyTerminalCollapsed, /terminal output|Interrupt requested/);
   const alreadyTerminalExpanded = render(renderSubagentResult(
     terminalResult, { expanded: true, isPartial: false }, theme, { args: { action: "interrupt", id: "done-id" } },
   ));
-  assertFull(alreadyTerminalExpanded, ["✓ explorer [done-id] · already completed", "terminal output"]);
+  assertFull(alreadyTerminalExpanded, ["✓  explorer [done-id] · already completed", "terminal output"]);
 
   const failedResult = { details: { run: run({ id: "failed-steer-id", agent: "fixer", status: "failed", output: undefined, error: "stored failure" }) } };
   const failedSteerCollapsed = render(renderSubagentResult(
     failedResult, { expanded: false, isPartial: false }, theme, { args: { action: "steer", id: "failed-steer-id", message: "too late" } },
   ));
-  assert.equal(failedSteerCollapsed, "✗ fixer [failed-steer-id] · already failed");
+  assert.equal(failedSteerCollapsed, "✗  fixer [failed-steer-id] · already failed");
   assert.doesNotMatch(failedSteerCollapsed, /stored failure|Steer requested/);
   const failedSteerExpanded = render(renderSubagentResult(
     failedResult, { expanded: true, isPartial: false }, theme, { args: { action: "steer", id: "failed-steer-id", message: "too late" } },
   ));
-  assertFull(failedSteerExpanded, ["✗ fixer [failed-steer-id] · already failed", "stored failure"]);
+  assertFull(failedSteerExpanded, ["✗  fixer [failed-steer-id] · already failed", "stored failure"]);
 });
 
 test("terminal immediate results expand only final output and error", () => {
@@ -227,16 +233,16 @@ test("terminal immediate results expand only final output and error", () => {
   const collapsed = render(renderSubagentResult(
     result, { expanded: false, isPartial: false }, theme, { args: { action: "create", agent: "fixer", task: "must not repeat" } },
   ));
-  assert.equal(collapsed, "✗ Started fixer [failed-id] · failed");
+  assert.equal(collapsed, "✗  Started fixer [failed-id] · failed");
   assert.doesNotMatch(collapsed, /failure output|failure error|Task:/i);
   const expanded = render(renderSubagentResult(
     result, { expanded: true, isPartial: false }, theme, { args: { action: "create", agent: "fixer", task: "must not repeat" } },
   ));
-  assertFull(expanded, ["✗ Started fixer [failed-id] · failed", "<results>failure output payload</results>", "<results>failure error payload</results>"]);
+  assertFull(expanded, ["✗  Started fixer [failed-id] · failed", "<results>failure output payload</results>", "<results>failure error payload</results>"]);
   assert.doesNotMatch(expanded, /Task:|Cwd:|Model:|Activity|Response:|Live response|Session:/);
 });
 
-test("Ctrl+O expands list waiting reasons without exposing excluded run data", () => {
+test("Ctrl+O expands list waiting reasons and terminal results without exposing excluded run data", () => {
   const result = {
     details: {
       runs: [
@@ -290,31 +296,78 @@ test("Ctrl+O expands list waiting reasons without exposing excluded run data", (
   const before = structuredClone(result);
   const collapsed = render(renderSubagentResult(result, { expanded: false, isPartial: false }, theme, { args: { action: "list" } }));
   assertFull(collapsed, [
-    "Active subagent run status · 2",
-    "● explorer [active-id] · running  active abstract",
-    "! fixer [waiting-id] · waiting  waiting abstract",
+    "Retained subagent run status · 3",
+    "✓  fixer [terminal-id] · completed  TERMINAL_ABSTRACT_SENTINEL",
+    "Output: OUTPUT_SENTINEL",
+    "Error: ERROR_SENTINEL",
+    "●  explorer [active-id] · running  active abstract",
+    "!  fixer [waiting-id] · waiting  waiting abstract",
   ]);
   assert.doesNotMatch(collapsed, /Reason:|interview_request/);
+  assert.doesNotMatch(collapsed, /[✓●!] [^ ]|[✓●!] {3}/);
   const expanded = render(renderSubagentResult(result, { expanded: true, isPartial: false }, theme, { args: { action: "list" } }));
   assertFull(expanded, [
-    "Active subagent run status · 2",
-    "● explorer [active-id] · running  active abstract",
-    "! fixer [waiting-id] · waiting  waiting abstract",
+    "Retained subagent run status · 3",
+    "✓  fixer [terminal-id] · completed  TERMINAL_ABSTRACT_SENTINEL",
+    "Output:",
+    "OUTPUT_SENTINEL",
+    "Error:",
+    "ERROR_SENTINEL",
+    "●  explorer [active-id] · running  active abstract",
+    "!  fixer [waiting-id] · waiting  waiting abstract",
     "Reason: interview_request",
   ]);
   assert.deepEqual(result, before);
   for (const sentinel of [
     "TASK_SENTINEL", "CWD_SENTINEL", "MODEL_SENTINEL", "TOOLS_SENTINEL", "CREATED_SENTINEL",
     "UPDATED_SENTINEL", "SESSION_SENTINEL", "SOURCE_SENTINEL", "ACTIVITY_SENTINEL", "ACTIVITY_TOOL_SENTINEL",
-    "OUTPUT_SENTINEL", "ERROR_SENTINEL", "NOTIFICATION_SENTINEL", "ACTIVE_TASK_SENTINEL",
+    "NOTIFICATION_SENTINEL", "ACTIVE_TASK_SENTINEL",
     "ACTIVE_ACTIVITY_SENTINEL", "ACTIVE_OUTPUT_SENTINEL", "ACTIVE_ERROR_SENTINEL", "WAITING_TASK_SENTINEL",
-    "WAITING_ACTIVITY_SENTINEL", "WAITING_OUTPUT_SENTINEL", "WAITING_ERROR_SENTINEL", "TERMINAL_ABSTRACT_SENTINEL",
+    "WAITING_ACTIVITY_SENTINEL", "WAITING_OUTPUT_SENTINEL", "WAITING_ERROR_SENTINEL",
     "REQUEST_MESSAGE_SENTINEL", "INTERVIEW_SENTINEL", "QUESTION_SENTINEL", "REQUEST_CREATED_SENTINEL",
   ]) {
     assert.doesNotMatch(collapsed, new RegExp(sentinel));
     assert.doesNotMatch(expanded, new RegExp(sentinel));
   }
-  assert.doesNotMatch(expanded, /Task:|Cwd:|Tools:|Model:|Created:|Updated:|Session:|Source run:|Live response:|Output:|Error:|Message:|Interview:/);
+  assert.doesNotMatch(expanded, /Task:|Cwd:|Tools:|Model:|Created:|Updated:|Session:|Source run:|Live response:|Message:|Interview:/);
+});
+
+test("clear receipts stay compact when collapsed and list every retained-item warning when expanded", () => {
+  const changed = {
+    content: [{ type: "text", text: "Cleared 3 retained subagent runs." }],
+    details: {
+      clearedCount: 3,
+      warnings: [
+        "Retained child session file for run-a: SESSION_WARNING_SENTINEL",
+        "Retained Goal stats sidecars because this branch has no Goal snapshot.",
+      ],
+      changed: true,
+    },
+  };
+  const context = { args: { action: "clear" } };
+  const collapsed = render(renderSubagentResult(changed, { expanded: false, isPartial: false }, theme, context));
+  assert.equal(collapsed, "✓  Cleared 3 retained runs · 2 retained items");
+  assert.doesNotMatch(collapsed, /SESSION_WARNING_SENTINEL/);
+  const expanded = render(renderSubagentResult(changed, { expanded: true, isPartial: false }, theme, context));
+  assertFull(expanded, [
+    "✓  Cleared 3 retained runs · 2 retained items",
+    "Warnings:",
+    "• Retained child session file for run-a: SESSION_WARNING_SENTINEL",
+    "• Retained Goal stats sidecars because this branch has no Goal snapshot.",
+  ]);
+
+  const unchanged = {
+    content: [{ type: "text", text: "No retained subagent runs to clear." }],
+    details: { clearedCount: 0, warnings: [], changed: false },
+  };
+  assert.equal(
+    render(renderSubagentResult(unchanged, { expanded: false, isPartial: false }, theme, context)),
+    "○  No retained runs to clear",
+  );
+  assert.equal(
+    render(renderSubagentResult(unchanged, { expanded: true, isPartial: false }, theme, context)),
+    "○  No retained runs to clear",
+  );
 });
 
 test("legacy transcript list derives a Unicode-safe abstract or shows an explicit unavailable placeholder", () => {
@@ -340,12 +393,12 @@ test("Ctrl+O collapses waiting notification details without changing model conte
   };
   const before = structuredClone(message);
   const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
-  assert.equal(collapsed, " ! fixer [run-1] · waiting (ctrl+o to expand)");
+  assert.equal(collapsed, " !  fixer [run-1] · waiting (ctrl+o to expand)");
   assert.doesNotMatch(collapsed, /Request|need_decision|request payload|Choose|A or B|Created|Model-facing/);
 
   const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
   assertFull(expanded, [
-    "! fixer [run-1] · waiting", "Request", "need_decision", "<results>request payload</results>",
+    "!  fixer [run-1] · waiting", "!  Request", "need_decision", "<results>request payload</results>",
     "Choose", "A or B?", "Created: 2026-04-17T00:01:00.000Z",
   ]);
   assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)|Task:|Low-value task|Live response|activity payload|Output:|stored output|Error:|stored error|Model:|Cwd:|Tools:|Session:|waitingSeq|Model-facing/);
@@ -367,11 +420,11 @@ test("Ctrl+O expands completed, failed, and interrupted notification output or e
     };
     const before = structuredClone(message);
     const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
-    assert.equal(collapsed, ` ${value.glyph} fixer [run-1] · ${value.status} (ctrl+o to expand)`);
+    assert.equal(collapsed, ` ${value.glyph}  fixer [run-1] · ${value.status} (ctrl+o to expand)`);
     assert.doesNotMatch(collapsed, /COMPLETED_OUTPUT|FAILED_ERROR|INTERRUPTED_OUTPUT|INTERRUPTED_ERROR|Model-facing/);
 
     const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
-    assertFull(expanded, [`${value.glyph} fixer [run-1] · ${value.status}`, value.body]);
+    assertFull(expanded, [`${value.glyph}  fixer [run-1] · ${value.status}`, value.body]);
     if (value.status === "interrupted") assert.match(expanded, /INTERRUPTED_ERROR/);
     assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)|Task:|Low-value task|Live response|activity payload|Model:|Cwd:|Tools:|Request|Model-facing/);
     assert.deepEqual(message, before);
@@ -386,14 +439,14 @@ test("Ctrl+O collapses active activity and expands complete live details", () =>
   };
   const before = structuredClone(message);
   const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
-  assert.equal(collapsed, " ● fixer [run-1] · running (ctrl+o to expand)");
+  assert.equal(collapsed, " ●  fixer [run-1] · running (ctrl+o to expand)");
   const narrow = renderLines(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme), 52);
   assert.ok(narrow.every((line) => visibleWidth(line) <= 52));
   assert.match(render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme), 52).trim(), /· running \(ctrl\+o to expand\)$/);
   assert.doesNotMatch(collapsed, /Live response|activity payload|toolA|Model-facing/);
 
   const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
-  assertFull(expanded, ["● fixer [run-1] · running", "Live response:", "<results>activity payload</results>", "Active tools:", "toolA"]);
+  assertFull(expanded, ["●  fixer [run-1] · running", "Live response:", "<results>activity payload</results>", "Active tools:", "toolA"]);
   assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)|Task:|Low-value task|Output:|Error:|Model:|Cwd:|Request|Model-facing/);
   assert.deepEqual(message, before);
 });

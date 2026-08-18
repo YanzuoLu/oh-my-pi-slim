@@ -1,6 +1,7 @@
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { MonitorStateChange, MonitorStatus } from "./monitor-runtime.js";
+import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
 
 export const MONITOR_WIDGET_KEY = "oh-my-pi-slim:monitors";
 export const MAX_MONITOR_WIDGET_LINES = 12;
@@ -98,9 +99,8 @@ function monitorLine(
   const safeWidth = Math.max(1, width);
   const id = sanitizeMonitorText(monitor.id).slice(0, 8);
   const status = sanitizeMonitorText(monitor.status);
-  const glyph = monitorStatusGlyph(monitor.status, theme);
-  const treePrefix = `${theme.fg("dim", branch)} ${glyph} `;
-  const glyphPrefix = `${glyph} `;
+  const glyphPrefix = formatSemanticGlyphPrefix(monitorStatusGlyph(monitor.status, theme));
+  const treePrefix = `${theme.fg("dim", branch)} ${glyphPrefix}`;
   const suffix = ` ${theme.fg("dim", `[${id}]`)} ${theme.fg("dim", "·")} ${theme.fg(monitorStatusRole(monitor.status), status)}`;
   const abstract = sanitizeMonitorText(monitor.abstract).trim();
 
@@ -128,11 +128,9 @@ export function renderMonitorWidgetLines(
   const running = sorted.filter((monitor) => monitor.status === "running").length;
   const visible = sorted.slice(0, MAX_VISIBLE_MONITORS);
   const hidden = sorted.length - visible.length;
-  const lines = [truncateToWidth(
-    theme.fg(running > 0 ? "accent" : "dim", theme.bold(`● Monitors (${running}/${sorted.length})`)),
-    safeWidth,
-    "…",
-  )];
+  const headingRole = running > 0 ? "accent" : "dim";
+  const heading = `${formatSemanticGlyphPrefix(theme.fg(headingRole, theme.bold("●")))}${theme.fg(headingRole, theme.bold(`Monitors (${running}/${sorted.length})`))}`;
+  const lines = [truncateToWidth(heading, safeWidth, "…")];
 
   for (let index = 0; index < visible.length; index += 1) {
     const continues = index < visible.length - 1 || hidden > 0;

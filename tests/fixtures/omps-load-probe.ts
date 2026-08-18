@@ -26,10 +26,24 @@ export default function ompsLoadProbe(pi: ExtensionAPI): void {
     handler: async (_args, ctx) => {
       const tools = pi.getAllTools().filter((tool) => AUDITED_TOOLS.has(tool.name));
       const byName = new Map(tools.map((tool) => [tool.name, tool]));
+      const systemPromptOptions = ctx.getSystemPromptOptions();
+      const promptSnippets = Object.fromEntries([...AUDITED_TOOLS].sort().flatMap((name) => {
+        const snippet = systemPromptOptions.toolSnippets?.[name];
+        return typeof snippet === "string" ? [[name, snippet]] : [];
+      }));
+      const systemPrompt = ctx.getSystemPrompt();
+      const guidelinesByTool = Object.fromEntries(tools.map((tool) => [tool.name, [...(tool.promptGuidelines ?? [])]]));
+      const auditedGuidelines = new Set(Object.values(guidelinesByTool).flat());
       ctx.ui.notify(`OMPS_LOAD_PROBE ${JSON.stringify({
         tools: tools.map((tool) => tool.name).sort(),
         activeTools: pi.getActiveTools().filter((name) => AUDITED_TOOLS.has(name)).sort(),
         commands: pi.getCommands().map((command) => command.name).filter((name) => name === "goal" || name === "loop").sort(),
+        descriptions: Object.fromEntries(tools.map((tool) => [tool.name, tool.description])),
+        promptSnippets,
+        guidelinesByTool,
+        flattenedGuidelines: (systemPromptOptions.promptGuidelines ?? []).filter((guideline) => auditedGuidelines.has(guideline)),
+        systemPromptToolLines: Object.entries(promptSnippets).filter(([name, snippet]) =>
+          systemPrompt.includes(`- ${name}: ${snippet}`)).map(([name, snippet]) => `- ${name}: ${snippet}`),
         schemas: Object.fromEntries([...AUDITED_TOOLS].sort().map((name) => [
           name,
           byName.has(name) ? schemaSummary(byName.get(name)?.parameters) : null,

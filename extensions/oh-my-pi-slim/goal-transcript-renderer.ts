@@ -9,6 +9,7 @@ import type {
   PublicGoalState,
 } from "./goal-runtime.js";
 import { goalStatusGlyph, sanitizeGoalBody, sanitizeGoalText } from "./goal-widget.js";
+import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
 
 type UnknownRecord = Record<string, unknown>;
 type ToolResultLike = { content?: unknown; details?: unknown };
@@ -148,7 +149,7 @@ function addCriterionEvidence(container: Container, goal: PublicGoalState, theme
       0,
     ));
     container.addChild(new Text(
-      `${theme.fg("success", "✓")} ${theme.fg("toolOutput", sanitizeGoalText(goal.evidence?.[index] ?? "—"))}`,
+      `${formatSemanticGlyphPrefix(theme.fg("success", "✓"))}${theme.fg("toolOutput", sanitizeGoalText(goal.evidence?.[index] ?? "—"))}`,
       4,
       0,
     ));
@@ -163,7 +164,7 @@ function spacedResult(component: Component): Container {
 }
 
 function resultSummary(action: GoalAction, goal: PublicGoalState | null, changed: boolean, theme: Theme): Text {
-  if (!goal) return new Text(`${theme.fg("dim", "○")} ${theme.fg("toolOutput", "Goal · none")}`, 0, 0);
+  if (!goal) return new Text(`${formatSemanticGlyphPrefix(theme.fg("dim", "○"))}${theme.fg("toolOutput", "Goal · none")}`, 0, 0);
   const evidenceCount = goal.evidence?.length ?? 0;
   let suffix = goal.status;
   if (action === "pause") suffix = changed ? `paused · ${goal.pauseReason ?? "—"}` : "already paused · no change";
@@ -172,7 +173,7 @@ function resultSummary(action: GoalAction, goal: PublicGoalState | null, changed
   else if (action === "cancel") suffix = `cancelled · ${goal.cancelReason ?? "—"}`;
   const glyph = changed || action === "status" ? goalStatusGlyph(goal.status, theme) : theme.fg("dim", "○");
   return new Text(
-    `${glyph} ${theme.fg("toolTitle", theme.bold("Goal"))} ${theme.fg("muted", "·")} ${theme.fg("toolOutput", sanitizeGoalText(goal.abstract))} ${theme.fg("muted", `· ${sanitizeGoalText(suffix)}`)}`,
+    `${formatSemanticGlyphPrefix(glyph)}${theme.fg("toolTitle", theme.bold("Goal"))} ${theme.fg("muted", "·")} ${theme.fg("toolOutput", sanitizeGoalText(goal.abstract))} ${theme.fg("muted", `· ${sanitizeGoalText(suffix)}`)}`,
     0,
     0,
   );
@@ -309,7 +310,7 @@ export function renderGoalContinuation(
   const box = new Box(options.outputPad ?? 1, 1, (text) => theme.bg("customMessageBg", text));
   if (options.expanded !== true) {
     box.addChild(new ExpandableNotificationLine(
-      `${theme.fg("accent", "↻")} ${theme.fg("customMessageText", "Goal · ")}${theme.fg("customMessageText", sanitizeGoalText(details.goal.abstract))}`,
+      `${formatSemanticGlyphPrefix(goalStatusGlyph("active", theme))}${theme.fg("customMessageText", "Goal · ")}${theme.fg("customMessageText", sanitizeGoalText(details.goal.abstract))}`,
       theme.fg("customMessageText", ` · continuation ${details.continuationNumber}`),
       theme,
     ));
@@ -317,7 +318,7 @@ export function renderGoalContinuation(
   }
   const container = new Container();
   container.addChild(new Text(
-    `${theme.fg("accent", "↻")} ${theme.fg("toolTitle", theme.bold("Goal"))} ${theme.fg("muted", `· continuation ${details.continuationNumber}`)}`,
+    `${formatSemanticGlyphPrefix(goalStatusGlyph("active", theme))}${theme.fg("toolTitle", theme.bold("Goal"))} ${theme.fg("muted", `· continuation ${details.continuationNumber}`)}`,
     0,
     0,
   ));
@@ -341,7 +342,7 @@ export function renderGoalState(
   const box = new Box(options.outputPad ?? 1, 1, (text) => theme.bg("customMessageBg", text));
   if (options.expanded !== true) {
     box.addChild(new ExpandableNotificationLine(
-      `${goalStatusGlyph(details.goal.status, theme)} ${theme.fg("customMessageText", "Goal · ")}${theme.fg("customMessageText", sanitizeGoalText(details.goal.abstract))}`,
+      `${formatSemanticGlyphPrefix(goalStatusGlyph(details.goal.status, theme))}${theme.fg("customMessageText", "Goal · ")}${theme.fg("customMessageText", sanitizeGoalText(details.goal.abstract))}`,
       theme.fg("customMessageText", ` · ${sanitizeGoalText(details.event)}: ${sanitizeGoalText(details.reason)}`),
       theme,
     ));
@@ -349,7 +350,7 @@ export function renderGoalState(
   }
   const container = new Container();
   container.addChild(new Text(
-    `${goalStatusGlyph(details.goal.status, theme)} ${theme.fg("toolTitle", theme.bold("Goal"))} ${theme.fg("muted", `· ${sanitizeGoalText(details.goal.status)}`)}`,
+    `${formatSemanticGlyphPrefix(goalStatusGlyph(details.goal.status, theme))}${theme.fg("toolTitle", theme.bold("Goal"))} ${theme.fg("muted", `· ${sanitizeGoalText(details.goal.status)}`)}`,
     0,
     0,
   ));

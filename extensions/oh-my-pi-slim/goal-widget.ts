@@ -1,6 +1,7 @@
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { GoalExecutionStats, GoalStatus, GoalView } from "./goal-runtime.js";
+import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
 
 export const GOAL_WIDGET_KEY = "oh-my-pi-slim:goal";
 
@@ -96,7 +97,8 @@ function statsLabel(owner: "main" | "child", stats: GoalExecutionStats): string 
 function headingLine(view: GoalView, theme: Theme, width: number): string {
   const goal = view.goal!;
   const safeWidth = Math.max(1, width);
-  const heading = `${theme.fg(statusRole(goal.status), theme.bold("● Goal"))} ${theme.fg("dim", "·")} ${goalStatusGlyph(goal.status, theme)} ${theme.fg(statusRole(goal.status), sanitizeGoalText(goal.status))} ${theme.fg("dim", "·")} `;
+  const role = statusRole(goal.status);
+  const heading = `${formatSemanticGlyphPrefix(theme.fg(role, theme.bold("●")))}${theme.fg(role, theme.bold("Goal"))} ${theme.fg("dim", "·")} ${formatSemanticGlyphPrefix(goalStatusGlyph(goal.status, theme))}${theme.fg(role, sanitizeGoalText(goal.status))} ${theme.fg("dim", "·")} `;
   if (visibleWidth(heading) >= safeWidth) return truncateToWidth(heading.trimEnd(), safeWidth, "…");
   const abstractWidth = safeWidth - visibleWidth(heading);
   const abstract = truncateToWidth(sanitizeGoalText(goal.abstract), abstractWidth, "…");

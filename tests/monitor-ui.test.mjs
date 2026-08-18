@@ -18,6 +18,7 @@ const dependencyMap = {
   "./monitor-runtime.js": new URL("../extensions/oh-my-pi-slim/monitor-runtime.ts", import.meta.url).href,
   "./monitor-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/monitor-transcript-renderer.ts", import.meta.url).href,
   "./monitor-widget.js": new URL("../extensions/oh-my-pi-slim/monitor-widget.ts", import.meta.url).href,
+  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -141,12 +142,14 @@ test("Monitor widget renders exact heading, glyphs, running/terminal order, over
     widgetMonitor({ id: "00000005", abstract: "terminal middle", status: "killed", endedAt: "2026-05-01T00:00:04.000Z" }),
   ];
   const lines = renderMonitorWidgetLines(monitors, theme, 100);
-  assert.equal(lines[0], "● Monitors (2/5)");
-  assert.equal(lines[1], "├─ ↻ running first [00000001] · running");
-  assert.equal(lines[2], "├─ ↻ running later [00000002] · running");
-  assert.equal(lines[3], "├─ ! terminal newest [00000004] · failed");
-  assert.equal(lines[4], "├─ × terminal middle [00000005] · killed");
-  assert.equal(lines[5], "└─ ✓ terminal old [00000003] · completed");
+  assert.equal(lines[0], "●  Monitors (2/5)");
+  assert.equal(lines[1], "├─ ↻  running first [00000001] · running");
+  assert.equal(lines[2], "├─ ↻  running later [00000002] · running");
+  assert.equal(lines[3], "├─ !  terminal newest [00000004] · failed");
+  assert.equal(lines[4], "├─ ×  terminal middle [00000005] · killed");
+  assert.equal(lines[5], "└─ ✓  terminal old [00000003] · completed");
+  assert.doesNotMatch(lines.join("\n"), /[↻!×✓●] [^ ]|[↻!×✓●] {3}/);
+  assert.match(lines.slice(1).join("\n"), /^├─ |\n(?:├─ |└─ )/);
 
   const overflow = renderMonitorWidgetLines(Array.from({ length: 13 }, (_, index) => widgetMonitor({
     id: String(index + 1).padStart(8, "0"),
@@ -163,10 +166,13 @@ test("Monitor widget renders exact heading, glyphs, running/terminal order, over
     fg: (_color, text) => `\u001b[36m${text}\u001b[0m`,
     bold: (text) => `\u001b[1m${text}\u001b[22m`,
   };
+  const wide = renderMonitorWidgetLines([widgetMonitor()], vtTheme, 100);
+  assert.ok(wide.every((line) => visibleWidth(line) <= 100));
+  assert.match(stripVTControlCharacters(wide[1]), /^└─ ↻  /);
   const narrow = renderMonitorWidgetLines([widgetMonitor({ abstract: "An extremely long abstract with controls\u0000 and ANSI \u001b[31mred\u001b[0m" })], vtTheme, 38);
   const narrowPlain = narrow.map((line) => stripVTControlCharacters(line));
   assert.ok(narrow.every((line) => visibleWidth(line) <= 38));
-  assert.match(narrowPlain[1], /↻ .*\[00000001\] · running$/);
+  assert.match(narrowPlain[1], /↻  .*\[00000001\] · running$/);
   assert.doesNotMatch(narrowPlain.join("\n"), /\u001b|\u0000|\[31m/);
   assert.deepEqual(renderMonitorWidgetLines([], theme, 80), []);
 });
@@ -238,7 +244,7 @@ test("MonitorWidget throttles and coalesces output, refreshes lifecycle immediat
   assert.equal(callsA.at(-1).content, undefined);
   widget.update();
   assert.equal(callsB.length, 1);
-  assert.equal(componentB.render(80)[0], "● Monitors (1/1)");
+  assert.equal(componentB.render(80)[0], "●  Monitors (1/1)");
 
   monitors = [];
   widget.handleChange({ type: "deleted", reason: "lifecycle", id: "00000001" });
@@ -347,7 +353,7 @@ test("Monitor create/status/list/delete results render compact receipts, full op
     const collapsedComponent = renderMonitorResult(result, { expanded: false }, theme, { args: { action } });
     assertBlankSeparator(collapsedComponent);
     const collapsed = render(collapsedComponent);
-    assert.match(collapsed, /^↻ Monitor \[00000001\] Compile the release bundle · running · 2 returned · 5 omitted · truncated$/);
+    assert.match(collapsed, /^↻  Monitor \[00000001\] Compile the release bundle · running · 2 returned · 5 omitted · truncated$/);
     assert.doesNotMatch(collapsed, /Command:|Log path:|ready now/);
 
     const expandedComponent = renderMonitorResult(result, { expanded: true }, theme, { args: { action } });
@@ -377,19 +383,20 @@ test("Monitor create/status/list/delete results render compact receipts, full op
   assertBlankSeparator(renderMonitorResult(listResult, { expanded: false }, theme, { args: { action: "list" } }));
   for (const expanded of [false, true]) {
     const text = render(renderMonitorResult(listResult, { expanded }, theme, { args: { action: "list" } }));
-    assert.match(text, /^● Monitors \(1\/4\)/);
-    for (const expected of ["↻ first [00000001] · running", "✓ second [00000002] · completed", "! third [00000003] · failed", "× fourth [00000004] · killed"]) {
+    assert.match(text, /^●  Monitors \(1\/4\)/);
+    for (const expected of ["↻  first [00000001] · running", "✓  second [00000002] · completed", "!  third [00000003] · failed", "×  fourth [00000004] · killed"]) {
       assert.match(text, escaped(expected));
     }
+    assert.doesNotMatch(text, /[↻✓!×●] [^ ]|[↻✓!×●] {3}/);
   }
 
   const normal = renderMonitorResult({ details: { id: "00000001", deleted: true, forced: false, warning: null } }, { expanded: false }, theme, { args: { action: "delete" } });
   assertBlankSeparator(normal);
-  assert.equal(render(normal), "✓ Deleted monitor [00000001]");
+  assert.equal(render(normal), "✓  Deleted monitor [00000001]");
   const forcedResult = { details: { id: "00000002", deleted: true, forced: true, warning: "Detached descendant may remain.\nInspect the process group." } };
   const forcedBefore = structuredClone(forcedResult);
   const forced = render(renderMonitorResult(forcedResult, { expanded: false }, theme, { args: { action: "delete" } }));
-  assert.match(forced, /^! Forced deletion · monitor \[00000002\]/);
+  assert.match(forced, /^!  Forced deletion · monitor \[00000002\]/);
   assert.match(forced, /Detached descendant may remain\.\n  Inspect the process group\./);
   assert.deepEqual(forcedResult, forcedBefore);
 });
@@ -401,7 +408,7 @@ test("Monitor matcher, terminal, and global summary notifications collapse exact
     details: { id: "00000001", abstract: "compile release", kind: "matcher", matched: ["ready", "done"], lines: incremental, omitted: 4, truncated: true },
   };
   const matcherBefore = structuredClone(matcher);
-  assert.equal(render(renderMonitorNotification(matcher, { expanded: false, outputPad: 0 }, theme)).trim(), "↻ Monitor [00000001] · compile release · matched 2 (ctrl+o to expand)");
+  assert.equal(render(renderMonitorNotification(matcher, { expanded: false, outputPad: 0 }, theme)).trim(), "↻  Monitor [00000001] · compile release · matched 2 (ctrl+o to expand)");
   const matcherNarrow = renderLines(renderMonitorNotification(matcher, { expanded: false, outputPad: 0 }, theme), 32);
   assert.ok(matcherNarrow.every((line) => visibleWidth(line) <= 32));
   assert.match(render(renderMonitorNotification(matcher, { expanded: false, outputPad: 0 }, theme), 32).trim(), /· matched 2 \(ctrl\+o to expand\)$/);
@@ -418,7 +425,7 @@ test("Monitor matcher, terminal, and global summary notifications collapse exact
     details: { id: "00000001", abstract: "compile release", kind: "terminal", status: terminalState, lines: incremental, omitted: 1, truncated: false },
   };
   const terminalBefore = structuredClone(terminal);
-  assert.equal(render(renderMonitorNotification(terminal, { expanded: false, outputPad: 0 }, theme)).trim(), "! Monitor [00000001] · compile release · failed (ctrl+o to expand)");
+  assert.equal(render(renderMonitorNotification(terminal, { expanded: false, outputPad: 0 }, theme)).trim(), "!  Monitor [00000001] · compile release · failed (ctrl+o to expand)");
   const terminalExpanded = render(renderMonitorNotification(terminal, { expanded: true, outputPad: 0 }, theme));
   for (const expected of ["Status: failed", "Exit code: 7", "Error:", "build failed", "Notification", "Log path:", "Combined lines:", "Incremental omitted: 1", "Incremental truncated: false", "Incremental lines:"]) {
     assert.match(terminalExpanded, escaped(expected));
@@ -431,7 +438,7 @@ test("Monitor matcher, terminal, and global summary notifications collapse exact
       content: `model ${status}`,
       details: { id: state.id, abstract: state.abstract, kind: "terminal", status: state, lines: [], omitted: 0, truncated: false },
     }, { expanded: false, outputPad: 0 }, theme)).trim();
-    assert.equal(text, `${glyph} Monitor [00000001] · Compile the release bundle · ${status} (ctrl+o to expand)`);
+    assert.equal(text, `${glyph}  Monitor [00000001] · Compile the release bundle · ${status} (ctrl+o to expand)`);
   }
 
   const summary = {
@@ -447,8 +454,11 @@ test("Monitor matcher, terminal, and global summary notifications collapse exact
     },
   };
   const summaryBefore = structuredClone(summary);
-  assert.equal(render(renderMonitorNotification(summary, { expanded: false, outputPad: 0 }, theme)).trim(), "! Monitors · rate limited (ctrl+o to expand)");
+  assert.equal(render(renderMonitorNotification(summary, { expanded: false, outputPad: 0 }, theme)).trim(), "!  Monitors · rate limited (ctrl+o to expand)");
   const summaryExpanded = render(renderMonitorNotification(summary, { expanded: true, outputPad: 0 }, theme));
+  assert.match(summaryExpanded, /^!  Monitors · rate limited\n↻  Monitor \[00000001\]/);
+  assert.match(summaryExpanded, /\n×  Monitor \[00000002\]/);
+  assert.doesNotMatch(summaryExpanded, /[↻!×] [^ ]|[↻!×] {3}/);
   for (const expected of ["Monitor [00000001] · first", "Suppressed batches: 3", "Suppressed lines: 18", "Monitor [00000002] · second", "Suppressed batches: 2", "Suppressed lines: 9", "Omitted monitors: 1", "Truncated: true"]) {
     assert.match(summaryExpanded, escaped(expected));
   }

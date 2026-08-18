@@ -15,6 +15,7 @@ const dependencyMap = {
   "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
   "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
   "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
+  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -165,7 +166,29 @@ test("Goal schema is a strict portable object with isolated public actions", asy
   assert.equal(schema.properties.criteria.maxItems, 8);
 
   const harness = createHarness();
-  assert.equal(harness.tools.get("goal").executionMode, "sequential");
+  const tool = harness.tools.get("goal");
+  assert.equal(tool.executionMode, "sequential");
+  assert.equal(tool.description, "Create and manage one durable branch-local Goal with autonomous continuation and explicit completion evidence. Restored unfinished Goals remain paused until resumed.");
+  assert.equal(tool.promptSnippet, "Manage one durable branch-local Goal.");
+  assert.deepEqual(tool.promptGuidelines, [
+    "Create a Goal with `goal create` only from a user message that starts with `/goal`.",
+    "For a bare `/goal`, call `goal status` and explain `/goal <objective>`.",
+    "Treat an active Goal as one durable contract, not as a `todo` checklist.",
+    "Continue an active Goal autonomously until completion or a blocker requires `goal pause`.",
+    "Let Goal continuation wait while subagents, monitors, Ask, pending messages, or user input require attention.",
+    "Prioritize resolving Goal blockers before unrelated work.",
+    "Expect provider failures during a Goal to enter `retry_wait` automatically.",
+    "Expect repeated automatic Goal runs without progress to pause the Goal for review.",
+    "Use `goal status` to inspect the branch-local Goal without changing it.",
+    "Use `goal modify` when the complete objective or completion contract must be replaced.",
+    "Use `goal pause` when safe progress cannot continue.",
+    "Expect a user abort to pause the active Goal rather than cancel it.",
+    "Use `goal resume` when a paused Goal can continue autonomously.",
+    "Treat restored unfinished Goals as paused until `goal resume` explicitly restarts them.",
+    "Use `goal cancel` only when the user explicitly abandons the Goal.",
+    "Use `goal complete` only after every criterion has concrete evidence.",
+  ]);
+  assert.equal(schema.properties.action.description, "Select the Goal action. Create and modify use abstract, objective, and criteria. Pause and cancel use reason. Complete uses evidence. Status and resume use no other fields.");
   for (const invalid of [
     { ...createInput, reason: "extra" },
     { action: "status", evidence: [] },
@@ -451,6 +474,7 @@ test("ownership and Goal view stats stay private from status and derive from bra
 test("slash command resends a real user message with idle and busy steer semantics", async () => {
   const harness = createHarness();
   const command = harness.commands.get("goal");
+  assert.equal(command.description, "Forward a goal request to the model.");
   await command.handler("", { isIdle: () => true });
   await command.handler("  ship it", { isIdle: () => false });
   assert.deepEqual(harness.sent.slice(-2), [

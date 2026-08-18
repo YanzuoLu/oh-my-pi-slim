@@ -1,6 +1,7 @@
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text, stripTerminalSequences, type Component } from "@earendil-works/pi-tui";
 import type { AskPublicAnswer, AskResult } from "./ask-runtime.js";
+import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
 
 type UnknownRecord = Record<string, unknown>;
 type ToolResultLike = { content?: unknown; details?: unknown };
@@ -175,14 +176,14 @@ function compactSummary(result: AskResult, total: number, theme: Theme): Compone
   if (result.cancelled) {
     const reason = result.cancelReason === "empty_submit" ? "empty submit" : "user cancelled";
     return new Text(
-      `${theme.fg("warning", "!")} ${theme.fg("toolOutput", `Cancelled · ${answered}/${total} answered · ${reason}`)}`,
+      `${formatSemanticGlyphPrefix(theme.fg("warning", "!"))}${theme.fg("toolOutput", `Cancelled · ${answered}/${total} answered · ${reason}`)}`,
       0,
       0,
     );
   }
   const status = result.partial ? "partial" : "complete";
   return new Text(
-    `${theme.fg(result.partial ? "warning" : "success", result.partial ? "◐" : "✓")} ${theme.fg("toolOutput", `Answered ${answered}/${total} · ${status}`)}`,
+    `${formatSemanticGlyphPrefix(theme.fg(result.partial ? "warning" : "success", result.partial ? "◐" : "✓"))}${theme.fg("toolOutput", `Answered ${answered}/${total} · ${status}`)}`,
     0,
     0,
   );

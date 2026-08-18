@@ -2,6 +2,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Spacer, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import type { LoopAction, LoopFireDetails, PublicLoop } from "./loop-runtime.js";
 import { sanitizeLoopBody, sanitizeLoopText, sortLoopsForDisplay } from "./loop-widget.js";
+import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
 
 type UnknownRecord = Record<string, unknown>;
 type ToolResultLike = { content?: unknown; details?: unknown };
@@ -65,6 +66,10 @@ class ExpandableNotificationLine implements Component {
   invalidate(): void {}
 }
 
+function activeLoopGlyph(theme: Theme): string {
+  return theme.fg("accent", "↻");
+}
+
 class LoopFireLine implements Component {
   private readonly details: LoopFireDetails;
   private readonly theme: Theme;
@@ -75,7 +80,7 @@ class LoopFireLine implements Component {
   }
 
   render(width: number): string[] {
-    const prefix = `${this.theme.fg("accent", "↻")} ${this.theme.fg("customMessageText", `Loop [${sanitizeLoopText(this.details.id)}] · `)}`;
+    const prefix = `${formatSemanticGlyphPrefix(activeLoopGlyph(this.theme))}${this.theme.fg("customMessageText", `Loop [${sanitizeLoopText(this.details.id)}] · `)}`;
     const suffix = this.theme.fg("customMessageText", ` · fire ${this.details.fireCount}`);
     const line = new ExpandableNotificationLine(
       `${prefix}${this.theme.fg("customMessageText", sanitizeLoopText(this.details.abstract))}`,
@@ -167,12 +172,12 @@ function failureLabel(count: number): string {
 function statusGlyph(loop: PublicLoop, theme: Theme): string {
   if (loop.status === "paused") return theme.fg("dim", "Ⅱ");
   if (loop.lastError) return theme.fg("error", "!");
-  return theme.fg("accent", "↻");
+  return activeLoopGlyph(theme);
 }
 
 function loopHeading(loop: PublicLoop, theme: Theme): Text {
   return new Text(
-    `${statusGlyph(loop, theme)} ${theme.fg("toolTitle", theme.bold(`Loop [${sanitizeLoopText(loop.id)}]`))} ${theme.fg("muted", `· ${loop.status}`)}`,
+    `${formatSemanticGlyphPrefix(statusGlyph(loop, theme))}${theme.fg("toolTitle", theme.bold(`Loop [${sanitizeLoopText(loop.id)}]`))} ${theme.fg("muted", `· ${loop.status}`)}`,
     0,
     0,
   );
@@ -198,7 +203,12 @@ function renderLoopList(loops: readonly PublicLoop[], theme: Theme, expanded: bo
   const sorted = sortLoopsForDisplay(loops);
   const active = sorted.filter((loop) => loop.status === "active").length;
   const container = new Container();
-  container.addChild(new Text(theme.fg(active > 0 ? "accent" : "dim", theme.bold(`● Loops (${active}/${sorted.length})`)), 0, 0));
+  const headingRole = active > 0 ? "accent" : "dim";
+  container.addChild(new Text(
+    `${formatSemanticGlyphPrefix(theme.fg(headingRole, theme.bold("●")))}${theme.fg(headingRole, theme.bold(`Loops (${active}/${sorted.length})`))}`,
+    0,
+    0,
+  ));
   for (const loop of sorted) {
     container.addChild(new Spacer(1));
     if (expanded) {
@@ -206,7 +216,7 @@ function renderLoopList(loops: readonly PublicLoop[], theme: Theme, expanded: bo
       continue;
     }
     container.addChild(new Text(
-      `${statusGlyph(loop, theme)} ${theme.fg("toolOutput", sanitizeLoopText(loop.abstract))} ${theme.fg("dim", `[${sanitizeLoopText(loop.id)}] · Every ${sanitizeLoopText(loop.interval)} · ${fireLabel(loop.fireCount)}`)}`,
+      `${formatSemanticGlyphPrefix(statusGlyph(loop, theme))}${theme.fg("toolOutput", sanitizeLoopText(loop.abstract))} ${theme.fg("dim", `[${sanitizeLoopText(loop.id)}] · Every ${sanitizeLoopText(loop.interval)} · ${fireLabel(loop.fireCount)}`)}`,
       0,
       0,
     ));
@@ -218,7 +228,7 @@ function mutationReceipt(action: LoopAction, loop: PublicLoop | undefined, chang
   const container = new Container();
   const displayId = sanitizeLoopText(loop?.id ?? id ?? "unknown");
   if (!changed) {
-    container.addChild(new Text(`${theme.fg("dim", "○")} ${theme.fg("toolOutput", `No change · loop [${displayId}]`)}`, 0, 0));
+    container.addChild(new Text(`${formatSemanticGlyphPrefix(theme.fg("dim", "○"))}${theme.fg("toolOutput", `No change · loop [${displayId}]`)}`, 0, 0));
     return container;
   }
   const verbs: Record<Exclude<LoopAction, "list">, string> = {
@@ -230,7 +240,7 @@ function mutationReceipt(action: LoopAction, loop: PublicLoop | undefined, chang
   };
   const suffix = loop ? ` · ${loop.status}` : "";
   container.addChild(new Text(
-    `${theme.fg("success", "✓")} ${theme.fg("toolOutput", `${verbs[action as Exclude<LoopAction, "list">]} loop [${displayId}]${suffix}`)}`,
+    `${formatSemanticGlyphPrefix(theme.fg("success", "✓"))}${theme.fg("toolOutput", `${verbs[action as Exclude<LoopAction, "list">]} loop [${displayId}]${suffix}`)}`,
     0,
     0,
   ));
@@ -333,7 +343,7 @@ export function renderLoopFire(
 
   const container = new Container();
   container.addChild(new Text(
-    `${theme.fg("accent", "↻")} ${theme.fg("toolTitle", theme.bold(`Loop [${sanitizeLoopText(details.id)}]`))} ${theme.fg("muted", `· fire ${details.fireCount}`)}`,
+    `${formatSemanticGlyphPrefix(activeLoopGlyph(theme))}${theme.fg("toolTitle", theme.bold(`Loop [${sanitizeLoopText(details.id)}]`))} ${theme.fg("muted", `· fire ${details.fireCount}`)}`,
     0,
     0,
   ));

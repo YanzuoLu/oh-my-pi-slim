@@ -16,6 +16,7 @@ const dependencyMap = {
   "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
   "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
   "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
+  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -50,6 +51,11 @@ const theme = {
   fg: (_color, text) => text,
   bg: (_color, text) => text,
   bold: (text) => text,
+};
+const vtTheme = {
+  fg: (_color, text) => `\u001b[36m${text}\u001b[0m`,
+  bg: (_color, text) => `\u001b[40m${text}\u001b[0m`,
+  bold: (text) => `\u001b[1m${text}\u001b[22m`,
 };
 
 function goal(overrides = {}) {
@@ -105,18 +111,18 @@ function escaped(value) {
 test("Goal widget renders five statuses, exact two-line order, stats, elapsed, retry, paused reason, width, and empty state", () => {
   const active = renderGoalWidgetLines(view(), theme, 180, NOW_MS);
   assert.deepEqual(active, [
-    "● Goal · ↻ active · Ship the frozen Goal UI",
+    "●  Goal · ↻  active · Ship the frozen Goal UI",
     "12m · 7 cont · 4 runs · main 84k tok/23 tools/9 turns/2 comp · child 231k tok/61 tools/18 turns/4 comp",
   ]);
 
   const cases = [
-    ["active", "↻"],
-    ["paused", "Ⅱ"],
-    ["retry_wait", "◷"],
-    ["completed", "✓"],
-    ["cancelled", "×"],
+    ["active", "↻  active"],
+    ["paused", "Ⅱ  paused"],
+    ["retry_wait", "◷  retry_wait"],
+    ["completed", "✓  completed"],
+    ["cancelled", "×  cancelled"],
   ];
-  for (const [status, glyph] of cases) {
+  for (const [status, statusLabel] of cases) {
     const terminal = status === "completed" || status === "cancelled";
     const value = goal({
       status,
@@ -130,8 +136,9 @@ test("Goal widget renders five statuses, exact two-line order, stats, elapsed, r
     });
     const lines = renderGoalWidgetLines(view(value), theme, 180, NOW_MS);
     assert.equal(lines.length, 2);
-    assert.equal(lines[0], `● Goal · ${glyph} ${status} · Ship the frozen Goal UI`);
+    assert.equal(lines[0], `●  Goal · ${statusLabel} · Ship the frozen Goal UI`);
   }
+  assert.doesNotMatch(cases.map(([status]) => renderGoalWidgetLines(view(goal({ status })), theme, 180, NOW_MS)[0]).join("\n"), /[↻Ⅱ◷✓×●] [^ ]|[↻Ⅱ◷✓×●] {3}/);
 
   const retry = renderGoalWidgetLines(view(goal({
     status: "retry_wait", retryAttempt: 2, nextRetryAt: "2026-06-01T00:12:30.000Z", lastProviderError: "rate limited",
@@ -151,11 +158,12 @@ test("Goal widget renders five statuses, exact two-line order, stats, elapsed, r
   assert.equal(compactGoalTokens(1_250_000), "1.3M");
 
   for (const width of [1, 8, 24, 48, 80]) {
-    const narrow = renderGoalWidgetLines(view(goal({ abstract: "Long\u001b[31m unsafe\u001b[0m abstract\u0000 that must truncate" })), theme, width, NOW_MS);
+    const narrow = renderGoalWidgetLines(view(goal({ abstract: "Long\u001b[31m unsafe\u001b[0m abstract\u0000 that must truncate" })), vtTheme, width, NOW_MS);
     assert.equal(narrow.length, 2);
     assert.ok(narrow.every((line) => visibleWidth(line) <= width));
     assert.ok(narrow.every((line) => !stripVTControlCharacters(line).includes("\u0000")));
   }
+  assert.match(stripVTControlCharacters(renderGoalWidgetLines(view(), vtTheme, 80, NOW_MS)[0]), /^●  Goal · ↻  active/);
   assert.deepEqual(renderGoalWidgetLines(view(null, { elapsedMs: null }), theme, 80, NOW_MS), []);
 });
 
@@ -379,15 +387,15 @@ test("Goal results cover active summaries, status none/goal, pause/resume no-cha
   const cancelled = goal({ status: "cancelled", endedAt: "2026-06-01T00:12:00.000Z", cancelReason: "user stopped it" });
   const retry = goal({ status: "retry_wait", retryAttempt: 2, nextRetryAt: "2026-06-01T00:12:30.000Z", lastProviderError: "rate limited" });
   const cases = [
-    ["create", active, true, "↻ Goal · Ship the frozen Goal UI · active", goalActivationContent("created", active)],
-    ["modify", active, true, "↻ Goal · Ship the frozen Goal UI · active", goalActivationContent("modified", active)],
-    ["resume", active, true, "↻ Goal · Ship the frozen Goal UI · active", goalActivationContent("resumed", active)],
-    ["resume", active, false, "○ Goal · Ship the frozen Goal UI · already active · no change", `Goal is already active. No change.\n${JSON.stringify(active, null, 2)}`],
-    ["pause", paused, true, "Ⅱ Goal · Ship the frozen Goal UI · paused · waiting for approval", `Goal paused.\n${JSON.stringify(paused, null, 2)}`],
-    ["pause", paused, false, "○ Goal · Ship the frozen Goal UI · already paused · no change", `Goal is already paused. No change.\n${JSON.stringify(paused, null, 2)}`],
-    ["complete", completed, true, "✓ Goal · Ship the frozen Goal UI · completed · 2 evidence items", `Goal completed.\n${JSON.stringify(completed, null, 2)}`],
-    ["cancel", cancelled, true, "× Goal · Ship the frozen Goal UI · cancelled · user stopped it", `Goal cancelled.\n${JSON.stringify(cancelled, null, 2)}`],
-    ["status", retry, false, "◷ Goal · Ship the frozen Goal UI · retry_wait", JSON.stringify(retry, null, 2)],
+    ["create", active, true, "↻  Goal · Ship the frozen Goal UI · active", goalActivationContent("created", active)],
+    ["modify", active, true, "↻  Goal · Ship the frozen Goal UI · active", goalActivationContent("modified", active)],
+    ["resume", active, true, "↻  Goal · Ship the frozen Goal UI · active", goalActivationContent("resumed", active)],
+    ["resume", active, false, "○  Goal · Ship the frozen Goal UI · already active · no change", `Goal is already active. No change.\n${JSON.stringify(active, null, 2)}`],
+    ["pause", paused, true, "Ⅱ  Goal · Ship the frozen Goal UI · paused · waiting for approval", `Goal paused.\n${JSON.stringify(paused, null, 2)}`],
+    ["pause", paused, false, "○  Goal · Ship the frozen Goal UI · already paused · no change", `Goal is already paused. No change.\n${JSON.stringify(paused, null, 2)}`],
+    ["complete", completed, true, "✓  Goal · Ship the frozen Goal UI · completed · 2 evidence items", `Goal completed.\n${JSON.stringify(completed, null, 2)}`],
+    ["cancel", cancelled, true, "×  Goal · Ship the frozen Goal UI · cancelled · user stopped it", `Goal cancelled.\n${JSON.stringify(cancelled, null, 2)}`],
+    ["status", retry, false, "◷  Goal · Ship the frozen Goal UI · retry_wait", JSON.stringify(retry, null, 2)],
   ];
   for (const [action, goalValue, changed, summary, modelText] of cases) {
     const result = { content: [{ type: "text", text: modelText }], details: { goal: structuredClone(goalValue), changed } };
@@ -402,7 +410,7 @@ test("Goal results cover active summaries, status none/goal, pause/resume no-cha
       assert.match(expanded, escaped(expected));
     }
     if (action === "complete") {
-      for (const expected of ["Criterion evidence:", "1. Widget is exact", "✓ Widget test", "2. Renderers are safe", "✓ Renderer test"]) assert.match(expanded, escaped(expected));
+      for (const expected of ["Criterion evidence:", "1. Widget is exact", "✓  Widget test", "2. Renderers are safe", "✓  Renderer test"]) assert.match(expanded, escaped(expected));
     }
     if (goalValue.status === "retry_wait") {
       for (const expected of ["Retry attempt: 2", "Next retry: 2026-06-01T00:12:30.000Z", "rate limited"]) assert.match(expanded, escaped(expected));
@@ -412,7 +420,7 @@ test("Goal results cover active summaries, status none/goal, pause/resume no-cha
   }
 
   const none = { content: [{ type: "text", text: "No Goal." }], details: { goal: null, changed: false } };
-  assert.equal(render(renderGoalResult(none, { expanded: false }, theme, { args: { action: "status" } })), "○ Goal · none");
+  assert.equal(render(renderGoalResult(none, { expanded: false }, theme, { args: { action: "status" } })), "○  Goal · none");
   assert.match(render(renderGoalResult(none, { expanded: true }, theme, { args: { action: "status" } })), /Model result:\n  No Goal\./);
 
   const fallback = { content: [{ type: "text", text: "Goal error\u001b[31m red\u001b[0m first\nComplete second\u0000 line" }], details: { malformed: true } };
@@ -437,12 +445,14 @@ test("Goal continuation and state notifications preserve exact collapsed concept
     },
   };
   const continuationBefore = structuredClone(continuation);
-  assert.equal(render(renderGoalContinuation(continuation, { expanded: false, outputPad: 1 }, theme)).trim(), "↻ Goal · Ship the frozen Goal UI · continuation 7 (ctrl+o to expand)");
-  const continuationNarrow = renderLines(renderGoalContinuation(continuation, { expanded: false, outputPad: 1 }, theme), 50);
+  assert.equal(render(renderGoalContinuation(continuation, { expanded: false, outputPad: 1 }, theme)).trim(), "↻  Goal · Ship the frozen Goal UI · continuation 7 (ctrl+o to expand)");
+  const continuationWide = renderGoalContinuation(continuation, { expanded: false, outputPad: 1 }, vtTheme).render(100);
+  assert.ok(continuationWide.every((line) => visibleWidth(line) <= 100));
+  const continuationNarrow = renderGoalContinuation(continuation, { expanded: false, outputPad: 1 }, vtTheme).render(50);
   assert.ok(continuationNarrow.every((line) => visibleWidth(line) <= 50));
-  assert.match(continuationNarrow.join("\n").trim(), /continuation 7 \(ctrl\+o to expand\)$/);
+  assert.match(continuationNarrow.map((line) => stripVTControlCharacters(line)).join("\n").trim(), /continuation 7 \(ctrl\+o to expand\)$/);
   const continuationExpanded = render(renderGoalContinuation(continuation, { expanded: true, outputPad: 1 }, theme));
-  for (const expected of ["↻ Goal · continuation 7", "Status: active", "Objective:", "Criteria:", "Continuation content:", "Continue pursuing the active Goal.", "Call `goal complete`"]) assert.match(continuationExpanded, escaped(expected));
+  for (const expected of ["↻  Goal · continuation 7", "Status: active", "Objective:", "Criteria:", "Continuation content:", "Continue pursuing the active Goal.", "Call `goal complete`"]) assert.match(continuationExpanded, escaped(expected));
   assert.doesNotMatch(continuationExpanded, /\(ctrl\+o to expand\)/);
   assert.deepEqual(continuation, continuationBefore);
 
@@ -452,9 +462,15 @@ test("Goal continuation and state notifications preserve exact collapsed concept
     details: { type: GOAL_STATE_MESSAGE_TYPE, event: "no_progress", reason: "no_progress", goal: structuredClone(paused) },
   };
   const stateBefore = structuredClone(state);
-  assert.equal(render(renderGoalState(state, { expanded: false, outputPad: 1 }, theme)).trim(), "Ⅱ Goal · Ship the frozen Goal UI · no_progress: no_progress (ctrl+o to expand)");
+  assert.equal(render(renderGoalState(state, { expanded: false, outputPad: 1 }, theme)).trim(), "Ⅱ  Goal · Ship the frozen Goal UI · no_progress: no_progress (ctrl+o to expand)");
+  assert.doesNotMatch(render(renderGoalState(state, { expanded: false, outputPad: 1 }, theme)), /Ⅱ [^ ]|Ⅱ {3}/);
+  const activeState = {
+    content: "Goal state changed: resumed.",
+    details: { type: GOAL_STATE_MESSAGE_TYPE, event: "resumed", reason: "manual resume", goal: structuredClone(active) },
+  };
+  assert.equal(render(renderGoalState(activeState, { expanded: false, outputPad: 1 }, theme)).trim(), "↻  Goal · Ship the frozen Goal UI · resumed: manual resume (ctrl+o to expand)");
   const stateExpanded = render(renderGoalState(state, { expanded: true, outputPad: 1 }, theme));
-  for (const expected of ["Ⅱ Goal · paused", "Event: no_progress", "Reason:", "no_progress", "Status: paused", "No progress: 3"]) assert.match(stateExpanded, escaped(expected));
+  for (const expected of ["Ⅱ  Goal · paused", "Event: no_progress", "Reason:", "no_progress", "Status: paused", "No progress: 3"]) assert.match(stateExpanded, escaped(expected));
   assert.doesNotMatch(stateExpanded, /\(ctrl\+o to expand\)/);
   assert.deepEqual(state, stateBefore);
 

@@ -4,9 +4,10 @@
  */
 
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import type { PersistedRun, RunStatus } from "./subagent-core.js";
+import { sortRetainedSubagentRuns, type PersistedRun, type RunStatus } from "./subagent-core.js";
 import { formatSubagentModel } from "./subagent-model-display.js";
 import type { DetachedRunActivity } from "./subagent-run-files.js";
+import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
 import {
   describeWidgetActivity,
   formatWidgetMs,
@@ -75,7 +76,7 @@ export function renderFinishedRunLine(run: WidgetRun, theme: WidgetTheme, nowMs 
     const message = run.error ? `: ${run.error.slice(0, 60)}` : "";
     statusText = theme.fg("error", ` failed${message}`);
   }
-  return `${icon} ${theme.fg("dim", runName(run, theme))}  ${theme.fg("dim", shortAbstract(run.abstract))} ${theme.fg("dim", "·")} ${theme.fg("dim", stats(run, theme, nowMs))}${statusText}`;
+  return `${formatSemanticGlyphPrefix(icon)}${theme.fg("dim", runName(run, theme))}  ${theme.fg("dim", shortAbstract(run.abstract))} ${theme.fg("dim", "·")} ${theme.fg("dim", stats(run, theme, nowMs))}${statusText}`;
 }
 
 export function renderActiveRunLines(
@@ -89,7 +90,7 @@ export function renderActiveRunLines(
     ? theme.fg("warning", SUBAGENT_WIDGET_GLYPHS.waiting)
     : theme.fg("accent", SUBAGENT_WIDGET_SPINNER[spinnerFrame % SUBAGENT_WIDGET_SPINNER.length]);
   const state = waiting ? ` ${theme.fg("warning", "waiting")}` : "";
-  const header = `${indicator} ${theme.bold(runName(run, theme))}${state}  ${theme.fg("muted", shortAbstract(run.abstract))}`;
+  const header = `${formatSemanticGlyphPrefix(indicator)}${theme.bold(runName(run, theme))}${state}  ${theme.fg("muted", shortAbstract(run.abstract))}`;
   const statsLine = theme.fg("dim", `${formatSubagentModel(run.model)} · ${stats(run, theme, nowMs)}`);
   const activityText = waiting
     ? run.request?.message || "supervisor reply required"
@@ -103,22 +104,18 @@ interface Categories {
   finished: WidgetRun[];
 }
 
-function categorizeRuns(
-  runs: readonly WidgetRun[],
-  shouldShowFinished: (runId: string, status: RunStatus) => boolean,
-): Categories {
+function categorizeRuns(runs: readonly WidgetRun[]): Categories {
   return {
     active: runs.filter((run) => run.status === "running" || run.status === "waiting"),
     queued: runs.filter((run) => run.status === "starting"),
-    finished: runs.filter((run) => !ACTIVE_STATUSES.has(run.status) && shouldShowFinished(run.id, run.status)),
+    finished: runs.filter((run) => !ACTIVE_STATUSES.has(run.status)),
   };
 }
 
 interface Sections {
   finishedLines: string[];
   activeLines: [header: string, stats: string, activity: string][];
-  queuedLine: string | undefined;
-  queuedCount: number;
+  queuedLines: string[];
 }
 
 function buildSections(
@@ -138,25 +135,27 @@ function buildSections(
       truncate(theme.fg("dim", "│  └─") + ` ${activity}`),
     ] as [string, string, string];
   });
-  const queuedLine = categories.queued.length > 0
-    ? truncate(theme.fg("dim", "├─") + ` ${theme.fg("muted", SUBAGENT_WIDGET_GLYPHS.queued)} ${theme.fg("dim", `${categories.queued.length} queued`)}`)
-    : undefined;
-  return { finishedLines, activeLines, queuedLine, queuedCount: categories.queued.length };
+  const queuedLines = categories.queued.map((run) => truncate(
+    theme.fg("dim", "├─") + ` ${formatSemanticGlyphPrefix(theme.fg("muted", SUBAGENT_WIDGET_GLYPHS.queued))}${theme.fg("dim", runName(run, theme))}  ${theme.fg("dim", shortAbstract(run.abstract))} ${theme.fg("dim", "·")} ${theme.fg("dim", stats(run, theme, nowMs))} ${theme.fg("muted", "queued")}`,
+  ));
+  return { finishedLines, activeLines, queuedLines };
 }
 
 function assembleWithinBudget(heading: string, sections: Sections): string[] {
-  const lines = [heading, ...sections.finishedLines];
+  const lines = [heading];
   for (const entry of sections.activeLines) lines.push(...entry);
-  if (sections.queuedLine) {
-    lines.push(sections.queuedLine.replace("├─", "└─"));
+  lines.push(...sections.queuedLines, ...sections.finishedLines);
+  if (sections.finishedLines.length > 0) {
+    const last = lines.length - 1;
+    lines[last] = lines[last].replace("├─", "└─");
+  } else if (sections.queuedLines.length > 0) {
+    const last = lines.length - 1;
+    lines[last] = lines[last].replace("├─", "└─");
   } else if (sections.activeLines.length > 0) {
     const headerIndex = lines.length - 3;
     lines[headerIndex] = lines[headerIndex].replace("├─", "└─");
     lines[headerIndex + 1] = lines[headerIndex + 1].replace("│  ", "   ");
     lines[headerIndex + 2] = lines[headerIndex + 2].replace("│  ", "   ");
-  } else if (sections.finishedLines.length > 0) {
-    const last = lines.length - 1;
-    lines[last] = lines[last].replace("├─", "└─");
   }
   return lines;
 }
@@ -179,11 +178,11 @@ function assembleOverflow(
       budget -= 3;
     } else hiddenActive += 1;
   }
-  if (sections.queuedLine) {
+  for (const line of sections.queuedLines) {
     if (budget >= 1) {
-      lines.push(sections.queuedLine);
+      lines.push(line);
       budget -= 1;
-    } else hiddenQueued = sections.queuedCount;
+    } else hiddenQueued += 1;
   }
   for (const line of sections.finishedLines) {
     if (budget >= 1) {
@@ -205,21 +204,20 @@ export function renderSubagentWidgetLines(params: {
   spinnerFrame: number;
   terminalWidth: number;
   theme: WidgetTheme;
-  shouldShowFinished: (runId: string, status: RunStatus) => boolean;
   nowMs?: number;
 }): string[] {
-  const { runs, spinnerFrame, terminalWidth, theme, shouldShowFinished } = params;
+  const { runs, spinnerFrame, terminalWidth, theme } = params;
   const nowMs = params.nowMs ?? Date.now();
-  const categories = categorizeRuns(runs, shouldShowFinished);
+  const categories = categorizeRuns(sortRetainedSubagentRuns(runs));
   const hasActive = categories.active.length > 0 || categories.queued.length > 0;
   if (!hasActive && categories.finished.length === 0) return [];
   const truncate = (line: string) => truncateToWidth(line, terminalWidth);
   const headingColor = hasActive ? "accent" : "dim";
   const headingIcon = hasActive ? SUBAGENT_WIDGET_GLYPHS.agentsActive : SUBAGENT_WIDGET_GLYPHS.agentsIdle;
-  const heading = truncate(theme.fg(headingColor, headingIcon) + " " + theme.fg(headingColor, "Agents"));
+  const heading = truncate(`${formatSemanticGlyphPrefix(theme.fg(headingColor, headingIcon))}${theme.fg(headingColor, "Agents")}`);
   const sections = buildSections(categories, spinnerFrame, theme, truncate, nowMs);
   const maxBody = MAX_SUBAGENT_WIDGET_LINES - 1;
-  const totalBody = sections.finishedLines.length + sections.activeLines.length * 3 + (sections.queuedLine ? 1 : 0);
+  const totalBody = sections.finishedLines.length + sections.activeLines.length * 3 + sections.queuedLines.length;
   return totalBody <= maxBody
     ? assembleWithinBudget(heading, sections)
     : assembleOverflow(heading, sections, maxBody, truncate, theme);

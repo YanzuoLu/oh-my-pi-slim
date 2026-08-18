@@ -1,6 +1,7 @@
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Markdown, Spacer, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { legacyRunAbstract } from "./subagent-core.js";
+import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
 
 export const SUBAGENT_NOTIFICATION_TYPE = "oh-my-pi-slim:subagent-notification";
 
@@ -139,7 +140,7 @@ function compactRunHeaderParts(
   const abstractText = includeAbstract ? transcriptRunAbstract(run) : undefined;
   const abstract = abstractText ? `  ${abstractText}` : "";
   return {
-    head: `${statusGlyph(status, theme)} ${theme.fg("toolTitle", theme.bold(identity.agent))} ${theme.fg("accent", `[${identity.id}]`)}`,
+    head: `${formatSemanticGlyphPrefix(statusGlyph(status, theme))}${theme.fg("toolTitle", theme.bold(identity.agent))} ${theme.fg("accent", `[${identity.id}]`)}`,
     tail: ` ${theme.fg("muted", `· ${status}`)}${abstract}`,
   };
 }
@@ -154,7 +155,7 @@ function addRequest(container: Container, theme: Theme, value: unknown): void {
   if (!request) return;
   container.addChild(new Spacer(1));
   container.addChild(new Text(
-    `${theme.fg("warning", "!")} ${theme.fg("toolTitle", theme.bold("Request"))}`,
+    `${formatSemanticGlyphPrefix(theme.fg("warning", "!"))}${theme.fg("toolTitle", theme.bold("Request"))}`,
     0,
     0,
   ));
@@ -224,31 +225,64 @@ function immediateAck(run: UnknownRecord, action: string, args: UnknownRecord, t
     text = `Started ${agent} [${id}] · ${status}`;
   }
   const container = new Container();
-  container.addChild(new Text(`${glyph} ${theme.fg("toolOutput", text)}`, 0, 0));
+  container.addChild(new Text(`${formatSemanticGlyphPrefix(glyph)}${theme.fg("toolOutput", text)}`, 0, 0));
   if (terminal && expanded) addFinalOutput(container, theme, run);
   return container;
 }
 
+function addCompactSummary(container: Container, theme: Theme, label: string, value: unknown): void {
+  if (typeof value !== "string") return;
+  container.addChild(new Text(
+    `${theme.fg("dim", `${label}:`)} ${theme.fg("toolOutput", safeFirstLine(value) || "—")}`,
+    0,
+    0,
+  ));
+}
+
 function renderRunList(runs: unknown[], theme: Theme, expanded: boolean): Container {
-  const activeRuns = runs.filter((value) => {
-    const status = runIdentity(asRecord(value) ?? {}).status;
-    return status === "starting" || status === "running" || status === "waiting";
-  });
   const container = new Container();
-  container.addChild(styledTitle(theme, "Active subagent run status", `· ${activeRuns.length}`));
-  if (activeRuns.length === 0) {
+  container.addChild(styledTitle(theme, "Retained subagent run status", `· ${runs.length}`));
+  if (runs.length === 0) {
     container.addChild(new Text(theme.fg("dim", "No retained runs."), 0, 0));
     return container;
   }
-  activeRuns.forEach((value) => {
+  runs.forEach((value) => {
     const run = asRecord(value) ?? {};
     const { status } = runIdentity(run);
     container.addChild(new Spacer(1));
     container.addChild(compactRunHeader(run, theme, undefined, true));
+    if (TERMINAL_STATUSES.has(status)) {
+      if (expanded) addFinalOutput(container, theme, run);
+      else {
+        addCompactSummary(container, theme, "Output", run.output);
+        addCompactSummary(container, theme, "Error", run.error);
+      }
+      return;
+    }
     if (!expanded || status !== "waiting") return;
     const reason = asString(run.reason);
     if (reason) addField(container, theme, "Reason", reason);
   });
+  return container;
+}
+
+function clearReceipt(details: UnknownRecord, theme: Theme, expanded: boolean): Container {
+  const clearedCount = typeof details.clearedCount === "number" ? details.clearedCount : 0;
+  const warnings = Array.isArray(details.warnings)
+    ? details.warnings.filter((warning): warning is string => typeof warning === "string")
+    : [];
+  const changed = details.changed === true;
+  const glyph = changed ? theme.fg("success", "✓") : theme.fg("muted", "○");
+  const summary = changed
+    ? `Cleared ${clearedCount} retained run${clearedCount === 1 ? "" : "s"}`
+    : "No retained runs to clear";
+  const tail = warnings.length > 0 ? ` · ${warnings.length} retained item${warnings.length === 1 ? "" : "s"}` : "";
+  const container = new Container();
+  container.addChild(new Text(`${formatSemanticGlyphPrefix(glyph)}${theme.fg("toolOutput", `${summary}${tail}`)}`, 0, 0));
+  if (!expanded || warnings.length === 0) return container;
+  container.addChild(new Spacer(1));
+  container.addChild(new Text(theme.fg("dim", "Warnings:"), 0, 0));
+  for (const warning of warnings) container.addChild(new Text(theme.fg("warning", `• ${warning}`), 0, 0));
   return container;
 }
 
@@ -296,7 +330,16 @@ export function renderSubagentCall(argsValue: unknown, theme: Theme, context: To
     if (expanded) {
       container.addChild(new Spacer(1));
       container.addChild(new Text(
-        theme.fg("toolOutput", "Returns only starting, running, and waiting run status with abstract and optional waiting reason."),
+        theme.fg("toolOutput", "Returns every retained run status with abstract, optional waiting reason, and terminal output or error."),
+        0,
+        0,
+      ));
+    }
+  } else if (action === "clear") {
+    if (expanded) {
+      container.addChild(new Spacer(1));
+      container.addChild(new Text(
+        theme.fg("toolOutput", "Removes every retained run record, run directory, child session file, and Goal-owned stats sidecar."),
         0,
         0,
       ));
@@ -318,6 +361,9 @@ export function renderSubagentResult(
   const { action, args } = actionFromContext(context, "create");
   const expanded = options.expanded === true;
   const runs = details?.runs;
+  if (action === "clear" && details && typeof details.clearedCount === "number") {
+    return spacedToolResult(clearReceipt(details, theme, expanded));
+  }
   if (action === "list" && Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme, expanded));
   const run = asRecord(details?.run);
   if (run) return spacedToolResult(immediateAck(run, action, args, theme, expanded));

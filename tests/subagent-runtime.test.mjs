@@ -50,6 +50,7 @@ const dependencyMap = {
   "./subagent-widget-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-renderer.ts", import.meta.url).href,
   "./subagent-widget-display.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-display.ts", import.meta.url).href,
   "./subagent-widget-glyphs.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-glyphs.ts", import.meta.url).href,
+  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -70,6 +71,7 @@ const {
   legacyRunAbstract,
   restoreRunJournal,
   runJournalEntry,
+  sortRetainedSubagentRuns,
   validateCreateInput,
 } = await import("../extensions/oh-my-pi-slim/subagent-core.ts");
 const {
@@ -96,6 +98,8 @@ const {
   listOwnerRunIds,
   readGoalStatsSidecar,
   readLaunchConfig,
+  removeChildSessionFile,
+  removeGoalStatsSidecar,
   removeRunFiles,
   safeReadJson,
   writeControl,
@@ -108,10 +112,8 @@ const NOW_MS = Date.parse("2026-04-17T00:00:00.000Z");
 
 function assertSteSentence(sentence) {
   const words = sentence.match(/[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*/g) ?? [];
-  assert.ok(words.length <= 20, `STE procedural sentence exceeds 20 words: ${sentence}`);
-  assert.doesNotMatch(sentence, /;/, `STE sentence must not use a semicolon: ${sentence}`);
-  assert.doesNotMatch(sentence, /\b(?:is|are|was|were|be|been|being)\s+\w+(?:ed|en)\b/i, `STE sentence must use active voice: ${sentence}`);
-  assert.match(sentence, /^(?:Use|Add|Read|Expect|Do not|Resume|For|In|After|Wait|Continue|Create|Reply|Select)\b/, `STE sentence must use an instruction or a leading condition: ${sentence}`);
+  assert.ok(words.length <= 20, `Model sentence exceeds 20 words: ${sentence}`);
+  assert.doesNotMatch(sentence, /;/, `Model sentence must not use a semicolon: ${sentence}`);
 }
 
 function assertSteBlock(block) {
@@ -154,6 +156,46 @@ function branchEntry(data) {
   return { type: "custom", customType: "oh-my-pi-slim:subagents", data };
 }
 
+function goalBranchEntry(ownedRunIds, instanceKey = "goal-instance") {
+  return {
+    type: "custom",
+    customType: "oh-my-pi-slim:goal-state",
+    data: {
+      version: 1,
+      instanceKey,
+      generation: 1,
+      goal: {
+        status: "active",
+        abstract: "goal abstract",
+        objective: "goal objective",
+        criteria: ["one criterion"],
+        createdAt: "2026-04-16T23:00:00.000Z",
+        updatedAt: "2026-04-16T23:00:00.000Z",
+        endedAt: null,
+        pauseReason: null,
+        retryAttempt: 0,
+        nextRetryAt: null,
+        lastProviderError: null,
+        noProgressCount: 0,
+        evidence: null,
+        cancelReason: null,
+      },
+      ownedRunIds: [...ownedRunIds],
+    },
+  };
+}
+
+function seedTerminalRun(harness, overrides = {}) {
+  const run = persistedRun({ status: "completed", output: "final output", ...overrides });
+  harness.runtime.registry.add(run, false);
+  mkdirSync(harness.paths(run.id).controlDir, { recursive: true, mode: 0o700 });
+  return run;
+}
+
+async function clear(harness) {
+  return harness.tools.get("subagent").execute("clear", { action: "clear" });
+}
+
 function notificationBranchEntry(message) {
   return {
     type: "custom_message",
@@ -187,6 +229,7 @@ function createHarness({
   rejectGroupSignal = false,
   readGoalStats,
   writeGoalStats,
+  onJournalWrite,
 } = {}) {
   const tempDir = mkdtempSync(join(CACHE, "runtime-harness-"));
   chmodSync(tempDir, 0o700);
@@ -209,7 +252,10 @@ function createHarness({
   const pi = {
     registerTool(definition) { tools.set(definition.name, definition); },
     registerMessageRenderer(type, renderer) { messageRenderers.set(type, renderer); },
-    appendEntry(type, data) { journalWrites.push({ type, data }); },
+    appendEntry(type, data) {
+      journalWrites.push({ type, data });
+      onJournalWrite?.({ type, data });
+    },
     sendMessage(message, options) {
       if (sendMessageError) throw sendMessageError;
       notifications.push({ message, options });
@@ -395,7 +441,7 @@ async function createChildCheckpointHarness() {
 }
 
 test("public schema and package-agent boundaries remain minimal", async () => {
-  assert.deepEqual(SUBAGENT_ACTIONS, ["create", "list", "interrupt", "steer", "resume", "reply"]);
+  assert.deepEqual(SUBAGENT_ACTIONS, ["create", "list", "interrupt", "steer", "resume", "reply", "clear"]);
   assert.deepEqual(SUBAGENT_PUBLIC_FIELDS, ["agent", "abstract", "task", "cwd", "action", "id", "message"]);
   assert.deepEqual(Object.keys(subagentParameters.properties).sort(), [...SUBAGENT_PUBLIC_FIELDS].sort());
   assert.equal(subagentParameters.additionalProperties, false);
@@ -407,9 +453,9 @@ test("public schema and package-agent boundaries remain minimal", async () => {
     abstract: "For create or resume, provide a short run summary.",
     task: "For create, provide the complete objective.",
     cwd: "For create, provide a different working directory.",
-    action: "Select the run action.",
+    action: "Select the subagent action. Create uses agent, abstract, task, and optional cwd. Steer and reply use id and message. Resume uses id, abstract, and message. Interrupt uses id. List and clear use no other fields.",
     id: "For steer, interrupt, resume, or reply, provide the run ID.",
-    message: "For steer, provide guidance. For resume, provide the continuation objective. For reply, provide the waiting-request answer.",
+    message: "For steer, provide an actual instruction. For resume, provide the complete continuation objective. For reply, answer the complete waiting request.",
   });
   for (const schema of Object.values(subagentParameters.properties)) assertSteBlock(schema.description);
   assert.deepEqual(validateCreateInput({ agent: "explorer", abstract: " map auth ", task: " map " }), {
@@ -721,44 +767,32 @@ test("registered subagent metadata describes the unified lifecycle", () => {
   const harness = createHarness();
   try {
     const subagent = harness.tools.get("subagent");
-    assert.equal(subagent.description, "Create specialist runs and manage them by run ID. Resume terminal runs with a new summary and objective. Reply to waiting runs.");
-    assert.equal(subagent.promptSnippet, "Create or manage specialist runs by ID.");
+    assert.equal(subagent.description, "Create and manage retained specialist runs by run ID. List reports every retained run and its public state. Terminal history includes final output or errors until cleared. Resume creates a new run, while reply continues a waiting run. Interrupt requests resolve through terminal notifications.");
+    assert.equal(subagent.promptSnippet, "Create or manage retained specialist runs by ID.");
     assertSteBlock(subagent.description);
     assertSteBlock(subagent.promptSnippet);
     assertStePromptGuidelines(subagent.promptGuidelines);
     const expectedGuidelines = [
-      "Use only `action`, `agent`, `abstract`, `task`, and optional `cwd` for `create`.",
-      "For `create`, select `agent` as the specialist role.",
-      "For `create`, use `abstract` for a short run summary.",
-      "For `create`, use `task` for the complete objective.",
-      "For `create`, add `cwd` only for a different working directory.",
-      "Expect `create` to return a new run ID.",
-      "Use the returned run ID for later actions.",
-      "Read each waiting notification before you reply.",
-      "Read each waiting notification for the complete request and run ID.",
-      "Read each terminal notification for the final output or error.",
-      "Use only `action` for `list`.",
-      "Use `list` to inspect active starting, running, and waiting runs.",
-      "Expect `list` to return ID, agent, abstract, status, live, optional sourceRunId, and optional reason.",
-      "Do not use `list` to get requests, activity, or terminal results.",
-      "Use only `action`, `id`, and `message` for `steer`.",
-      "For `steer`, use a running run ID in `id`.",
-      "For `steer`, use `message` for complete guidance.",
-      "Use only `action` and `id` for `interrupt`.",
-      "For `interrupt`, use a starting, running, or waiting run ID in `id`.",
-      "After `interrupt`, read the terminal notification for the actual status.",
-      "Use only `action`, `id`, `abstract`, and `message` for `resume`.",
-      "Resume only a terminal source run that has saved context.",
-      "For `resume`, use the terminal source run ID in `id`.",
-      "For `resume`, use `abstract` for a new short run summary.",
-      "For `resume`, use `message` for the complete continuation objective.",
-      "Expect `resume` to return a new run ID.",
-      "Use the new run ID for later actions.",
-      "Use only `action`, `id`, and `message` for `reply`.",
-      "For `reply`, use a live waiting run ID in `id`.",
-      "In `message`, answer the complete waiting request.",
-      "Expect `reply` to continue the same run.",
+      "Delegate bounded specialist work with `subagent create` when an independent lane improves progress.",
+      "Give each `subagent create` lane exclusive writer ownership over its assigned files.",
+      "Run independent `subagent` lanes concurrently only when their ownership and dependencies do not conflict.",
+      "`subagent create` starts new work, while `subagent resume` continues reusable terminal context in a new run.",
+      "Do not duplicate work already owned by a starting, running, or waiting `subagent` run.",
+      "Use `subagent list` to inspect every retained run and its public state.",
+      "Expect terminal `subagent list` entries to include final output or errors.",
+      "Read each waiting `subagent` notification before answering with `subagent reply`.",
+      "`subagent reply` continues the same waiting run after the complete answer arrives.",
+      "Use `subagent steer` only for an actual instruction, never for polling or reassurance.",
+      "Use `subagent interrupt` only when a live run is obsolete, wrong, or conflicting.",
+      "Limit `subagent interrupt` to starting, running, or waiting runs.",
+      "Inspect partial file changes after `subagent interrupt` because interruption is not rollback.",
+      "Read every terminal `subagent` notification for final output, errors, or interrupt status.",
+      "Expect reload, tree navigation, or session replacement to interrupt active `subagent` runs while retaining their history.",
+      "Call `subagent clear` only after every retained run becomes terminal.",
+      "Do not call any `subagent` action on a run removed by `subagent clear`.",
     ];
+    assert.equal(subagent.parameters.properties.action.description, "Select the subagent action. Create uses agent, abstract, task, and optional cwd. Steer and reply use id and message. Resume uses id, abstract, and message. Interrupt uses id. List and clear use no other fields.");
+    assert.equal(subagent.parameters.properties.message.description, "For steer, provide an actual instruction. For resume, provide the complete continuation objective. For reply, answer the complete waiting request.");
     assert.deepEqual(subagent.promptGuidelines, expectedGuidelines);
     const guidelines = subagent.promptGuidelines.join("\n");
     assert.doesNotMatch(`${subagent.description}\n${subagent.promptSnippet}\n${guidelines}`, /subagent_supervisor|pending query|replyTo|request ID|waitingSeq|deliveryKey|legacy|saved child-session/i);
@@ -769,13 +803,20 @@ test("registered subagent metadata describes the unified lifecycle", () => {
   } finally { harness.cleanup(); }
 });
 
-test("subagent list is active-only status data with abstract", async () => {
+test("subagent list returns active then starting then newest terminal runs without changing public fields or terminal output", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
     harness.runtime.registry.add(persistedRun({
       id: "status-completed", abstract: "completed abstract", status: "completed",
+      createdAt: "2026-04-16T00:00:00.000Z", updatedAt: "2026-04-16T00:00:00.000Z",
       task: "TASK_SENTINEL", output: "OUTPUT_SENTINEL", error: "ERROR_SENTINEL",
+      sourceRunId: "older-run",
+    }), false);
+    harness.runtime.registry.add(persistedRun({
+      id: "status-failed-new", abstract: "recent terminal abstract", status: "failed",
+      createdAt: "2026-04-15T00:00:00.000Z", updatedAt: "2026-04-18T00:00:00.000Z",
+      task: "RECENT_TASK_SENTINEL", error: "RECENT_ERROR_SENTINEL",
     }), false);
     const running = await createRun(harness, { abstract: "running abstract", task: "RUNNING_TASK_SENTINEL" });
     const runningId = running.details.run.id;
@@ -798,8 +839,22 @@ test("subagent list is active-only status data with abstract", async () => {
     const starting = await createRun(harness, { abstract: "starting abstract", task: "STARTING_TASK_SENTINEL" });
 
     const result = await harness.tools.get("subagent").execute("list", { action: "list" });
+    const activeIds = sortRetainedSubagentRuns([
+      harness.runtime.registry.require(runningId),
+      harness.runtime.registry.require(waitingId),
+    ]).map((run) => run.id);
+    assert.deepEqual(result.details.runs.map((run) => run.id), [
+      ...activeIds, starting.details.run.id, "status-failed-new", "status-completed",
+    ], "list must use shared active, starting, terminal-newest priority");
     const byId = new Map(result.details.runs.map((run) => [run.id, run]));
-    assert.equal(byId.has("status-completed"), false);
+    assert.deepEqual(byId.get("status-completed"), {
+      id: "status-completed", agent: "fixer", abstract: "completed abstract", status: "completed", live: false,
+      sourceRunId: "older-run", output: "OUTPUT_SENTINEL", error: "ERROR_SENTINEL",
+    });
+    assert.deepEqual(byId.get("status-failed-new"), {
+      id: "status-failed-new", agent: "fixer", abstract: "recent terminal abstract", status: "failed", live: false,
+      error: "RECENT_ERROR_SENTINEL",
+    });
     assert.deepEqual(byId.get(runningId), {
       id: runningId, agent: "fixer", abstract: "running abstract", status: "running", live: true,
     });
@@ -813,11 +868,11 @@ test("subagent list is active-only status data with abstract", async () => {
     const exposed = JSON.stringify({ content: result.content, details: result.details });
     for (const field of [
       "task", "cwd", "model", "deniedTools", "createdAt", "updatedAt", "sessionFile", "activity",
-      "output", "error", "notificationPending", "request", "message", "interview", "requestId", "waitingSeq",
+      "notificationPending", "request", "message", "interview", "requestId", "waitingSeq",
     ]) {
       assert.equal(exposed.includes(`\"${field}\"`), false, `${field} must not enter list output`);
     }
-    for (const sentinel of ["TASK_SENTINEL", "RUNNING_TASK_SENTINEL", "WAITING_TASK_SENTINEL", "STARTING_TASK_SENTINEL", "REQUEST_MESSAGE_SENTINEL", "INTERVIEW_SENTINEL"]) {
+    for (const sentinel of ["TASK_SENTINEL", "RECENT_TASK_SENTINEL", "RUNNING_TASK_SENTINEL", "WAITING_TASK_SENTINEL", "STARTING_TASK_SENTINEL", "REQUEST_MESSAGE_SENTINEL", "INTERVIEW_SENTINEL"]) {
       assert.equal(exposed.includes(sentinel), false);
     }
   } finally { harness.cleanup(); }
@@ -845,23 +900,41 @@ test("contact_supervisor prompt metadata describes persistent reply-to-continue 
     assert.equal(typeof sessionStart, "function");
     sessionStart();
     assert.deepEqual(activeTools, allTools);
-    assert.equal(definition.promptSnippet, "Create a supervisor request and pause until reply.");
+    assert.equal(definition.description, "Request an orchestrator reply and pause the child run until the reply arrives.");
+    assert.equal(definition.promptSnippet, "Request an orchestrator reply from a child run.");
     assertStePromptGuidelines(definition.promptGuidelines);
     assert.equal(definition.parameters.type, "object");
     assert.equal(definition.parameters.additionalProperties, false);
     assert.equal(definition.parameters.anyOf, undefined);
     assert.equal(definition.parameters.oneOf, undefined);
     assert.equal(definition.parameters.required.includes("message"), false);
-    for (const phrase of [
-      "Use `contact_supervisor` when the run needs an orchestrator reply.",
-      "For `reason`, select `need_decision`, `interview_request`, or `progress_update`.",
-      "Use `message` for the complete request context.",
-      "Add `interview` when structured questions can help the orchestrator.",
-      "After the call, wait for the orchestrator reply.",
-      "Wait for a reply for every reason, including `progress_update`.",
-    ]) {
-      assert.equal(definition.promptGuidelines.includes(phrase), true, `missing guideline: ${phrase}`);
-    }
+    const contactDescriptions = {
+      reason: definition.parameters.properties.reason.description,
+      message: definition.parameters.properties.message.description,
+      interview: definition.parameters.properties.interview.description,
+      questions: definition.parameters.properties.interview.properties.questions.description,
+      title: definition.parameters.properties.interview.properties.title.description,
+      id: definition.parameters.properties.interview.properties.questions.items.properties.id.description,
+      prompt: definition.parameters.properties.interview.properties.questions.items.properties.prompt.description,
+      options: definition.parameters.properties.interview.properties.questions.items.properties.options.description,
+    };
+    assert.deepEqual(contactDescriptions, {
+      reason: "Select the supervisor request type.",
+      message: "Provide the complete request context for the orchestrator.",
+      interview: "Provide structured interview details.",
+      questions: "Provide the structured interview questions.",
+      title: "Provide a short interview title.",
+      id: "Provide a short question identifier.",
+      prompt: "Provide the question text.",
+      options: "Provide the answer options.",
+    });
+    for (const description of Object.values(contactDescriptions)) assertSteBlock(description);
+    assert.deepEqual(definition.promptGuidelines, [
+      "Contact the orchestrator through `contact_supervisor` when a decision, interview, or progress update needs acknowledgement.",
+      "Request a structured interview through `contact_supervisor` when authored questions will help the orchestrator decide.",
+      "Treat every `contact_supervisor` request as a waiting transition, including progress updates.",
+      "Resume child work only after the orchestrator replies to `contact_supervisor`.",
+    ]);
     const guidelines = definition.promptGuidelines.join("\n");
     assert.doesNotMatch(`${definition.description}\n${definition.promptSnippet}\n${guidelines}`, /request ID|UUID|waitingSeq|deliveryKey|legacy|saved child/i);
     const result = await definition.execute("call", { reason: "interview_request", message: "choose", interview: { title: "Choice" } });
@@ -1163,7 +1236,7 @@ test("runtime rejects lifecycle tools from a launch-time deny resolver", async (
   } finally { harness.cleanup(); }
 });
 
-test("create waits for the just-spawned PID to exit before cleaning up when process identity is unavailable", async () => {
+test("create stops the just-spawned PID and retains its directory when process identity is unavailable", async () => {
   const sleeps = [];
   let harness;
   harness = createHarness({
@@ -1172,7 +1245,7 @@ test("create waits for the just-spawned PID to exit before cleaning up when proc
       sleeps.push(ms);
       const [run] = harness.runtime.registry.list();
       assert.equal(existsSync(harness.paths(run.id).runDir), true, "run directory remains during termination grace");
-      assert.equal(harness.alive.has(999), sleeps.length === 1, "cleanup waits until exit is confirmed");
+      assert.equal(harness.alive.has(999), sleeps.length === 1, "termination waits until exit is confirmed");
     },
   });
   try {
@@ -1201,7 +1274,7 @@ test("create waits for the just-spawned PID to exit before cleaning up when proc
       { pid: -999, signal: "SIGKILL" },
     ]);
     assert.deepEqual(sleeps, [1500, 1500]);
-    assert.equal(existsSync(harness.paths(run.id).runDir), false);
+    assert.equal(existsSync(harness.paths(run.id).runDir), true, "terminal run directories are retained until clear");
   } finally { harness.cleanup(); }
 });
 
@@ -1252,7 +1325,7 @@ test("create failure returns the complete failed run", async () => {
     });
     assert.equal(harness.runtime.registry.isLive(run.id), false);
     assert.equal(harness.journalWrites.length, 2, "starting and failed-pending states are journaled before acknowledgement");
-    assert.equal(existsSync(harness.paths(run.id).runDir), false);
+    assert.equal(existsSync(harness.paths(run.id).runDir), true, "terminal run directories are retained until clear");
   } finally { harness.cleanup(); }
 });
 
@@ -1691,7 +1764,7 @@ test("terminal notification stays pending until matching delivered message ackno
     assert.equal(harness.runtime.registry.isLive(id), false);
     assert.equal(harness.runtime.registry.get(id).notificationPending, "completed");
     assert.equal(harness.journalWrites.length, 2, "starting and terminal-pending states are journaled before delivery acknowledgement");
-    assert.equal(existsSync(harness.paths(id).runDir), false);
+    assert.equal(existsSync(harness.paths(id).runDir), true, "terminal run directories are retained until clear");
     assert.deepEqual(sent.options, { deliverAs: "steer", triggerTurn: true });
     assert.equal(sent.message.display, true);
     assert.equal(sent.message.details.event, "completed");
@@ -1804,7 +1877,7 @@ test("undelivered pending notification replays once on restore and keeps complet
     assert.equal(first.runtime.registry.get(id).notificationPending, "completed");
     assert.equal(first.notifications.length, 0);
     assert.equal(first.runtime.queuedNotifications.size, 0, "synchronous send failure removes the queued delivery key");
-    assert.equal(existsSync(first.paths(id).runDir), false);
+    assert.equal(existsSync(first.paths(id).runDir), true, "terminal run directories are retained until clear");
     branch = first.journalWrites.map(({ data }) => branchEntry(data));
   } finally { first.cleanup(); }
 
@@ -1903,7 +1976,7 @@ test("no-state and stale-heartbeat failures honor local grace windows", async ()
     assert.equal(noState.runtime.registry.isLive(id), false);
     assert.equal(noState.controlWrites.at(-1).type, "interrupt");
     assert.deepEqual(noState.killed, [{ pid: -999, signal: "SIGTERM" }]);
-    assert.equal(existsSync(noState.paths(id).runDir), false);
+    assert.equal(existsSync(noState.paths(id).runDir), true, "terminal run directories are retained until clear");
   } finally { noState.cleanup(); }
 
   const stale = createHarness();
@@ -1924,7 +1997,7 @@ test("no-state and stale-heartbeat failures honor local grace windows", async ()
     assert.equal(stale.runtime.registry.isLive(id), false);
     assert.equal(stale.controlWrites.at(-1).type, "interrupt");
     assert.deepEqual(stale.killed, [{ pid: -999, signal: "SIGTERM" }]);
-    assert.equal(existsSync(stale.paths(id).runDir), false);
+    assert.equal(existsSync(stale.paths(id).runDir), true, "terminal run directories are retained until clear");
   } finally { stale.cleanup(); }
 });
 
@@ -2264,7 +2337,7 @@ test("shutdown journals a pending interruption and the next runtime delivers it 
   } finally { harness.cleanup(); }
 });
 
-test("restore terminates verified live orphans before cleanup and removes terminal leftovers", async () => {
+test("restore terminates verified live orphans before cleanup and retains branch terminal directories", async () => {
   const terminal = persistedRun({ id: "terminal-leftover", status: "completed", output: "done" });
   let orphanPaths;
   const cleanupObservations = [];
@@ -2302,7 +2375,7 @@ test("restore terminates verified live orphans before cleanup and removes termin
     assert.deepEqual(harness.killed, [{ pid: -6161, signal: "SIGTERM" }]);
     assert.deepEqual(cleanupObservations, [{ directoryExists: true, processAlive: false }]);
     assert.equal(existsSync(orphanPaths.runDir), false);
-    assert.equal(existsSync(terminalPaths.runDir), false);
+    assert.equal(existsSync(terminalPaths.runDir), true, "a branch terminal run keeps its directory until clear");
   } finally { harness.cleanup(); }
 });
 
@@ -2421,7 +2494,7 @@ test("legacy active waiting launch without abstract remains verifiable and is in
     assert.equal(harness.runtime.registry.get(activeRun.id).status, "interrupted");
     assert.equal(harness.controlWrites.at(-1).type, "interrupt");
     assert.deepEqual(harness.killed, [{ pid: -776, signal: "SIGTERM" }]);
-    assert.equal(existsSync(paths.runDir), false);
+    assert.equal(existsSync(paths.runDir), true, "an interrupted run keeps its directory until clear");
   } finally { harness.cleanup(); }
 });
 
@@ -2586,4 +2659,388 @@ test("resume creates a new run ID and a complete --session invocation", async ()
     assert.notEqual(denyIndex, -1);
     assert.equal(config.piInvocation.args[denyIndex + 1], "ask_user_question");
   } finally { harness.cleanup(); }
+});
+
+test("clear rejects while any run stays active and changes nothing", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const started = await createRun(harness);
+    const id = started.details.run.id;
+    const config = readConfig(harness, id);
+    harness.alive.add(999);
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token));
+    await inspect(harness, id);
+    seedTerminalRun(harness, { id: "already-done" });
+    const journalCount = harness.journalWrites.length;
+
+    await assert.rejects(clear(harness), (error) => {
+      assert.match(error.message, /clear requires every retained run to reach a terminal status/);
+      assert.match(error.message, new RegExp(`${id} \\(running\\)`));
+      return true;
+    });
+    assert.deepEqual(harness.runtime.registry.list().map((run) => run.id).sort(), ["already-done", id].sort());
+    assert.equal(harness.journalWrites.length, journalCount, "a rejected clear appends no journal entry");
+    assert.equal(existsSync(harness.paths(id).runDir), true);
+    assert.equal(existsSync(harness.paths("already-done").runDir), true);
+
+    for (const status of ["starting", "waiting"]) {
+      harness.runtime.registry.update(id, { status });
+      await assert.rejects(clear(harness), /clear requires every retained run to reach a terminal status/);
+    }
+  } finally { harness.cleanup(); }
+});
+
+test("clear on empty terminal history is a no-change without a clear journal entry", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const result = await clear(harness);
+    assert.deepEqual(result.details, { clearedCount: 0, warnings: [], changed: false });
+    assert.equal(result.content[0].text, "No retained subagent runs to clear.");
+    assert.deepEqual(harness.journalWrites, []);
+
+    const collapsed = stripVTControlCharacters(harness.tools.get("subagent")
+      .renderResult(result, { expanded: false }, transcriptTheme, { args: { action: "clear" } })
+      .render(200).join("\n")).trim();
+    assert.equal(collapsed, "○  No retained runs to clear");
+  } finally { harness.cleanup(); }
+});
+
+test("clear removes terminal run directories and appends one version-3 replacement snapshot", async () => {
+  const harness = createHarness();
+  let branch;
+  let id;
+  try {
+    await harness.restore();
+    const started = await createRun(harness);
+    id = started.details.run.id;
+    const config = readConfig(harness, id);
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "completed", output: "terminal output", responseText: "done",
+    }));
+    await inspect(harness, id);
+    assert.equal(existsSync(harness.paths(id).runDir), true);
+    assert.equal(existsSync(harness.paths(id).configFile), true);
+    assert.equal(existsSync(harness.paths(id).stateFile), true);
+
+    const result = await clear(harness);
+    assert.equal(result.details.clearedCount, 1);
+    assert.equal(result.details.changed, true);
+    assert.equal(existsSync(harness.paths(id).runDir), false, "clear removes the run directory, state, and config");
+    assert.deepEqual(harness.runtime.registry.list(), []);
+    assert.deepEqual(harness.journalWrites.at(-1), {
+      type: "oh-my-pi-slim:subagents",
+      data: { version: 3, runs: [] },
+    });
+    assert.equal(harness.journalWrites.filter(({ data }) => data.version === 3).length, 1);
+    assert.equal(harness.journalWrites.some(({ data }) => data.version === 2), true, "earlier v2 upserts stay in history");
+    branch = harness.journalWrites.map(({ data }) => branchEntry(data));
+  } finally { harness.cleanup(); }
+
+  const restored = createHarness({ branch });
+  try {
+    await restored.restore();
+    assert.deepEqual(restored.runtime.registry.list(), [], "the latest version-3 replacement wins on replay");
+    assert.equal(restored.notifications.length, 0, "cleared runs never replay a pending notification");
+    const listed = await restored.tools.get("subagent").execute("list", { action: "list" });
+    assert.deepEqual(listed.details.runs, []);
+    await assert.rejects(
+      restored.tools.get("subagent").execute("resume", { action: "resume", id, abstract: "again", message: "again" }),
+      new RegExp(`Run ${id} was cleared from the subagent history and is no longer available`),
+    );
+  } finally { restored.cleanup(); }
+});
+
+test("clear replay stays empty over legacy version-1 and version-2 history and later upserts still fold", async () => {
+  const legacy = persistedRun({ id: "legacy-one", status: "completed", output: "legacy output" });
+  const upsert = persistedRun({ id: "upsert-one", status: "failed", error: "boom" });
+  const afterClear = persistedRun({ id: "after-clear", status: "completed", createdAt: "2026-04-17T01:00:00.000Z" });
+  const clearedOnly = createHarness({
+    branch: [
+      branchEntry({ version: 1, runs: [legacy] }),
+      branchEntry({ version: 2, run: upsert }),
+      branchEntry({ version: 3, runs: [] }),
+    ],
+  });
+  try {
+    await clearedOnly.restore();
+    assert.deepEqual(clearedOnly.runtime.registry.list(), []);
+    for (const id of ["legacy-one", "upsert-one"]) {
+      await assert.rejects(
+        clearedOnly.tools.get("subagent").execute("steer", { action: "steer", id, message: "go" }),
+        new RegExp(`Run ${id} was cleared from the subagent history and is no longer available`),
+      );
+    }
+  } finally { clearedOnly.cleanup(); }
+
+  const resumedHistory = createHarness({
+    branch: [
+      branchEntry({ version: 1, runs: [legacy] }),
+      branchEntry({ version: 3, runs: [] }),
+      branchEntry({ version: 2, run: afterClear }),
+    ],
+  });
+  try {
+    await resumedHistory.restore();
+    assert.deepEqual(resumedHistory.runtime.registry.list().map((run) => run.id), ["after-clear"]);
+    await assert.rejects(
+      resumedHistory.tools.get("subagent").execute("interrupt", { action: "interrupt", id: "legacy-one" }),
+      /was cleared from the subagent history/,
+    );
+    await assert.rejects(
+      resumedHistory.tools.get("subagent").execute("interrupt", { action: "interrupt", id: "never-existed" }),
+      /Unknown subagent run: never-existed/,
+    );
+  } finally { resumedHistory.cleanup(); }
+});
+
+test("clear removes owned child session files once and warns about shared, escaped, and linked paths", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const childDir = join(harness.sessionDir, "omps-subagents");
+    mkdirSync(childDir, { recursive: true, mode: 0o700 });
+    const shared = join(childDir, "shared.jsonl");
+    const linked = join(childDir, "linked.jsonl");
+    const linkTarget = join(harness.tempDir, "link-target.jsonl");
+    const outside = join(harness.tempDir, "outside.jsonl");
+    const nested = join(childDir, "nested");
+    mkdirSync(nested, { recursive: true, mode: 0o700 });
+    const nestedFile = join(nested, "deep.jsonl");
+    for (const file of [shared, linkTarget, outside, nestedFile]) writeFileSync(file, "{}\n");
+    symlinkSync(linkTarget, linked);
+
+    seedTerminalRun(harness, { id: "shared-a", sessionFile: shared });
+    seedTerminalRun(harness, { id: "shared-b", sessionFile: shared });
+    seedTerminalRun(harness, { id: "nested-run", sessionFile: nestedFile });
+    seedTerminalRun(harness, { id: "linked-run", sessionFile: linked });
+    seedTerminalRun(harness, { id: "escaped-run", sessionFile: outside });
+    seedTerminalRun(harness, { id: "missing-run", sessionFile: join(childDir, "gone.jsonl") });
+    seedTerminalRun(harness, { id: "directory-run", sessionFile: nested });
+
+    const result = await clear(harness);
+    assert.equal(result.details.clearedCount, 7);
+    assert.equal(result.details.changed, true);
+    assert.equal(existsSync(shared), false, "a session file shared by two cleared runs is removed exactly once");
+    assert.equal(existsSync(nestedFile), false);
+    assert.equal(existsSync(linked), true, "a symlinked session file is never removed");
+    assert.equal(existsSync(linkTarget), true);
+    assert.equal(existsSync(outside), true, "a session file outside the child session directory is never removed");
+    assert.equal(existsSync(nested), true, "a session path that is a directory is never removed");
+    const warnings = result.details.warnings.join("\n");
+    assert.match(warnings, /Retained child session file for linked-run: .*symbolic link/);
+    assert.match(warnings, /Retained child session file for escaped-run: .*outside this session's child session directory/);
+    assert.match(warnings, /Retained child session file for directory-run: .*not a regular file/);
+    assert.doesNotMatch(warnings, /shared-a|shared-b|nested-run|missing-run/);
+    assert.deepEqual(harness.runtime.registry.list(), [], "unsafe session files never block registry consistency");
+    for (const id of ["shared-a", "linked-run", "escaped-run", "directory-run"]) {
+      assert.equal(existsSync(harness.paths(id).runDir), false);
+    }
+  } finally { harness.cleanup(); }
+});
+
+test("clear removes Goal stats sidecars only when the Goal snapshot owns every cleared run", async () => {
+  const statsRoot = (harness) => getGoalStatsRoot(harness.sessionDir);
+  const seedSidecar = (harness, runId) => {
+    assert.equal(writeGoalStatsSidecar(statsRoot(harness), harness.ownerSessionId, {
+      version: 1, runId, tokens: 10, tools: 1, turns: 1, compactions: 0,
+    }), true);
+  };
+
+  const superset = createHarness({ branch: [goalBranchEntry(["own-a", "own-b", "not-in-registry"])] });
+  try {
+    await superset.restore();
+    for (const id of ["own-a", "own-b", "not-in-registry"]) seedSidecar(superset, id);
+    seedTerminalRun(superset, { id: "own-a" });
+    seedTerminalRun(superset, { id: "own-b" });
+    const result = await clear(superset);
+    assert.deepEqual(result.details.warnings, []);
+    for (const id of ["own-a", "own-b"]) {
+      assert.equal(readGoalStatsSidecar(statsRoot(superset), superset.ownerSessionId, id), undefined);
+    }
+    assert.equal(
+      readGoalStatsSidecar(statsRoot(superset), superset.ownerSessionId, "not-in-registry")?.tokens,
+      10,
+      "a Goal-owned run outside the registry keeps its stats",
+    );
+  } finally { superset.cleanup(); }
+
+  const partial = createHarness({ branch: [goalBranchEntry(["own-a"])] });
+  try {
+    await partial.restore();
+    for (const id of ["own-a", "own-b"]) seedSidecar(partial, id);
+    seedTerminalRun(partial, { id: "own-a" });
+    seedTerminalRun(partial, { id: "own-b" });
+    const result = await clear(partial);
+    assert.deepEqual(result.details.warnings, [
+      "Retained Goal stats sidecars because the Goal snapshot does not own every cleared run.",
+    ]);
+    for (const id of ["own-a", "own-b"]) {
+      assert.equal(readGoalStatsSidecar(statsRoot(partial), partial.ownerSessionId, id)?.tokens, 10);
+    }
+  } finally { partial.cleanup(); }
+
+  const noGoal = createHarness();
+  try {
+    await noGoal.restore();
+    seedSidecar(noGoal, "own-a");
+    seedTerminalRun(noGoal, { id: "own-a" });
+    const result = await clear(noGoal);
+    assert.deepEqual(result.details.warnings, [
+      "Retained Goal stats sidecars because this branch has no Goal snapshot.",
+    ]);
+    assert.equal(readGoalStatsSidecar(statsRoot(noGoal), noGoal.ownerSessionId, "own-a")?.tokens, 10);
+  } finally { noGoal.cleanup(); }
+
+  const newerGoal = createHarness({
+    branch: [goalBranchEntry(["old-a"], "old-goal"), goalBranchEntry(["new-only"], "new-goal")],
+  });
+  try {
+    await newerGoal.restore();
+    seedSidecar(newerGoal, "old-a");
+    seedTerminalRun(newerGoal, { id: "old-a" });
+    const result = await clear(newerGoal);
+    assert.deepEqual(result.details.warnings, [
+      "Retained Goal stats sidecars because the Goal snapshot does not own every cleared run.",
+    ]);
+    assert.equal(
+      readGoalStatsSidecar(statsRoot(newerGoal), newerGoal.ownerSessionId, "old-a")?.tokens,
+      10,
+      "a newer Goal history must not delete an older sub-run's stats",
+    );
+  } finally { newerGoal.cleanup(); }
+});
+
+test("clear retains an unsafe run directory and still clears the registry consistently", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const safe = seedTerminalRun(harness, { id: "safe-run" });
+    const linkedId = "linked-run-dir";
+    const linkedPaths = harness.paths(linkedId);
+    mkdirSync(dirname(linkedPaths.runDir), { recursive: true, mode: 0o700 });
+    const realDir = join(harness.tempDir, "real-run-dir");
+    mkdirSync(realDir, { recursive: true, mode: 0o700 });
+    symlinkSync(realDir, linkedPaths.runDir);
+    harness.runtime.registry.add(persistedRun({ id: linkedId, status: "failed", error: "boom" }), false);
+
+    const result = await clear(harness);
+    assert.equal(result.details.clearedCount, 2);
+    assert.equal(result.details.changed, true);
+    assert.match(result.details.warnings.join("\n"), /Retained run directory for linked-run-dir/);
+    assert.equal(existsSync(harness.paths(safe.id).runDir), false);
+    assert.equal(existsSync(realDir), true, "a linked run directory is never followed");
+    assert.deepEqual(harness.runtime.registry.list(), []);
+    assert.deepEqual(harness.journalWrites.at(-1).data, { version: 3, runs: [] });
+  } finally { harness.cleanup(); }
+});
+
+test("clear blocks poll and agent-settled callbacks from reviving a targeted run", async () => {
+  let harness;
+  const observed = [];
+  harness = createHarness({
+    onJournalWrite({ data }) {
+      if (data.version !== 3) return;
+      observed.push({
+        clearing: harness.runtime.clearing,
+        registrySize: harness.runtime.registry.list().length,
+      });
+      harness.runtime.deliverPendingNotification("race-run");
+      harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+      harness.intervals[0].callback();
+    },
+  });
+  try {
+    await harness.restore();
+    harness.runtime.registry.add(persistedRun({
+      id: "race-run", status: "completed", output: "done", notificationPending: "completed",
+    }), false);
+    mkdirSync(harness.paths("race-run").controlDir, { recursive: true, mode: 0o700 });
+    harness.runtime.queuedNotifications.add(expectedDeliveryKey("race-run", "completed"));
+    const notificationsBefore = harness.notifications.length;
+
+    const result = await clear(harness);
+    await new Promise((resolveTick) => setImmediate(resolveTick));
+
+    assert.deepEqual(observed, [{ clearing: true, registrySize: 1 }]);
+    assert.equal(result.details.changed, true);
+    assert.deepEqual(harness.runtime.registry.list(), [], "no callback revives a run during or after clear");
+    assert.equal(harness.notifications.length, notificationsBefore, "clear suppresses notification delivery for targeted runs");
+    assert.equal(harness.runtime.queuedNotifications.size, 0);
+    assert.equal(harness.journalWrites.filter(({ data }) => data.version === 3).length, 1);
+    assert.equal(harness.runtime.clearing, false);
+    harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+    harness.intervals[0].callback();
+    await new Promise((resolveTick) => setImmediate(resolveTick));
+    assert.deepEqual(harness.runtime.registry.list(), []);
+    assert.equal(harness.notifications.length, notificationsBefore);
+  } finally { harness.cleanup(); }
+});
+
+test("every ID-bearing action reports a cleared run explicitly and never reuses its ID", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const sessionFile = join(harness.sessionDir, "omps-subagents", "cleared.jsonl");
+    mkdirSync(dirname(sessionFile), { recursive: true, mode: 0o700 });
+    writeFileSync(sessionFile, "{}\n");
+    seedTerminalRun(harness, { id: "gone-run", sessionFile });
+    await clear(harness);
+
+    const subagent = harness.tools.get("subagent");
+    const cleared = /Run gone-run was cleared from the subagent history and is no longer available/;
+    await assert.rejects(subagent.execute("resume", { action: "resume", id: "gone-run", abstract: "a", message: "m" }), cleared);
+    await assert.rejects(subagent.execute("steer", { action: "steer", id: "gone-run", message: "m" }), cleared);
+    await assert.rejects(subagent.execute("interrupt", { action: "interrupt", id: "gone-run" }), cleared);
+    await assert.rejects(subagent.execute("reply", { action: "reply", id: "gone-run", message: "m" }), cleared);
+    assert.equal(harness.runtime.clearedRunIds.has("gone-run"), true, "cleared IDs stay reserved against reuse");
+
+    harness.runtime.setModelResolver((agent) => `preset/${agent}:high`);
+    harness.runtime.setDenyResolver(() => []);
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      assert.notEqual(harness.runtime.newRunId(), "gone-run");
+    }
+  } finally { harness.cleanup(); }
+});
+
+test("clear rejects unknown fields and stays exactly { action: clear }", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const subagent = harness.tools.get("subagent");
+    await assert.rejects(subagent.execute("clear", { action: "clear", id: "x" }), /clear does not accept id or message/);
+    await assert.rejects(subagent.execute("clear", { action: "clear", message: "x" }), /clear does not accept id or message/);
+    await assert.rejects(subagent.execute("clear", { action: "clear", agent: "fixer" }), /clear does not accept create field\(s\): agent/);
+    await assert.rejects(subagent.execute("clear", { action: "clear", abstract: "x" }), /clear does not accept create field\(s\): abstract/);
+    await assert.rejects(subagent.execute("clear", { action: "clear", extra: 1 }), /subagent does not accept unknown field\(s\): extra/);
+  } finally { harness.cleanup(); }
+});
+
+test("guarded removal helpers reject unsafe sidecar and session paths directly", () => {
+  const tempDir = mkdtempSync(join(CACHE, "safe-removal-"));
+  try {
+    const statsRoot = join(tempDir, "omps-goal-stats");
+    assert.equal(writeGoalStatsSidecar(statsRoot, "owner-a", {
+      version: 1, runId: "run-a", tokens: 1, tools: 0, turns: 0, compactions: 0,
+    }), true);
+    assert.deepEqual(removeGoalStatsSidecar(statsRoot, "owner-a", "run-a"), { removed: true });
+    assert.deepEqual(removeGoalStatsSidecar(statsRoot, "owner-a", "run-a"), { removed: true });
+    assert.equal(removeGoalStatsSidecar(statsRoot, "../escape", "run-a").removed, false);
+    assert.equal(removeGoalStatsSidecar(statsRoot, "owner-a", "../escape").removed, false);
+    const linkedSidecar = getGoalStatsSidecarPaths(statsRoot, "owner-a", "linked").file;
+    symlinkSync(join(tempDir, "sidecar-target.json"), linkedSidecar);
+    assert.match(removeGoalStatsSidecar(statsRoot, "owner-a", "linked").reason, /link or not a regular file/);
+
+    const childDir = join(tempDir, "children");
+    mkdirSync(childDir, { recursive: true, mode: 0o700 });
+    const file = join(childDir, "session.jsonl");
+    writeFileSync(file, "{}\n");
+    assert.deepEqual(removeChildSessionFile(childDir, file), { removed: true });
+    assert.deepEqual(removeChildSessionFile(childDir, file), { removed: true });
+    assert.equal(removeChildSessionFile(childDir, join(childDir, "..", "escape.jsonl")).removed, false);
+    assert.equal(removeChildSessionFile(childDir, childDir).removed, false);
+    assert.equal(removeChildSessionFile("", file).removed, false);
+    assert.deepEqual(removeChildSessionFile(join(tempDir, "missing-root"), file), { removed: true });
+  } finally { rmSync(tempDir, { recursive: true, force: true }); }
 });

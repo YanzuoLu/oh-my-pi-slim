@@ -8,13 +8,14 @@ import {
   closeSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { legacyRunAbstract } from "./subagent-core.js";
 
@@ -128,6 +129,12 @@ export interface GoalStatsSidecarPaths {
   root: string;
   ownerDir: string;
   file: string;
+}
+
+/** Result of a guarded delete: `removed` also covers an already-absent target, which never warrants a warning. */
+export interface SafeRemoval {
+  removed: boolean;
+  reason?: string;
 }
 
 export interface InvocationSeams {
@@ -246,6 +253,72 @@ export function removeRunFiles(paths: RunPaths): void {
     throw new Error("Refusing to remove a linked or non-directory detached run path.");
   }
   rmSync(runDir, { recursive: true, force: true });
+}
+
+function removalError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Removes one Goal stats sidecar through the same session-owned path guard that writes it.
+ * Reuses getGoalStatsSidecarPaths() so clear never reimplements the sidecar containment rules.
+ */
+export function removeGoalStatsSidecar(root: string, ownerSessionId: string, runId: string): SafeRemoval {
+  let paths: GoalStatsSidecarPaths;
+  try { paths = getGoalStatsSidecarPaths(root, ownerSessionId, runId); }
+  catch (error) { return { removed: false, reason: removalError(error) }; }
+  for (const directory of [paths.root, paths.ownerDir]) {
+    let stat;
+    try { stat = lstatSync(directory); }
+    catch { return { removed: true }; }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      return { removed: false, reason: `Goal stats directory ${directory} is a link or not a directory.` };
+    }
+  }
+  let stat;
+  try { stat = lstatSync(paths.file); }
+  catch { return { removed: true }; }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    return { removed: false, reason: "Goal stats sidecar is a link or not a regular file." };
+  }
+  try {
+    unlinkSync(paths.file);
+    return { removed: true };
+  } catch (error) {
+    return { removed: false, reason: removalError(error) };
+  }
+}
+
+/**
+ * Removes one child session file only when it truly resides inside this parent session's child session root.
+ * Resolves the real parent directory first so symlinked parents and `..` segments cannot escape containment.
+ */
+export function removeChildSessionFile(childSessionDir: string, sessionFile: string): SafeRemoval {
+  if (!isNonBlankString(childSessionDir) || !isNonBlankString(sessionFile)) {
+    return { removed: false, reason: "Child session path is empty." };
+  }
+  let root: string;
+  try { root = realpathSync(resolve(childSessionDir)); }
+  catch { return { removed: true }; }
+  const requested = resolve(sessionFile);
+  let target: string;
+  try { target = resolve(realpathSync(dirname(requested)), basename(requested)); }
+  catch { return { removed: true }; }
+  const inside = relative(root, target);
+  if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) {
+    return { removed: false, reason: `Session file ${sessionFile} is outside this session's child session directory.` };
+  }
+  let stat;
+  try { stat = lstatSync(target); }
+  catch { return { removed: true }; }
+  if (stat.isSymbolicLink()) return { removed: false, reason: `Session file ${sessionFile} is a symbolic link.` };
+  if (!stat.isFile()) return { removed: false, reason: `Session file ${sessionFile} is not a regular file.` };
+  try {
+    unlinkSync(target);
+    return { removed: true };
+  } catch (error) {
+    return { removed: false, reason: removalError(error) };
+  }
 }
 
 function isGoalRunStatsSidecar(value: unknown): value is GoalRunStatsSidecar {

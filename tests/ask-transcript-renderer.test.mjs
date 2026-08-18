@@ -15,6 +15,7 @@ const dependencyMap = {
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
   "./ask-runtime.js": new URL("../extensions/oh-my-pi-slim/ask-runtime.ts", import.meta.url).href,
   "./ask-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts", import.meta.url).href,
+  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -114,10 +115,10 @@ test("Ask result collapsed summaries distinguish complete, partial, cancelled, a
   });
   const empty = buildAskResult(questionnaire, { answers: [] });
   const cases = [
-    [complete, "✓ Answered 3/3 · complete"],
-    [partial, "◐ Answered 1/3 · partial"],
-    [cancelled, "! Cancelled · 1/3 answered · user cancelled"],
-    [empty, "! Cancelled · 0/3 answered · empty submit"],
+    [complete, "✓  Answered 3/3 · complete"],
+    [partial, "◐  Answered 1/3 · partial"],
+    [cancelled, "!  Cancelled · 1/3 answered · user cancelled"],
+    [empty, "!  Cancelled · 0/3 answered · empty submit"],
   ];
   for (const [details, expected] of cases) {
     const component = renderAskResult({ content: [{ type: "text", text: "MODEL_CONTENT_SENTINEL" }], details }, { expanded: false }, theme, { args });
@@ -125,6 +126,7 @@ test("Ask result collapsed summaries distinguish complete, partial, cancelled, a
     assert.equal(lines[0], "");
     assert.equal(render(component), expected);
     assert.doesNotMatch(render(component), /MODEL_CONTENT_SENTINEL|Question:|Answer:|Unanswered/);
+    assert.doesNotMatch(render(component), /[✓◐!] [^ ]|[✓◐!] {3}/);
   }
 });
 

@@ -19,10 +19,8 @@ export interface SubagentWidgetState {
   readonly hasActive: boolean;
 }
 
-export function assembleSubagentWidgetState(
-  runs: readonly RunSummary[],
-  shouldShowFinished: (runId: string, status: RunStatus) => boolean,
-): SubagentWidgetState {
+/** Every retained run stays visible; terminal runs disappear only when `subagent clear` removes them. */
+export function assembleSubagentWidgetState(runs: readonly RunSummary[]): SubagentWidgetState {
   let runningCount = 0;
   let waitingCount = 0;
   let queuedCount = 0;
@@ -31,7 +29,7 @@ export function assembleSubagentWidgetState(
     if (run.status === "running") runningCount += 1;
     else if (run.status === "waiting") waitingCount += 1;
     else if (run.status === "starting") queuedCount += 1;
-    else if (shouldShowFinished(run.id, run.status)) hasFinished = true;
+    else hasFinished = true;
   }
   return {
     runningCount,
@@ -61,20 +59,16 @@ interface WidgetOptions {
   clearInterval?: (timer: unknown) => void;
 }
 
-const ERROR_STATUSES = new Set<RunStatus>(["failed", "interrupted"]);
-
 export class SubagentWidget {
   private uiCtx: SubagentWidgetUI | undefined;
   private widgetFrame = 0;
   private widgetInterval: unknown;
-  private finishedTurnAge = new Map<string, number>();
   private widgetRegistered = false;
   private tui: SubagentWidgetTui | undefined;
   private lastStatusText: string | undefined;
   private readonly listRuns: () => PersistedRun[];
   private readonly setIntervalFn: (callback: () => void, ms: number) => unknown;
   private readonly clearIntervalFn: (timer: unknown) => void;
-  private static readonly ERROR_LINGER_TURNS = 2;
 
   constructor(listRuns: () => PersistedRun[], options: WidgetOptions = {}) {
     this.listRuns = listRuns;
@@ -91,7 +85,6 @@ export class SubagentWidget {
   }
 
   onTurnStart(): void {
-    for (const [id, age] of this.finishedTurnAge) this.finishedTurnAge.set(id, age + 1);
     this.update();
   }
 
@@ -99,19 +92,7 @@ export class SubagentWidget {
     this.widgetInterval ??= this.setIntervalFn(() => this.update(), 80);
   }
 
-  private shouldShowFinished(runId: string, status: RunStatus): boolean {
-    const age = this.finishedTurnAge.get(runId) ?? 0;
-    return age < (ERROR_STATUSES.has(status) ? SubagentWidget.ERROR_LINGER_TURNS : 1);
-  }
-
-  private seedFinishedRuns(runs: readonly PersistedRun[]): void {
-    for (const run of runs) {
-      if (!run.status || run.status === "starting" || run.status === "running" || run.status === "waiting") continue;
-      if (!this.finishedTurnAge.has(run.id)) this.finishedTurnAge.set(run.id, 0);
-    }
-  }
-
-  private clearWidget(runs: readonly PersistedRun[]): void {
+  private clearWidget(): void {
     if (this.widgetRegistered) {
       this.uiCtx!.setWidget("omps-subagents", undefined);
       this.widgetRegistered = false;
@@ -124,9 +105,6 @@ export class SubagentWidget {
     if (this.widgetInterval !== undefined) {
       this.clearIntervalFn(this.widgetInterval);
       this.widgetInterval = undefined;
-    }
-    for (const [id] of this.finishedTurnAge) {
-      if (!runs.some((run) => run.id === id)) this.finishedTurnAge.delete(id);
     }
   }
 
@@ -146,10 +124,9 @@ export class SubagentWidget {
   update(): void {
     if (!this.uiCtx) return;
     const runs = this.listRuns();
-    this.seedFinishedRuns(runs);
-    const state = assembleSubagentWidgetState(runs, (id, status) => this.shouldShowFinished(id, status));
+    const state = assembleSubagentWidgetState(runs);
     if (!state.hasActive && !state.hasFinished) {
-      this.clearWidget(runs);
+      this.clearWidget();
       return;
     }
 
@@ -165,7 +142,6 @@ export class SubagentWidget {
             spinnerFrame: this.widgetFrame,
             terminalWidth: tui.terminal.columns,
             theme,
-            shouldShowFinished: (id, status) => this.shouldShowFinished(id, status),
           }),
           invalidate: () => {
             this.widgetRegistered = false;

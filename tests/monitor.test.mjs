@@ -26,6 +26,7 @@ registerHooks({
     if (specifier === "./monitor-transcript-renderer.js") return { url: new URL("../extensions/oh-my-pi-slim/monitor-transcript-renderer.ts", import.meta.url).href, shortCircuit: true };
     if (specifier === "./monitor-widget.js") return { url: new URL("../extensions/oh-my-pi-slim/monitor-widget.ts", import.meta.url).href, shortCircuit: true };
     if (specifier === "./monitor-runtime.js") return { url: new URL("../extensions/oh-my-pi-slim/monitor-runtime.ts", import.meta.url).href, shortCircuit: true };
+    if (specifier === "./semantic-glyph.js") return { url: new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href, shortCircuit: true };
     return nextResolve(specifier, context);
   },
 });
@@ -103,9 +104,21 @@ test("monitor schema and registration expose the exact portable main-only contra
   const tool = harness.tools.get("monitor");
   assert.equal(tool.executionMode, "sequential");
   assert.equal(harness.tools.size, 1);
-  assert.match(tool.promptGuidelines.join("\n"), /foreground command/);
-  assert.match(tool.promptGuidelines.join("\n"), /Do not poll/);
-  assert.match(tool.promptGuidelines.join("\n"), /nohup, setsid, disown/);
+  assert.equal(tool.description, "Create and manage foreground long-running Bash commands while Pi remains available. Monitor owns each process group. Terminal results remain available until deletion or runtime shutdown.");
+  assert.equal(tool.promptSnippet, "Manage foreground long-running commands by monitor ID.");
+  assert.deepEqual(tool.promptGuidelines, [
+    "Create a monitor for foreground long-running commands that should continue while Pi remains available.",
+    "Let monitor own the complete process group for every monitored command.",
+    "Never detach a monitor command with nohup, setsid, disown, or a background ampersand.",
+    "Use monitor `notifyOn` for case-sensitive literal alerts that merit attention before completion.",
+    "Use `monitor list` to inspect current monitors without polling command output.",
+    "Do not poll running monitors with repeated `monitor status` calls.",
+    "After a monitor terminal notification, call `monitor status` to inspect results, then call `monitor delete`.",
+    "Expect runtime shutdown to terminate monitor process groups and discard retained terminal results.",
+  ]);
+  assert.equal(schema.properties.action.description, "Select the monitor action. Create uses abstract, command, optional cwd, and optional notifyOn. Delete uses id. Status uses id and optional start and end. List uses no other fields.");
+  assert.equal(schema.properties.command.description, "Provide one foreground Bash command. Do not use nohup, setsid, disown, a trailing ampersand, or another daemon escape.");
+  assert.equal(schema.properties.end.description, "For status, read through this reverse log offset. Set `start` to the prior `end` for older lines.");
 
   const windowsTools = [];
   assert.equal(registerMonitorRuntime({ registerTool(toolValue) { windowsTools.push(toolValue); } }, { platform: "win32" }), undefined);

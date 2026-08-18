@@ -389,10 +389,12 @@ function parseStructuredLine(buffer: Buffer): StructuredLogLine | undefined {
 
 export const monitorParameters = Type.Object({
   action: Type.Union(MONITOR_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Select the monitor action.",
+    description: "Select the monitor action. Create uses abstract, command, optional cwd, and optional notifyOn. Delete uses id. Status uses id and optional start and end. List uses no other fields.",
   }),
   abstract: Type.Optional(Type.String({ description: "For create, provide a short command summary." })),
-  command: Type.Optional(Type.String({ description: "For create, provide one foreground bash command." })),
+  command: Type.Optional(Type.String({
+    description: "Provide one foreground Bash command. Do not use nohup, setsid, disown, a trailing ampersand, or another daemon escape.",
+  })),
   cwd: Type.Optional(Type.String({ description: "For create, provide an optional working directory." })),
   notifyOn: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), {
     maxItems: 20,
@@ -401,7 +403,10 @@ export const monitorParameters = Type.Object({
   })),
   id: Type.Optional(Type.String({ description: "For delete or status, provide the exact monitor ID." })),
   start: Type.Optional(Type.Integer({ minimum: 0, description: "For status, skip this many newest log lines." })),
-  end: Type.Optional(Type.Integer({ minimum: 1, description: "For status, read through this reverse log offset." })),
+  end: Type.Optional(Type.Integer({
+    minimum: 1,
+    description: "For status, read through this reverse log offset. Set `start` to the prior `end` for older lines.",
+  })),
 }, { additionalProperties: false });
 
 if (JSON.stringify(Object.keys(monitorParameters.properties).sort()) !== JSON.stringify([...MONITOR_PUBLIC_FIELDS].sort())) {
@@ -494,19 +499,17 @@ export class MonitorRuntime {
       name: "monitor",
       label: "Monitor",
       executionMode: "sequential",
-      description: "Use monitor to run and manage foreground long-running bash commands in the current runtime.",
-      promptSnippet: "Use monitor for foreground long-running commands without polling.",
+      description: "Create and manage foreground long-running Bash commands while Pi remains available. Monitor owns each process group. Terminal results remain available until deletion or runtime shutdown.",
+      promptSnippet: "Manage foreground long-running commands by monitor ID.",
       promptGuidelines: [
-        "Use `monitor` for long-running commands that should continue while Pi works.",
-        "Provide a foreground command and let monitor own its process group.",
-        "Do not use nohup, setsid, disown, a trailing ampersand, or another daemon escape.",
-        "After a terminal notification, use `status` to inspect results and then use `delete`.",
-        "Do not poll running monitors.",
-        "Use ordinary `status` reverse pagination to inspect additional log lines.",
-        "Use only `action`, `abstract`, `command`, optional `cwd`, and optional `notifyOn` for `create`.",
-        "Use only `action` and `id` for `delete`.",
-        "Use only `action` for `list`.",
-        "Use only `action`, `id`, optional `start`, and optional `end` for `status`.",
+        "Create a monitor for foreground long-running commands that should continue while Pi remains available.",
+        "Let monitor own the complete process group for every monitored command.",
+        "Never detach a monitor command with nohup, setsid, disown, or a background ampersand.",
+        "Use monitor `notifyOn` for case-sensitive literal alerts that merit attention before completion.",
+        "Use `monitor list` to inspect current monitors without polling command output.",
+        "Do not poll running monitors with repeated `monitor status` calls.",
+        "After a monitor terminal notification, call `monitor status` to inspect results, then call `monitor delete`.",
+        "Expect runtime shutdown to terminate monitor process groups and discard retained terminal results.",
       ],
       parameters: monitorParameters,
       execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => this.execute(params as MonitorInput, ctx),

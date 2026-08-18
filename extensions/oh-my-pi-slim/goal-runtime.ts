@@ -145,7 +145,7 @@ const ACTION_FIELDS: Record<GoalAction, readonly string[]> = {
 
 export const goalParameters = Type.Object({
   action: Type.Union(GOAL_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Select the Goal action.",
+    description: "Select the Goal action. Create and modify use abstract, objective, and criteria. Pause and cancel use reason. Complete uses evidence. Status and resume use no other fields.",
   }),
   abstract: Type.Optional(Type.String({
     description: "For create or modify, provide a short Goal summary.",
@@ -489,20 +489,25 @@ export class GoalRuntime {
       name: "goal",
       label: "Goal",
       executionMode: "sequential",
-      description: "Create and manage the single durable Goal on the current session branch.",
-      promptSnippet: "Create or manage the single durable branch-local Goal.",
+      description: "Create and manage one durable branch-local Goal with autonomous continuation and explicit completion evidence. Restored unfinished Goals remain paused until resumed.",
+      promptSnippet: "Manage one durable branch-local Goal.",
       promptGuidelines: [
-        "Use only `action`, `abstract`, `objective`, and `criteria` for `create` or `modify`.",
-        "Use only `action` for `status` or `resume`.",
-        "Use only `action` and `reason` for `pause` or `cancel`.",
-        "Use only `action` and `evidence` for `complete`.",
-        "Use `create` only when the latest user message starts with `/goal`.",
-        "Do not create Goals from ordinary natural-language requests.",
-        "For a bare `/goal`, call `status` and explain `/goal <objective>`.",
-        "Use `modify` for an existing nonterminal Goal and provide its complete replacement contract.",
-        "Pause the Goal when a blocker prevents further progress.",
-        "Cancel the Goal only when the user explicitly requests cancellation.",
-        "Complete the Goal only with one evidence item per completion criterion.",
+        "Create a Goal with `goal create` only from a user message that starts with `/goal`.",
+        "For a bare `/goal`, call `goal status` and explain `/goal <objective>`.",
+        "Treat an active Goal as one durable contract, not as a `todo` checklist.",
+        "Continue an active Goal autonomously until completion or a blocker requires `goal pause`.",
+        "Let Goal continuation wait while subagents, monitors, Ask, pending messages, or user input require attention.",
+        "Prioritize resolving Goal blockers before unrelated work.",
+        "Expect provider failures during a Goal to enter `retry_wait` automatically.",
+        "Expect repeated automatic Goal runs without progress to pause the Goal for review.",
+        "Use `goal status` to inspect the branch-local Goal without changing it.",
+        "Use `goal modify` when the complete objective or completion contract must be replaced.",
+        "Use `goal pause` when safe progress cannot continue.",
+        "Expect a user abort to pause the active Goal rather than cancel it.",
+        "Use `goal resume` when a paused Goal can continue autonomously.",
+        "Treat restored unfinished Goals as paused until `goal resume` explicitly restarts them.",
+        "Use `goal cancel` only when the user explicitly abandons the Goal.",
+        "Use `goal complete` only after every criterion has concrete evidence.",
       ],
       parameters: goalParameters,
       execute: async (_toolCallId, params) => this.execute(params as GoalInput),
@@ -510,7 +515,7 @@ export class GoalRuntime {
       renderResult: renderGoalResult,
     });
     this.pi.registerCommand("goal", {
-      description: "Forward a Goal request to the model.",
+      description: "Forward a goal request to the model.",
       handler: async (args, ctx) => {
         this.onExternalUserInput();
         const raw = args === "" ? "/goal" : `/goal ${args}`;

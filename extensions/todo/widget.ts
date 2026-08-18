@@ -1,5 +1,6 @@
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
+import { formatSemanticGlyphPrefix } from "../oh-my-pi-slim/semantic-glyph.js";
 import type { TodoOperation, TodoReceipt, TodoTask } from "./core.js";
 
 export const TODO_WIDGET_KEY = "oh-my-pi-slim:todos";
@@ -34,9 +35,9 @@ function taskSubject(task: TodoTask, theme: Theme): string {
 
 function taskLine(task: TodoTask, theme: Theme): string {
   const blocked = task.blockedBy.length > 0
-    ? theme.fg("dim", ` ⛓ ${task.blockedBy.map(sanitizeTodoText).join(", ")}`)
+    ? ` ${formatSemanticGlyphPrefix(theme.fg("dim", "⛓"))}${theme.fg("dim", task.blockedBy.map(sanitizeTodoText).join(", "))}`
     : "";
-  return `${taskGlyph(task, theme)} ${taskSubject(task, theme)}${blocked}`;
+  return `${formatSemanticGlyphPrefix(taskGlyph(task, theme))}${taskSubject(task, theme)}${blocked}`;
 }
 
 function counts(tasks: readonly TodoTask[]): { completed: number; pending: number; inProgress: number } {
@@ -56,26 +57,38 @@ function hiddenSummary(tasks: readonly TodoTask[]): string {
   return `+${tasks.length} more (${parts.join(", ")})`;
 }
 
+export function isTodoTaskBlocked(task: TodoTask, tasks: readonly TodoTask[]): boolean {
+  const bySubject = new Map(tasks.map((candidate) => [candidate.subject, candidate]));
+  return task.blockedBy.some((dependency) => bySubject.get(dependency)?.status !== "completed");
+}
+
+export function sortTodoTasksForWidget(tasks: readonly TodoTask[]): TodoTask[] {
+  const ranked = tasks.map((task, index) => {
+    let priority: number;
+    if (task.status === "in_progress") priority = 0;
+    else if (task.status === "pending") priority = isTodoTaskBlocked(task, tasks) ? 2 : 1;
+    else priority = 3;
+    return { task, index, priority };
+  });
+  ranked.sort((left, right) => {
+    if (left.priority !== right.priority) return left.priority - right.priority;
+    if (left.priority === 3) return right.index - left.index;
+    return left.index - right.index;
+  });
+  return ranked.map(({ task }) => task);
+}
+
 export function selectTodoWidgetLayout(
   tasks: readonly TodoTask[],
   maxLines = MAX_TODO_WIDGET_LINES,
 ): { visible: TodoTask[]; hidden: TodoTask[] } {
+  const sorted = sortTodoTasksForWidget(tasks);
   const directBudget = Math.max(0, maxLines - 1);
-  if (tasks.length <= directBudget) return { visible: [...tasks], hidden: [] };
+  if (sorted.length <= directBudget) return { visible: sorted, hidden: [] };
   const taskBudget = Math.max(0, maxLines - 2);
-  const unfinished = tasks.filter((task) => task.status !== "completed");
-  const selected = new Set<TodoTask>();
-  for (const task of unfinished.slice(0, taskBudget)) selected.add(task);
-  if (selected.size < taskBudget) {
-    for (const task of tasks) {
-      if (task.status !== "completed") continue;
-      selected.add(task);
-      if (selected.size >= taskBudget) break;
-    }
-  }
   return {
-    visible: tasks.filter((task) => selected.has(task)),
-    hidden: tasks.filter((task) => !selected.has(task)),
+    visible: sorted.slice(0, taskBudget),
+    hidden: sorted.slice(taskBudget),
   };
 }
 
@@ -88,7 +101,8 @@ export function renderTodoLines(
   if (tasks.length === 0 || maxLines <= 0) return [];
   const truncate = (line: string): string => truncateToWidth(line, Math.max(1, width), "…");
   const completed = tasks.filter((task) => task.status === "completed").length;
-  const lines = [truncate(theme.fg("accent", theme.bold(`● Todos (${completed}/${tasks.length})`)))];
+  const heading = `${formatSemanticGlyphPrefix(theme.fg("accent", theme.bold("●")))}${theme.fg("accent", theme.bold(`Todos (${completed}/${tasks.length})`))}`;
+  const lines = [truncate(heading)];
   const layout = selectTodoWidgetLayout(tasks, maxLines);
   for (let index = 0; index < layout.visible.length; index += 1) {
     const last = index === layout.visible.length - 1 && layout.hidden.length === 0;
@@ -127,12 +141,16 @@ function addResultList(container: Container, theme: Theme, label: string, values
 export function renderTodoListResult(tasks: readonly TodoTask[], theme: Theme, expanded = false): Component {
   const completed = tasks.filter((task) => task.status === "completed").length;
   const container = new Container();
-  container.addChild(new Text(theme.fg("accent", theme.bold(`● Todos (${completed}/${tasks.length})`)), 0, 0));
+  container.addChild(new Text(
+    `${formatSemanticGlyphPrefix(theme.fg("accent", theme.bold("●")))}${theme.fg("accent", theme.bold(`Todos (${completed}/${tasks.length})`))}`,
+    0,
+    0,
+  ));
   if (!expanded) return container;
   for (const task of tasks) {
     container.addChild(new Spacer(1));
     container.addChild(new Text(
-      `${statusGlyph(task.status, theme)} ${theme.fg("toolTitle", theme.bold(sanitizeTodoText(task.subject)))}`,
+      `${formatSemanticGlyphPrefix(statusGlyph(task.status, theme))}${theme.fg("toolTitle", theme.bold(sanitizeTodoText(task.subject)))}`,
       0,
       0,
     ));
@@ -146,7 +164,7 @@ export function renderTodoListResult(tasks: readonly TodoTask[], theme: Theme, e
 function receiptStatusTransition(receipt: TodoReceipt, theme: Theme): string | undefined {
   const match = /\bstatus (pending|in_progress|completed) to (pending|in_progress|completed)\b/.exec(receipt.text);
   if (!match) return;
-  return `${statusGlyph(match[1] as TodoTask["status"], theme)} → ${statusGlyph(match[2] as TodoTask["status"], theme)}`;
+  return `${formatSemanticGlyphPrefix(statusGlyph(match[1] as TodoTask["status"], theme))}→ ${formatSemanticGlyphPrefix(statusGlyph(match[2] as TodoTask["status"], theme))}`;
 }
 
 export function renderTodoReceipts(
@@ -157,12 +175,13 @@ export function renderTodoReceipts(
 ): Component {
   const append = operations.filter((operation) => operation.op === "append").length;
   const modify = operations.filter((operation) => operation.op === "modify").length;
+  const deletes = operations.filter((operation) => operation.op === "delete").length;
   const clear = operations.filter((operation) => operation.op === "clear").length;
   const noChange = receipts.filter((receipt) => receipt.kind === "no-change").length;
   const changed = receipts.length - noChange;
   const container = new Container();
   container.addChild(new Text(
-    `${theme.fg("success", "✓")} ${theme.fg("toolOutput", `Applied ${append} append · ${modify} modify · ${clear} clear → ${changed} changed · ${noChange} no-change`)}`,
+    `${formatSemanticGlyphPrefix(theme.fg("success", "✓"))}${theme.fg("toolOutput", `Applied ${append} append · ${modify} modify · ${deletes} delete · ${clear} clear → ${changed} changed · ${noChange} no-change`)}`,
     0,
     0,
   ));
@@ -171,10 +190,12 @@ export function renderTodoReceipts(
     const transition = receiptStatusTransition(receipt, theme);
     const glyph = transition ?? (receipt.kind === "no-change"
       ? theme.fg("dim", "○")
-      : receipt.kind === "clear" ? theme.fg("warning", "✓") : theme.fg("success", "✓"));
+      : receipt.kind === "clear" || receipt.kind === "delete"
+        ? theme.fg("warning", "✓")
+        : theme.fg("success", "✓"));
     container.addChild(new Spacer(1));
     container.addChild(new Text(
-      `${theme.fg("dim", `${receipt.operation}.`)} ${glyph} ${theme.fg("toolOutput", sanitizeTodoText(receipt.text))}`,
+      `${theme.fg("dim", `${receipt.operation}.`)} ${transition ?? formatSemanticGlyphPrefix(glyph)}${theme.fg("toolOutput", sanitizeTodoText(receipt.text))}`,
       0,
       0,
     ));

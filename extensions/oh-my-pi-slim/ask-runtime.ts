@@ -9,42 +9,42 @@ export const ASK_RPC_SUBMIT_LABEL = "Submit questionnaire";
 export const ASK_RPC_CANCEL_LABEL = "Cancel questionnaire";
 export const ASK_RPC_DONE_LABEL = "Done with this question";
 export const ASK_RESERVED_LABELS = ["Other", ASK_CUSTOM_LABEL, ASK_NEXT_LABEL] as const;
-export const ASK_PROMPT_SNIPPET = "Ask the user structured questions for ordinary decisions.";
+export const ASK_PROMPT_SNIPPET = "Ask the user structured questions for decisions.";
 export const ASK_PROMPT_GUIDELINES = [
-  "Use ask_user_question for ordinary user decisions.",
-  "Provide from one through four questions.",
-  "Provide from two through four options for each question.",
-  "For a recommended option, place it first and append `(Recommended)` to its label.",
-  "Use a short label for each option.",
-  "Expect the user to select an authored option or provide a custom response.",
-  "Use `multiSelect` only when the user may choose multiple authored options.",
-  "Use `preview` only for single-select options.",
-  "Do not use `Other`, `Type something.`, or `Next` as option labels.",
-  "Expect active Goals to make ask_user_question unavailable.",
+  "Choose `ask_user_question` only when the user's decision should direct the next step.",
+  "Prefer bounded authored choices in `ask_user_question` when likely outcomes are known.",
+  "Allow a custom `ask_user_question` response when authored choices may not fit.",
+  "Treat partial or cancelled `ask_user_question` answers as valid outcomes, not failed calls.",
+  "Do not call `ask_user_question` while a Goal is active.",
 ] as const;
 
 const askOptionSchema = Type.Object({
-  label: Type.String({ maxLength: 60, description: "Provide a short option label." }),
-  description: Type.String({ description: "Describe the option clearly." }),
-  preview: Type.Optional(Type.String({ description: "For single-select only, provide optional preview content." })),
+  label: Type.String({
+    maxLength: 60,
+    description: "Write a short option label. Mark a recommendation by placing it first and appending (Recommended). Do not use Other, Type something., or Next.",
+  }),
+  description: Type.String({ description: "Describe the outcome of choosing this option." }),
+  preview: Type.Optional(Type.String({ description: "Add preview content only for a single-select question." })),
 }, { additionalProperties: false });
 
 const askQuestionSchema = Type.Object({
-  question: Type.String({ description: "Ask one user decision question." }),
-  header: Type.String({ maxLength: 16, description: "Provide a short question header." }),
+  question: Type.String({ description: "Write one user decision question." }),
+  header: Type.String({ maxLength: 16, description: "Write a short question header." }),
   options: Type.Array(askOptionSchema, {
     minItems: 2,
     maxItems: 4,
-    description: "Provide from two through four authored options.",
+    description: "Provide authored choices in display order.",
   }),
-  multiSelect: Type.Optional(Type.Boolean({ description: "Allow selection of multiple authored options." })),
+  multiSelect: Type.Optional(Type.Boolean({
+    description: "Set true only when multiple authored options may be selected. Omit option previews when true.",
+  })),
 }, { additionalProperties: false });
 
 export const askUserQuestionParameters = Type.Object({
   questions: Type.Array(askQuestionSchema, {
     minItems: 1,
     maxItems: 4,
-    description: "Ask from one through four questions.",
+    description: "Provide questions in display order.",
   }),
 }, { additionalProperties: false });
 
@@ -427,7 +427,7 @@ export class AskRuntime {
       name: ASK_TOOL_NAME,
       label: "Ask User Question",
       executionMode: "sequential",
-      description: "Ask the user one through four structured questions.",
+      description: "Ask the user structured questions and return structured answers.",
       promptSnippet: ASK_PROMPT_SNIPPET,
       promptGuidelines: [...ASK_PROMPT_GUIDELINES],
       parameters: askUserQuestionParameters,

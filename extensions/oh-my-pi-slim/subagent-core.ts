@@ -22,6 +22,7 @@ export const SUBAGENT_ACTIONS = [
   "steer",
   "resume",
   "reply",
+  "clear",
 ] as const;
 
 export const SUBAGENT_PUBLIC_FIELDS = [
@@ -75,9 +76,16 @@ export interface RunJournalUpsert {
   run: PersistedRun;
 }
 
+/** Versioned full-registry replacement written by `subagent clear`; the latest one wins during replay. */
+export interface RunJournalReplacement {
+  version: 3;
+  runs: PersistedRun[];
+}
+
 export interface RestoredRunJournal {
   runs: PersistedRun[];
   activeRunIds: string[];
+  clearedRunIds: string[];
 }
 
 export interface RunSummary extends PersistedRun {
@@ -96,6 +104,32 @@ export interface SubagentLaunchInput {
 
 export function isTerminalStatus(status: RunStatus): boolean {
   return TERMINAL_RUN_STATUSES.has(status);
+}
+
+type RetainedRunSortFields = Pick<PersistedRun, "id" | "status" | "createdAt" | "updatedAt">;
+
+function retainedRunPriority(status: RunStatus): number {
+  if (status === "running" || status === "waiting") return 0;
+  if (status === "starting") return 1;
+  return 2;
+}
+
+export function compareRetainedSubagentRuns(left: RetainedRunSortFields, right: RetainedRunSortFields): number {
+  const priority = retainedRunPriority(left.status) - retainedRunPriority(right.status);
+  if (priority !== 0) return priority;
+  if (isTerminalStatus(left.status) && isTerminalStatus(right.status)) {
+    const updated = right.updatedAt.localeCompare(left.updatedAt);
+    if (updated !== 0) return updated;
+    const created = right.createdAt.localeCompare(left.createdAt);
+    if (created !== 0) return created;
+    return left.id.localeCompare(right.id);
+  }
+  const created = left.createdAt.localeCompare(right.createdAt);
+  return created !== 0 ? created : left.id.localeCompare(right.id);
+}
+
+export function sortRetainedSubagentRuns<T extends RetainedRunSortFields>(runs: readonly T[]): T[] {
+  return [...runs].sort(compareRetainedSubagentRuns);
 }
 
 export function requireString(value: unknown, field: string): string {
@@ -235,30 +269,45 @@ export function runJournalEntry(run: PersistedRun): RunJournalUpsert {
   return { version: 2, run: cloneRun(run) };
 }
 
+export function runJournalReplacementEntry(runs: Iterable<PersistedRun>): RunJournalReplacement {
+  return { version: 3, runs: [...runs].map(cloneRun) };
+}
+
+export function runJournalClearEntry(): RunJournalReplacement {
+  return runJournalReplacementEntry([]);
+}
+
 export function restoreRunJournal(values: Iterable<unknown>, _now = new Date().toISOString()): RestoredRunJournal {
   let runs = new Map<string, PersistedRun>();
+  const everSeen = new Set<string>();
   for (const value of values) {
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     const entry = value as Record<string, unknown>;
-    if (entry.version === 1 && Array.isArray(entry.runs)) {
+    if ((entry.version === 1 || entry.version === 3) && Array.isArray(entry.runs)) {
       const replacement = new Map<string, PersistedRun>();
       for (const candidate of entry.runs) {
         const run = parsePersistedRun(candidate);
-        if (run) replacement.set(run.id, run);
+        if (run) {
+          replacement.set(run.id, run);
+          everSeen.add(run.id);
+        }
       }
       runs = replacement;
     } else if (entry.version === 2) {
       const run = parsePersistedRun(entry.run);
-      if (run) runs.set(run.id, run);
+      if (run) {
+        runs.set(run.id, run);
+        everSeen.add(run.id);
+      }
     }
   }
 
-  const restored = [...runs.values()].map(cloneRun);
-  restored.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const restored = sortRetainedSubagentRuns([...runs.values()].map(cloneRun));
   const activeRunIds = restored
     .filter((run) => run.status === "starting" || run.status === "running" || run.status === "waiting")
     .map((run) => run.id);
-  return { runs: restored, activeRunIds };
+  const clearedRunIds = [...everSeen].filter((id) => !runs.has(id)).sort();
+  return { runs: restored, activeRunIds, clearedRunIds };
 }
 
 export function restoreSnapshot(value: unknown, now = new Date().toISOString()): LegacyRuntimeSnapshot {
@@ -288,6 +337,12 @@ export class SubagentRegistry {
 
   restore(runs: Iterable<PersistedRun>): void {
     this.runs = new Map([...runs].map((run) => [run.id, cloneRun(run)]));
+    this.liveIds.clear();
+    this.emit();
+  }
+
+  clear(): void {
+    this.runs = new Map();
     this.liveIds.clear();
     this.emit();
   }
@@ -336,8 +391,7 @@ export class SubagentRegistry {
   }
 
   list(): RunSummary[] {
-    return [...this.runs.values()]
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    return sortRetainedSubagentRuns([...this.runs.values()])
       .map((run) => ({ ...cloneRun(run), live: this.liveIds.has(run.id) }));
   }
 
