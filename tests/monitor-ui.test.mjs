@@ -19,6 +19,7 @@ const dependencyMap = {
   "./monitor-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/monitor-transcript-renderer.ts", import.meta.url).href,
   "./monitor-widget.js": new URL("../extensions/oh-my-pi-slim/monitor-widget.ts", import.meta.url).href,
   "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -27,7 +28,8 @@ registerHooks({
   },
 });
 
-const { visibleWidth } = await import("@earendil-works/pi-tui");
+const { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, visibleWidth } = await import("@earendil-works/pi-tui");
+const { widgetExpandHint } = await import("../extensions/oh-my-pi-slim/widget-expansion.ts");
 const {
   MONITOR_NOTIFICATION_TYPE,
   MonitorRuntime,
@@ -49,6 +51,14 @@ const theme = {
   fg: (_color, text) => text,
   bg: (_color, text) => text,
   bold: (text) => text,
+};
+const roleAnsiTheme = {
+  fg: (color, text) => {
+    const code = { accent: 35, dim: 2, success: 32, text: 37, muted: 90, warning: 33, error: 31 }[color] ?? 39;
+    return `\u001b[${code}m${text}\u001b[0m`;
+  },
+  bg: (_color, text) => text,
+  bold: (text) => `\u001b[1m${text}\u001b[22m`,
 };
 
 function renderLines(component, width = 240) {
@@ -116,6 +126,22 @@ function escaped(value) {
   return new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
 }
 
+const DEFAULT_HINT = " · ctrl+o to expand";
+
+/** Installs a user-configured `app.tools.expand` binding so the hint proves it reads the live keymap. */
+function withConfiguredExpandKey(keys, body) {
+  setKeybindings(new KeybindingsManager(
+    { ...TUI_KEYBINDINGS, "app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" } },
+    { "app.tools.expand": keys },
+  ));
+  try { body(); } finally { setKeybindings(null); }
+}
+
+function withBrokenKeybindings(body) {
+  setKeybindings({ getKeys() { throw new Error("keybindings unavailable"); } });
+  try { body(); } finally { setKeybindings(null); }
+}
+
 function fakeChild(pid = 24680) {
   const child = new EventEmitter();
   child.pid = pid;
@@ -142,13 +168,14 @@ test("Monitor widget renders exact heading, glyphs, running/terminal order, over
     widgetMonitor({ id: "00000005", abstract: "terminal middle", status: "killed", endedAt: "2026-05-01T00:00:04.000Z" }),
   ];
   const lines = renderMonitorWidgetLines(monitors, theme, 100);
-  assert.equal(lines[0], "●  Monitors (2/5)");
+  assert.equal(lines[0], "●  Monitors");
+  assert.doesNotMatch(lines[0], /\(|\)|\d/, "the Monitors heading carries no running/total ratio");
   assert.equal(lines[1], "├─ ↻  running first [00000001] · running");
   assert.equal(lines[2], "├─ ↻  running later [00000002] · running");
   assert.equal(lines[3], "├─ !  terminal newest [00000004] · failed");
   assert.equal(lines[4], "├─ ×  terminal middle [00000005] · killed");
   assert.equal(lines[5], "└─ ✓  terminal old [00000003] · completed");
-  assert.doesNotMatch(lines.join("\n"), /[↻!×✓●] [^ ]|[↻!×✓●] {3}/);
+  assert.doesNotMatch(lines.join("\n"), /[↻!×✓●○] [^ ]|[↻!×✓●○] {3}/);
   assert.match(lines.slice(1).join("\n"), /^├─ |\n(?:├─ |└─ )/);
 
   const overflow = renderMonitorWidgetLines(Array.from({ length: 13 }, (_, index) => widgetMonitor({
@@ -175,6 +202,155 @@ test("Monitor widget renders exact heading, glyphs, running/terminal order, over
   assert.match(narrowPlain[1], /↻  .*\[00000001\] · running$/);
   assert.doesNotMatch(narrowPlain.join("\n"), /\u001b|\u0000|\[31m/);
   assert.deepEqual(renderMonitorWidgetLines([], theme, 80), []);
+});
+
+test("Monitor collapsed body keeps only running rows, adds one atomic dim expand hint, and never touches the expanded body", () => {
+  const mixed = [
+    widgetMonitor({ id: "00000001", abstract: "running first", createdAt: "2026-05-01T00:00:01.000Z" }),
+    widgetMonitor({ id: "00000002", abstract: "running later", createdAt: "2026-05-01T00:00:02.000Z" }),
+    widgetMonitor({ id: "00000003", abstract: "terminal done", status: "completed", endedAt: "2026-05-01T00:00:03.000Z" }),
+    widgetMonitor({ id: "00000004", abstract: "terminal broken", status: "failed", endedAt: "2026-05-01T00:00:04.000Z" }),
+    widgetMonitor({ id: "00000005", abstract: "terminal stopped", status: "killed", endedAt: "2026-05-01T00:00:05.000Z" }),
+  ];
+
+  assert.deepEqual(renderMonitorWidgetLines(mixed, theme, 100, true, DEFAULT_HINT), renderMonitorWidgetLines(mixed, theme, 100));
+  assert.deepEqual(renderMonitorWidgetLines(mixed, theme, 100, false, DEFAULT_HINT), [
+    "●  Monitors · ctrl+o to expand",
+    "├─ ↻  running first [00000001] · running",
+    "└─ ↻  running later [00000002] · running",
+  ]);
+
+  const runningOnly = mixed.filter((monitor) => monitor.status === "running");
+  assert.deepEqual(
+    renderMonitorWidgetLines(runningOnly, theme, 100, false, DEFAULT_HINT),
+    renderMonitorWidgetLines(runningOnly, theme, 100),
+    "a collapsed widget with nothing hidden shows no hint at all",
+  );
+
+  const terminalOnly = mixed.filter((monitor) => monitor.status !== "running");
+  assert.deepEqual(renderMonitorWidgetLines(terminalOnly, theme, 100, false, DEFAULT_HINT), ["○  Monitors · ctrl+o to expand"]);
+  assert.equal(renderMonitorWidgetLines(terminalOnly, theme, 100, true, DEFAULT_HINT).length, 4);
+});
+
+test("Monitor expand hint stays one dim non-bold segment, uses the configured key, and drops whole when the width is tight", () => {
+  const mixed = [
+    widgetMonitor({ id: "00000001", abstract: "running first" }),
+    widgetMonitor({ id: "00000003", abstract: "terminal done", status: "completed", endedAt: "2026-05-01T00:00:03.000Z" }),
+  ];
+  const terminalOnly = [mixed[1]];
+  const dimHint = "\u001b[2m · ctrl+o to expand\u001b[0m";
+
+  const activeHeading = renderMonitorWidgetLines(mixed, roleAnsiTheme, 100, false, DEFAULT_HINT)[0];
+  assert.equal(
+    activeHeading,
+    `\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mMonitors\u001b[22m\u001b[0m${dimHint}`,
+  );
+  const idleHeading = renderMonitorWidgetLines(terminalOnly, roleAnsiTheme, 100, false, DEFAULT_HINT)[0];
+  assert.equal(idleHeading, `\u001b[2m○\u001b[0m  \u001b[2mMonitors\u001b[0m${dimHint}`);
+  assert.ok(
+    activeHeading.endsWith(dimHint) && idleHeading.endsWith(dimHint),
+    "the hint renders identically in the active and idle heading states",
+  );
+  assert.doesNotMatch(activeHeading.slice(activeHeading.indexOf(dimHint)), /\u001b\[1m/, "the hint is never bold");
+
+  withConfiguredExpandKey("ctrl+shift+e", () => {
+    assert.equal(widgetExpandHint(), " · ctrl+shift+e to expand");
+    assert.equal(
+      renderMonitorWidgetLines(mixed, theme, 100, false, widgetExpandHint())[0],
+      "●  Monitors · ctrl+shift+e to expand",
+    );
+  });
+  assert.equal(widgetExpandHint(), DEFAULT_HINT, "an unconfigured keymap falls back to Pi's default binding");
+  withBrokenKeybindings(() => {
+    assert.equal(widgetExpandHint(), DEFAULT_HINT, "a failing keybinding registry falls back without breaking widget render");
+  });
+
+  const full = "●  Monitors · ctrl+o to expand";
+  assert.equal(renderMonitorWidgetLines(mixed, theme, full.length, false, DEFAULT_HINT)[0], full);
+  for (const width of [1, 4, 8, 11, 20, full.length - 1]) {
+    const heading = renderMonitorWidgetLines(mixed, theme, width, false, DEFAULT_HINT)[0];
+    assert.ok(visibleWidth(heading) <= width, `width ${width} must stay inside the terminal`);
+    assert.doesNotMatch(heading, /·|expand|ctrl/, `width ${width} must drop the whole hint, never half of it`);
+  }
+});
+
+test("Monitor overflow counts only visible running rows and ignores policy-hidden terminal monitors", () => {
+  const monitors = [
+    ...Array.from({ length: 12 }, (_, index) => widgetMonitor({
+      id: String(index + 1).padStart(8, "0"),
+      abstract: `running ${index + 1}`,
+      createdAt: new Date(Date.parse("2026-05-01T00:00:00.000Z") + index * 1000).toISOString(),
+    })),
+    ...Array.from({ length: 4 }, (_, index) => widgetMonitor({
+      id: String(index + 20).padStart(8, "0"),
+      abstract: `terminal ${index + 1}`,
+      status: "completed",
+      endedAt: new Date(Date.parse("2026-05-01T00:01:00.000Z") + index * 1000).toISOString(),
+    })),
+  ];
+
+  const expanded = renderMonitorWidgetLines(monitors, theme, 80, true, DEFAULT_HINT);
+  assert.equal(expanded.length, MAX_MONITOR_WIDGET_LINES);
+  assert.equal(expanded.at(-1), "└─ … 6 more");
+
+  const collapsed = renderMonitorWidgetLines(monitors, theme, 80, false, DEFAULT_HINT);
+  assert.equal(collapsed[0], "●  Monitors · ctrl+o to expand");
+  assert.equal(collapsed.at(-1), "└─ … 2 more", "only the two budget-hidden running rows are summarised");
+  assert.doesNotMatch(collapsed.join("\n"), /terminal /, "policy-hidden terminal rows never reach the body");
+  assert.equal(collapsed.length, MAX_MONITOR_WIDGET_LINES);
+});
+
+test("MonitorWidget reads Pi's live expansion state on every render without re-registering the widget", () => {
+  let expanded = true;
+  const monitors = [
+    widgetMonitor({ id: "00000001", abstract: "running first" }),
+    widgetMonitor({ id: "00000009", abstract: "terminal done", status: "completed", endedAt: "2026-05-01T00:00:03.000Z" }),
+  ];
+  const calls = [];
+  let component;
+  const tui = { requestRender() {} };
+  const ui = {
+    theme,
+    getToolsExpanded: () => expanded,
+    setWidget(key, content, options) {
+      calls.push({ key, content, options });
+      component = typeof content === "function" ? content(tui, theme) : undefined;
+    },
+  };
+  const widget = new MonitorWidget(() => monitors, {
+    setTimeout(callback, milliseconds) { return { callback, milliseconds, unref() {} }; },
+    clearTimeout() {},
+  });
+
+  widget.setContext(ui);
+  widget.update();
+  assert.equal(calls.length, 1);
+  assert.equal(component.render(100).length, 3);
+
+  expanded = false;
+  assert.deepEqual(component.render(100), ["●  Monitors · ctrl+o to expand", "└─ ↻  running first [00000001] · running"]);
+  assert.equal(calls.length, 1, "Ctrl+O must not re-register the widget");
+
+  expanded = true;
+  assert.equal(component.render(100).length, 3, "Ctrl+O toggles straight back to the full body");
+  assert.equal(calls.length, 1);
+
+  const legacyCalls = [];
+  let legacyComponent;
+  const legacyWidget = new MonitorWidget(() => monitors, {
+    setTimeout(callback, milliseconds) { return { callback, milliseconds, unref() {} }; },
+    clearTimeout() {},
+  });
+  legacyWidget.setContext({
+    theme,
+    setWidget(key, content) {
+      legacyCalls.push({ key, content });
+      legacyComponent = typeof content === "function" ? content(tui, theme) : undefined;
+    },
+  });
+  legacyWidget.update();
+  assert.equal(legacyComponent.render(100).length, 3, "a host without getToolsExpanded stays expanded");
+  assert.doesNotMatch(legacyComponent.render(100).join("\n"), /to expand/);
 });
 
 test("MonitorWidget throttles and coalesces output, refreshes lifecycle immediately, registers once, keeps invalidate a no-op, rebinds, and disposes", () => {
@@ -244,7 +420,7 @@ test("MonitorWidget throttles and coalesces output, refreshes lifecycle immediat
   assert.equal(callsA.at(-1).content, undefined);
   widget.update();
   assert.equal(callsB.length, 1);
-  assert.equal(componentB.render(80)[0], "●  Monitors (1/1)");
+  assert.equal(componentB.render(80)[0], "●  Monitors");
 
   monitors = [];
   widget.handleChange({ type: "deleted", reason: "lifecycle", id: "00000001" });

@@ -5,6 +5,7 @@
 
 import type { PersistedRun, RunStatus } from "./subagent-core.js";
 import { renderSubagentWidgetLines, type WidgetTheme } from "./subagent-widget-renderer.js";
+import { readWidgetExpanded, widgetExpandHint } from "./widget-expansion.js";
 
 interface RunSummary {
   readonly id: string;
@@ -46,6 +47,7 @@ export interface SubagentWidgetTui {
 }
 
 export interface SubagentWidgetUI {
+  getToolsExpanded?(): boolean;
   setStatus(key: string, text: string | undefined): void;
   setWidget(
     key: string,
@@ -142,6 +144,8 @@ export class SubagentWidget {
             spinnerFrame: this.widgetFrame,
             terminalWidth: tui.terminal.columns,
             theme,
+            expanded: readWidgetExpanded(this.uiCtx),
+            hint: widgetExpandHint(),
           }),
           invalidate: () => {
             this.widgetRegistered = false;

@@ -233,6 +233,7 @@ Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree res
 - compaction 与 tree operation 期间，package notification 会安全排队，之后正常交付，不丢失用户可见结果。
 - package tool row 与 notification 使用 Ctrl+O 切换 collapsed/expanded；展开只改变显示，不改变工具数据或持久化状态。
 - 前台 TUI 为 retained subagent、Todo、Loop、Monitor 与 active Goal 提供紧凑 widget；RPC session 不注册这些 widget。
+- subagent、Todo 与 Monitor widget 跟随与 tool row 相同的 Ctrl+O 状态：collapsed 隐藏已结束的行，并在标题末尾追加使用当前配置键位的 dim 提示；expanded 显示完整内容。Loop 与 Goal widget 始终显示完整内容。
 - Subagent、Todo 与 Goal 会按各自 session 或 branch 范围恢复。尤其是成功执行的 subagent `clear` 在 reload 后仍保持清空。
 - Loop 与 Monitor 是 runtime service，不是 durable schedule。session transition 会关闭它们；Loop 按上文列出的规则清空。
 - child process 是隔离的 Pi RPC session。session shutdown 时，active run 会被中断，而不会被后续 session 静默接管；retained terminal session 可用 `resume` 继续，但会创建新 run。

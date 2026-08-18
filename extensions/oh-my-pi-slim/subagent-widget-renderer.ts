@@ -3,7 +3,7 @@
  * Copyright (c) 2026 tintinweb. MIT licensed; see THIRD_PARTY_NOTICES.md.
  */
 
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { sortRetainedSubagentRuns, type PersistedRun, type RunStatus } from "./subagent-core.js";
 import { formatSubagentModel } from "./subagent-model-display.js";
 import type { DetachedRunActivity } from "./subagent-run-files.js";
@@ -96,6 +96,29 @@ export function renderActiveRunLines(
     ? run.request?.message || "supervisor reply required"
     : describeWidgetActivity(run.activity?.activeTools ?? {}, run.activity?.responseText);
   return [header, statsLine, theme.fg(waiting ? "warning" : "dim", activityText)];
+}
+
+/** Counts every retained run directly, so budget, overflow, and sorting never move the heading numbers. */
+function subagentWidgetHeading(runs: readonly WidgetRun[], theme: WidgetTheme): string {
+  const live = runs.filter((run) => ACTIVE_STATUSES.has(run.status)).length;
+  const terminal = runs.length - live;
+  const active = live > 0;
+  const color = active ? "accent" : "dim";
+  const glyph = active
+    ? theme.bold(SUBAGENT_WIDGET_GLYPHS.agentsActive)
+    : SUBAGENT_WIDGET_GLYPHS.agentsIdle;
+  const label = active
+    ? theme.bold(`Agents (${terminal}/${runs.length})`)
+    : `Agents (${terminal}/${runs.length})`;
+  return `${formatSemanticGlyphPrefix(theme.fg(color, glyph))}${theme.fg(color, label)}`;
+}
+
+/** Appends the collapsed hint only when the separator-through-expand segment fits whole; never half of it. */
+function subagentHeadingLine(heading: string, hint: string, theme: WidgetTheme, width: number): string {
+  if (hint !== "" && visibleWidth(heading) + visibleWidth(hint) <= width) {
+    return `${heading}${theme.fg("dim", hint)}`;
+  }
+  return truncateToWidth(heading, width);
 }
 
 interface Categories {
@@ -205,17 +228,25 @@ export function renderSubagentWidgetLines(params: {
   terminalWidth: number;
   theme: WidgetTheme;
   nowMs?: number;
+  expanded?: boolean;
+  hint?: string;
 }): string[] {
   const { runs, spinnerFrame, terminalWidth, theme } = params;
   const nowMs = params.nowMs ?? Date.now();
+  const expanded = params.expanded ?? true;
   const categories = categorizeRuns(sortRetainedSubagentRuns(runs));
   const hasActive = categories.active.length > 0 || categories.queued.length > 0;
   if (!hasActive && categories.finished.length === 0) return [];
+  const policyHidden = expanded ? 0 : categories.finished.length;
+  const shown: Categories = expanded ? categories : { ...categories, finished: [] };
   const truncate = (line: string) => truncateToWidth(line, terminalWidth);
-  const headingColor = hasActive ? "accent" : "dim";
-  const headingIcon = hasActive ? SUBAGENT_WIDGET_GLYPHS.agentsActive : SUBAGENT_WIDGET_GLYPHS.agentsIdle;
-  const heading = truncate(`${formatSemanticGlyphPrefix(theme.fg(headingColor, headingIcon))}${theme.fg(headingColor, "Agents")}`);
-  const sections = buildSections(categories, spinnerFrame, theme, truncate, nowMs);
+  const heading = subagentHeadingLine(
+    subagentWidgetHeading(runs, theme),
+    policyHidden > 0 ? params.hint ?? "" : "",
+    theme,
+    terminalWidth,
+  );
+  const sections = buildSections(shown, spinnerFrame, theme, truncate, nowMs);
   const maxBody = MAX_SUBAGENT_WIDGET_LINES - 1;
   const totalBody = sections.finishedLines.length + sections.activeLines.length * 3 + sections.queuedLines.length;
   return totalBody <= maxBody

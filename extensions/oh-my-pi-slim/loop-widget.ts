@@ -114,6 +114,15 @@ function secondLine(loop: PublicLoop, theme: Theme, width: number, continues: bo
   return truncateToWidth(`${tree} ${theme.fg(loop.lastError && loop.status === "active" ? "error" : "dim", parts.join(" · "))}`, Math.max(1, width), "…");
 }
 
+/** Ratio-free heading: filled accent bold while any loop is active, hollow dim once every loop is paused. */
+function loopWidgetHeading(loops: readonly PublicLoop[], theme: Theme): string {
+  const active = loops.some((loop) => loop.status === "active");
+  const role = active ? "accent" : "dim";
+  const glyph = active ? theme.bold("●") : "○";
+  const label = active ? theme.bold("Loops") : "Loops";
+  return `${formatSemanticGlyphPrefix(theme.fg(role, glyph))}${theme.fg(role, label)}`;
+}
+
 export function renderLoopWidgetLines(
   loops: readonly PublicLoop[],
   theme: Theme,
@@ -123,12 +132,9 @@ export function renderLoopWidgetLines(
   if (loops.length === 0) return [];
   const safeWidth = Math.max(1, width);
   const sorted = sortLoopsForDisplay(loops);
-  const active = sorted.filter((loop) => loop.status === "active").length;
   const visible = sorted.slice(0, MAX_VISIBLE_LOOPS);
   const hidden = sorted.length - visible.length;
-  const headingRole = active > 0 ? "accent" : "dim";
-  const heading = `${formatSemanticGlyphPrefix(theme.fg(headingRole, theme.bold("●")))}${theme.fg(headingRole, theme.bold(`Loops (${active}/${sorted.length})`))}`;
-  const lines = [truncateToWidth(heading, safeWidth, "…")];
+  const lines = [truncateToWidth(loopWidgetHeading(sorted, theme), safeWidth, "…")];
 
   for (let index = 0; index < visible.length; index += 1) {
     const continues = index < visible.length - 1 || hidden > 0;

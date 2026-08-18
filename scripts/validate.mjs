@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.3", "package version must be 0.10.3");
+check(packageJson.version === "0.10.4", "package version must be 0.10.4");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.3" && lock.packages?.[""]?.version === "0.10.3", "package-lock version must be 0.10.3");
+check(lock.version === "0.10.4" && lock.packages?.[""]?.version === "0.10.4", "package-lock version must be 0.10.4");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -204,6 +204,59 @@ const todoExtension = read("extensions/todo/index.ts");
 const todoCore = read("extensions/todo/core.ts");
 const todoWidget = read("extensions/todo/widget.ts");
 const semanticGlyph = read("extensions/oh-my-pi-slim/semantic-glyph.ts");
+const widgetExpansion = read("extensions/oh-my-pi-slim/widget-expansion.ts");
+
+// Persistent widget expansion must reuse Pi's own global tool-output state and nothing else.
+hasAll(widgetExpansion, [
+  'import { keyText } from "@earendil-works/pi-coding-agent"',
+  'DEFAULT_WIDGET_EXPAND_KEY = "ctrl+o"',
+  "export function readWidgetExpanded",
+  'typeof ui.getToolsExpanded !== "function"', "return true", "ui.getToolsExpanded() !== false",
+  "export function widgetExpandKey", 'keyText("app.tools.expand")', "try {", "catch {",
+  "export function widgetExpandHint", "return ` · ${widgetExpandKey()} to expand`",
+], "shared widget expansion reads Pi global state and the configured key");
+hasNone(widgetExpansion, [
+  "registerShortcut", "setToolsExpanded", "setEditorComponent", "CustomEditor", "handleInput",
+  "writeFileSync", "appendEntry", "localStorage", "globalThis", "let ", "theme.fg(", "theme.bold(", "registerTool",
+], "shared widget expansion must own no keybinding, editor, store, persistence, or theme");
+for (const [name, source] of [
+  ["Monitor widget", monitorWidget],
+  ["Todo widget", todoWidget],
+  ["Subagent widget", read("extensions/oh-my-pi-slim/subagent-widget.ts")],
+]) {
+  hasAll(source, [
+    "readWidgetExpanded", "widgetExpandHint()",
+  ], `${name} must read Pi global expansion live on every render`);
+  hasNone(source, [
+    "registerShortcut", "setToolsExpanded", "setEditorComponent",
+  ], `${name} must not register or hijack the expansion keybinding`);
+}
+for (const [name, source] of [["Goal widget", goalWidget], ["Loop widget", loopWidget]]) {
+  hasNone(source, [
+    "widget-expansion", "readWidgetExpanded", "widgetExpandHint", "getToolsExpanded", "to expand",
+  ], `${name} must stay out of Ctrl+O expansion with a permanently full body`);
+}
+// Persistent widgets are presentation only: no tool schema, prompt text, or model-facing payload lives here.
+for (const [name, source] of [
+  ["Monitor widget", monitorWidget],
+  ["Loop widget", loopWidget],
+  ["Goal widget", goalWidget],
+  ["Todo widget", todoWidget],
+  ["Subagent widget renderer", read("extensions/oh-my-pi-slim/subagent-widget-renderer.ts")],
+]) {
+  hasNone(source, [
+    "registerTool", "promptSnippet", "promptGuidelines", "Type.Object", "parameters:", "content: [{",
+  ], `${name} must not touch tool schema or model-facing content`);
+}
+for (const file of [
+  "tests/monitor-ui.test.mjs", "tests/monitor.test.mjs", "tests/subagent-widget.test.mjs",
+  "tests/subagent-runtime.test.mjs", "tests/loop.test.mjs", "tests/provider-schema.test.mjs",
+]) {
+  hasAll(read(file), ["./widget-expansion.js"], `${file} shared widget expansion load mapping`);
+}
+for (const file of ["tests/todo.test.mjs", "tests/provider-schema.test.mjs"]) {
+  hasAll(read(file), ["../oh-my-pi-slim/widget-expansion.js"], `${file} Todo shared widget expansion load mapping`);
+}
 
 hasAll(semanticGlyph, [
   'SEMANTIC_GLYPH_GAP = "  "', "formatSemanticGlyphPrefix", 'return `${glyph}${SEMANTIC_GLYPH_GAP}`',
@@ -344,6 +397,23 @@ hasAll(goalWidget, [
   "sanitizeGoalText", "sanitizeGoalBody", "dispose()",
 ], "Goal fixed two-line width-safe cached widget contract");
 hasNone(goalWidget, ["\\u001b[", "registerShortcut", "setStatus("], "Goal widget theme-only contract");
+const goalPrefixBlock = goalWidget.slice(
+  goalWidget.indexOf("function isGoalPursuing"),
+  goalWidget.indexOf("function headingLine"),
+);
+hasAll(goalPrefixBlock, [
+  'return status === "active" || status === "retry_wait"',
+  "const pursuing = isGoalPursuing(status)",
+  'const role = pursuing ? statusRole(status) : "dim"',
+  'const glyph = pursuing ? theme.bold("●") : "○"',
+  'const label = pursuing ? theme.bold("Goal") : "Goal"',
+  "formatSemanticGlyphPrefix(theme.fg(role, glyph))", "theme.fg(role, label)",
+], "Goal pursuing-versus-idle heading prefix visual");
+hasNone(goalPrefixBlock, ['theme.bold("○")', "Goal (", "hint"], "Goal prefix must stay ratio-free, unbolded when idle, and free of expand hints");
+check(
+  goalWidget.includes("`${goalWidgetPrefix(goal.status, theme)} ${theme.fg(\"dim\", \"·\")} ${formatSemanticGlyphPrefix(goalStatusGlyph(goal.status, theme))}${theme.fg(role, sanitizeGoalText(goal.status))} ${theme.fg(\"dim\", \"·\")} `"),
+  "Goal heading must keep the status glyph, status text, and abstract structure behind the shared prefix",
+);
 hasAll(goalTranscriptRenderer, [
   "renderGoalCall", "renderGoalResult", "renderGoalContinuation", "renderGoalState", 'theme.bold("goal")', 'goalStatusGlyph("active", theme)',
   '`· ${sanitizeGoalText(action)}${expanded ? "" : " (ctrl+o to expand)"}`', "new Spacer(1)", "addCompleteGoal", "addCriterionEvidence",
@@ -607,8 +677,27 @@ hasAll(monitorWidget, [
   "MONITOR_RENDER_THROTTLE_MS = 110", 'theme.bold("●")', 'theme.fg("accent", "↻")', '"✓"', '"!"', '"×"',
   "sortMonitorsForDisplay", "createdAt", "endedAt", 'theme.fg("dim", `… ${hidden} more`)', "lines.slice(0, MAX_MONITOR_WIDGET_LINES)",
   'placement: "aboveEditor"', "change.reason === \"output\"", "scheduleRender()", "requestRender()", "invalidate() {}", "dispose()",
-], "Monitor foreground widget visual and throttle contract");
+  "expanded = true", 'hint = ""', 'sorted.filter((monitor) => monitor.status === "running")',
+  "const policyHidden = sorted.length - shown.length", "const hidden = shown.length - visible.length",
+  "monitorHeadingLine(monitorWidgetHeading(sorted, theme), policyHidden > 0 ? hint : \"\", theme, safeWidth)",
+], "Monitor foreground widget visual, collapse policy, and throttle contract");
 hasNone(monitorWidget, ["notify(", "setStatus", "registerShortcut", "overlay", "setInterval("], "Monitor widget excluded UI");
+const monitorHeadingBlock = monitorWidget.slice(
+  monitorWidget.indexOf("function monitorWidgetHeading"),
+  monitorWidget.indexOf("export function renderMonitorWidgetLines"),
+);
+hasAll(monitorHeadingBlock, [
+  'const active = monitors.some((monitor) => monitor.status === "running")',
+  'const role = active ? "accent" : "dim"',
+  'const glyph = active ? theme.bold("●") : "○"',
+  'const label = active ? theme.bold("Monitors") : "Monitors"',
+  "formatSemanticGlyphPrefix(theme.fg(role, glyph))", "theme.fg(role, label)",
+  'if (hint !== "" && visibleWidth(heading) + visibleWidth(hint) <= width)',
+  '`${heading}${theme.fg("dim", hint)}`', 'return truncateToWidth(heading, width, "…")',
+], "Monitor ratio-free active-idle heading and atomic dim expand hint");
+hasNone(monitorHeadingBlock, [
+  'theme.bold("○")', "Monitors (", "${running}", "/${sorted.length}", "theme.bold(hint)",
+], "Monitor heading must drop the ratio and never bold the idle glyph or the hint");
 hasAll(monitorTranscriptRenderer, [
   "renderMonitorCall", "renderMonitorResult", "renderMonitorNotification", 'theme.bold("monitor")', 'monitorStatusGlyph("running", theme)',
   '`· ${safeAction}${expanded ? "" : " (ctrl+o to expand)"}`', "spacedResult", "safeFirstLine", "sanitizeMonitorBody",
@@ -689,13 +778,25 @@ check(
 hasNone(loopRuntime, ["appendEntry", "setInterval(", "maxFires", "expiresAt", "maxLength", "registerShortcut", "setWidget"], "Loop core semantic boundary");
 hasAll(loopWidget, [
   'LOOP_WIDGET_KEY = "oh-my-pi-slim:loops"', "MAX_LOOP_WIDGET_LINES = 12", "MAX_VISIBLE_LOOPS = 5",
-  'theme.bold(`Loops (${active}/${sorted.length})`)', 'theme.fg("accent", "↻")', '"Ⅱ"', '"!"',
+  "truncateToWidth(loopWidgetHeading(sorted, theme), safeWidth, \"…\")", 'theme.fg("accent", "↻")', '"Ⅱ"', '"!"',
   'parts.push(`next in ${formatLoopCountdown', 'parts.push("paused", fireLabel', "failureLabel(loop.failureCount)",
   "sortLoopsForDisplay", "nextFireAt", "createdAt", 'setIntervalFn(() => this.update(), 1_000)',
   "requestRender()", 'placement: "aboveEditor"', "stopTimer()", "dispose()", 'setWidget(LOOP_WIDGET_KEY, undefined)',
   'theme.fg("dim", `… ${hidden} more`)', "lines.slice(0, MAX_LOOP_WIDGET_LINES)",
 ], "Loop foreground widget visual contract");
 hasNone(loopWidget, ["notify(", "registerShortcut", "custom(", "overlay"], "Loop widget excluded UI");
+const loopHeadingBlock = loopWidget.slice(
+  loopWidget.indexOf("function loopWidgetHeading"),
+  loopWidget.indexOf("export function renderLoopWidgetLines"),
+);
+hasAll(loopHeadingBlock, [
+  'const active = loops.some((loop) => loop.status === "active")',
+  'const role = active ? "accent" : "dim"',
+  'const glyph = active ? theme.bold("●") : "○"',
+  'const label = active ? theme.bold("Loops") : "Loops"',
+  "formatSemanticGlyphPrefix(theme.fg(role, glyph))", "theme.fg(role, label)",
+], "Loop ratio-free active-idle heading visual");
+hasNone(loopHeadingBlock, ['theme.bold("○")', "Loops (", "${active}", "hint"], "Loop heading must drop the ratio, the bold idle glyph, and any expand hint");
 hasAll(loopTranscriptRenderer, [
   "renderLoopCall", "renderLoopResult", "renderLoopFire", "styledTitle(", '"loop"', 'theme.fg("accent", "↻")',
   '`· ${action}${expanded ? "" : " (ctrl+o to expand)"}`',
@@ -1073,7 +1174,32 @@ hasAll(subagentWidgetTests, [
   "a retained terminal run keeps the widget registered",
   "clearing every retained run removes the widget",
   "↻  0 · 5.0s", "[●⠋↻◦✓] [^ ]|[●⠋↻◦✓] {3}", "visibleWidth(line) <= terminalWidth",
-], "Subagent widget retained-run parity and fixed turn-glyph padding tests");
+  "persistent widget heading counts terminal over retained runs with Todo-parity active and idle roles",
+  "persistent widget heading refreshes on every live-to-terminal flip and clears with the last retained run",
+  '"**●**  **Agents (5/8)**"', '"○  Agents (5/5)"', '"**●**  **Agents (1/2)**"', '"**●**  **Agents (2/3)**"',
+  '"\\u001b[35m\\u001b[1m●\\u001b[22m\\u001b[0m  \\u001b[35m\\u001b[1mAgents (5/8)\\u001b[22m\\u001b[0m"',
+  '"\\u001b[2m○\\u001b[0m  \\u001b[2mAgents (5/5)\\u001b[0m"',
+  "must count as live and stay out of the numerator",
+  "an all-terminal widget must not render any accent role",
+  "the idle heading must stay dim without bold emphasis",
+  "hidden rows never change the retained counts", "two hidden terminal rows still count toward the heading",
+  "clearing every retained run unregisters the widget", "roleAnsiTheme",
+  "collapsed Agents body keeps starting, running, and waiting rows and hides every terminal run",
+  "expanded keeps the previous body byte for byte",
+  '"**●**  **Agents (3/6)** · ctrl+o to expand"', '["○  Agents (3/3) · ctrl+o to expand"]',
+  "a collapsed widget with nothing hidden shows no hint at all",
+  "an all-terminal collapsed widget keeps a heading-only body with no tree",
+  "the last collapsed active entry keeps its three-line block and closes the tree",
+  "withConfiguredExpandKey", '"app.tools.expand"', '" · ctrl+shift+e to expand"',
+  "the hint renders identically in the active and idle heading states",
+  "the hint is never bold", "must drop the whole hint, never half of it",
+  "heading counts ignore both filtering and overflow",
+  "policy-hidden terminal runs stay out of the overflow summary",
+  "three whole lines per surviving active run plus the queued row, none split",
+  "reads Pi's live expansion state on every render without re-registering the widget",
+  "Ctrl+O must not re-register the widget", "Ctrl+O toggles straight back to the full body",
+  "a host without getToolsExpanded stays expanded",
+], "Subagent widget retained-run parity, heading count, collapse, hint, and fixed turn-glyph padding tests");
 
 hasAll(bootstrap, [
   "Seed the user preset once",
@@ -1286,7 +1412,25 @@ hasAll(todoWidgetHeadingBlock, [
   "formatSemanticGlyphPrefix(theme.fg(color, glyph))", "theme.fg(color, label)",
 ], "Todo persistent widget active and all-completed idle heading visual");
 hasNone(todoWidgetHeadingBlock, ['theme.bold("○")'], "Todo idle heading must remain dim without bold emphasis");
-check(todoWidget.includes("truncate(todoWidgetHeading(tasks, theme))"), "Todo persistent widget must render through the active-idle heading helper");
+check(
+  todoWidget.includes("todoHeadingLine(todoWidgetHeading(tasks, theme), policyHidden > 0 ? hint : \"\", theme, safeWidth)"),
+  "Todo persistent widget must render through the active-idle heading helper with its collapsed hint",
+);
+const todoHeadingLineBlock = todoWidget.slice(
+  todoWidget.indexOf("function todoHeadingLine"),
+  todoWidget.indexOf("export function isTodoTaskBlocked"),
+);
+hasAll(todoHeadingLineBlock, [
+  'if (hint !== "" && visibleWidth(heading) + visibleWidth(hint) <= width)',
+  '`${heading}${theme.fg("dim", hint)}`', 'return truncateToWidth(heading, width, "…")',
+], "Todo collapsed hint is one atomic dim segment that only fits or disappears");
+hasNone(todoHeadingLineBlock, ["theme.bold(hint)", "slice(0,", "to collapse"], "Todo hint must never be bold, split, or inverted");
+hasAll(todoWidget, [
+  "expanded = true", 'hint = ""',
+  'const sorted = expanded ? ranked : ranked.filter((task) => task.status !== "completed")',
+  'const policyHidden = expanded ? 0 : tasks.filter((task) => task.status === "completed").length',
+  "selectTodoWidgetLayout(tasks, maxLines, expanded)",
+], "Todo collapsed policy hides only completed rows and ranks against the whole ledger");
 hasAll(todoExtension, [
   "context.expanded === true", "todoCallTitle", 'theme.bold("todo")', 'theme.fg("muted", detail)',
   '`· ${action}${expanded ? "" : " (ctrl+o to expand)"}`', 'action === "list" || !expanded',
@@ -1314,7 +1458,13 @@ hasAll(loopUiTests, [
   "compact receipts", "result fallback", "fire renderer", "without mutation",
   "· fire 3 (ctrl+o to expand)", "Legacy first  line (ctrl+o to expand)",
   "├─ ↻  middle", "[↻!Ⅱ●] [^ ]|[↻!Ⅱ●] {3}", "wideAnsi", "visibleWidth(line) <= 28",
-], "Loop focused visual tests");
+  'assert.equal(lines[0], "●  Loops")', "the Loops heading carries no active/total ratio",
+  "drops the ratio, mirrors the Todo active and idle roles, and never joins Ctrl+O expansion",
+  '"○  Loops"', "the idle Loops heading stays dim without bold emphasis",
+  "an all-paused Loops widget renders no accent role",
+  "Loops never filters rows and never appends an expand hint",
+  "the Loops renderer takes no expansion parameters", "roleAnsiTheme",
+], "Loop focused ratio-free heading and no-expansion visual tests");
 const loopCoreTests = read("tests/loop.test.mjs");
 hasAll(loopCoreTests, [
   "synchronous injected timeout callbacks activate after commit", "scheduler failures preserve active modify and paused resume atomicity",
@@ -1353,7 +1503,20 @@ hasAll(todoTests, [
   "widget heading refreshes both ways across update, delete, clear, replay, tree, compact, and session restore",
   '"○  Todos (14/14)"', "all-completed widget must not render any accent role",
   "tool result keeps its existing non-widget heading visual", "roleAnsiTheme",
-], "Todo focused Ctrl+O and active-idle widget visual tests");
+  "collapsed widget keeps pending and in_progress rows, including blocked pending, and hides only completed ones",
+  '"●  Todos (2/6) · ctrl+o to expand"', '"├─ ○  blocked-work ⛓  open-dependency"',
+  '["○  Todos (2/2) · ctrl+o to expand"]', "a collapsed ledger with nothing hidden shows no hint at all",
+  "withConfiguredExpandKey", '"app.tools.expand"', '" · ctrl+shift+e to expand"',
+  "the hint renders identically in the active and idle heading states",
+  "the hint is never bold", "must drop the whole hint, never half of it",
+  "heading counts ignore both filtering and overflow",
+  "policy-hidden completed rows stay out of the overflow summary",
+  "reads Pi's live expansion state on every render without re-registering the widget",
+  "Ctrl+O must not re-register the widget", "Ctrl+O toggles straight back without a second registration",
+  "an all-completed collapsed ledger keeps a heading-only widget",
+  "a non-empty ledger stays registered while collapsed",
+  "an empty ledger still unregisters while collapsed",
+], "Todo focused Ctrl+O, active-idle, and collapsed-widget visual tests");
 const subagentTranscriptTests = read("tests/subagent-transcript-renderer.test.mjs");
 hasAll(subagentTranscriptTests, [
   "clear receipts stay compact when collapsed and list every retained-item warning when expanded",
@@ -1391,8 +1554,19 @@ hasAll(monitorUiTests, [
   "matched 2 (ctrl+o to expand)", "rate limited (ctrl+o to expand)", '${status} (ctrl+o to expand)',
   "fallbacks and errors sanitize controls", "model-facing list data invariant", "without a TUI context",
   "narrow.map((line) => stripVTControlCharacters(line))", '"printf done"',
-  "├─ ↻  running first", "[↻!×✓●] [^ ]|[↻!×✓●] {3}", "↻  Monitor [00000001]",
-], "Monitor focused widget, Ctrl+O, result, notification, fallback, invariant, and RPC visual tests");
+  "├─ ↻  running first", "[↻!×✓●○] [^ ]|[↻!×✓●○] {3}", "↻  Monitor [00000001]",
+  'assert.equal(lines[0], "●  Monitors")', "the Monitors heading carries no running/total ratio",
+  "collapsed body keeps only running rows", "one atomic dim expand hint",
+  '"●  Monitors · ctrl+o to expand"', '["○  Monitors · ctrl+o to expand"]',
+  "a collapsed widget with nothing hidden shows no hint at all",
+  "withConfiguredExpandKey", '"app.tools.expand"', '" · ctrl+shift+e to expand"',
+  "the hint renders identically in the active and idle heading states",
+  "the hint is never bold", "must drop the whole hint, never half of it",
+  "only the two budget-hidden running rows are summarised", "policy-hidden terminal rows never reach the body",
+  "reads Pi's live expansion state on every render without re-registering the widget",
+  "Ctrl+O must not re-register the widget", "Ctrl+O toggles straight back to the full body",
+  "a host without getToolsExpanded stays expanded", "roleAnsiTheme",
+], "Monitor focused widget, ratio-free heading, collapse, hint, and RPC visual tests");
 const loopLoadTests = read("tests/loop-load.test.mjs");
 hasAll(loopLoadTests, [
   "real Pi isolated RPC main and child sessions expose exact package tools without widgets",
@@ -1421,8 +1595,12 @@ hasAll(goalUiTests, [
   "one shared 1s timer", "Component.invalidate is a no-op", "caches branch stats across timer ticks", "RPC or print widget",
   "all seven calls", "uniform collapsed hints", "status none/goal", "pause/resume no-change", "evidence, cancel, retry fields",
   "continuation and state notifications", "fallback hints", "data invariance", "continuation 7 (ctrl+o to expand)",
-  "no_progress: no_progress (ctrl+o to expand)", "●  Goal · ↻  active", "[↻Ⅱ◷✓×●] [^ ]|[↻Ⅱ◷✓×●] {3}", "continuationWide",
-], "Goal focused widget, lifecycle, Ctrl+O, result, notification, fallback, invariant, and RPC visual tests");
+  "no_progress: no_progress (ctrl+o to expand)", "●  Goal · ↻  active", "[↻Ⅱ◷✓×●○] [^ ]|[↻Ⅱ◷✓×●○] {3}", "continuationWide",
+  "pursuing versus idle across all five statuses and never joins Ctrl+O expansion",
+  "the Goal heading carries no ratio", "must render a hollow dim prefix", "must not bold the Goal prefix",
+  "the status glyph and text keep their own status colour", "the abstract keeps its existing text role",
+  "must never append an expand hint", "the Goal renderer takes no expansion parameters", "roleAnsiTheme",
+], "Goal focused widget, five-status prefix, no-expansion, and RPC visual tests");
 for (const file of ["tests/loop.test.mjs", "tests/provider-schema.test.mjs", "tests/subagent-runtime.test.mjs"]) {
   hasAll(read(file), ["./goal-runtime.js", "./goal-transcript-renderer.js", "./goal-widget.js"], `${file} Goal TypeScript load mappings`);
 }
@@ -1547,7 +1725,36 @@ hasAll(widgetRenderer, [
   "formatWidgetModel", "formatSubagentModel", "run.model", "formatWidgetTurns", "formatWidgetSessionTokens",
   "describeWidgetActivity", "activeLines.length * 3", "queuedLines.length", "budget >= 3", "run.abstract", "shortAbstract",
   "sortRetainedSubagentRuns(runs)", "lines.push(...sections.queuedLines, ...sections.finishedLines)",
+  "const expanded = params.expanded ?? true",
+  "const policyHidden = expanded ? 0 : categories.finished.length",
+  "const shown: Categories = expanded ? categories : { ...categories, finished: [] }",
+  "subagentHeadingLine(", "subagentWidgetHeading(runs, theme),", 'policyHidden > 0 ? params.hint ?? "" : "",',
+  "buildSections(shown, spinnerFrame, theme, truncate, nowMs)",
 ], "subagent widget renderer");
+const subagentHintBlock = widgetRenderer.slice(
+  widgetRenderer.indexOf("function subagentHeadingLine"),
+  widgetRenderer.indexOf("interface Categories"),
+);
+hasAll(subagentHintBlock, [
+  'if (hint !== "" && visibleWidth(heading) + visibleWidth(hint) <= width)',
+  '`${heading}${theme.fg("dim", hint)}`', "return truncateToWidth(heading, width)",
+], "Agents collapsed hint is one atomic dim segment that only fits or disappears");
+hasNone(subagentHintBlock, ["theme.bold(hint)", "slice(0,", "to collapse"], "Agents hint must never be bold, split, or inverted");
+const subagentHeadingBlock = widgetRenderer.slice(
+  widgetRenderer.indexOf("function subagentWidgetHeading"),
+  widgetRenderer.indexOf("function subagentHeadingLine"),
+);
+hasAll(subagentHeadingBlock, [
+  "runs.filter((run) => ACTIVE_STATUSES.has(run.status)).length", "const terminal = runs.length - live",
+  "const active = live > 0", 'const color = active ? "accent" : "dim"',
+  "theme.bold(SUBAGENT_WIDGET_GLYPHS.agentsActive)", "SUBAGENT_WIDGET_GLYPHS.agentsIdle",
+  "theme.bold(`Agents (${terminal}/${runs.length})`)", "`Agents (${terminal}/${runs.length})`",
+  "formatSemanticGlyphPrefix(theme.fg(color, glyph))", "theme.fg(color, label)",
+], "Subagent persistent widget active and all-terminal idle heading visual");
+hasNone(subagentHeadingBlock, [
+  "theme.bold(SUBAGENT_WIDGET_GLYPHS.agentsIdle)", "categories", "sections", "maxBody",
+], "Subagent idle heading must stay dim without bold and count runs before any layout budget");
+hasNone(widgetRenderer, ["headingColor", "headingIcon"], "Subagent heading must render through the active-idle heading helper");
 hasNone(widgetRenderer, ["run.task", "shortTask"], "abstract-only widget labels");
 hasAll(modelDisplay, ["THINKING_LEVELS", "formatSubagentModel", '"xhigh"', '"max"'], "subagent model display formatter");
 hasAll(transcriptRenderer, [
@@ -1680,6 +1887,7 @@ if (packCheck.status === 0) {
     check(files.includes("extensions/todo/index.ts"), "npm pack must include the Todo extension entry");
     check(files.includes("extensions/todo/core.ts"), "npm pack must include the Todo state core");
     check(files.includes("extensions/todo/widget.ts"), "npm pack must include the Todo widget");
+    check(files.includes("extensions/oh-my-pi-slim/widget-expansion.ts"), "npm pack must include the shared widget expansion module");
     check(files.includes("tests/todo.test.mjs"), "npm pack must include the Todo contract tests");
     check(files.includes("tests/fixtures/todo-load-probe.ts"), "npm pack must include the Todo real-Pi load probe");
     check(files.includes("agents/observer.md"), "npm pack must include the Observer role");

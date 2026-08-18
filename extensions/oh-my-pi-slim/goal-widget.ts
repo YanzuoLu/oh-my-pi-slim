@@ -94,11 +94,25 @@ function statsLabel(owner: "main" | "child", stats: GoalExecutionStats): string 
   return `${owner} ${compactGoalTokens(stats.tokens)} tok/${countLabel(stats.tools, "tool")}/${countLabel(stats.turns, "turn")}/${countLabel(stats.compactions, "comp", "comp")}`;
 }
 
+/** Pursuing goals keep working; idle goals are parked, finished, or abandoned. */
+function isGoalPursuing(status: GoalStatus): boolean {
+  return status === "active" || status === "retry_wait";
+}
+
+/** Ratio-free prefix shared with the other persistent widgets: filled accent-or-warning bold, or hollow dim. */
+function goalWidgetPrefix(status: GoalStatus, theme: Theme): string {
+  const pursuing = isGoalPursuing(status);
+  const role = pursuing ? statusRole(status) : "dim";
+  const glyph = pursuing ? theme.bold("●") : "○";
+  const label = pursuing ? theme.bold("Goal") : "Goal";
+  return `${formatSemanticGlyphPrefix(theme.fg(role, glyph))}${theme.fg(role, label)}`;
+}
+
 function headingLine(view: GoalView, theme: Theme, width: number): string {
   const goal = view.goal!;
   const safeWidth = Math.max(1, width);
   const role = statusRole(goal.status);
-  const heading = `${formatSemanticGlyphPrefix(theme.fg(role, theme.bold("●")))}${theme.fg(role, theme.bold("Goal"))} ${theme.fg("dim", "·")} ${formatSemanticGlyphPrefix(goalStatusGlyph(goal.status, theme))}${theme.fg(role, sanitizeGoalText(goal.status))} ${theme.fg("dim", "·")} `;
+  const heading = `${goalWidgetPrefix(goal.status, theme)} ${theme.fg("dim", "·")} ${formatSemanticGlyphPrefix(goalStatusGlyph(goal.status, theme))}${theme.fg(role, sanitizeGoalText(goal.status))} ${theme.fg("dim", "·")} `;
   if (visibleWidth(heading) >= safeWidth) return truncateToWidth(heading.trimEnd(), safeWidth, "…");
   const abstractWidth = safeWidth - visibleWidth(heading);
   const abstract = truncateToWidth(sanitizeGoalText(goal.abstract), abstractWidth, "…");

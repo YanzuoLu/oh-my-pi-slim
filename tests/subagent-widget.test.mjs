@@ -10,6 +10,7 @@ import test from "node:test";
 const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
 const piRoot = dirname(dirname(piEntry));
 const dependencyMap = {
+  "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
   "./subagent-model-display.js": new URL("../extensions/oh-my-pi-slim/subagent-model-display.ts", import.meta.url).href,
@@ -18,6 +19,7 @@ const dependencyMap = {
   "./subagent-widget-glyphs.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-glyphs.ts", import.meta.url).href,
   "./subagent-run-files.js": new URL("../extensions/oh-my-pi-slim/subagent-run-files.ts", import.meta.url).href,
   "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -26,7 +28,8 @@ registerHooks({
   },
 });
 
-const { visibleWidth } = await import("@earendil-works/pi-tui");
+const { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, visibleWidth } = await import("@earendil-works/pi-tui");
+const { widgetExpandHint } = await import("../extensions/oh-my-pi-slim/widget-expansion.ts");
 const {
   SubagentRegistry,
   restoreRunJournal,
@@ -50,6 +53,24 @@ const vtTheme = {
   fg: (_color, text) => `\u001b[36m${text}\u001b[0m`,
   bold: (text) => `\u001b[1m${text}\u001b[22m`,
 };
+const roleAnsiTheme = {
+  fg: (color, text) => {
+    const code = { accent: 35, dim: 2, success: 32, muted: 90, warning: 33, error: 31 }[color] ?? 39;
+    return `\u001b[${code}m${text}\u001b[0m`;
+  },
+  bold: (text) => `\u001b[1m${text}\u001b[22m`,
+};
+
+const DEFAULT_HINT = " · ctrl+o to expand";
+
+/** Installs a user-configured `app.tools.expand` binding so the hint proves it reads the live keymap. */
+function withConfiguredExpandKey(keys, body) {
+  setKeybindings(new KeybindingsManager(
+    { ...TUI_KEYBINDINGS, "app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" } },
+    { "app.tools.expand": keys },
+  ));
+  try { body(); } finally { setKeybindings(null); }
+}
 
 function run(overrides = {}) {
   return {
@@ -197,14 +218,14 @@ test("pure widget renderer preserves the three-line active tree and queued summa
     nowMs: NOW_MS,
   });
   assert.deepEqual(lines, [
-    "●  Agents",
+    "**●**  **Agents (1/3)**",
     "├─ ⠋  **fixer [live]**  implement the widget",
     "│  ├─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
     "│  └─ thinking…",
     "├─ ◦  fixer [queue]  implement the widget · ↻  0 · 5.0s queued",
     "└─ ✓  fixer [done]  implement the widget · ↻  0 · 5.0s",
   ]);
-  assert.doesNotMatch(lines.join("\n"), /[●⠋↻◦✓] [^ ]|[●⠋↻◦✓] {3}/);
+  assert.doesNotMatch(lines.join("\n").replaceAll("**", ""), /[●⠋↻◦✓] [^ ]|[●⠋↻◦✓] {3}/);
   assert.match(lines.slice(1).join("\n"), /^├─ /, "tree connectors keep their structural separator");
 
   for (const terminalWidth of [24, 80]) {
@@ -241,6 +262,7 @@ test("pure widget renderer caps at 12 lines, keeps active entries atomic, and re
     nowMs: NOW_MS,
   });
   assert.equal(lines.length, MAX_SUBAGENT_WIDGET_LINES);
+  assert.equal(lines[0], "**●**  **Agents (2/9)**", "hidden rows never change the retained counts");
   assert.match(lines[1], /active-0.*waiting/);
   assert.match(lines[2], /^│  ├─ \(openai\) gpt-5\.6-sol • xhigh · ↻  0/);
   assert.equal(lines[3], "│  └─ supervisor reply required");
@@ -270,9 +292,255 @@ test("pure widget renderer caps at 12 lines, keeps active entries atomic, and re
     .filter((line) => /^(?:├─|└─) /.test(line) && !line.includes("more ("))
     .map((line) => /\[([^\]]+)\]/.exec(line)?.[1])
     .filter(Boolean);
+  assert.equal(orderedOverflow[0], "**●**  **Agents (8/10)**", "two hidden terminal rows still count toward the heading");
   assert.deepEqual(visibleIds, ["active", "starting", "term-7", "term-6", "term-5", "term-4", "term-3", "term-2"]);
   assert.equal(orderedOverflow.at(-1), "└─ +2 more (2 finished)");
   assert.doesNotMatch(orderedOverflow.join("\n"), /term-0|term-1/);
+});
+
+test("persistent widget heading counts terminal over retained runs with Todo-parity active and idle roles", () => {
+  const heading = (runs, widgetTheme = theme, terminalWidth = 200) =>
+    renderSubagentWidgetLines({ runs, spinnerFrame: 0, terminalWidth, theme: widgetTheme, nowMs: NOW_MS })[0];
+  const mixed = [
+    run({ id: "queued", status: "starting" }),
+    run({ id: "busy", status: "running" }),
+    run({ id: "held", status: "waiting" }),
+    run({ id: "ok-1", status: "completed" }),
+    run({ id: "ok-2", status: "completed" }),
+    run({ id: "bad-1", status: "failed", error: "boom" }),
+    run({ id: "bad-2", status: "failed", error: "boom" }),
+    run({ id: "stopped", status: "interrupted" }),
+  ];
+  assert.equal(heading(mixed), "**●**  **Agents (5/8)**");
+  assert.equal(
+    heading(mixed, roleAnsiTheme),
+    "\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mAgents (5/8)\u001b[22m\u001b[0m",
+  );
+  assert.equal(stripVTControlCharacters(heading(mixed, roleAnsiTheme)), "●  Agents (5/8)");
+  for (const status of ["starting", "running", "waiting"]) {
+    assert.equal(
+      heading([run({ id: "live", status }), run({ id: "term", status: "completed" })]),
+      "**●**  **Agents (1/2)**",
+      `${status} must count as live and stay out of the numerator`,
+    );
+  }
+
+  const terminalOnly = mixed.filter((value) => !["starting", "running", "waiting"].includes(value.status));
+  assert.equal(heading(terminalOnly), "○  Agents (5/5)");
+  assert.equal(heading(terminalOnly, roleAnsiTheme), "\u001b[2m○\u001b[0m  \u001b[2mAgents (5/5)\u001b[0m");
+  const idleLines = renderSubagentWidgetLines({ runs: terminalOnly, spinnerFrame: 0, terminalWidth: 200, theme: roleAnsiTheme, nowMs: NOW_MS });
+  assert.doesNotMatch(idleLines.join("\n"), /\u001b\[35m/, "an all-terminal widget must not render any accent role");
+  assert.doesNotMatch(idleLines[0], /\u001b\[1m/, "the idle heading must stay dim without bold emphasis");
+
+  for (const width of [6, 12, 20]) {
+    for (const runs of [mixed, terminalOnly]) {
+      const narrow = renderSubagentWidgetLines({ runs, spinnerFrame: 0, terminalWidth: width, theme: roleAnsiTheme, nowMs: NOW_MS });
+      assert.ok(narrow.every((line) => visibleWidth(line) <= width));
+    }
+  }
+  assert.match(heading(terminalOnly, theme, 6), /^○  /);
+  assert.deepEqual(renderSubagentWidgetLines({ runs: [], spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS }), []);
+});
+
+test("persistent widget heading refreshes on every live-to-terminal flip and clears with the last retained run", () => {
+  let runs = [run({ id: "live", status: "running" }), run({ id: "done", status: "completed" })];
+  const widgetCalls = [];
+  let component;
+  const tui = { terminal: { columns: 120 }, requestRender() {} };
+  const widget = new SubagentWidget(() => runs, { setInterval() { return "timer"; }, clearInterval() {} });
+  widget.setUICtx({
+    setStatus() {},
+    setWidget(key, content) {
+      widgetCalls.push({ key, content });
+      component = typeof content === "function" ? content(tui, theme) : undefined;
+    },
+  });
+
+  widget.update();
+  assert.equal(component.render()[0], "**●**  **Agents (1/2)**");
+
+  runs = [run({ id: "live", status: "waiting" }), run({ id: "done", status: "completed" })];
+  widget.update();
+  assert.equal(component.render()[0], "**●**  **Agents (1/2)**");
+
+  runs = [run({ id: "live", status: "interrupted" }), run({ id: "done", status: "completed" })];
+  widget.update();
+  assert.equal(component.render()[0], "○  Agents (2/2)", "the last live run settling flips the heading to idle");
+
+  runs = [...runs, run({ id: "fresh", status: "starting" })];
+  widget.onTurnStart();
+  assert.equal(component.render()[0], "**●**  **Agents (2/3)**", "a restored or created run flips the heading back to active");
+
+  runs = [];
+  widget.update();
+  assert.equal(widgetCalls.at(-1).content, undefined, "clearing every retained run unregisters the widget");
+});
+
+test("collapsed Agents body keeps starting, running, and waiting rows and hides every terminal run", () => {
+  const runs = [
+    run({ id: "live", status: "running", model: "openai/gpt-5.6-sol:xhigh", updatedAt: "2026-04-16T23:59:56.000Z" }),
+    run({ id: "held", status: "waiting", model: "openai/gpt-5.6-sol:xhigh" }),
+    run({ id: "queue", status: "starting" }),
+    run({ id: "ok", status: "completed" }),
+    run({ id: "bad", status: "failed", error: "boom" }),
+    run({ id: "stopped", status: "interrupted" }),
+  ];
+  const render = (overrides) => renderSubagentWidgetLines({
+    runs, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS, ...overrides,
+  });
+
+  const expanded = render({});
+  assert.deepEqual(render({ expanded: true, hint: DEFAULT_HINT }), expanded, "expanded keeps the previous body byte for byte");
+  assert.equal(expanded.length, 11);
+
+  assert.deepEqual(render({ expanded: false, hint: DEFAULT_HINT }), [
+    "**●**  **Agents (3/6)** · ctrl+o to expand",
+    "├─ !  **fixer [held]** waiting  implement the widget",
+    "│  ├─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
+    "│  └─ supervisor reply required",
+    "├─ ⠋  **fixer [live]**  implement the widget",
+    "│  ├─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
+    "│  └─ thinking…",
+    "└─ ◦  fixer [queue]  implement the widget · ↻  0 · 5.0s queued",
+  ]);
+
+  const liveOnly = runs.filter((value) => ["starting", "running", "waiting"].includes(value.status));
+  assert.deepEqual(
+    renderSubagentWidgetLines({ runs: liveOnly, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS, expanded: false, hint: DEFAULT_HINT }),
+    renderSubagentWidgetLines({ runs: liveOnly, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS }),
+    "a collapsed widget with nothing hidden shows no hint at all",
+  );
+
+  const terminalOnly = runs.filter((value) => !["starting", "running", "waiting"].includes(value.status));
+  const idle = { runs: terminalOnly, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS };
+  assert.deepEqual(
+    renderSubagentWidgetLines({ ...idle, expanded: false, hint: DEFAULT_HINT }),
+    ["○  Agents (3/3) · ctrl+o to expand"],
+    "an all-terminal collapsed widget keeps a heading-only body with no tree",
+  );
+  assert.equal(renderSubagentWidgetLines({ ...idle, expanded: true, hint: DEFAULT_HINT }).length, 4);
+
+  const soloActive = renderSubagentWidgetLines({
+    runs: [runs[0], runs[3]], spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS, expanded: false, hint: DEFAULT_HINT,
+  });
+  assert.deepEqual(soloActive, [
+    "**●**  **Agents (1/2)** · ctrl+o to expand",
+    "└─ ⠋  **fixer [live]**  implement the widget",
+    "   ├─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
+    "   └─ thinking…",
+  ], "the last collapsed active entry keeps its three-line block and closes the tree");
+  assert.deepEqual(renderSubagentWidgetLines({ runs: [], spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS, expanded: false, hint: DEFAULT_HINT }), []);
+});
+
+test("collapsed Agents hint is one dim non-bold segment with the configured key, dropped whole when the width is tight", () => {
+  const mixed = [run({ id: "live", status: "running" }), run({ id: "ok", status: "completed" })];
+  const terminalOnly = [run({ id: "ok", status: "completed" })];
+  const heading = (runs, widgetTheme, terminalWidth) => renderSubagentWidgetLines({
+    runs, spinnerFrame: 0, terminalWidth, theme: widgetTheme, nowMs: NOW_MS, expanded: false, hint: DEFAULT_HINT,
+  })[0];
+  const dimHint = "\u001b[2m · ctrl+o to expand\u001b[0m";
+
+  const activeHeading = heading(mixed, roleAnsiTheme, 200);
+  assert.equal(
+    activeHeading,
+    `\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mAgents (1/2)\u001b[22m\u001b[0m${dimHint}`,
+  );
+  const idleHeading = heading(terminalOnly, roleAnsiTheme, 200);
+  assert.equal(idleHeading, `\u001b[2m○\u001b[0m  \u001b[2mAgents (1/1)\u001b[0m${dimHint}`);
+  assert.ok(
+    activeHeading.endsWith(dimHint) && idleHeading.endsWith(dimHint),
+    "the hint renders identically in the active and idle heading states",
+  );
+  assert.doesNotMatch(activeHeading.slice(activeHeading.indexOf(dimHint)), /\u001b\[1m/, "the hint is never bold");
+
+  withConfiguredExpandKey("ctrl+shift+e", () => {
+    assert.equal(widgetExpandHint(), " · ctrl+shift+e to expand");
+    assert.equal(
+      renderSubagentWidgetLines({
+        runs: mixed, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS, expanded: false, hint: widgetExpandHint(),
+      })[0],
+      "**●**  **Agents (1/2)** · ctrl+shift+e to expand",
+    );
+  });
+  assert.equal(widgetExpandHint(), DEFAULT_HINT, "an unconfigured keymap falls back to Pi's default binding");
+
+  const full = "○  Agents (1/1) · ctrl+o to expand";
+  assert.equal(heading(terminalOnly, theme, full.length), full);
+  for (const width of [1, 5, 10, 16, full.length - 1]) {
+    const narrow = heading(terminalOnly, theme, width);
+    assert.ok(visibleWidth(narrow) <= width, `width ${width} must stay inside the terminal`);
+    assert.doesNotMatch(narrow, /·|expand|ctrl/, `width ${width} must drop the whole hint, never half of it`);
+  }
+});
+
+test("collapsed Agents overflow spends the 12-line budget on live runs only and keeps the retained counts", () => {
+  const runs = [
+    ...Array.from({ length: 5 }, (_, index) => run({
+      id: `active-${index}`,
+      status: index === 0 ? "waiting" : "running",
+      model: "openai/gpt-5.6-sol:xhigh",
+    })),
+    run({ id: "queue-0", status: "starting" }),
+    ...Array.from({ length: 4 }, (_, index) => run({ id: `finished-${index}`, status: "completed" })),
+  ];
+  const collapsed = renderSubagentWidgetLines({
+    runs, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS, expanded: false, hint: DEFAULT_HINT,
+  });
+
+  assert.equal(collapsed.length, MAX_SUBAGENT_WIDGET_LINES);
+  assert.equal(collapsed[0], "**●**  **Agents (4/10)** · ctrl+o to expand", "heading counts ignore both filtering and overflow");
+  assert.equal(collapsed.at(-1), "└─ +2 more (2 active)", "policy-hidden terminal runs stay out of the overflow summary");
+  assert.doesNotMatch(collapsed.join("\n"), /finished-/);
+  assert.equal(collapsed.slice(1, -1).length, 10, "three whole lines per surviving active run plus the queued row, none split");
+});
+
+test("SubagentWidget reads Pi's live expansion state on every render without re-registering the widget", () => {
+  let expanded = true;
+  const runs = [run({ id: "live", status: "running" }), run({ id: "ok", status: "completed" })];
+  const widgetCalls = [];
+  let component;
+  const tui = { terminal: { columns: 200 }, requestRender() {} };
+  const widget = new SubagentWidget(() => runs, { setInterval() { return "timer"; }, clearInterval() {} });
+  widget.setUICtx({
+    getToolsExpanded: () => expanded,
+    setStatus() {},
+    setWidget(key, content) {
+      widgetCalls.push({ key, content });
+      component = typeof content === "function" ? content(tui, theme) : undefined;
+    },
+  });
+
+  widget.update();
+  const registrations = widgetCalls.filter((call) => typeof call.content === "function").length;
+  assert.equal(component.render().length, 5);
+
+  expanded = false;
+  const collapsed = component.render();
+  assert.equal(collapsed[0], "**●**  **Agents (1/2)** · ctrl+o to expand");
+  assert.equal(collapsed.length, 4);
+  assert.equal(
+    widgetCalls.filter((call) => typeof call.content === "function").length,
+    registrations,
+    "Ctrl+O must not re-register the widget",
+  );
+
+  expanded = true;
+  assert.equal(component.render().length, 5, "Ctrl+O toggles straight back to the full body");
+  assert.equal(widgetCalls.filter((call) => typeof call.content === "function").length, registrations);
+
+  const legacyCalls = [];
+  let legacyComponent;
+  const legacyWidget = new SubagentWidget(() => runs, { setInterval() { return "timer"; }, clearInterval() {} });
+  legacyWidget.setUICtx({
+    setStatus() {},
+    setWidget(key, content) {
+      legacyCalls.push({ key, content });
+      legacyComponent = typeof content === "function" ? content(tui, theme) : undefined;
+    },
+  });
+  legacyWidget.update();
+  assert.equal(legacyComponent.render().length, 5, "a host without getToolsExpanded stays expanded");
+  assert.doesNotMatch(legacyComponent.render().join("\n"), /to expand/);
 });
 
 test("widget registers its callback once, ticks at 80ms, then requests render", () => {

@@ -2,6 +2,7 @@ import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent"
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { MonitorStateChange, MonitorStatus } from "./monitor-runtime.js";
 import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
+import { readWidgetExpanded, widgetExpandHint } from "./widget-expansion.js";
 
 export const MONITOR_WIDGET_KEY = "oh-my-pi-slim:monitors";
 export const MAX_MONITOR_WIDGET_LINES = 12;
@@ -25,6 +26,7 @@ export interface MonitorWidgetTui {
 
 interface MonitorWidgetUI {
   readonly theme: Theme;
+  getToolsExpanded?(): boolean;
   setWidget(
     key: string,
     content: undefined | ((tui: MonitorWidgetTui, theme: Theme) => { render(width: number): string[]; invalidate(): void }),
@@ -117,20 +119,38 @@ function monitorLine(
   return truncateToWidth(`${glyphPrefix}${theme.fg("dim", `[${id}] · ${status}`)}`, safeWidth, "…");
 }
 
+/** Ratio-free heading: filled accent bold while anything runs, hollow dim once every monitor is terminal. */
+function monitorWidgetHeading(monitors: readonly MonitorWidgetItem[], theme: Theme): string {
+  const active = monitors.some((monitor) => monitor.status === "running");
+  const role = active ? "accent" : "dim";
+  const glyph = active ? theme.bold("●") : "○";
+  const label = active ? theme.bold("Monitors") : "Monitors";
+  return `${formatSemanticGlyphPrefix(theme.fg(role, glyph))}${theme.fg(role, label)}`;
+}
+
+/** Appends the collapsed hint only when the separator-through-expand segment fits whole; never half of it. */
+function monitorHeadingLine(heading: string, hint: string, theme: Theme, width: number): string {
+  if (hint !== "" && visibleWidth(heading) + visibleWidth(hint) <= width) {
+    return `${heading}${theme.fg("dim", hint)}`;
+  }
+  return truncateToWidth(heading, width, "…");
+}
+
 export function renderMonitorWidgetLines(
   monitors: readonly MonitorWidgetItem[],
   theme: Theme,
   width: number,
+  expanded = true,
+  hint = "",
 ): string[] {
   if (monitors.length === 0) return [];
   const safeWidth = Math.max(1, width);
   const sorted = sortMonitorsForDisplay(monitors);
-  const running = sorted.filter((monitor) => monitor.status === "running").length;
-  const visible = sorted.slice(0, MAX_VISIBLE_MONITORS);
-  const hidden = sorted.length - visible.length;
-  const headingRole = running > 0 ? "accent" : "dim";
-  const heading = `${formatSemanticGlyphPrefix(theme.fg(headingRole, theme.bold("●")))}${theme.fg(headingRole, theme.bold(`Monitors (${running}/${sorted.length})`))}`;
-  const lines = [truncateToWidth(heading, safeWidth, "…")];
+  const shown = expanded ? sorted : sorted.filter((monitor) => monitor.status === "running");
+  const policyHidden = sorted.length - shown.length;
+  const visible = shown.slice(0, MAX_VISIBLE_MONITORS);
+  const hidden = shown.length - visible.length;
+  const lines = [monitorHeadingLine(monitorWidgetHeading(sorted, theme), policyHidden > 0 ? hint : "", theme, safeWidth)];
 
   for (let index = 0; index < visible.length; index += 1) {
     const continues = index < visible.length - 1 || hidden > 0;
@@ -217,7 +237,13 @@ export class MonitorWidget {
       this.ui.setWidget(MONITOR_WIDGET_KEY, (tui, theme) => {
         this.tui = tui;
         return {
-          render: (width: number) => renderMonitorWidgetLines(this.listMonitors(), this.ui?.theme ?? theme, width),
+          render: (width: number) => renderMonitorWidgetLines(
+            this.listMonitors(),
+            this.ui?.theme ?? theme,
+            width,
+            readWidgetExpanded(this.ui),
+            widgetExpandHint(),
+          ),
           invalidate() {},
         };
       }, { placement: "aboveEditor" });

@@ -57,6 +57,14 @@ const vtTheme = {
   bg: (_color, text) => `\u001b[40m${text}\u001b[0m`,
   bold: (text) => `\u001b[1m${text}\u001b[22m`,
 };
+const roleAnsiTheme = {
+  fg: (color, text) => {
+    const code = { accent: 35, dim: 2, success: 32, text: 37, muted: 90, warning: 33, error: 31 }[color] ?? 39;
+    return `\u001b[${code}m${text}\u001b[0m`;
+  },
+  bg: (_color, text) => text,
+  bold: (text) => `\u001b[1m${text}\u001b[22m`,
+};
 
 function goal(overrides = {}) {
   return {
@@ -116,13 +124,13 @@ test("Goal widget renders five statuses, exact two-line order, stats, elapsed, r
   ]);
 
   const cases = [
-    ["active", "↻  active"],
-    ["paused", "Ⅱ  paused"],
-    ["retry_wait", "◷  retry_wait"],
-    ["completed", "✓  completed"],
-    ["cancelled", "×  cancelled"],
+    ["active", "↻  active", "●"],
+    ["paused", "Ⅱ  paused", "○"],
+    ["retry_wait", "◷  retry_wait", "●"],
+    ["completed", "✓  completed", "○"],
+    ["cancelled", "×  cancelled", "○"],
   ];
-  for (const [status, statusLabel] of cases) {
+  for (const [status, statusLabel, prefixGlyph] of cases) {
     const terminal = status === "completed" || status === "cancelled";
     const value = goal({
       status,
@@ -136,9 +144,10 @@ test("Goal widget renders five statuses, exact two-line order, stats, elapsed, r
     });
     const lines = renderGoalWidgetLines(view(value), theme, 180, NOW_MS);
     assert.equal(lines.length, 2);
-    assert.equal(lines[0], `●  Goal · ${statusLabel} · Ship the frozen Goal UI`);
+    assert.equal(lines[0], `${prefixGlyph}  Goal · ${statusLabel} · Ship the frozen Goal UI`);
+    assert.doesNotMatch(lines[0], /Goal \(/, "the Goal heading carries no ratio");
   }
-  assert.doesNotMatch(cases.map(([status]) => renderGoalWidgetLines(view(goal({ status })), theme, 180, NOW_MS)[0]).join("\n"), /[↻Ⅱ◷✓×●] [^ ]|[↻Ⅱ◷✓×●] {3}/);
+  assert.doesNotMatch(cases.map(([status]) => renderGoalWidgetLines(view(goal({ status })), theme, 180, NOW_MS)[0]).join("\n"), /[↻Ⅱ◷✓×●○] [^ ]|[↻Ⅱ◷✓×●○] {3}/);
 
   const retry = renderGoalWidgetLines(view(goal({
     status: "retry_wait", retryAttempt: 2, nextRetryAt: "2026-06-01T00:12:30.000Z", lastProviderError: "rate limited",
@@ -165,6 +174,32 @@ test("Goal widget renders five statuses, exact two-line order, stats, elapsed, r
   }
   assert.match(stripVTControlCharacters(renderGoalWidgetLines(view(), vtTheme, 80, NOW_MS)[0]), /^●  Goal · ↻  active/);
   assert.deepEqual(renderGoalWidgetLines(view(null, { elapsedMs: null }), theme, 80, NOW_MS), []);
+});
+
+test("Goal prefix marks pursuing versus idle across all five statuses and never joins Ctrl+O expansion", () => {
+  const prefix = (status) => renderGoalWidgetLines(view(goal({ status })), roleAnsiTheme, 180, NOW_MS)[0].split(" \u001b[2m·")[0];
+
+  assert.equal(prefix("active"), "\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mGoal\u001b[22m\u001b[0m");
+  assert.equal(prefix("retry_wait"), "\u001b[33m\u001b[1m●\u001b[22m\u001b[0m  \u001b[33m\u001b[1mGoal\u001b[22m\u001b[0m");
+  for (const status of ["paused", "completed", "cancelled"]) {
+    assert.equal(prefix(status), "\u001b[2m○\u001b[0m  \u001b[2mGoal\u001b[0m", `${status} must render a hollow dim prefix`);
+    assert.doesNotMatch(prefix(status), /\u001b\[1m/, `${status} must not bold the Goal prefix`);
+  }
+
+  const completed = renderGoalWidgetLines(view(goal({ status: "completed" })), roleAnsiTheme, 180, NOW_MS)[0];
+  assert.match(completed, /\u001b\[32m✓\u001b\[0m  \u001b\[32mcompleted\u001b\[0m/, "the status glyph and text keep their own status colour");
+  const cancelled = renderGoalWidgetLines(view(goal({ status: "cancelled" })), roleAnsiTheme, 180, NOW_MS)[0];
+  assert.match(cancelled, /\u001b\[31m×\u001b\[0m  \u001b\[31mcancelled\u001b\[0m/);
+  assert.match(completed, /\u001b\[37mShip the frozen Goal UI\u001b\[0m$/, "the abstract keeps its existing text role");
+
+  for (const status of ["active", "retry_wait", "paused", "completed", "cancelled"]) {
+    assert.doesNotMatch(
+      renderGoalWidgetLines(view(goal({ status })), theme, 180, NOW_MS).join("\n"),
+      /to expand|ctrl\+o/i,
+      `${status} must never append an expand hint`,
+    );
+  }
+  assert.equal(renderGoalWidgetLines.length, 3, "the Goal renderer takes no expansion parameters");
 });
 
 test("GoalWidget uses one shared 1s timer, keeps cached rendering, clears empty state, rebinds, and disposes without duplicate setWidget", () => {

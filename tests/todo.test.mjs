@@ -15,6 +15,7 @@ const dependencyMap = {
   "./core.js": new URL("../extensions/todo/core.ts", import.meta.url).href,
   "./widget.js": new URL("../extensions/todo/widget.ts", import.meta.url).href,
   "../oh-my-pi-slim/semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "../oh-my-pi-slim/widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -23,7 +24,8 @@ registerHooks({
   },
 });
 
-const { visibleWidth } = await import("@earendil-works/pi-tui");
+const { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, visibleWidth } = await import("@earendil-works/pi-tui");
+const { widgetExpandHint } = await import("../extensions/oh-my-pi-slim/widget-expansion.ts");
 const core = await import("../extensions/todo/core.ts");
 const todoModule = await import("../extensions/todo/index.ts");
 const widgetModule = await import("../extensions/todo/widget.ts");
@@ -68,6 +70,17 @@ function task(subject, status = "pending", blockedBy = [], abstract = `${subject
   return { subject, abstract, status, blockedBy };
 }
 
+const DEFAULT_HINT = " · ctrl+o to expand";
+
+/** Installs a user-configured `app.tools.expand` binding so the hint proves it reads the live keymap. */
+function withConfiguredExpandKey(keys, body) {
+  setKeybindings(new KeybindingsManager(
+    { ...TUI_KEYBINDINGS, "app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" } },
+    { "app.tools.expand": keys },
+  ));
+  try { body(); } finally { setKeybindings(null); }
+}
+
 function branchResult(details, { isError = false } = {}) {
   return {
     type: "message",
@@ -80,6 +93,7 @@ function createHarness({
   mode = "tui",
   branch = [],
   getAllTools = () => { throw new Error("runtime not initialized"); },
+  getToolsExpanded,
 } = {}) {
   const tools = [];
   const commands = [];
@@ -108,6 +122,7 @@ function createHarness({
       else widgetComponent = undefined;
     },
   };
+  if (getToolsExpanded) ui.getToolsExpanded = getToolsExpanded;
   const ctx = {
     mode,
     hasUI: mode === "tui" || mode === "rpc",
@@ -684,6 +699,147 @@ test("widget active and all-completed idle headings keep exact roles, ANSI, widt
   assert.ok(overflowAnsi.every((line) => visibleWidth(line) <= 30));
   assert.doesNotMatch(overflowAnsi.join("\n"), /\u001b\[35m/);
   assert.match(overflowAnsi.at(-1), /\u001b\[2m\+4 more \(4 completed\)\u001b\[0m/);
+});
+
+test("collapsed widget keeps pending and in_progress rows, including blocked pending, and hides only completed ones", () => {
+  const tasks = [
+    task("finished-dependency", "completed"),
+    task("open-dependency", "pending"),
+    task("ready-work", "pending", ["finished-dependency"]),
+    task("blocked-work", "pending", ["open-dependency"]),
+    task("active", "in_progress"),
+    task("finished-late", "completed"),
+  ];
+
+  const expanded = renderTodoLines(tasks, theme, 80);
+  assert.deepEqual(renderTodoLines(tasks, theme, 80, MAX_TODO_WIDGET_LINES, true, DEFAULT_HINT), expanded);
+  assert.deepEqual(expanded, [
+    "●  Todos (2/6)",
+    "├─ ◐  active",
+    "├─ ○  open-dependency",
+    "├─ ○  ready-work ⛓  finished-dependency",
+    "├─ ○  blocked-work ⛓  open-dependency",
+    "├─ ✓  ~finished-late~",
+    "└─ ✓  ~finished-dependency~",
+  ]);
+
+  assert.deepEqual(renderTodoLines(tasks, theme, 80, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT), [
+    "●  Todos (2/6) · ctrl+o to expand",
+    "├─ ◐  active",
+    "├─ ○  open-dependency",
+    "├─ ○  ready-work ⛓  finished-dependency",
+    "└─ ○  blocked-work ⛓  open-dependency",
+  ]);
+
+  const openOnly = tasks.filter((item) => item.status !== "completed");
+  assert.deepEqual(
+    renderTodoLines(openOnly, theme, 80, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT),
+    renderTodoLines(openOnly, theme, 80),
+    "a collapsed ledger with nothing hidden shows no hint at all",
+  );
+
+  const completedOnly = tasks.filter((item) => item.status === "completed");
+  assert.deepEqual(
+    renderTodoLines(completedOnly, theme, 80, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT),
+    ["○  Todos (2/2) · ctrl+o to expand"],
+  );
+  assert.equal(renderTodoLines(completedOnly, theme, 80, MAX_TODO_WIDGET_LINES, true, DEFAULT_HINT).length, 3);
+  assert.deepEqual(renderTodoLines([], theme, 80, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT), []);
+});
+
+test("collapsed Todo hint is one dim non-bold segment with the configured key, dropped whole when the width is tight", () => {
+  const mixed = [task("Open"), task("Done", "completed")];
+  const completedOnly = [task("Done", "completed")];
+  const dimHint = "\u001b[2m · ctrl+o to expand\u001b[0m";
+
+  const activeHeading = renderTodoLines(mixed, roleAnsiTheme, 80, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT)[0];
+  assert.equal(
+    activeHeading,
+    `\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mTodos (1/2)\u001b[22m\u001b[0m${dimHint}`,
+  );
+  const idleHeading = renderTodoLines(completedOnly, roleAnsiTheme, 80, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT)[0];
+  assert.equal(idleHeading, `\u001b[2m○\u001b[0m  \u001b[2mTodos (1/1)\u001b[0m${dimHint}`);
+  assert.ok(
+    activeHeading.endsWith(dimHint) && idleHeading.endsWith(dimHint),
+    "the hint renders identically in the active and idle heading states",
+  );
+  assert.doesNotMatch(activeHeading.slice(activeHeading.indexOf(dimHint)), /\u001b\[1m/, "the hint is never bold");
+
+  withConfiguredExpandKey("ctrl+shift+e", () => {
+    assert.equal(widgetExpandHint(), " · ctrl+shift+e to expand");
+    assert.equal(
+      renderTodoLines(mixed, theme, 80, MAX_TODO_WIDGET_LINES, false, widgetExpandHint())[0],
+      "●  Todos (1/2) · ctrl+shift+e to expand",
+    );
+  });
+  assert.equal(widgetExpandHint(), DEFAULT_HINT, "an unconfigured keymap falls back to Pi's default binding");
+
+  const full = "●  Todos (1/2) · ctrl+o to expand";
+  assert.equal(renderTodoLines(mixed, theme, full.length, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT)[0], full);
+  for (const width of [1, 5, 10, 15, full.length - 1]) {
+    const heading = renderTodoLines(mixed, theme, width, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT)[0];
+    assert.ok(visibleWidth(heading) <= width, `width ${width} must stay inside the terminal`);
+    assert.doesNotMatch(heading, /·|expand|ctrl/, `width ${width} must drop the whole hint, never half of it`);
+  }
+});
+
+test("collapsed Todo overflow counts only the visible open rows and keeps heading counts on the whole ledger", () => {
+  const tasks = [
+    ...Array.from({ length: 6 }, (_, index) => task(`done-${index}`, "completed")),
+    ...Array.from({ length: 12 }, (_, index) => task(`open-${index}`, "pending")),
+  ];
+
+  const expanded = renderTodoLines(tasks, theme, 60);
+  assert.equal(expanded[0], "●  Todos (6/18)");
+  assert.equal(expanded.at(-1), "└─ +8 more (6 completed, 2 pending)");
+
+  const collapsed = renderTodoLines(tasks, theme, 60, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT);
+  assert.equal(collapsed[0], "●  Todos (6/18) · ctrl+o to expand", "heading counts ignore both filtering and overflow");
+  assert.equal(collapsed.length, MAX_TODO_WIDGET_LINES);
+  assert.equal(collapsed.at(-1), "└─ +2 more (2 pending)", "policy-hidden completed rows stay out of the overflow summary");
+  assert.doesNotMatch(collapsed.join("\n"), /done-/);
+});
+
+test("TodoWidget reads Pi's live expansion state on every render without re-registering the widget", () => {
+  let expanded = true;
+  const harness = createHarness({ mode: "tui", getToolsExpanded: () => expanded });
+  harness.emit("session_start", { reason: "startup" });
+  runUpdate(harness.tool, harness.ctx, [
+    { op: "append", subject: "Open", abstract: "open" },
+    { op: "append", subject: "Done", abstract: "done" },
+    { op: "modify", target: "Done", status: "completed" },
+  ]);
+  const registrations = harness.widgetCalls.filter((call) => typeof call.content === "function").length;
+
+  assert.deepEqual(harness.widgetComponent.render(80), ["●  Todos (1/2)", "├─ ○  Open", "└─ ✓  ~Done~"]);
+
+  expanded = false;
+  assert.deepEqual(harness.widgetComponent.render(80), ["●  Todos (1/2) · ctrl+o to expand", "└─ ○  Open"]);
+  assert.equal(
+    harness.widgetCalls.filter((call) => typeof call.content === "function").length,
+    registrations,
+    "Ctrl+O must not re-register the widget",
+  );
+
+  runUpdate(harness.tool, harness.ctx, [{ op: "modify", target: "Open", status: "completed" }]);
+  assert.deepEqual(
+    harness.widgetComponent.render(80),
+    ["○  Todos (2/2) · ctrl+o to expand"],
+    "an all-completed collapsed ledger keeps a heading-only widget",
+  );
+  assert.notEqual(harness.widgetCalls.at(-1).content, undefined, "a non-empty ledger stays registered while collapsed");
+
+  expanded = true;
+  assert.deepEqual(harness.widgetComponent.render(80), ["○  Todos (2/2)", "├─ ✓  ~Done~", "└─ ✓  ~Open~"]);
+  assert.equal(
+    harness.widgetCalls.filter((call) => typeof call.content === "function").length,
+    registrations,
+    "Ctrl+O toggles straight back without a second registration",
+  );
+
+  expanded = false;
+  runUpdate(harness.tool, harness.ctx, [{ op: "clear" }]);
+  assert.equal(harness.widgetCalls.at(-1).content, undefined, "an empty ledger still unregisters while collapsed");
 });
 
 test("widget heading refreshes both ways across update, delete, clear, replay, tree, compact, and session restore", () => {

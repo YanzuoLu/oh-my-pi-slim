@@ -27,6 +27,7 @@ registerHooks({
     if (specifier === "./monitor-widget.js") return { url: new URL("../extensions/oh-my-pi-slim/monitor-widget.ts", import.meta.url).href, shortCircuit: true };
     if (specifier === "./monitor-runtime.js") return { url: new URL("../extensions/oh-my-pi-slim/monitor-runtime.ts", import.meta.url).href, shortCircuit: true };
     if (specifier === "./semantic-glyph.js") return { url: new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href, shortCircuit: true };
+    if (specifier === "./widget-expansion.js") return { url: new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href, shortCircuit: true };
     return nextResolve(specifier, context);
   },
 });

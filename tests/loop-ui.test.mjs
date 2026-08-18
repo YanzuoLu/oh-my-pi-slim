@@ -50,6 +50,14 @@ const vtTheme = {
   bg: (_color, text) => `\u001b[40m${text}\u001b[0m`,
   bold: (text) => `\u001b[1m${text}\u001b[22m`,
 };
+const roleAnsiTheme = {
+  fg: (color, text) => {
+    const code = { accent: 35, dim: 2, success: 32, text: 37, muted: 90, warning: 33, error: 31 }[color] ?? 39;
+    return `\u001b[${code}m${text}\u001b[0m`;
+  },
+  bg: (_color, text) => text,
+  bold: (text) => `\u001b[1m${text}\u001b[22m`,
+};
 
 function loop(overrides = {}) {
   return {
@@ -99,7 +107,8 @@ test("Loop widget renders exact heading, glyph priority, counts, order, and two-
     loop({ id: "00000004", abstract: "middle", nextFireAt: "2026-05-01T00:00:20.000Z", fireCount: 1 }),
   ];
   const lines = renderLoopWidgetLines(loops, theme, 120, NOW_MS);
-  assert.equal(lines[0], "●  Loops (3/4)");
+  assert.equal(lines[0], "●  Loops");
+  assert.doesNotMatch(lines[0], /\(|\)|\d/, "the Loops heading carries no active/total ratio");
   assert.match(lines[1], /^├─ !  failed last time \[00000002\]$/);
   assert.equal(lines[2], "│  └─ Every 10s · next in 10s · 0 fires · 1 failure: queue unavailable");
   assert.match(lines[3], /^├─ ↻  middle \[00000004\]$/);
@@ -110,6 +119,34 @@ test("Loop widget renders exact heading, glyph priority, counts, order, and two-
   assert.doesNotMatch(lines.join("\n"), /[↻!Ⅱ●] [^ ]|[↻!Ⅱ●] {3}/);
   assert.equal(lines[8], "   └─ Every 10s · paused · 1 fire");
   assert.equal(lines.length, 9);
+});
+
+test("Loop heading drops the ratio, mirrors the Todo active and idle roles, and never joins Ctrl+O expansion", () => {
+  const activeMix = [loop({ id: "00000001" }), loop({ id: "00000002", status: "paused", nextFireAt: null })];
+  const allPaused = [
+    loop({ id: "00000001", status: "paused", nextFireAt: null }),
+    loop({ id: "00000002", status: "paused", nextFireAt: null, abstract: "second parked loop" }),
+  ];
+
+  assert.equal(renderLoopWidgetLines(activeMix, theme, 120, NOW_MS)[0], "●  Loops");
+  assert.equal(
+    renderLoopWidgetLines(activeMix, roleAnsiTheme, 120, NOW_MS)[0],
+    "\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mLoops\u001b[22m\u001b[0m",
+  );
+
+  assert.equal(renderLoopWidgetLines(allPaused, theme, 120, NOW_MS)[0], "○  Loops");
+  const idle = renderLoopWidgetLines(allPaused, roleAnsiTheme, 120, NOW_MS);
+  assert.equal(idle[0], "\u001b[2m○\u001b[0m  \u001b[2mLoops\u001b[0m");
+  assert.doesNotMatch(idle[0], /\u001b\[1m/, "the idle Loops heading stays dim without bold emphasis");
+  assert.doesNotMatch(idle.join("\n"), /\u001b\[35m/, "an all-paused Loops widget renders no accent role");
+
+  const expandedBody = renderLoopWidgetLines(allPaused, theme, 120, NOW_MS);
+  const collapsedBody = renderLoopWidgetLines(allPaused, theme, 120, NOW_MS);
+  assert.deepEqual(collapsedBody, expandedBody, "Loops never filters rows and never appends an expand hint");
+  assert.equal(collapsedBody.length, 5);
+  assert.doesNotMatch(collapsedBody.join("\n"), /to expand|ctrl\+o/i);
+  assert.doesNotMatch(renderLoopWidgetLines(activeMix, theme, 120, NOW_MS).join("\n"), /to expand|ctrl\+o/i);
+  assert.equal(renderLoopWidgetLines.length, 3, "the Loops renderer takes no expansion parameters");
 });
 
 test("Loop widget caps at 12 lines, preserves entries atomically, and keeps IDs under width truncation", () => {
@@ -172,7 +209,7 @@ test("LoopWidget uses one shared 1s timer and clears widget and timer for empty,
   assert.deepEqual(widgetCalls[0].options, { placement: "aboveEditor" });
   assert.equal(intervals.length, 1);
   assert.equal(intervals[0].milliseconds, 1_000);
-  assert.deepEqual(component.render(80)[0], "●  Loops (1/1)");
+  assert.deepEqual(component.render(80)[0], "●  Loops");
   component.invalidate();
   const registrationsAfterInvalidate = widgetCalls.length;
   const rendersAfterInvalidate = renders;
