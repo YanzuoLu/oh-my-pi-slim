@@ -453,6 +453,7 @@ export class OmpsSubagentRuntime {
       promptGuidelines: [
         "Delegate bounded specialist work with `subagent create` when an independent lane improves progress.",
         "Give concurrent `subagent create` runs disjoint writer ownership and nonconflicting dependencies.",
+        "`subagent create` returns asynchronously, so do not continue work that overlaps the active run's assigned scope.",
         "Do not duplicate work owned by a starting, running, or waiting `subagent` run.",
         "`subagent create` starts new work, while `subagent resume` starts a new run from reusable terminal context.",
         "`subagent list` summarizes retained runs, while `subagent status` returns one run's detailed result.",

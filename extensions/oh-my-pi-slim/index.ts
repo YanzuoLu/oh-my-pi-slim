@@ -7,6 +7,7 @@ import {
   SettingsManager,
   type ExtensionAPI,
   type ExtensionContext,
+  type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { registerAskRuntime } from "./ask-runtime.js";
 import { AskTuiDriver } from "./ask-tui.js";
@@ -27,6 +28,7 @@ import { SUBAGENT_NOTIFICATION_TYPE } from "./subagent-transcript-renderer.js";
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(EXTENSION_DIR, "../..");
 const ORCHESTRATOR_PROMPT = parseFrontmatter(readFileSync(join(EXTENSION_DIR, "orchestrator.md"), "utf8")).body.trim();
+const PACKAGE_VERSION = readPackageVersion(join(PACKAGE_ROOT, "package.json"));
 const CONFIG_FILE = "oh-my-pi-slim.json";
 const ROLE_NAMES = ["orchestrator", ...SPECIALIST_NAMES] as const;
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -133,6 +135,18 @@ function envPreset(): string | undefined {
 function nonEmptyString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.trim() === "") throw new Error(`${field} must be a non-empty string.`);
   return value.trim();
+}
+
+/** Read the shipped package version once at load so the footer never drifts from package metadata. */
+function readPackageVersion(path: string): string {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(`oh-my-pi-slim cannot read its package metadata at ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${path} must contain a JSON object.`);
+  return nonEmptyString((raw as Record<string, unknown>).version, `${path}.version`);
 }
 
 function modelPart(value: unknown, field: string): string {
@@ -259,6 +273,12 @@ function availablePresetsMessage(config: PresetConfig): string {
   return `Available presets: ${Object.keys(config.presets).join(", ")}. Default: ${config.defaultPreset ?? "none"}.\nUsage: /preset <name>`;
 }
 
+/** Footer status content for the active preset. Undefined clears the status slot. */
+export function presetStatusContent(theme: Pick<Theme, "fg">, presetName: string | undefined): string | undefined {
+  if (presetName === undefined) return undefined;
+  return theme.fg("accent", `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})`);
+}
+
 function isAnthropicOAuth(ctx: ExtensionContext): boolean {
   return ctx.model?.provider === "anthropic" && ctx.model?.api === "anthropic-messages" && ctx.modelRegistry.isUsingOAuth(ctx.model);
 }
@@ -344,8 +364,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
 
   function updateStatus(ctx: ExtensionContext): void {
     if (!ctx.hasUI) return;
-    const text = active ? `orchestrator${activePresetName ? `:${activePresetName}` : ""}` : undefined;
-    ctx.ui.setStatus("oh-my-pi-slim", text ? ctx.ui.theme.fg("accent", text) : undefined);
+    ctx.ui.setStatus("oh-my-pi-slim", presetStatusContent(ctx.ui.theme, active ? activePresetName : undefined));
   }
 
   function takeTreeNotificationHold(): TreeNotificationHold | undefined {
