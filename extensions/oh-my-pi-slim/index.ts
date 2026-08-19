@@ -38,7 +38,7 @@ const SAFE_MODEL_PART = /^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$/;
 const LIFECYCLE_TOOLS = new Set(["subagent", "contact_supervisor"]);
 
 const PHASE_REMINDER = `<system-reminder>
-!IMPORTANT! Scheduler workflow: First choose the lightest workflow that fits the work. If direct execution is justified, complete it and verify proportionately. Otherwise: plan lanes/dependencies → dispatch background specialists → track task IDs → wait for hook-driven completion → reconcile terminal results → verify. !END!
+!IMPORTANT! Scheduler workflow: First choose the lightest workflow that fits the work. If direct execution is justified, complete it and verify proportionately. Otherwise: plan lanes/dependencies → dispatch background specialists → continue non-overlapping work when available → await completion notifications → reconcile terminal results → verify. !END!
 </system-reminder>`;
 
 const RELOAD_PRESET_STORE_KEY = "__ompsActivePresetForReload";

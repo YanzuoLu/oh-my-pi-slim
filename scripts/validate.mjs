@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.6", "package version must be 0.10.6");
+check(packageJson.version === "0.10.7", "package version must be 0.10.7");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.6" && lock.packages?.[""]?.version === "0.10.6", "package-lock version must be 0.10.6");
+check(lock.version === "0.10.7" && lock.packages?.[""]?.version === "0.10.7", "package-lock version must be 0.10.7");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -315,6 +315,11 @@ hasAll(extension, [
   'goal?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)', "goal?.setUICtx(undefined)", "goal?.refreshFromBranch(ctx)",
   "monitors?.acknowledgeNotificationMessage(message)", "monitors?.retryQueuedNotificationsAfterAgentSettled()",
 ], "main extension contract");
+check(
+  extension.includes("!IMPORTANT! Scheduler workflow: First choose the lightest workflow that fits the work. If direct execution is justified, complete it and verify proportionately. Otherwise: plan lanes/dependencies → dispatch background specialists → continue non-overlapping work when available → await completion notifications → reconcile terminal results → verify. !END!"),
+  "phase reminder must preserve direct execution while forbidding overlapping post-dispatch work and waiting for notifications",
+);
+hasNone(extension, ["track task IDs", "hook-driven completion"], "phase reminder removed manual tracking and implementation-specific completion wording");
 // The footer status must name the active preset with the version taken from package metadata, never a second literal.
 hasAll(extension, [
   'const PACKAGE_ROOT = resolve(EXTENSION_DIR, "../..")',
@@ -1096,7 +1101,6 @@ checkSteBlock(subagentPromptSnippet, "subagent promptSnippet");
 const expectedSubagentGuidelines = [
   "Delegate bounded specialist work with `subagent create` when an independent lane improves progress.",
   "Give concurrent `subagent create` runs disjoint writer ownership and nonconflicting dependencies.",
-  "`subagent create` returns asynchronously, so do not continue work that overlaps the active run's assigned scope.",
   "Do not duplicate work owned by a starting, running, or waiting `subagent` run.",
   "`subagent create` starts new work, while `subagent resume` starts a new run from reusable terminal context.",
   "`subagent list` summarizes retained runs, while `subagent status` returns one run's detailed result.",
