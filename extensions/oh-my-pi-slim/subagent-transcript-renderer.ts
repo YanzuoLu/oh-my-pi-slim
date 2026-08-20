@@ -15,6 +15,8 @@ type MessageRenderOptionsLike = { outputPad?: number; expanded?: boolean };
 const RAW_HTML_TAG = /<\/?[A-Za-z][^>]*>/;
 const LIVE_STATUSES = new Set(["starting", "running"]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "interrupted"]);
+/** Interrupt outcomes whose tool result is itself the complete final delivery. */
+const INTERRUPT_FINAL_OUTCOMES = new Set(["stopped", "raced", "unconfirmed"]);
 
 function asRecord(value: unknown): UnknownRecord | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -204,12 +206,27 @@ function actionFromContext(context: ToolRenderContextLike, fallback: string): { 
   return { action: asString(args.action) ?? fallback, args };
 }
 
-function immediateAck(run: UnknownRecord, action: string, args: UnknownRecord, theme: Theme, expanded: boolean): Container {
+function immediateAck(
+  run: UnknownRecord,
+  action: string,
+  args: UnknownRecord,
+  theme: Theme,
+  expanded: boolean,
+  outcome?: string,
+): Container {
   const { agent, id, status } = runIdentity(run);
   const terminal = TERMINAL_STATUSES.has(status);
+  const interruptFinal = action === "interrupt" && outcome !== undefined && INTERRUPT_FINAL_OUTCOMES.has(outcome);
   let glyph = terminal ? statusGlyph(status, theme) : theme.fg("success", "✓");
   let text: string;
-  if (terminal && (action === "steer" || action === "interrupt")) {
+  if (interruptFinal) {
+    glyph = statusGlyph(status, theme);
+    text = outcome === "raced"
+      ? `${agent} [${id}] · ${status} before interrupt`
+      : outcome === "unconfirmed"
+        ? `${agent} [${id}] · ${status} · stop unconfirmed`
+        : `${agent} [${id}] · ${status} · stopped`;
+  } else if (terminal && (action === "steer" || action === "interrupt")) {
     text = `${agent} [${id}] · already ${status}`;
   } else if (action === "resume") {
     const source = asString(args.id) ?? asString(run.sourceRunId) ?? "unknown source";
@@ -226,9 +243,11 @@ function immediateAck(run: UnknownRecord, action: string, args: UnknownRecord, t
   }
   const container = new Container();
   container.addChild(new Text(`${formatSemanticGlyphPrefix(glyph)}${theme.fg("toolOutput", text)}`, 0, 0));
-  // Terminal steer never repeats final results, even when a legacy session replays a full run shape:
-  // the queued terminal notification owns that delivery.
-  if (terminal && expanded && action !== "steer") addFinalOutput(container, theme, run);
+  // A terminal steer or already-terminal interrupt never repeats final results, even when a legacy session
+  // replays a full run shape: the queued terminal notification owns that delivery. A synchronous interrupt
+  // that actually stopped, raced, or could not confirm the stop owns the delivery itself and expands fully.
+  const ownsFinalResult = interruptFinal || (action !== "steer" && action !== "interrupt");
+  if (terminal && expanded && ownsFinalResult) addFinalOutput(container, theme, run);
   return container;
 }
 
@@ -367,7 +386,7 @@ export function renderSubagentResult(
   if (action === "list" && Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme, expanded));
   const run = asRecord(details?.run);
   if (action === "status" && run) return spacedToolResult(renderRunStatus(run, theme, expanded));
-  if (run) return spacedToolResult(immediateAck(run, action, args, theme, expanded));
+  if (run) return spacedToolResult(immediateAck(run, action, args, theme, expanded, asString(details?.outcome)));
   if (Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme, expanded));
   return spacedToolResult(fallbackResult(result, theme, options.isPartial === true, expanded));
 }

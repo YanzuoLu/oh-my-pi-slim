@@ -73,7 +73,9 @@ const SPECIALISTS = new Set<SpecialistName>(SPECIALIST_NAMES);
 const DEFAULT_POLL_MS = 250;
 const DEFAULT_GRACE_MS = 5000;
 const DEFAULT_SHUTDOWN_WAIT_MS = 3500;
+const DEFAULT_INTERRUPT_WAIT_MS = 8000;
 const POST_TERM_GRACE_MS = 1500;
+const INTERRUPT_ERROR = "Interrupted by the parent session.";
 const LIFECYCLE_TOOLS = new Set(["subagent", "contact_supervisor"]);
 
 interface AgentDefinition {
@@ -94,6 +96,7 @@ interface RuntimeOptions {
   pollMs?: number;
   graceMs?: number;
   shutdownWaitMs?: number;
+  interruptWaitMs?: number;
   invocationSeams?: InvocationSeams;
   launchRunner?: typeof launchDetachedRunner;
   getProcessIdentity?: (pid: number) => string | undefined;
@@ -132,6 +135,12 @@ interface RepliedSeq {
   waitingSeq: number;
   sentAt: number;
 }
+
+/**
+ * Non-persisted classification of one synchronous `subagent interrupt` call.
+ * `already-terminal` never writes a control, and the other outcomes always carry the final result.
+ */
+export type InterruptOutcome = "already-terminal" | "stopped" | "raced" | "unconfirmed";
 
 export interface SubagentClearReceipt {
   clearedCount: number;
@@ -207,6 +216,28 @@ export function discoverPackageAgents(): Map<SpecialistName, AgentDefinition> {
 
 function toolText(text: string, details?: unknown) {
   return { content: [{ type: "text" as const, text }], details };
+}
+
+function abortError(message: string): Error {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
+}
+
+function terminalResultTail(run: PersistedRun): string {
+  const output = run.output !== undefined ? `\n\nOutput: ${run.output}` : "";
+  const error = run.error !== undefined ? `\n\nError: ${run.error}` : "";
+  return `${output}${error}`;
+}
+
+/** Interrupt hands back the same complete result that a terminal lifecycle notification would have carried. */
+function interruptResultText(run: PersistedRun, outcome: InterruptOutcome): string {
+  const headline = outcome === "raced"
+    ? `Run ${run.id} (${run.agent}) reached ${run.status} before the interrupt stopped it.`
+    : outcome === "unconfirmed"
+      ? `Run ${run.id} (${run.agent}) is ${run.status}, but its detached runner did not confirm that it stopped and its run directory is retained.`
+      : `Run ${run.id} (${run.agent}) is ${run.status}.`;
+  return `${headline}${terminalResultTail(run)}`;
 }
 
 function publicSchemaKeys(schema: { properties?: Record<string, unknown> }): string[] {
@@ -344,6 +375,7 @@ export class OmpsSubagentRuntime {
   private readonly pollMs: number;
   private readonly graceMs: number;
   private readonly shutdownWaitMs: number;
+  private readonly interruptWaitMs: number;
   private readonly invocationSeams?: InvocationSeams;
   private readonly launchRunner: typeof launchDetachedRunner;
   private readonly processIdentity: (pid: number) => string | undefined;
@@ -363,8 +395,15 @@ export class OmpsSubagentRuntime {
   private readonly health = new Map<string, RunHealth>();
   private readonly repliedSeqs = new Map<string, RepliedSeq>();
   private readonly queuedNotifications = new Set<string>();
-  private readonly reconciling = new Set<string>();
+  /** In-flight reconciliation pass per run, so a later termination can wait it out instead of racing its stop. */
+  private readonly reconciling = new Map<string, Promise<void>>();
   private readonly clearedRunIds = new Set<string>();
+  /** One shared termination per run, so concurrent interrupts and shutdown never race two stop sequences. */
+  private readonly terminating = new Map<string, Promise<PersistedRun>>();
+  /** Whether the last termination of a run confirmed that its detached runner actually stopped. */
+  private readonly terminationConfirmed = new Map<string, boolean>();
+  /** Run-scoped suppression owned by a synchronous interrupt that will hand back the final result itself. */
+  private readonly notificationSuppression = new Map<string, number>();
   private notificationDeliveryPaused = false;
   private clearing = false;
   private readonly unsubscribeRegistry: () => void;
@@ -376,6 +415,8 @@ export class OmpsSubagentRuntime {
   private denyResolver?: DenyResolver;
   private poller?: TimerHandle;
   private shuttingDown = false;
+  /** Bumped by restore and shutdown so an in-flight interrupt never hands a result to a replaced session. */
+  private generation = 0;
 
   constructor(pi: ExtensionAPI, options: RuntimeOptions = {}) {
     this.pi = pi;
@@ -385,6 +426,7 @@ export class OmpsSubagentRuntime {
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS;
     this.graceMs = options.graceMs ?? DEFAULT_GRACE_MS;
     this.shutdownWaitMs = options.shutdownWaitMs ?? DEFAULT_SHUTDOWN_WAIT_MS;
+    this.interruptWaitMs = options.interruptWaitMs ?? DEFAULT_INTERRUPT_WAIT_MS;
     this.invocationSeams = options.invocationSeams;
     this.launchRunner = options.launchRunner ?? launchDetachedRunner;
     this.processIdentity = options.getProcessIdentity ?? getProcessIdentity;
@@ -448,7 +490,7 @@ export class OmpsSubagentRuntime {
     this.pi.registerTool({
       name: "subagent",
       label: "Subagent",
-      description: "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, errors, and interruption outcomes. `subagent resume` starts a new run from reusable terminal context. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` requests termination of a live run without reverting file changes. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.",
+      description: "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.",
       promptSnippet: "Delegate and manage specialist runs.",
       promptGuidelines: [
         "Delegate bounded specialist work with `subagent create` when an independent lane improves progress.",
@@ -458,18 +500,19 @@ export class OmpsSubagentRuntime {
         "`subagent list` summarizes retained runs, while `subagent status` returns one run's detailed result.",
         "Use `subagent reply` only to answer the complete request from that same waiting run.",
         "Use `subagent steer` only for a genuine new instruction, not polling or reassurance.",
-        "Use `subagent interrupt` only for starting, running, or waiting runs that should stop.",
+        "Use `subagent interrupt` only to stop a starting, running, or waiting run and wait for its final result.",
         "`subagent interrupt` is not rollback, so inspect partial file changes before continuing.",
         "Use `subagent clear` only when every run is terminal and all retained history should be removed.",
       ],
       parameters: subagentParameters,
-      execute: async (_toolCallId, params) => this.executeSubagent(params as RuntimeInput),
+      execute: async (_toolCallId, params, signal) => this.executeSubagent(params as RuntimeInput, signal),
       renderCall: renderSubagentCall,
       renderResult: renderSubagentResult,
     });
   }
 
   async restore(ctx: ExtensionContext, notificationDeliveryPaused = false): Promise<void> {
+    this.generation += 1;
     this.stopPoller();
     this.widget.dispose();
     this.activity.clear();
@@ -479,6 +522,10 @@ export class OmpsSubagentRuntime {
     this.repliedSeqs.clear();
     this.queuedNotifications.clear();
     this.clearedRunIds.clear();
+    this.terminationConfirmed.clear();
+    // `terminating` and `notificationSuppression` deliberately survive a generation change: an interrupt started by the
+    // previous session still owns the only stop sequence for that OS process, and restore or shutdown must share it
+    // instead of signaling twice. The generation only blocks the stale handoff, never the shared termination itself.
     this.clearing = false;
     this.notificationDeliveryPaused = notificationDeliveryPaused;
     this.ctx = ctx;
@@ -516,7 +563,7 @@ export class OmpsSubagentRuntime {
       if (target && state?.token === target.config.token && state.runId === id && isTerminalStatus(state.status)) {
         this.applyState(id, state, true);
       } else {
-        await this.terminateRun(id, "Parent session ended before the run completed.", true);
+        await this.terminateRun(id, "Parent session ended before the run completed.", true).catch(() => undefined);
       }
     }));
     for (const run of this.registry.list()) this.deliverPendingNotification(run.id);
@@ -530,6 +577,7 @@ export class OmpsSubagentRuntime {
 
   async shutdown(): Promise<void> {
     if (this.shuttingDown) return;
+    this.generation += 1;
     this.shuttingDown = true;
     this.modelResolver = undefined;
     this.denyResolver = undefined;
@@ -538,7 +586,7 @@ export class OmpsSubagentRuntime {
     this.clearing = false;
     this.notificationDeliveryPaused = false;
     const activeIds = this.registry.list().filter((run) => ACTIVE_STATUSES.has(run.status)).map((run) => run.id);
-    await Promise.all(activeIds.map((id) => this.terminateRun(id, "Parent session shut down.", false)));
+    await Promise.all(activeIds.map((id) => this.terminateRun(id, "Parent session shut down.", false).catch(() => undefined)));
     this.widget.dispose();
     this.activity.clear();
     this.goalActivity.clear();
@@ -547,6 +595,7 @@ export class OmpsSubagentRuntime {
     this.repliedSeqs.clear();
     this.queuedNotifications.clear();
     this.clearedRunIds.clear();
+    this.terminationConfirmed.clear();
     this.notificationDeliveryPaused = false;
     this.ctx = undefined;
     this.ownerSessionId = undefined;
@@ -793,12 +842,10 @@ export class OmpsSubagentRuntime {
     const request = run.request
       ? `\n\nRequest:\n${JSON.stringify(run.request, null, 2)}`
       : "";
-    const output = run.output !== undefined ? `\n\nOutput: ${run.output}` : "";
-    const error = run.error !== undefined ? `\n\nError: ${run.error}` : "";
     this.pi.sendMessage(
       {
         customType: SUBAGENT_NOTIFICATION_TYPE,
-        content: `Subagent ${run.id} (${run.agent}) is ${delivery.event}.${request}${output}${error}`,
+        content: `Subagent ${run.id} (${run.agent}) is ${delivery.event}.${request}${terminalResultTail(run)}`,
         display: true,
         details: {
           run: this.formatRun(run),
@@ -815,8 +862,12 @@ export class OmpsSubagentRuntime {
     );
   }
 
+  /**
+   * Single choke point for every automatic lifecycle notification.
+   * A run suppressed by an in-flight synchronous interrupt returns its final result through that tool call instead.
+   */
   private deliverPendingNotification(id: string): void {
-    if (this.shuttingDown || this.clearing || this.notificationDeliveryPaused) return;
+    if (this.shuttingDown || this.clearing || this.notificationDeliveryPaused || this.notificationSuppression.has(id)) return;
     const run = this.registry.get(id);
     if (!run) return;
     const delivery = this.pendingNotificationDelivery(run);
@@ -824,6 +875,17 @@ export class OmpsSubagentRuntime {
     this.queuedNotifications.add(delivery.deliveryKey);
     try { this.sendNotification(run, delivery); }
     catch { this.queuedNotifications.delete(delivery.deliveryKey); }
+  }
+
+  private acquireNotificationSuppression(id: string): void {
+    this.notificationSuppression.set(id, (this.notificationSuppression.get(id) ?? 0) + 1);
+  }
+
+  private releaseNotificationSuppression(id: string): void {
+    const held = this.notificationSuppression.get(id);
+    if (held === undefined) return;
+    if (held <= 1) this.notificationSuppression.delete(id);
+    else this.notificationSuppression.set(id, held - 1);
   }
 
   retryQueuedNotificationsAfterAgentSettled(): void {
@@ -915,85 +977,91 @@ export class OmpsSubagentRuntime {
     this.failRun(id, error, true);
   }
 
-  private async reconcileRun(id: string): Promise<void> {
-    if (this.clearing) return;
-    if (this.reconciling.has(id)) return;
-    this.reconciling.add(id);
-    try {
-      const run = this.registry.get(id);
-      if (!run || isTerminalStatus(run.status)) return;
-      const target = this.validConfig(id);
-      if (!target) {
-        const paths = this.pathsFor(id);
-        if (!existsSync(paths.runDir)) {
-          this.updateRun(id, {
-            status: "interrupted",
-            error: "Detached run directory is missing.",
-            request: undefined,
-            notificationPending: "interrupted",
-            updatedAt: this.now(),
-          });
-          this.registry.markLive(id, false);
-          this.health.delete(id);
-          this.repliedSeqs.delete(id);
-          this.deliverPendingNotification(id);
-        } else {
-          console.error(`[oh-my-pi-slim] Retaining unverifiable detached run directory ${paths.runDir}: launch config is missing or invalid.`);
-          this.failRun(id, "Detached launch config is missing or invalid.", true);
-        }
-        return;
-      }
+  private reconcileRun(id: string): Promise<void> {
+    if (this.clearing) return Promise.resolve();
+    // A run already owned by a termination must never be failed, re-controlled, or re-signaled here:
+    // that owner writes the single interrupt control, performs the only stop, and adopts the authoritative terminal state.
+    if (this.terminating.has(id)) return Promise.resolve();
+    if (this.reconciling.has(id)) return Promise.resolve();
+    // The pass owns its own cleanup, so a termination waiting on it can never deadlock this map.
+    const pass = this.runReconcilePass(id).finally(() => { this.reconciling.delete(id); });
+    pass.catch(() => undefined);
+    this.reconciling.set(id, pass);
+    return pass;
+  }
 
-      const state = readRunState(target.paths);
-      const health = this.health.get(id) ?? { trackedAt: this.nowMs() };
-      this.health.set(id, health);
-      if (!state || state.token !== target.config.token || state.runId !== id) {
+  private async runReconcilePass(id: string): Promise<void> {
+    const run = this.registry.get(id);
+    if (!run || isTerminalStatus(run.status)) return;
+    const target = this.validConfig(id);
+    if (!target) {
+      const paths = this.pathsFor(id);
+      if (!existsSync(paths.runDir)) {
+        this.updateRun(id, {
+          status: "interrupted",
+          error: "Detached run directory is missing.",
+          request: undefined,
+          notificationPending: "interrupted",
+          updatedAt: this.now(),
+        });
         this.registry.markLive(id, false);
-        if (this.nowMs() - health.trackedAt >= this.graceMs) {
-          const log = tailLog(target.paths.logFile).trim();
-          await this.failUnhealthyRun(id, target, `Detached runner did not publish valid state.${log ? ` Runner log:\n${log}` : ""}`);
-        }
-        return;
+        this.health.delete(id);
+        this.repliedSeqs.delete(id);
+        this.deliverPendingNotification(id);
+      } else {
+        console.error(`[oh-my-pi-slim] Retaining unverifiable detached run directory ${paths.runDir}: launch config is missing or invalid.`);
+        this.failRun(id, "Detached launch config is missing or invalid.", true);
       }
+      return;
+    }
 
-      const repliedSeq = this.repliedSeqs.get(id);
-      let suppressWaitingReply = false;
-      if (repliedSeq) {
-        if (state.status === "running" || isTerminalStatus(state.status) || state.waitingSeq !== repliedSeq.waitingSeq) {
-          this.repliedSeqs.delete(id);
-        } else if (state.status === "waiting" && this.nowMs() - repliedSeq.sentAt < this.graceMs) {
-          suppressWaitingReply = true;
-        } else if (this.nowMs() - repliedSeq.sentAt >= this.graceMs) {
-          this.repliedSeqs.delete(id);
-        }
+    const state = readRunState(target.paths);
+    const health = this.health.get(id) ?? { trackedAt: this.nowMs() };
+    this.health.set(id, health);
+    if (!state || state.token !== target.config.token || state.runId !== id) {
+      this.registry.markLive(id, false);
+      if (this.nowMs() - health.trackedAt >= this.graceMs) {
+        const log = tailLog(target.paths.logFile).trim();
+        await this.failUnhealthyRun(id, target, `Detached runner did not publish valid state.${log ? ` Runner log:\n${log}` : ""}`);
       }
+      return;
+    }
 
-      const next = suppressWaitingReply
-        ? (this.activity.set(id, stateActivity(state)), this.widget.update(), run)
-        : this.applyState(id, state);
-      if (isTerminalStatus(next.status)) return;
-      if (!this.pidAlive(state.pid)) {
-        this.failRun(id, "Detached runner process exited before publishing a terminal state.", true);
-        return;
+    const repliedSeq = this.repliedSeqs.get(id);
+    let suppressWaitingReply = false;
+    if (repliedSeq) {
+      if (state.status === "running" || isTerminalStatus(state.status) || state.waitingSeq !== repliedSeq.waitingSeq) {
+        this.repliedSeqs.delete(id);
+      } else if (state.status === "waiting" && this.nowMs() - repliedSeq.sentAt < this.graceMs) {
+        suppressWaitingReply = true;
+      } else if (this.nowMs() - repliedSeq.sentAt >= this.graceMs) {
+        this.repliedSeqs.delete(id);
       }
-      this.registry.markLive(id, true);
+    }
 
-      if (health.lastHeartbeat !== state.heartbeatAt) {
-        health.lastHeartbeat = state.heartbeatAt;
-        health.staleSince = undefined;
-        return;
-      }
-      const heartbeatMs = Date.parse(state.heartbeatAt);
-      if (!Number.isFinite(heartbeatMs) || this.nowMs() - heartbeatMs <= this.graceMs) {
-        health.staleSince = undefined;
-        return;
-      }
-      health.staleSince ??= this.nowMs();
-      if (this.nowMs() - health.staleSince >= this.graceMs) {
-        await this.failUnhealthyRun(id, target, "Detached runner heartbeat no longer advances.");
-      }
-    } finally {
-      this.reconciling.delete(id);
+    const next = suppressWaitingReply
+      ? (this.activity.set(id, stateActivity(state)), this.widget.update(), run)
+      : this.applyState(id, state);
+    if (isTerminalStatus(next.status)) return;
+    if (!this.pidAlive(state.pid)) {
+      this.failRun(id, "Detached runner process exited before publishing a terminal state.", true);
+      return;
+    }
+    this.registry.markLive(id, true);
+
+    if (health.lastHeartbeat !== state.heartbeatAt) {
+      health.lastHeartbeat = state.heartbeatAt;
+      health.staleSince = undefined;
+      return;
+    }
+    const heartbeatMs = Date.parse(state.heartbeatAt);
+    if (!Number.isFinite(heartbeatMs) || this.nowMs() - heartbeatMs <= this.graceMs) {
+      health.staleSince = undefined;
+      return;
+    }
+    health.staleSince ??= this.nowMs();
+    if (this.nowMs() - health.staleSince >= this.graceMs) {
+      await this.failUnhealthyRun(id, target, "Detached runner heartbeat no longer advances.");
     }
   }
 
@@ -1004,38 +1072,74 @@ export class OmpsSubagentRuntime {
       .map((run) => this.reconcileRun(run.id)));
   }
 
-  private async terminateRun(id: string, error: string, notify: boolean): Promise<void> {
+  /**
+   * Drives one run to a terminal status and resolves with the retained final run.
+   * Concurrent callers share a single in-flight termination per run, so interrupt, shutdown, and restore never duplicate it.
+   */
+  private terminateRun(id: string, error: string, notify: boolean, waitMs = this.shutdownWaitMs): Promise<PersistedRun> {
+    const inFlight = this.terminating.get(id);
+    if (inFlight) return inFlight;
     const current = this.registry.get(id);
-    if (!current || isTerminalStatus(current.status)) return;
+    if (!current) return Promise.reject(new Error(`Run ${id} is no longer retained.`));
+    if (isTerminalStatus(current.status)) {
+      this.terminationConfirmed.set(id, true);
+      return Promise.resolve(current);
+    }
+    // Ownership is registered before any termination work starts, so no reconciliation observed in between
+    // can write a second control, signal the same process, or overwrite the authoritative terminal state.
+    const settled = Promise.resolve()
+      .then(() => this.runTermination(id, error, notify, waitMs))
+      .finally(() => { this.terminating.delete(id); });
+    // An aborted or abandoned caller must never turn a shared termination failure into an unhandled rejection.
+    settled.catch(() => undefined);
+    this.terminating.set(id, settled);
+    return settled;
+  }
+
+  private adoptTerminalState(id: string, state: DetachedRunState, notify: boolean): PersistedRun {
+    const next = this.applyState(id, state, notify);
+    this.terminationConfirmed.set(id, true);
+    return next;
+  }
+
+  /**
+   * Waits out a reconciliation pass that entered before this termination registered ownership.
+   * That pass may already own an interrupt control and a bounded verified stop, so its terminal result is authoritative.
+   */
+  private async settledByInFlightReconciliation(id: string): Promise<PersistedRun | undefined> {
+    const inFlight = this.reconciling.get(id);
+    if (!inFlight) return;
+    await inFlight.catch(() => undefined);
+    const current = this.registry.get(id);
+    if (!current) throw new Error(`Run ${id} is no longer retained.`);
+    if (!isTerminalStatus(current.status)) return;
+    this.terminationConfirmed.set(id, true);
+    return current;
+  }
+
+  private async runTermination(id: string, error: string, notify: boolean, waitMs: number): Promise<PersistedRun> {
+    this.terminationConfirmed.delete(id);
+    const reconciled = await this.settledByInFlightReconciliation(id);
+    if (reconciled) return reconciled;
     const target = this.validConfig(id);
     let latestState: DetachedRunState | undefined;
+    let stopConfirmed = false;
     if (target) {
       latestState = this.readVerifiedState(target, id);
-      if (latestState && isTerminalStatus(latestState.status)) {
-        this.applyState(id, latestState, notify);
-        return;
-      }
+      if (latestState && isTerminalStatus(latestState.status)) return this.adoptTerminalState(id, latestState, notify);
       try { this.controlWriter(target.paths, target.config.token, "interrupt"); } catch { /* force termination below */ }
-      const deadline = this.nowMs() + this.shutdownWaitMs;
+      const deadline = this.nowMs() + waitMs;
       while (this.nowMs() < deadline) {
         await this.sleep(Math.min(50, Math.max(1, deadline - this.nowMs())));
         latestState = this.readVerifiedState(target, id) ?? latestState;
-        if (latestState && isTerminalStatus(latestState.status)) {
-          this.applyState(id, latestState, notify);
-          return;
-        }
+        if (latestState && isTerminalStatus(latestState.status)) return this.adoptTerminalState(id, latestState, notify);
       }
       latestState = this.readVerifiedState(target, id) ?? latestState;
-      if (latestState && isTerminalStatus(latestState.status)) {
-        this.applyState(id, latestState, notify);
-        return;
-      }
+      if (latestState && isTerminalStatus(latestState.status)) return this.adoptTerminalState(id, latestState, notify);
       const stopped = await this.stopVerifiedProcess(target, id);
       latestState = stopped.state ?? latestState;
-      if (latestState && isTerminalStatus(latestState.status)) {
-        this.applyState(id, latestState, notify);
-        return;
-      }
+      if (latestState && isTerminalStatus(latestState.status)) return this.adoptTerminalState(id, latestState, notify);
+      stopConfirmed = stopped.safeToCleanup;
       if (latestState) this.activity.set(id, stateActivity(latestState));
     }
     const run = this.registry.require(id);
@@ -1051,7 +1155,54 @@ export class OmpsSubagentRuntime {
     this.registry.markLive(id, false);
     this.health.delete(id);
     this.repliedSeqs.delete(id);
+    this.terminationConfirmed.set(id, stopConfirmed);
     if (notify) this.deliverPendingNotification(id);
+    return this.registry.require(id);
+  }
+
+  private async awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined, message: string): Promise<T> {
+    if (!signal) return promise;
+    if (signal.aborted) throw abortError(message);
+    let onAbort: (() => void) | undefined;
+    try {
+      return await Promise.race([promise, new Promise<never>((_, reject) => {
+        onAbort = () => reject(abortError(message));
+        signal.addEventListener("abort", onAbort, { once: true });
+      })]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /**
+   * Stops one live run and hands its complete final result back to the caller.
+   * Suppression is acquired synchronously, so the terminal lifecycle notification is never sent, retried, or replayed.
+   */
+  private async interruptRun(id: string, signal: AbortSignal | undefined) {
+    const generation = this.generation;
+    this.acquireNotificationSuppression(id);
+    try {
+      const terminal = await this.awaitWithAbort(
+        this.terminateRun(id, INTERRUPT_ERROR, true, this.interruptWaitMs),
+        signal,
+        `Interrupt of ${id} was aborted before its result was handed back.`,
+      );
+      const outcome: InterruptOutcome = terminal.status !== "interrupted"
+        ? "raced"
+        : this.terminationConfirmed.get(id) === true ? "stopped" : "unconfirmed";
+      if (this.shuttingDown || this.generation !== generation || !this.registry.get(id)) {
+        throw new Error(`Run ${id} is ${terminal.status}, but this session can no longer hand back its result directly.`);
+      }
+      // Synchronous handoff: clearing the pending event is what removes this terminal delivery from
+      // the queue, from any future agent-settled retry, and from the next session's restore replay.
+      const handed = this.registry.require(id);
+      if (handed.notificationPending !== undefined) this.updateRun(id, { notificationPending: undefined });
+      const final = this.registry.require(id);
+      return toolText(interruptResultText(final, outcome), { run: this.formatRun(final), outcome });
+    } finally {
+      this.releaseNotificationSuppression(id);
+      this.deliverPendingNotification(id);
+    }
   }
 
   private formatRunSummary(run: PersistedRun): SubagentRunSummary {
@@ -1171,7 +1322,7 @@ export class OmpsSubagentRuntime {
     });
   }
 
-  private async executeSubagent(input: RuntimeInput) {
+  private async executeSubagent(input: RuntimeInput, signal?: AbortSignal) {
     rejectUnknownFields(input, SUBAGENT_PUBLIC_FIELDS, "subagent");
     const action = requireString(input.action, "action");
     if (!SUBAGENT_ACTIONS.includes(action as (typeof SUBAGENT_ACTIONS)[number])) {
@@ -1216,10 +1367,12 @@ export class OmpsSubagentRuntime {
     if (action === "reply") return this.reply(id, requireString(input.message, "message"));
     const run = this.requireRun(id);
     if (isTerminalStatus(run.status)) {
-      // A steer that loses the race to a terminal transition must stay compact: the queued
+      // A steer or interrupt that loses the race to a terminal transition must stay compact: the queued
       // terminal lifecycle notification remains the single automatic delivery of output/error.
-      const terminalRun = action === "steer" ? this.formatRunSummary(run) : this.formatRun(run);
-      return toolText(`${id} is already ${run.status}.`, { run: terminalRun });
+      const terminalRun = this.formatRunSummary(run);
+      const alreadyTerminal: InterruptOutcome = "already-terminal";
+      const terminalDetails = action === "interrupt" ? { run: terminalRun, outcome: alreadyTerminal } : { run: terminalRun };
+      return toolText(`${id} is already ${run.status}.`, terminalDetails);
     }
     const target = this.validConfig(id);
     if (!target) throw new Error(`Run ${id} has no valid detached control target.`);
@@ -1228,8 +1381,7 @@ export class OmpsSubagentRuntime {
       this.controlWriter(target.paths, target.config.token, "steer", requireString(input.message, "message"));
       return toolText(`Steer requested for ${id}.`, { run: this.formatRun(run) });
     }
-    this.controlWriter(target.paths, target.config.token, "interrupt");
-    return toolText(`Interrupt requested for ${id}.`, { run: this.formatRun(run) });
+    return this.interruptRun(id, signal);
   }
 
   private async launchCreate(input: RuntimeInput) {
@@ -1319,6 +1471,7 @@ export class OmpsSubagentRuntime {
         this.activity.delete(run.id);
         this.health.delete(run.id);
         this.repliedSeqs.delete(run.id);
+        this.terminationConfirmed.delete(run.id);
       }
       this.queuedNotifications.clear();
       this.registry.clear();

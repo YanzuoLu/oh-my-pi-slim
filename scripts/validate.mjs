@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.7", "package version must be 0.10.7");
+check(packageJson.version === "0.10.8", "package version must be 0.10.8");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.7" && lock.packages?.[""]?.version === "0.10.7", "package-lock version must be 0.10.7");
+check(lock.version === "0.10.8" && lock.packages?.[""]?.version === "0.10.8", "package-lock version must be 0.10.8");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -687,6 +687,83 @@ hasAll(retryNotification, [
   "this.deliverPendingNotification(delivery.runId)",
 ], "agent-settled notification retry");
 check(!runtime.includes("appendEntry(SUBAGENT_NOTIFICATION_TYPE"), "notification delivery must not append a second TUI entry");
+hasAll(runtime, [
+  "const DEFAULT_INTERRUPT_WAIT_MS = 8000",
+  'const INTERRUPT_ERROR = "Interrupted by the parent session."',
+  "interruptWaitMs?: number",
+  "this.interruptWaitMs = options.interruptWaitMs ?? DEFAULT_INTERRUPT_WAIT_MS",
+  "this.shutdownWaitMs = options.shutdownWaitMs ?? DEFAULT_SHUTDOWN_WAIT_MS",
+  'export type InterruptOutcome = "already-terminal" | "stopped" | "raced" | "unconfirmed"',
+  "private readonly reconciling = new Map<string, Promise<void>>()",
+  "private readonly terminating = new Map<string, Promise<PersistedRun>>()",
+  "private readonly notificationSuppression = new Map<string, number>()",
+  "private generation = 0",
+], "synchronous interrupt seams, outcome contract, and per-run termination sharing");
+check(
+  /async restore\(ctx: ExtensionContext, notificationDeliveryPaused = false\): Promise<void> \{\s*this\.generation \+= 1;/.test(runtime) &&
+  /async shutdown\(\): Promise<void> \{\s*if \(this\.shuttingDown\) return;\s*this\.generation \+= 1;/.test(runtime),
+  "restore and shutdown must bump the runtime generation before any other work",
+);
+check(
+  deliverNotification.includes("this.notificationSuppression.has(id)") &&
+  deliverNotification.indexOf("this.notificationSuppression.has(id)") < deliverNotification.indexOf("const run = this.registry.get(id)"),
+  "run-scoped interrupt suppression must early-return from the single notification choke point",
+);
+const terminateStart = runtime.indexOf("private terminateRun(id: string, error: string, notify: boolean, waitMs = this.shutdownWaitMs)");
+const terminateEnd = runtime.indexOf("private formatRunSummary(", terminateStart);
+check(terminateStart >= 0 && terminateEnd > terminateStart, "runtime must keep one shared terminateRun that resolves with the final run");
+const termination = runtime.slice(terminateStart, terminateEnd);
+hasAll(termination, [
+  "const inFlight = this.terminating.get(id)", "if (inFlight) return inFlight",
+  ".then(() => this.runTermination(id, error, notify, waitMs))",
+  "this.terminating.set(id, settled)", "this.terminating.delete(id)",
+  "this.terminationConfirmed.set(id, true)", "this.terminationConfirmed.set(id, stopConfirmed)",
+  "stopConfirmed = stopped.safeToCleanup", "await this.stopVerifiedProcess(target, id)",
+  "this.acquireNotificationSuppression(id)",
+  "this.terminateRun(id, INTERRUPT_ERROR, true, this.interruptWaitMs)",
+  "const outcome: InterruptOutcome",
+  "this.shuttingDown || this.generation !== generation || !this.registry.get(id)",
+  "if (handed.notificationPending !== undefined) this.updateRun(id, { notificationPending: undefined })",
+  "this.releaseNotificationSuppression(id)", "this.deliverPendingNotification(id)",
+  "signal.addEventListener(\"abort\"", "signal.removeEventListener(", "abortError(",
+], "synchronous interrupt termination, abort seam, suppression, and result handoff");
+hasNone(termination, ["this.killPid", "process.kill", "this.signalProcess"], "termination must reuse the shared verified-process stop helper");
+const reconcileGuardStart = runtime.indexOf("private reconcileRun(id: string): Promise<void>");
+const reconcilePassStart = runtime.indexOf("private async runReconcilePass(id: string): Promise<void>", reconcileGuardStart);
+check(reconcileGuardStart >= 0 && reconcilePassStart > reconcileGuardStart, "runtime must isolate reconciliation ownership from one reconcile pass");
+const reconcileGuard = runtime.slice(reconcileGuardStart, reconcilePassStart);
+hasAll(reconcileGuard, [
+  "if (this.clearing) return Promise.resolve();",
+  "if (this.terminating.has(id)) return Promise.resolve();",
+  "if (this.reconciling.has(id)) return Promise.resolve();",
+  "const pass = this.runReconcilePass(id).finally(() => { this.reconciling.delete(id); })",
+  "this.reconciling.set(id, pass)",
+], "reconciliation must skip terminated ownership and retain an awaitable in-flight pass");
+check(
+  reconcileGuard.indexOf("if (this.terminating.has(id)) return Promise.resolve();") <
+    reconcileGuard.indexOf("if (this.reconciling.has(id)) return Promise.resolve();") &&
+  reconcileGuard.indexOf("this.reconciling.set(id, pass)") > reconcileGuard.indexOf("const pass = this.runReconcilePass(id)"),
+  "the termination guard must precede reconciliation reentrancy and each pass must be retained before returning",
+);
+hasAll(termination, [
+  "private async settledByInFlightReconciliation(id: string)",
+  "const inFlight = this.reconciling.get(id)",
+  "await inFlight.catch(() => undefined)",
+  "const reconciled = await this.settledByInFlightReconciliation(id)",
+  "if (reconciled) return reconciled",
+], "termination must wait out a reconciliation that acquired process-stop ownership first");
+const runTerminationStart = termination.indexOf("private async runTermination(");
+const reconciledWait = termination.indexOf("const reconciled = await this.settledByInFlightReconciliation(id)", runTerminationStart);
+const terminationTarget = termination.indexOf("const target = this.validConfig(id)", runTerminationStart);
+check(runTerminationStart >= 0 && reconciledWait > runTerminationStart && terminationTarget > reconciledWait,
+  "termination must adopt an earlier reconciliation before reading control state or writing a second interrupt");
+check(
+  termination.indexOf("this.acquireNotificationSuppression(id)") < termination.indexOf("await this.awaitWithAbort("),
+  "interrupt must acquire run-scoped suppression synchronously before any await",
+);
+const interruptDispatch = runtime.slice(runtime.indexOf('if (action === "steer") {'), runtime.indexOf("private async launchCreate("));
+hasAll(interruptDispatch, ["return this.interruptRun(id, signal);"], "interrupt must dispatch through the synchronous termination handoff");
+hasNone(interruptDispatch, ["Interrupt requested"], "interrupt must not return an enqueue-only receipt");
 hasAll(monitorRuntime, [
   'export const MONITOR_ACTIONS = ["create", "delete", "list", "status"] as const',
   "export const monitorParameters = Type.Object({", "}, { additionalProperties: false });",
@@ -954,6 +1031,12 @@ hasAll(restoreNotificationFlow, [
 const shutdownStart = runtime.indexOf("async shutdown(): Promise<void>");
 const shutdownEnd = runtime.indexOf("private startPoller", shutdownStart);
 hasAll(runtime.slice(shutdownStart, shutdownEnd), ["queuedNotifications.clear()", "notificationDeliveryPaused = false"], "shutdown notification queue cleanup");
+check(
+  restoreNotificationFlow.includes("`terminating` and `notificationSuppression` deliberately survive a generation change"),
+  "restore must document why shared termination and suppression ownership outlives a generation change",
+);
+hasNone(restoreNotificationFlow, ["this.terminating.clear()", "this.notificationSuppression.clear()"], "restore must not drop shared termination or suppression ownership");
+hasNone(runtime.slice(shutdownStart, shutdownEnd), ["this.terminating.clear()", "this.notificationSuppression.clear()"], "shutdown must not drop shared termination or suppression ownership");
 const pauseSetterStart = runtime.indexOf("setNotificationDeliveryPaused(paused: boolean)");
 const pauseSetterEnd = runtime.indexOf("registerTools(): void", pauseSetterStart);
 const pauseSetter = runtime.slice(pauseSetterStart, pauseSetterEnd);
@@ -1013,13 +1096,15 @@ const terminalRaceEnd = runtime.indexOf("const target = this.validConfig(id);", 
 check(terminalRaceStart > statusActionEnd && terminalRaceEnd > terminalRaceStart, "steer and interrupt must share one terminal-status branch before control writing");
 const terminalRace = runtime.slice(terminalRaceStart, terminalRaceEnd);
 hasAll(terminalRace, [
-  'const terminalRun = action === "steer" ? this.formatRunSummary(run) : this.formatRun(run)',
-  "`${id} is already ${run.status}.`", "{ run: terminalRun }",
-], "terminal steer race receipt must carry only the public run summary");
+  "const terminalRun = this.formatRunSummary(run)",
+  'const alreadyTerminal: InterruptOutcome = "already-terminal"',
+  'action === "interrupt" ? { run: terminalRun, outcome: alreadyTerminal } : { run: terminalRun }',
+  "`${id} is already ${run.status}.`", "toolText(`${id} is already ${run.status}.`, terminalDetails)",
+], "terminal steer and interrupt race receipts must carry only the public run summary");
 hasNone(terminalRace, [
   "run.output", "run.error", "this.activity", "formatRunStatus", "deliverPendingNotification",
-  "notificationPending", "queuedNotifications", "deliveryKey",
-], "terminal steer race receipt");
+  "notificationPending", "queuedNotifications", "deliveryKey", "controlWriter", "acquireNotificationSuppression",
+], "terminal steer and interrupt race receipts");
 check(runtime.indexOf("await this.reconcileRun(id)", listActionEnd) < statusActionStart, "status must reconcile its ID before reading the latest registry value");
 hasAll(runtime, [
   'if ((action === "status" || action === "interrupt") && input.message !== undefined)',
@@ -1094,7 +1179,7 @@ const subagentDescription = propertyString(subagentToolMetadata, "description", 
 const subagentPromptSnippet = propertyString(subagentToolMetadata, "promptSnippet", "subagent tool metadata");
 const subagentGuidelineBlock = runtime.slice(subagentGuidelinesStart, subagentGuidelinesEnd);
 const subagentGuidelines = staticStrings(subagentGuidelineBlock, "subagent promptGuidelines");
-check(subagentDescription === "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, errors, and interruption outcomes. `subagent resume` starts a new run from reusable terminal context. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` requests termination of a live run without reverting file changes. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.", "subagent description must match the reviewed contract");
+check(subagentDescription === "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.", "subagent description must match the reviewed contract");
 check(subagentPromptSnippet === "Delegate and manage specialist runs.", "subagent promptSnippet must match the reviewed contract");
 checkSteBlock(subagentDescription, "subagent description");
 checkSteBlock(subagentPromptSnippet, "subagent promptSnippet");
@@ -1106,7 +1191,7 @@ const expectedSubagentGuidelines = [
   "`subagent list` summarizes retained runs, while `subagent status` returns one run's detailed result.",
   "Use `subagent reply` only to answer the complete request from that same waiting run.",
   "Use `subagent steer` only for a genuine new instruction, not polling or reassurance.",
-  "Use `subagent interrupt` only for starting, running, or waiting runs that should stop.",
+  "Use `subagent interrupt` only to stop a starting, running, or waiting run and wait for its final result.",
   "`subagent interrupt` is not rollback, so inspect partial file changes before continuing.",
   "Use `subagent clear` only when every run is terminal and all retained history should be removed.",
 ];
@@ -1274,6 +1359,26 @@ hasAll(subagentRuntimeTests, [
   "reload and restore retain terminal results for status until clear removes the run",
   "a steer that loses the terminal race stays compact while the queued notification keeps the only full result",
 ], "Subagent clear and retained-history list tests");
+hasAll(subagentRuntimeTests, [
+  "interrupt stops a running run synchronously, returns the full result, and sends no notification",
+  "interrupting a waiting run keeps its waiting notification and adds no retry",
+  "interrupt accepts natural completion inside its wait window and never sends a terminal notification",
+  "interrupt of an already terminal run writes no control and never steals its notification",
+  "interrupt escalates to verified SIGTERM then SIGKILL when the runner never publishes a terminal state",
+  "interrupt never signals an unverifiable runner and reports an unconfirmed stop",
+  "interrupt of a dead runner adopts the failed reconciliation without a control",
+  "two concurrent interrupts share one termination and both receive the same final result",
+  "poller reconciliation during an interrupt never delivers the suppressed terminal notification",
+  "an aborted interrupt keeps its control and replays the pending notification exactly once",
+  "a shutdown during an interrupt refuses the handoff and journals the pending notification for the next session",
+  "a restore during an interrupt refuses the handoff and delivers the pending notification exactly once",
+  "poller failure paths never duplicate a termination that an interrupt already owns",
+  "an interrupt waits out a reconciliation that already owns the stop and never duplicates it",
+  "a handed-back terminal event never replays after restore",
+], "synchronous subagent interrupt handoff tests");
+hasAll(read("tests/subagent-transcript-renderer.test.mjs"), [
+  "synchronous interrupt outcomes collapse to the final result and expand its complete output and error",
+], "synchronous interrupt outcome renderer test");
 hasAll(subagentRuntimeTests, [
   '["abstract", "agent", "id", "live", "status"]',
   'assert.equal(controls(harness, id).length, 0, "a terminal run never receives a steer control")',
@@ -1932,8 +2037,17 @@ check(immediateAckStart >= 0 && immediateAckEnd > immediateAckStart, "transcript
 const immediateAckRenderer = transcriptRenderer.slice(immediateAckStart, immediateAckEnd);
 hasAll(immediateAckRenderer, [
   'text = `${agent} [${id}] · already ${status}`',
-  'if (terminal && expanded && action !== "steer") addFinalOutput(container, theme, run)',
-], "terminal steer immediate acknowledgement must never repeat final output or error");
+  'const interruptFinal = action === "interrupt" && outcome !== undefined && INTERRUPT_FINAL_OUTCOMES.has(outcome)',
+  '`${agent} [${id}] · ${status} before interrupt`',
+  '`${agent} [${id}] · ${status} · stop unconfirmed`',
+  '`${agent} [${id}] · ${status} · stopped`',
+  'const ownsFinalResult = interruptFinal || (action !== "steer" && action !== "interrupt")',
+  "if (terminal && expanded && ownsFinalResult) addFinalOutput(container, theme, run)",
+], "terminal steer and already-terminal interrupt acknowledgements must never repeat final output or error");
+hasAll(transcriptRenderer, [
+  'const INTERRUPT_FINAL_OUTCOMES = new Set(["stopped", "raced", "unconfirmed"])',
+  'immediateAck(run, action, args, theme, expanded, asString(details?.outcome))',
+], "synchronous interrupt outcome rendering");
 hasNone(immediateAckRenderer, [
   "if (terminal && expanded) addFinalOutput", "addLiveActivity", "addRequest", "run.task", "run.activity",
 ], "immediate acknowledgement renderer");

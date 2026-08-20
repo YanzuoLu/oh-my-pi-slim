@@ -120,7 +120,7 @@ test("Goal widget renders five statuses, exact two-line order, stats, elapsed, r
   const active = renderGoalWidgetLines(view(), theme, 180, NOW_MS);
   assert.deepEqual(active, [
     "●  Goal · ↻  active · Ship the frozen Goal UI",
-    "12m · 7 cont · 4 runs · main 84k tok/23 tools/9 turns/2 comp · child 231k tok/61 tools/18 turns/4 comp",
+    "└─ 12m · 7 cont · 4 runs · main 84k tok/23 tools/9 turns/2 comp · child 231k tok/61 tools/18 turns/4 comp",
   ]);
 
   const cases = [
@@ -152,9 +152,9 @@ test("Goal widget renders five statuses, exact two-line order, stats, elapsed, r
   const retry = renderGoalWidgetLines(view(goal({
     status: "retry_wait", retryAttempt: 2, nextRetryAt: "2026-06-01T00:12:30.000Z", lastProviderError: "rate limited",
   })), theme, 180, NOW_MS)[1];
-  assert.equal(retry, "12m · 7 cont · 4 runs · retry in 30s · main 84k tok/23 tools/9 turns/2 comp · child 231k tok/61 tools/18 turns/4 comp");
+  assert.equal(retry, "└─ 12m · 7 cont · 4 runs · retry in 30s · main 84k tok/23 tools/9 turns/2 comp · child 231k tok/61 tools/18 turns/4 comp");
   const paused = renderGoalWidgetLines(view(goal({ status: "paused", pauseReason: "waiting for release approval" })), theme, 180, NOW_MS)[1];
-  assert.equal(paused, "12m · 7 cont · 4 runs · paused waiting for release approval · main 84k tok/23 tools/9 turns/2 comp · child 231k tok/61 tools/18 turns/4 comp");
+  assert.equal(paused, "└─ 12m · 7 cont · 4 runs · paused waiting for release approval · main 84k tok/23 tools/9 turns/2 comp · child 231k tok/61 tools/18 turns/4 comp");
 
   const singular = renderGoalWidgetLines(view(goal(), {
     continuationCount: 1,
@@ -162,7 +162,7 @@ test("Goal widget renders five statuses, exact two-line order, stats, elapsed, r
     main: { tokens: 999, tools: 1, turns: 1, compactions: 1 },
     children: { runCount: 1, tokens: 1_250_000, tools: 1, turns: 1, compactions: 1 },
   }), theme, 180, NOW_MS)[1];
-  assert.match(singular, /1 cont · 1 run · main 999 tok\/1 tool\/1 turn\/1 comp · child 1\.3M tok\/1 tool\/1 turn\/1 comp/);
+  assert.match(singular, /^└─ 12m · 1 cont · 1 run · main 999 tok\/1 tool\/1 turn\/1 comp · child 1\.3M tok\/1 tool\/1 turn\/1 comp$/);
   assert.equal(compactGoalTokens(1_000), "1k");
   assert.equal(compactGoalTokens(1_250_000), "1.3M");
 
@@ -200,6 +200,29 @@ test("Goal prefix marks pursuing versus idle across all five statuses and never 
     );
   }
   assert.equal(renderGoalWidgetLines.length, 3, "the Goal renderer takes no expansion parameters");
+});
+
+test("Goal detail row hangs off the heading with the shared dim last-child branch", () => {
+  for (const status of ["active", "retry_wait", "paused", "completed", "cancelled"]) {
+    const lines = renderGoalWidgetLines(view(goal({ status, pauseReason: status === "paused" ? "held" : null })), roleAnsiTheme, 180, NOW_MS);
+    assert.equal(lines.length, 2, `${status} still renders exactly two lines`);
+    assert.ok(
+      lines[1].startsWith("\u001b[2m\u2514\u2500\u001b[0m "),
+      `${status} must open the detail row with the dim last-child branch and one space`,
+    );
+    assert.doesNotMatch(
+      stripVTControlCharacters(lines[0]),
+      /[\u2514\u251c\u2502\u2500]/,
+      `${status} heading stays the tree root and carries no branch glyph`,
+    );
+  }
+
+  const plain = renderGoalWidgetLines(view(), theme, 180, NOW_MS);
+  assert.equal(
+    visibleWidth(stripVTControlCharacters(plain[1]).slice(0, 3)),
+    3,
+    "the branch prefix occupies three display columns, matching the Agents and Loops entries",
+  );
 });
 
 test("GoalWidget uses one shared 1s timer, keeps cached rendering, clears empty state, rebinds, and disposes without duplicate setWidget", () => {

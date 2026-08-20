@@ -101,13 +101,15 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 | `create` | 用 agent、简短 abstract、task 和可选 cwd 创建新 run |
 | `list` | 按 retained-run 顺序返回全部 retained run 的精简公开状态 |
 | `status` | 返回单个 retained run 的公开状态，并在 terminal 时返回已有结果 |
-| `interrupt` | 请求中断未结束的 run，但不回滚文件修改 |
+| `interrupt` | 停止未结束的 run，但不回滚文件修改，并返回其最终结果 |
 | `steer` | 向 running run 发送补充指导 |
 | `resume` | 从 terminal run 保存的 child session 创建新 run，并生成新 ID |
 | `reply` | 回复 waiting child，并继续同一个 run |
 | `clear` | 删除全部 retained terminal history |
 
 `list` 包含 `starting`、`running`、`waiting`、`completed`、`failed` 与 `interrupted` run，但绝不包含 terminal `output` 或 `error`。使用单个 retained run ID 调用 `status`，可查看相同公开字段，并在结果存在时取回 terminal 结果。subagent widget 使用相同的 retained 集合与排序，因此 terminal run 会一直显示到 `clear`。
+
+`interrupt` 是同步的：它会等待目标 run 进入 terminal 状态，并直接返回完整最终结果，包括已保存的 `output` 或 `error`。当显式 `interrupt` 调用取得某个 live run 的结果交接权时，该 terminal event 不会再单独发送，reload 后也不会重放；而由 shutdown、reload、tree navigation 或 session 替换导致的中断，仍然按普通 terminal notification 送达。若 run 在调用前就已是 terminal，它保留自己的 terminal notification，不会收到 interrupt control，并且只返回精简回执。若无法确认 detached runner 已停止，结果会显式说明，并保留该 run 目录。
 
 只要存在 `starting`、`running` 或 `waiting` run，`clear` 就会被拒绝。全部 retained run 都进入 terminal 后才可清理完整历史；清理结果在 reload 和 restore 后仍保持为空。清理 Subagent history 不会改变 Goal statistics。
 

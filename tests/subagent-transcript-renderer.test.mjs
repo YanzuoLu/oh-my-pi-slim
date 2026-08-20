@@ -199,22 +199,25 @@ test("subagent immediate results use accurate compact action acknowledgements", 
   ));
   assert.equal(reply, "✓  Replied · fixer [reply-id] · running");
 
-  const interrupt = render(renderSubagentResult(
+  // A legacy transcript entry recorded before interrupt became synchronous replays without an outcome.
+  const legacyInterrupt = render(renderSubagentResult(
     { details: { run: run({ id: "interrupt-id", agent: "explorer", status: "running", output: undefined, error: undefined }) } },
     { expanded: false, isPartial: false }, theme, { args: { action: "interrupt", id: "interrupt-id" } },
   ));
-  assert.equal(interrupt, "!  Interrupt requested · explorer [interrupt-id] · running");
+  assert.equal(legacyInterrupt, "!  Interrupt requested · explorer [interrupt-id] · running");
 
-  const terminalResult = { details: { run: run({ id: "done-id", agent: "explorer", status: "completed", output: "terminal output", error: undefined }) } };
+  const terminalResult = { details: { run: run({ id: "done-id", agent: "explorer", status: "completed", output: "terminal output", error: undefined }), outcome: "already-terminal" } };
   const alreadyTerminalCollapsed = render(renderSubagentResult(
     terminalResult, { expanded: false, isPartial: false }, theme, { args: { action: "interrupt", id: "done-id" } },
   ));
   assert.equal(alreadyTerminalCollapsed, "✓  explorer [done-id] · already completed");
   assert.doesNotMatch(alreadyTerminalCollapsed, /terminal output|Interrupt requested/);
+  // The reconciled terminal notification still owns that full result, so the receipt never repeats it.
   const alreadyTerminalExpanded = render(renderSubagentResult(
     terminalResult, { expanded: true, isPartial: false }, theme, { args: { action: "interrupt", id: "done-id" } },
   ));
-  assertFull(alreadyTerminalExpanded, ["✓  explorer [done-id] · already completed", "terminal output"]);
+  assert.equal(alreadyTerminalExpanded, "✓  explorer [done-id] · already completed");
+  assert.doesNotMatch(alreadyTerminalExpanded, /terminal output|Output:|Error:/);
 
   const failedResult = { details: { run: run({ id: "failed-steer-id", agent: "fixer", status: "failed", output: undefined, error: "stored failure" }) } };
   const failedSteerCollapsed = render(renderSubagentResult(
@@ -227,6 +230,38 @@ test("subagent immediate results use accurate compact action acknowledgements", 
   ));
   assert.equal(failedSteerExpanded, "✗  fixer [failed-steer-id] · already failed");
   assert.doesNotMatch(failedSteerExpanded, /stored failure|Output:|Error:/);
+});
+
+test("synchronous interrupt outcomes collapse to the final result and expand its complete output and error", () => {
+  for (const { outcome, status, glyph, collapsed } of [
+    { outcome: "stopped", status: "interrupted", glyph: "✗", collapsed: "✗  fixer [stop-id] · interrupted · stopped" },
+    { outcome: "raced", status: "completed", glyph: "✓", collapsed: "✓  fixer [stop-id] · completed before interrupt" },
+    { outcome: "unconfirmed", status: "interrupted", glyph: "✗", collapsed: "✗  fixer [stop-id] · interrupted · stop unconfirmed" },
+  ]) {
+    const result = {
+      content: [{ type: "text", text: `Run stop-id (fixer) is ${status}.` }],
+      details: {
+        outcome,
+        run: run({
+          id: "stop-id",
+          agent: "fixer",
+          status,
+          output: "INTERRUPT_OUTPUT_SENTINEL",
+          error: "INTERRUPT_ERROR_SENTINEL",
+          task: "INTERRUPT_TASK_SENTINEL",
+          activity: { responseText: "INTERRUPT_ACTIVITY_SENTINEL" },
+        }),
+      },
+    };
+    const context = { args: { action: "interrupt", id: "stop-id" } };
+    const compact = render(renderSubagentResult(result, { expanded: false, isPartial: false }, theme, context));
+    assert.equal(compact, collapsed);
+    assert.doesNotMatch(compact, /SENTINEL/);
+    assert.equal(compact.startsWith(glyph), true);
+    const expanded = render(renderSubagentResult(result, { expanded: true, isPartial: false }, theme, context));
+    assertFull(expanded, [collapsed, "INTERRUPT_OUTPUT_SENTINEL", "INTERRUPT_ERROR_SENTINEL"]);
+    assert.doesNotMatch(expanded, /INTERRUPT_TASK_SENTINEL|INTERRUPT_ACTIVITY_SENTINEL|Task:|Cwd:|Model:|Live response/);
+  }
 });
 
 test("terminal steer immediate results never repeat final output or error even from legacy full run details", () => {

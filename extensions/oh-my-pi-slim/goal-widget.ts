@@ -119,8 +119,10 @@ function headingLine(view: GoalView, theme: Theme, width: number): string {
   return `${heading}${theme.fg("text", abstract)}`;
 }
 
+/** The Goal body is always a single detail row, so it always takes the last-child branch. */
 function detailLine(view: GoalView, theme: Theme, width: number, nowMs: number): string {
   const goal = view.goal!;
+  const tree = theme.fg("dim", "└─");
   const parts = [
     formatGoalElapsed(view.elapsedMs ?? 0),
     `${view.continuationCount} cont`,
@@ -129,7 +131,7 @@ function detailLine(view: GoalView, theme: Theme, width: number, nowMs: number):
   if (goal.status === "retry_wait") parts.push(`retry in ${formatGoalCountdown(goal.nextRetryAt, nowMs)}`);
   else if (goal.status === "paused" && goal.pauseReason) parts.push(`paused ${sanitizeGoalText(goal.pauseReason)}`);
   parts.push(statsLabel("main", view.main), statsLabel("child", view.children));
-  return truncateToWidth(theme.fg("dim", parts.join(" · ")), Math.max(1, width), "…");
+  return truncateToWidth(`${tree} ${theme.fg("dim", parts.join(" · "))}`, Math.max(1, width), "…");
 }
 
 export function renderGoalWidgetLines(

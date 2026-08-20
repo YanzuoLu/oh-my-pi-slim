@@ -221,6 +221,7 @@ function createHarness({
   mode = "rpc",
   trusted = true,
   shutdownWaitMs = 0,
+  interruptWaitMs = 0,
   sleep = async () => {},
   sendMessageError,
   launchError,
@@ -267,6 +268,7 @@ function createHarness({
     pollMs: 250,
     graceMs: 5000,
     shutdownWaitMs,
+    interruptWaitMs,
     invocationSeams: { argv: ["pi", "/missing/pi.js"], execPath: "/usr/bin/node", exists: () => false },
     async launchRunner(configFile, runnerPath, options) {
       launches.push({ configFile, runnerPath, options });
@@ -362,6 +364,50 @@ async function createRun(harness, overrides = {}) {
   return harness.tools.get("subagent").execute("create", {
     action: "create", agent: "fixer", abstract: "detached summary", task: "detached task", ...overrides,
   });
+}
+
+/** Interrupt harness with a single-shot sleep hook, so one deterministic event lands inside the interrupt wait window. */
+function createInterruptHarness(options = {}) {
+  let sleepHook;
+  let harness;
+  harness = createHarness({
+    interruptWaitMs: 50,
+    sleep: async (ms) => {
+      const hook = sleepHook;
+      sleepHook = undefined;
+      hook?.();
+      harness.advance(ms);
+    },
+    ...options,
+  });
+  harness.onNextSleep = (hook) => { sleepHook = hook; };
+  harness.takeSleepHook = () => {
+    const hook = sleepHook;
+    sleepHook = undefined;
+    return hook;
+  };
+  return harness;
+}
+
+async function startRunningRun(harness, overrides = {}) {
+  const started = await createRun(harness);
+  const id = started.details.run.id;
+  const config = readConfig(harness, id);
+  harness.alive.add(999);
+  atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, typeof overrides === "function" ? overrides(id) : overrides));
+  await inspect(harness, id);
+  return { id, config };
+}
+
+async function interrupt(harness, id, signal) {
+  return harness.tools.get("subagent").execute("interrupt", { action: "interrupt", id }, signal);
+}
+
+async function settleTerminations(harness) {
+  for (let attempt = 0; attempt < 50 && harness.runtime.terminating.size > 0; attempt += 1) {
+    await Promise.all([...harness.runtime.terminating.values()].map((promise) => promise.catch(() => undefined)));
+  }
+  await new Promise((resolve) => setImmediate(resolve));
 }
 
 async function inspect(harness, id) {
@@ -779,7 +825,7 @@ test("registered subagent metadata describes the unified lifecycle", () => {
   const harness = createHarness();
   try {
     const subagent = harness.tools.get("subagent");
-    assert.equal(subagent.description, "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, errors, and interruption outcomes. `subagent resume` starts a new run from reusable terminal context. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` requests termination of a live run without reverting file changes. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.");
+    assert.equal(subagent.description, "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.");
     assert.equal(subagent.promptSnippet, "Delegate and manage specialist runs.");
     assertSteBlock(subagent.description);
     assertSteBlock(subagent.promptSnippet);
@@ -792,7 +838,7 @@ test("registered subagent metadata describes the unified lifecycle", () => {
       "`subagent list` summarizes retained runs, while `subagent status` returns one run's detailed result.",
       "Use `subagent reply` only to answer the complete request from that same waiting run.",
       "Use `subagent steer` only for a genuine new instruction, not polling or reassurance.",
-      "Use `subagent interrupt` only for starting, running, or waiting runs that should stop.",
+      "Use `subagent interrupt` only to stop a starting, running, or waiting run and wait for its final result.",
       "`subagent interrupt` is not rollback, so inspect partial file changes before continuing.",
       "Use `subagent clear` only when every run is terminal and all retained history should be removed.",
     ];
@@ -1688,25 +1734,21 @@ test("stale waiting state is restored after the supervisor reply grace expires",
   } finally { harness.cleanup(); }
 });
 
-test("steer and interrupt only enqueue controls and return requested", async () => {
-  for (const action of ["steer", "interrupt"]) {
-    const harness = createHarness();
-    try {
-      await harness.restore();
-      const started = await createRun(harness);
-      const id = started.details.run.id;
-      const config = readConfig(harness, id);
-      harness.alive.add(999);
-      atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token));
-      await inspect(harness, id);
-      const result = await harness.tools.get("subagent").execute(action, {
-        action, id, ...(action === "steer" ? { message: "focus" } : {}),
-      });
-      assert.match(result.content[0].text, /requested/i);
-      assert.equal(controls(harness, id).at(-1).type, action);
-      assert.equal(harness.runtime.registry.get(id).status, "running");
-    } finally { harness.cleanup(); }
-  }
+test("steer only enqueues a control and returns requested", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const started = await createRun(harness);
+    const id = started.details.run.id;
+    const config = readConfig(harness, id);
+    harness.alive.add(999);
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token));
+    await inspect(harness, id);
+    const result = await harness.tools.get("subagent").execute("steer", { action: "steer", id, message: "focus" });
+    assert.match(result.content[0].text, /requested/i);
+    assert.equal(controls(harness, id).at(-1).type, "steer");
+    assert.equal(harness.runtime.registry.get(id).status, "running");
+  } finally { harness.cleanup(); }
 });
 
 test("a steer that loses the terminal race stays compact while the queued notification keeps the only full result", async () => {
@@ -1773,22 +1815,475 @@ test("a steer that loses the terminal race stays compact while the queued notifi
   }
 });
 
-test("interrupt accepts a waiting non-terminal run", async () => {
-  const harness = createHarness();
+test("interrupt stops a running run synchronously, returns the full result, and sends no notification", async () => {
+  const harness = createInterruptHarness();
+  try {
+    await harness.restore();
+    const { id, config } = await startRunningRun(harness);
+    assert.equal(harness.notifications.length, 0);
+    harness.onNextSleep(() => atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "interrupted",
+      output: "INTERRUPT_PARTIAL_SENTINEL",
+      error: "Interrupted by supervisor.",
+      sessionFile: join(harness.tempDir, "session.jsonl"),
+    })));
+
+    const result = await interrupt(harness, id);
+
+    assert.equal(result.details.outcome, "stopped");
+    assert.equal(result.details.run.status, "interrupted");
+    assert.equal(result.details.run.output, "INTERRUPT_PARTIAL_SENTINEL");
+    assert.equal(result.details.run.error, "Interrupted by supervisor.");
+    assert.match(result.content[0].text, /Output: INTERRUPT_PARTIAL_SENTINEL/);
+    assert.match(result.content[0].text, /Error: Interrupted by supervisor\./);
+    assert.equal(controls(harness, id).filter(({ type }) => type === "interrupt").length, 1);
+    assert.deepEqual(harness.killed, [], "a runner that honors the interrupt control is never signaled");
+
+    assert.equal(harness.notifications.length, 0, "the interrupting tool call owns the only delivery");
+    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+    assert.equal(harness.runtime.queuedNotifications.size, 0);
+    const pendingJournal = harness.journalWrites.filter(({ data }) => data.run?.notificationPending === "interrupted");
+    assert.equal(pendingJournal.length >= 1, true, "the wait window still journals a crash-safe pending marker");
+    assert.equal(harness.journalWrites.at(-1).data.run.notificationPending, undefined);
+
+    harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+    assert.equal(harness.notifications.length, 0, "no queued retry can match the handed-back terminal event");
+
+    const next = createHarness({ branch: harness.journalWrites.map(({ data }) => branchEntry(data)) });
+    try {
+      await next.restore();
+      assert.equal(next.runtime.registry.get(id).status, "interrupted");
+      assert.equal(next.notifications.length, 0, "a handed-back terminal event never replays after restore");
+    } finally { next.cleanup(); }
+  } finally { harness.cleanup(); }
+});
+
+test("interrupting a waiting run keeps its waiting notification and adds no retry", async () => {
+  const harness = createInterruptHarness();
+  try {
+    await harness.restore();
+    const { id, config } = await startRunningRun(harness, (runId) => ({
+      status: "waiting",
+      waitingSeq: 1,
+      request: { runId, reason: "need_decision", message: "choose", createdAt: new Date(NOW_MS).toISOString() },
+    }));
+    assert.equal(harness.notifications.length, 1);
+    assert.equal(harness.notifications[0].message.details.status, "waiting");
+    const waitingKey = harness.notifications[0].message.details.deliveryKey;
+    assert.equal(harness.runtime.queuedNotifications.has(waitingKey), true);
+    harness.onNextSleep(() => atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "interrupted", error: "Interrupted by supervisor.",
+    })));
+
+    const result = await interrupt(harness, id);
+
+    assert.equal(result.details.outcome, "stopped");
+    assert.equal(result.details.run.status, "interrupted");
+    assert.equal(result.details.run.request, undefined);
+    assert.equal(harness.notifications.length, 1, "only the earlier waiting notification exists");
+    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+
+    harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+    assert.equal(harness.notifications.length, 1, "the stale waiting key is dropped without a retry");
+    assert.equal(harness.runtime.queuedNotifications.size, 0);
+  } finally { harness.cleanup(); }
+});
+
+test("interrupt accepts natural completion inside its wait window and never sends a terminal notification", async () => {
+  const harness = createInterruptHarness();
+  try {
+    await harness.restore();
+    const { id, config } = await startRunningRun(harness);
+    harness.onNextSleep(() => atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "completed", output: "RACED_OUTPUT_SENTINEL", responseText: "RACED_OUTPUT_SENTINEL",
+    })));
+
+    const result = await interrupt(harness, id);
+
+    assert.equal(result.details.outcome, "raced");
+    assert.equal(result.details.run.status, "completed");
+    assert.equal(result.details.run.output, "RACED_OUTPUT_SENTINEL");
+    assert.match(result.content[0].text, /reached completed before the interrupt stopped it/);
+    assert.match(result.content[0].text, /Output: RACED_OUTPUT_SENTINEL/);
+    assert.deepEqual(harness.killed, []);
+    assert.equal(harness.notifications.length, 0, "an authoritative natural terminal state is handed back, not notified");
+    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+    assert.equal(harness.runtime.queuedNotifications.size, 0);
+  } finally { harness.cleanup(); }
+});
+
+test("interrupt of an already terminal run writes no control and never steals its notification", async () => {
+  const harness = createInterruptHarness();
+  try {
+    await harness.restore();
+    const { id, config } = await startRunningRun(harness);
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "completed", output: "ALREADY_TERMINAL_SENTINEL", responseText: "ALREADY_TERMINAL_SENTINEL",
+    }));
+
+    const result = await interrupt(harness, id);
+
+    assert.equal(result.content[0].text, `${id} is already completed.`);
+    assert.equal(result.details.outcome, "already-terminal");
+    assert.deepEqual(Object.keys(result.details.run).sort(), ["abstract", "agent", "id", "live", "status"]);
+    assert.doesNotMatch(JSON.stringify(result.details), /SENTINEL/);
+    assert.equal(controls(harness, id).length, 0, "a terminal run never receives an interrupt control");
+    assert.deepEqual(harness.killed, []);
+
+    assert.equal(harness.notifications.length, 1, "the reconciled terminal notification keeps the full result");
+    assert.equal(harness.notifications[0].message.details.status, "completed");
+    assert.equal(harness.notifications[0].message.details.run.output, "ALREADY_TERMINAL_SENTINEL");
+    assert.equal(harness.runtime.registry.get(id).notificationPending, "completed");
+  } finally { harness.cleanup(); }
+});
+
+test("interrupt escalates to verified SIGTERM then SIGKILL when the runner never publishes a terminal state", async () => {
+  const sleeps = [];
+  let harness;
+  harness = createInterruptHarness({
+    keepAliveAfterTerm: true,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      harness.advance(ms);
+    },
+  });
+  try {
+    await harness.restore();
+    const { id } = await startRunningRun(harness);
+
+    const result = await interrupt(harness, id);
+
+    assert.equal(result.details.outcome, "stopped");
+    assert.equal(result.details.run.status, "interrupted");
+    assert.equal(result.details.run.error, "Interrupted by the parent session.");
+    assert.deepEqual(harness.killed, [
+      { pid: -999, signal: "SIGTERM" },
+      { pid: -999, signal: "SIGKILL" },
+    ]);
+    assert.deepEqual(sleeps.slice(-2), [1500, 1500]);
+    assert.equal(controls(harness, id).filter(({ type }) => type === "interrupt").length, 1);
+    assert.equal(harness.notifications.length, 0);
+    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+  } finally { harness.cleanup(); }
+});
+
+test("interrupt never signals an unverifiable runner and reports an unconfirmed stop", async () => {
+  const errors = [];
+  const originalConsoleError = console.error;
+  console.error = (...args) => { errors.push(args.join(" ")); };
+  const harness = createInterruptHarness();
+  try {
+    await harness.restore();
+    const { id } = await startRunningRun(harness);
+    harness.setProcessIdentity(999, "reused-process");
+
+    const result = await interrupt(harness, id);
+
+    assert.equal(result.details.outcome, "unconfirmed");
+    assert.equal(result.details.run.status, "interrupted");
+    assert.match(result.content[0].text, /did not confirm that it stopped and its run directory is retained/);
+    assert.deepEqual(harness.killed, [], "a PID-reused or unverifiable process is never signaled");
+    assert.equal(existsSync(harness.paths(id).runDir), true);
+    assert.equal(harness.notifications.length, 0);
+    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+    assert.equal(errors.some((line) => line.includes("Retaining unverifiable detached run directory")), true);
+  } finally {
+    console.error = originalConsoleError;
+    harness.cleanup();
+  }
+});
+
+test("interrupt of a dead runner adopts the failed reconciliation without a control", async () => {
+  const harness = createInterruptHarness();
   try {
     await harness.restore();
     const started = await createRun(harness);
     const id = started.details.run.id;
     const config = readConfig(harness, id);
     harness.alive.add(999);
-    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
-      status: "waiting", waitingSeq: 1,
-      request: { runId: id, reason: "need_decision", message: "choose", createdAt: new Date(NOW_MS).toISOString() },
-    }));
+    atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token));
     await inspect(harness, id);
-    const result = await harness.tools.get("subagent").execute("interrupt", { action: "interrupt", id });
-    assert.match(result.content[0].text, /Interrupt requested/);
-    assert.equal(controls(harness, id).at(-1).type, "interrupt");
+    harness.alive.delete(999);
+
+    const result = await interrupt(harness, id);
+
+    assert.equal(result.details.outcome, "already-terminal");
+    assert.equal(result.details.run.status, "failed");
+    assert.equal(result.content[0].text, `${id} is already failed.`);
+    assert.equal(controls(harness, id).length, 0);
+    assert.equal(harness.notifications.length, 1, "the reconciled failure keeps its own notification");
+    assert.equal(harness.notifications[0].message.details.status, "failed");
+    assert.match(harness.runtime.registry.get(id).error, /exited/);
+  } finally { harness.cleanup(); }
+});
+
+test("two concurrent interrupts share one termination and both receive the same final result", async () => {
+  const harness = createInterruptHarness();
+  try {
+    await harness.restore();
+    const { id, config } = await startRunningRun(harness);
+    harness.onNextSleep(() => atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+      status: "interrupted", output: "SHARED_STOP_SENTINEL", error: "Interrupted by supervisor.",
+    })));
+
+    const [first, second] = await Promise.all([interrupt(harness, id), interrupt(harness, id)]);
+
+    assert.equal(controls(harness, id).filter(({ type }) => type === "interrupt").length, 1,
+      "one shared termination writes one interrupt control");
+    for (const result of [first, second]) {
+      assert.equal(result.details.run.status, "interrupted");
+      assert.equal(result.details.run.output, "SHARED_STOP_SENTINEL");
+      assert.equal(["stopped", "already-terminal"].includes(result.details.outcome), true);
+    }
+    assert.equal(harness.notifications.length, 0);
+    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+    assert.equal(harness.runtime.terminating.size, 0);
+  } finally { harness.cleanup(); }
+});
+
+test("poller reconciliation during an interrupt never delivers the suppressed terminal notification", async () => {
+  const harness = createInterruptHarness();
+  try {
+    await harness.restore();
+    const { id, config } = await startRunningRun(harness);
+    harness.onNextSleep(() => {
+      atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+        status: "interrupted", output: "POLLED_STOP_SENTINEL", error: "Interrupted by supervisor.",
+      }));
+      for (const timer of harness.intervals) timer.callback();
+    });
+
+    const result = await interrupt(harness, id);
+
+    assert.equal(result.details.run.status, "interrupted");
+    assert.equal(result.details.run.output, "POLLED_STOP_SENTINEL");
+    assert.equal(harness.notifications.length, 0, "the poller shares the run-scoped suppression");
+    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+    assert.equal(harness.runtime.queuedNotifications.size, 0);
+  } finally { harness.cleanup(); }
+});
+
+test("poller failure paths never duplicate a termination that an interrupt already owns", async () => {
+  for (const mode of ["dead-runner", "stale-heartbeat"]) {
+    const harness = createInterruptHarness();
+    try {
+      await harness.restore();
+      const { id, config } = await startRunningRun(harness);
+      harness.onNextSleep(() => {
+        // The poller observes a failure signature that would normally fail the run, write another interrupt
+        // control, and signal the process while the interrupt already owns this termination.
+        if (mode === "dead-runner") {
+          harness.alive.delete(999);
+          for (const timer of harness.intervals) timer.callback();
+        } else {
+          for (let pass = 0; pass < 2; pass += 1) {
+            harness.advance(5001);
+            for (const timer of harness.intervals) timer.callback();
+          }
+        }
+        atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+          status: "interrupted", output: "OWNED_STOP_SENTINEL", error: "Interrupted by supervisor.",
+        }));
+      });
+
+      const result = await interrupt(harness, id);
+
+      assert.equal(result.details.outcome, "stopped", `${mode} must not change the owned termination outcome`);
+      assert.equal(result.details.run.status, "interrupted");
+      assert.equal(result.details.run.output, "OWNED_STOP_SENTINEL");
+      assert.equal(result.details.run.error, "Interrupted by supervisor.", `${mode} must not overwrite the authoritative diagnosis`);
+      assert.match(result.content[0].text, /Output: OWNED_STOP_SENTINEL/);
+      assert.equal(controls(harness, id).filter(({ type }) => type === "interrupt").length, 1,
+        `${mode} must not write a second interrupt control`);
+      assert.deepEqual(harness.killed, [], `${mode} must not signal a process the termination owner already handles`);
+      assert.equal(harness.notifications.length, 0, `${mode} keeps the single direct handoff`);
+      assert.equal(harness.runtime.registry.get(id).status, "interrupted");
+      assert.equal(harness.runtime.registry.get(id).error, "Interrupted by supervisor.");
+      assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+      assert.equal(harness.runtime.queuedNotifications.size, 0);
+      assert.equal(harness.runtime.terminating.size, 0);
+    } finally { harness.cleanup(); }
+  }
+});
+
+test("an interrupt waits out a reconciliation that already owns the stop and never duplicates it", async () => {
+  let harness;
+  let releaseStopGrace;
+  let stopGraceEntered;
+  const stopGraceReached = new Promise((resolve) => { stopGraceEntered = resolve; });
+  harness = createHarness({
+    interruptWaitMs: 50,
+    sleep: async (ms) => {
+      if (ms === 1500 && releaseStopGrace === undefined) {
+        // Park the reconciliation pass inside its verified stop grace, proving it entered the async window.
+        const parked = new Promise((resolve) => { releaseStopGrace = resolve; });
+        stopGraceEntered();
+        await parked;
+      }
+      harness.advance(ms);
+    },
+  });
+  try {
+    await harness.restore();
+    const { id } = await startRunningRun(harness);
+
+    // The poller reaches its stale-heartbeat failure first and starts terminating the run itself.
+    for (let pass = 0; pass < 2; pass += 1) {
+      harness.advance(5001);
+      for (const timer of harness.intervals) timer.callback();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await stopGraceReached;
+    assert.equal(harness.runtime.reconciling.has(id), true, "the reconciliation pass must still be in flight");
+    assert.equal(controls(harness, id).filter(({ type }) => type === "interrupt").length, 1,
+      "the reconciliation pass owns the only interrupt control");
+    assert.deepEqual(harness.killed, [{ pid: -999, signal: "SIGTERM" }]);
+    assert.equal(harness.runtime.registry.get(id).status, "running", "the reconciliation has not concluded yet");
+
+    // The explicit interrupt arrives while that pass is parked, so its own pre-reconcile returns immediately.
+    const pending = interrupt(harness, id);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(harness.runtime.terminating.has(id), true, "the explicit termination registered ownership");
+    assert.equal(harness.runtime.notificationSuppression.has(id), true, "suppression is held before any await");
+    assert.equal(controls(harness, id).filter(({ type }) => type === "interrupt").length, 1,
+      "the waiting termination must not write a second control");
+    assert.deepEqual(harness.killed, [{ pid: -999, signal: "SIGTERM" }], "the waiting termination must not signal again");
+
+    releaseStopGrace();
+    const result = await pending;
+
+    assert.equal(result.details.outcome, "raced");
+    assert.equal(result.details.run.status, "failed");
+    assert.equal(result.details.run.error, "Detached runner heartbeat no longer advances.",
+      "the reconciliation diagnosis stays authoritative");
+    assert.match(result.content[0].text, /Error: Detached runner heartbeat no longer advances\./);
+    assert.equal(controls(harness, id).filter(({ type }) => type === "interrupt").length, 1,
+      "the whole interleaving writes exactly one interrupt control");
+    assert.deepEqual(harness.killed, [{ pid: -999, signal: "SIGTERM" }], "the whole interleaving signals exactly once");
+    assert.equal(harness.notifications.length, 0, "the explicit interrupt hands back the reconciled result directly");
+    assert.equal(harness.runtime.registry.get(id).status, "failed");
+    assert.equal(harness.runtime.registry.get(id).error, "Detached runner heartbeat no longer advances.");
+    assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
+    assert.equal(harness.runtime.queuedNotifications.size, 0);
+    assert.equal(harness.runtime.terminating.size, 0);
+    assert.equal(harness.runtime.reconciling.has(id), false);
+
+    harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+    assert.equal(harness.notifications.length, 0, "no queued retry can match the handed-back terminal event");
+  } finally { harness.cleanup(); }
+});
+
+test("an aborted interrupt keeps its control and replays the pending notification exactly once", async () => {
+  const controller = new AbortController();
+  const harness = createInterruptHarness();
+  try {
+    await harness.restore();
+    const { id, config } = await startRunningRun(harness);
+    harness.onNextSleep(() => {
+      atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+        status: "interrupted", output: "ABORTED_STOP_SENTINEL", error: "Interrupted by supervisor.",
+      }));
+      controller.abort();
+    });
+
+    await assert.rejects(
+      harness.tools.get("subagent").execute("interrupt", { action: "interrupt", id }, controller.signal),
+      (error) => error.name === "AbortError",
+    );
+
+    await settleTerminations(harness);
+    assert.equal(controls(harness, id).filter(({ type }) => type === "interrupt").length, 1,
+      "an aborted interrupt never reverts its written control");
+    assert.equal(harness.runtime.registry.get(id).status, "interrupted");
+    assert.equal(harness.runtime.registry.get(id).notificationPending, "interrupted");
+    assert.equal(harness.notifications.length, 1, "the retained pending event is delivered exactly once");
+    assert.equal(harness.notifications[0].message.details.status, "interrupted");
+    assert.equal(harness.notifications[0].message.details.run.output, "ABORTED_STOP_SENTINEL");
+
+    assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(harness.notifications[0].message)), true);
+    harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+    assert.equal(harness.notifications.length, 1, "the acknowledged replay is never repeated");
+  } finally { harness.cleanup(); }
+});
+
+test("a shutdown during an interrupt refuses the handoff and journals the pending notification for the next session", async () => {
+  let harness;
+  let shutdown;
+  harness = createInterruptHarness({
+    sleep: async (ms) => {
+      const hook = harness.takeSleepHook();
+      hook?.();
+      harness.advance(ms);
+    },
+  });
+  try {
+    await harness.restore();
+    const { id, config } = await startRunningRun(harness);
+    harness.onNextSleep(() => {
+      atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+        status: "interrupted", output: "SHUTDOWN_STOP_SENTINEL", error: "Interrupted by supervisor.",
+      }));
+      shutdown = harness.runtime.shutdown();
+    });
+
+    await assert.rejects(
+      harness.tools.get("subagent").execute("interrupt", { action: "interrupt", id }),
+      /can no longer hand back its result directly/,
+    );
+    await shutdown;
+
+    assert.equal(harness.runtime.registry.get(id).status, "interrupted");
+    assert.equal(harness.runtime.registry.get(id).notificationPending, "interrupted");
+    assert.equal(harness.notifications.length, 0, "the closing parent receives no notification");
+    assert.equal(harness.journalWrites.at(-1).data.run.notificationPending, "interrupted");
+
+    const next = createHarness({ branch: harness.journalWrites.map(({ data }) => branchEntry(data)) });
+    try {
+      await next.restore();
+      assert.equal(next.notifications.length, 1, "the next session replays the retained pending event once");
+      assert.equal(next.notifications[0].message.details.status, "interrupted");
+      assert.match(next.notifications[0].message.content, /SHUTDOWN_STOP_SENTINEL/);
+    } finally { next.cleanup(); }
+  } finally { harness.cleanup(); }
+});
+
+test("a restore during an interrupt refuses the handoff and delivers the pending notification exactly once", async () => {
+  const branch = [];
+  let harness;
+  let restored;
+  harness = createInterruptHarness({
+    branch,
+    onJournalWrite: ({ data }) => branch.push(branchEntry(data)),
+    sleep: async (ms) => {
+      const hook = harness.takeSleepHook();
+      hook?.();
+      harness.advance(ms);
+    },
+  });
+  try {
+    await harness.restore();
+    const { id, config } = await startRunningRun(harness);
+    harness.onNextSleep(() => {
+      atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, {
+        status: "interrupted", output: "RESTORED_STOP_SENTINEL", error: "Interrupted by supervisor.",
+      }));
+      restored = harness.restore();
+    });
+
+    await assert.rejects(
+      harness.tools.get("subagent").execute("interrupt", { action: "interrupt", id }),
+      /can no longer hand back its result directly/,
+    );
+    await restored;
+
+    assert.equal(harness.runtime.registry.get(id).status, "interrupted");
+    assert.equal(harness.notifications.length, 1, "the replaced session delivers the retained pending event once");
+    assert.equal(harness.notifications[0].message.details.status, "interrupted");
+    assert.match(harness.notifications[0].message.content, /RESTORED_STOP_SENTINEL/);
+
+    assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(harness.notifications[0].message)), true);
+    harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+    assert.equal(harness.notifications.length, 1, "the acknowledged replay is never repeated");
   } finally { harness.cleanup(); }
 });
 

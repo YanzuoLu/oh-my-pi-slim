@@ -149,6 +149,8 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 - Before local edits or another writer task, compare against running task scopes.
 - Parallel background tasks are allowed only when their write scopes do not conflict.
 - Use `subagent({ action: "interrupt", id })` only when the user asks, or when a live lane is obsolete, wrong, or conflicts with a safer replacement plan.
+- Interrupt is synchronous: it waits for that run's terminal status and returns the complete final result, so no separate terminal notification follows it. Reconcile the returned result immediately instead of waiting for one.
+- An interrupt of an already terminal run changes nothing and returns a compact acknowledgement; that run's own terminal notification still carries its full result.
 - Interruption is not rollback: after interrupting a writer, inspect and reconcile partial file changes before launching a replacement lane.
 
 #### End Turn After Background Tasks

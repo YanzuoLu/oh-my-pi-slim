@@ -101,13 +101,15 @@ Runs specialists in isolated background child sessions and returns control immed
 | `create` | Start a new specialist run with an agent, short abstract, task, and optional cwd |
 | `list` | Return compact public state for every retained run in retained-run order |
 | `status` | Return one retained run's public state and its terminal result when available |
-| `interrupt` | Request interruption of a non-terminal run without rolling back file changes |
+| `interrupt` | Stop a non-terminal run without rolling back file changes and return its final result |
 | `steer` | Send guidance to a running run |
 | `resume` | Continue a terminal run's saved child session as a new run with a new ID |
 | `reply` | Answer a waiting child and continue that same run |
 | `clear` | Remove all retained terminal history |
 
 `list` includes `starting`, `running`, `waiting`, `completed`, `failed`, and `interrupted` runs, but never includes terminal `output` or `error`. Use `status` with one retained run ID to inspect the same public fields and recover its terminal result when present. The subagent widget uses the same retained set and ordering, so terminal runs remain visible until `clear`.
+
+`interrupt` is synchronous. It waits for the targeted run to reach a terminal status and returns that complete final result, including any stored `output` or `error`. When an explicit `interrupt` call takes over delivery for a live run, that terminal event is not sent separately and is not replayed after reload. Interruptions caused by shutdown, reload, tree navigation, or session replacement still arrive as ordinary terminal notifications. A run that already reached a terminal status before the call keeps its own terminal notification, receives no interrupt control, and returns only a compact status line. When the detached runner cannot be verified as stopped, the result says so explicitly and the run directory is retained.
 
 `clear` is refused while any run is `starting`, `running`, or `waiting`. Once every retained run is terminal, it can clear the complete history; the cleared state remains empty after reload and restoration. Clearing Subagent history never changes Goal statistics.
 
