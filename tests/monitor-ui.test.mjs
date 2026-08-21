@@ -7,7 +7,7 @@ import { dirname } from "node:path";
 import { PassThrough } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { pathToFileURL } from "node:url";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 
 const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
 const piRoot = dirname(dirname(piEntry));
@@ -20,6 +20,8 @@ const dependencyMap = {
   "./monitor-widget.js": new URL("../extensions/oh-my-pi-slim/monitor-widget.ts", import.meta.url).href,
   "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
   "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
+  "./widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
+  "./widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -42,10 +44,15 @@ const {
 const {
   MAX_MONITOR_WIDGET_LINES,
   MONITOR_RENDER_THROTTLE_MS,
-  MONITOR_WIDGET_KEY,
   MonitorWidget,
   renderMonitorWidgetLines,
 } = await import("../extensions/oh-my-pi-slim/monitor-widget.ts");
+const {
+  WIDGET_STACK_KEY,
+  resetWidgetStackHost,
+} = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
+
+beforeEach(() => resetWidgetStackHost());
 
 const theme = {
   fg: (_color, text) => text,
@@ -161,7 +168,7 @@ function closeChild(child, code = 0, signal = null) {
   child.emit("close", code, signal);
 }
 
-test("Monitor widget renders exact heading, glyphs, running/terminal order, overflow, width safety, and empty state", () => {
+test("Monitor widget renders the exact terminal/total heading ratio, glyphs, running/terminal order, overflow, width safety, and empty state", () => {
   const monitors = [
     widgetMonitor({ id: "00000003", abstract: "terminal old", status: "completed", createdAt: "2026-04-30T00:00:00.000Z", endedAt: "2026-05-01T00:00:03.000Z" }),
     widgetMonitor({ id: "00000002", abstract: "running later", createdAt: "2026-05-01T00:00:02.000Z" }),
@@ -170,8 +177,7 @@ test("Monitor widget renders exact heading, glyphs, running/terminal order, over
     widgetMonitor({ id: "00000005", abstract: "terminal middle", status: "killed", endedAt: "2026-05-01T00:00:04.000Z" }),
   ];
   const lines = renderMonitorWidgetLines(monitors, theme, 100);
-  assert.equal(lines[0], "●  Monitors");
-  assert.doesNotMatch(lines[0], /\(|\)|\d/, "the Monitors heading carries no running/total ratio");
+  assert.equal(lines[0], "●  Monitors (3/5)", "completed, failed, and killed all count as terminal in the numerator");
   assert.equal(lines[1], "├─ ↻  running first [00000001] · running");
   assert.equal(lines[2], "├─ ↻  running later [00000002] · running");
   assert.equal(lines[3], "├─ !  terminal newest [00000004] · failed");
@@ -186,6 +192,7 @@ test("Monitor widget renders exact heading, glyphs, running/terminal order, over
     createdAt: new Date(Date.parse("2026-05-01T00:00:00.000Z") + index * 1000).toISOString(),
   })), theme, 80);
   assert.equal(overflow.length, MAX_MONITOR_WIDGET_LINES);
+  assert.equal(overflow[0], "●  Monitors (0/13)", "the 12-line budget and overflow row never shrink the heading total");
   assert.equal(overflow.at(-1), "└─ … 3 more");
   assert.match(overflow.join("\n"), /\[00000010\]/);
   assert.doesNotMatch(overflow.join("\n"), /\[00000011\]/);
@@ -196,11 +203,13 @@ test("Monitor widget renders exact heading, glyphs, running/terminal order, over
     bold: (text) => `\u001b[1m${text}\u001b[22m`,
   };
   const wide = renderMonitorWidgetLines([widgetMonitor()], vtTheme, 100);
+  assert.equal(stripVTControlCharacters(wide[0]), "●  Monitors (0/1)");
   assert.ok(wide.every((line) => visibleWidth(line) <= 100));
   assert.match(stripVTControlCharacters(wide[1]), /^└─ ↻  /);
   const narrow = renderMonitorWidgetLines([widgetMonitor({ abstract: "An extremely long abstract with controls\u0000 and ANSI \u001b[31mred\u001b[0m" })], vtTheme, 38);
   const narrowPlain = narrow.map((line) => stripVTControlCharacters(line));
   assert.ok(narrow.every((line) => visibleWidth(line) <= 38));
+  assert.equal(narrowPlain[0], "●  Monitors (0/1)", "a narrow terminal keeps the whole ratio while the rows truncate");
   assert.match(narrowPlain[1], /↻  .*\[00000001\] · running$/);
   assert.doesNotMatch(narrowPlain.join("\n"), /\u001b|\u0000|\[31m/);
   assert.deepEqual(renderMonitorWidgetLines([], theme, 80), []);
@@ -217,10 +226,15 @@ test("Monitor collapsed body keeps only running rows, adds one atomic dim expand
 
   assert.deepEqual(renderMonitorWidgetLines(mixed, theme, 100, true, DEFAULT_HINT), renderMonitorWidgetLines(mixed, theme, 100));
   assert.deepEqual(renderMonitorWidgetLines(mixed, theme, 100, false, DEFAULT_HINT), [
-    "●  Monitors · ctrl+o to expand",
+    "●  Monitors (3/5) · ctrl+o to expand",
     "├─ ↻  running first [00000001] · running",
     "└─ ↻  running later [00000002] · running",
   ]);
+  assert.equal(
+    renderMonitorWidgetLines(mixed, theme, 100, false, "")[0],
+    renderMonitorWidgetLines(mixed, theme, 100, true, "")[0],
+    "collapsing away every terminal row leaves the heading ratio untouched",
+  );
 
   const runningOnly = mixed.filter((monitor) => monitor.status === "running");
   assert.deepEqual(
@@ -229,9 +243,20 @@ test("Monitor collapsed body keeps only running rows, adds one atomic dim expand
     "a collapsed widget with nothing hidden shows no hint at all",
   );
 
+  assert.equal(
+    renderMonitorWidgetLines(runningOnly, theme, 100)[0],
+    "●  Monitors (0/2)",
+    "a fully running widget reports a zero numerator",
+  );
+
   const terminalOnly = mixed.filter((monitor) => monitor.status !== "running");
-  assert.deepEqual(renderMonitorWidgetLines(terminalOnly, theme, 100, false, DEFAULT_HINT), ["○  Monitors · ctrl+o to expand"]);
+  assert.deepEqual(renderMonitorWidgetLines(terminalOnly, theme, 100, false, DEFAULT_HINT), ["○  Monitors (3/3) · ctrl+o to expand"]);
   assert.equal(renderMonitorWidgetLines(terminalOnly, theme, 100, true, DEFAULT_HINT).length, 4);
+  assert.equal(
+    renderMonitorWidgetLines(terminalOnly, theme, 100, true, DEFAULT_HINT)[0],
+    "○  Monitors (3/3)",
+    "an all-terminal widget reads N/N with the hollow dim glyph, even while every row stays hidden",
+  );
 });
 
 test("Monitor expand hint stays one dim non-bold segment, uses the configured key, and drops whole when the width is tight", () => {
@@ -245,10 +270,15 @@ test("Monitor expand hint stays one dim non-bold segment, uses the configured ke
   const activeHeading = renderMonitorWidgetLines(mixed, roleAnsiTheme, 100, false, DEFAULT_HINT)[0];
   assert.equal(
     activeHeading,
-    `\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mMonitors\u001b[22m\u001b[0m${dimHint}`,
+    `\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mMonitors (1/2)\u001b[22m\u001b[0m${dimHint}`,
+    "a running monitor keeps the filled accent bold glyph, label, and ratio",
   );
   const idleHeading = renderMonitorWidgetLines(terminalOnly, roleAnsiTheme, 100, false, DEFAULT_HINT)[0];
-  assert.equal(idleHeading, `\u001b[2m○\u001b[0m  \u001b[2mMonitors\u001b[0m${dimHint}`);
+  assert.equal(
+    idleHeading,
+    `\u001b[2m○\u001b[0m  \u001b[2mMonitors (1/1)\u001b[0m${dimHint}`,
+    "an all-terminal widget drops to a hollow dim non-bold glyph, label, and ratio",
+  );
   assert.ok(
     activeHeading.endsWith(dimHint) && idleHeading.endsWith(dimHint),
     "the hint renders identically in the active and idle heading states",
@@ -259,7 +289,7 @@ test("Monitor expand hint stays one dim non-bold segment, uses the configured ke
     assert.equal(widgetExpandHint(), " · ctrl+shift+e to expand");
     assert.equal(
       renderMonitorWidgetLines(mixed, theme, 100, false, widgetExpandHint())[0],
-      "●  Monitors · ctrl+shift+e to expand",
+      "●  Monitors (1/2) · ctrl+shift+e to expand",
     );
   });
   assert.equal(widgetExpandHint(), DEFAULT_HINT, "an unconfigured keymap falls back to Pi's default binding");
@@ -267,8 +297,13 @@ test("Monitor expand hint stays one dim non-bold segment, uses the configured ke
     assert.equal(widgetExpandHint(), DEFAULT_HINT, "a failing keybinding registry falls back without breaking widget render");
   });
 
-  const full = "●  Monitors · ctrl+o to expand";
+  const full = "●  Monitors (1/2) · ctrl+o to expand";
   assert.equal(renderMonitorWidgetLines(mixed, theme, full.length, false, DEFAULT_HINT)[0], full);
+  assert.equal(
+    renderMonitorWidgetLines(mixed, theme, 17, false, DEFAULT_HINT)[0],
+    "●  Monitors (1/2)",
+    "the widest hintless heading keeps the ratio whole",
+  );
   for (const width of [1, 4, 8, 11, 20, full.length - 1]) {
     const heading = renderMonitorWidgetLines(mixed, theme, width, false, DEFAULT_HINT)[0];
     assert.ok(visibleWidth(heading) <= width, `width ${width} must stay inside the terminal`);
@@ -276,7 +311,7 @@ test("Monitor expand hint stays one dim non-bold segment, uses the configured ke
   }
 });
 
-test("Monitor overflow counts only visible running rows and ignores policy-hidden terminal monitors", () => {
+test("Monitor overflow counts only visible running rows while the heading ratio still spans every retained monitor", () => {
   const monitors = [
     ...Array.from({ length: 12 }, (_, index) => widgetMonitor({
       id: String(index + 1).padStart(8, "0"),
@@ -293,10 +328,16 @@ test("Monitor overflow counts only visible running rows and ignores policy-hidde
 
   const expanded = renderMonitorWidgetLines(monitors, theme, 80, true, DEFAULT_HINT);
   assert.equal(expanded.length, MAX_MONITOR_WIDGET_LINES);
+  assert.equal(expanded[0], "●  Monitors (4/16)", "six rows hidden by the line budget still count in the heading");
   assert.equal(expanded.at(-1), "└─ … 6 more");
 
   const collapsed = renderMonitorWidgetLines(monitors, theme, 80, false, DEFAULT_HINT);
-  assert.equal(collapsed[0], "●  Monitors · ctrl+o to expand");
+  assert.equal(collapsed[0], "●  Monitors (4/16) · ctrl+o to expand", "collapse plus budget never changes the ratio");
+  assert.equal(
+    renderMonitorWidgetLines([...monitors].reverse(), theme, 80, false, DEFAULT_HINT)[0],
+    collapsed[0],
+    "display sorting never reorders the counted set",
+  );
   assert.equal(collapsed.at(-1), "└─ … 2 more", "only the two budget-hidden running rows are summarised");
   assert.doesNotMatch(collapsed.join("\n"), /terminal /, "policy-hidden terminal rows never reach the body");
   assert.equal(collapsed.length, MAX_MONITOR_WIDGET_LINES);
@@ -330,7 +371,7 @@ test("MonitorWidget reads Pi's live expansion state on every render without re-r
   assert.equal(component.render(100).length, 3);
 
   expanded = false;
-  assert.deepEqual(component.render(100), ["●  Monitors · ctrl+o to expand", "└─ ↻  running first [00000001] · running"]);
+  assert.deepEqual(component.render(100), ["●  Monitors (1/2) · ctrl+o to expand", "└─ ↻  running first [00000001] · running"]);
   assert.equal(calls.length, 1, "Ctrl+O must not re-register the widget");
 
   expanded = true;
@@ -396,7 +437,7 @@ test("MonitorWidget throttles and coalesces output, refreshes lifecycle immediat
   monitors = [widgetMonitor()];
   widget.handleChange({ type: "created", reason: "lifecycle", id: "00000001", status: "running" });
   assert.equal(callsA.length, 1);
-  assert.equal(callsA[0].key, MONITOR_WIDGET_KEY);
+  assert.equal(callsA[0].key, WIDGET_STACK_KEY, "Monitors joins the one aggregate widget instead of owning a key");
   assert.deepEqual(callsA[0].options, { placement: "aboveEditor" });
   componentA.invalidate();
 
@@ -422,7 +463,12 @@ test("MonitorWidget throttles and coalesces output, refreshes lifecycle immediat
   assert.equal(callsA.at(-1).content, undefined);
   widget.update();
   assert.equal(callsB.length, 1);
-  assert.equal(componentB.render(80)[0], "●  Monitors");
+  assert.equal(componentB.render(80)[0], "●  Monitors (0/1)");
+
+  monitors = [widgetMonitor({ status: "completed", endedAt: "2026-05-01T00:00:09.000Z" })];
+  widget.handleChange({ type: "updated", reason: "lifecycle", id: "00000001", status: "completed" });
+  assert.equal(componentB.render(80)[0], "○  Monitors (1/1)", "a lifecycle refresh moves the ratio and drops the heading to idle");
+  assert.equal(callsB.length, 1, "a ratio change reuses the registered widget");
 
   monitors = [];
   widget.handleChange({ type: "deleted", reason: "lifecycle", id: "00000001" });
@@ -431,7 +477,7 @@ test("MonitorWidget throttles and coalesces output, refreshes lifecycle immediat
   widget.dispose();
   widget.dispose();
   assert.equal(callsB.filter((call) => call.content === undefined).length, clearsBeforeDispose);
-  assert.equal(rendersB, 0);
+  assert.equal(rendersB, 1, "the rebound host rendered once, for the terminal lifecycle change");
 });
 
 test("MonitorRuntime registers renderers, binds one foreground subscription, survives same-UI tree refresh, rebinds replacement UI, and disposes on reset", async () => {

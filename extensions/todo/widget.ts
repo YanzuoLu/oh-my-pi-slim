@@ -1,10 +1,12 @@
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { formatSemanticGlyphPrefix } from "../oh-my-pi-slim/semantic-glyph.js";
-import { readWidgetExpanded, widgetExpandHint } from "../oh-my-pi-slim/widget-expansion.js";
+import { widgetStackHost } from "../oh-my-pi-slim/widget-stack-host.js";
+import type { WidgetStackSection } from "../oh-my-pi-slim/widget-stack.js";
 import type { TodoOperation, TodoReceipt, TodoTask } from "./core.js";
 
-export const TODO_WIDGET_KEY = "oh-my-pi-slim:todos";
+export const TODO_SECTION_ID = "todos";
+export const TODO_WIDGET_OWNER = "oh-my-pi-slim:todo-widget";
 export const MAX_TODO_WIDGET_LINES = 12;
 
 export function sanitizeTodoText(value: unknown): string {
@@ -58,9 +60,18 @@ function hiddenSummary(tasks: readonly TodoTask[]): string {
   return `+${tasks.length} more (${parts.join(", ")})`;
 }
 
+export function countCompletedTodoTasks(tasks: readonly TodoTask[]): number {
+  return tasks.filter((task) => task.status === "completed").length;
+}
+
+/** The heading's own filled-or-hollow test, shared with the widget stack so both agree by construction. */
+export function hasOpenTodoTasks(tasks: readonly TodoTask[]): boolean {
+  return countCompletedTodoTasks(tasks) < tasks.length;
+}
+
 function todoWidgetHeading(tasks: readonly TodoTask[], theme: Theme): string {
-  const completed = tasks.filter((task) => task.status === "completed").length;
-  const active = completed < tasks.length;
+  const completed = countCompletedTodoTasks(tasks);
+  const active = hasOpenTodoTasks(tasks);
   const color = active ? "accent" : "dim";
   const glyph = active ? theme.bold("●") : "○";
   const label = active ? theme.bold(`Todos (${completed}/${tasks.length})`) : `Todos (${completed}/${tasks.length})`;
@@ -127,7 +138,7 @@ export function renderTodoLines(
   if (tasks.length === 0 || maxLines <= 0) return [];
   const safeWidth = Math.max(1, width);
   const truncate = (line: string): string => truncateToWidth(line, safeWidth, "…");
-  const policyHidden = expanded ? 0 : tasks.filter((task) => task.status === "completed").length;
+  const policyHidden = expanded ? 0 : countCompletedTodoTasks(tasks);
   const lines = [todoHeadingLine(todoWidgetHeading(tasks, theme), policyHidden > 0 ? hint : "", theme, safeWidth)];
   const layout = selectTodoWidgetLayout(tasks, maxLines, expanded);
   for (let index = 0; index < layout.visible.length; index += 1) {
@@ -165,7 +176,7 @@ function addResultList(container: Container, theme: Theme, label: string, values
 }
 
 export function renderTodoListResult(tasks: readonly TodoTask[], theme: Theme, expanded = false): Component {
-  const completed = tasks.filter((task) => task.status === "completed").length;
+  const completed = countCompletedTodoTasks(tasks);
   const container = new Container();
   container.addChild(new Text(
     `${formatSemanticGlyphPrefix(theme.fg("accent", theme.bold("●")))}${theme.fg("accent", theme.bold(`Todos (${completed}/${tasks.length})`))}`,
@@ -230,54 +241,60 @@ export function renderTodoReceipts(
 }
 
 export class TodoWidget {
-  private ui: (ExtensionUIContext & { getToolsExpanded?(): boolean }) | undefined;
-  private tui: { requestRender(force?: boolean): void } | undefined;
-  private registered = false;
+  private ui: ExtensionUIContext | undefined;
+  private published = false;
   private tasks: readonly TodoTask[] = [];
+  private readonly section: WidgetStackSection = {
+    id: TODO_SECTION_ID,
+    isActive: () => hasOpenTodoTasks(this.tasks),
+    render: (input) => renderTodoLines(
+      this.tasks,
+      input.theme,
+      input.width,
+      MAX_TODO_WIDGET_LINES,
+      input.expanded,
+      input.hint,
+    ),
+  };
 
   setContext(ui: ExtensionUIContext): void {
-    if (this.ui === ui) return;
-    if (this.registered && this.ui) this.ui.setWidget(TODO_WIDGET_KEY, undefined);
+    if (this.ui === ui) {
+      // Re-binding the same UI is how a tree restore reclaims the host after `dispose` released it.
+      if (ui) widgetStackHost().bind(TODO_WIDGET_OWNER, ui);
+      return;
+    }
+    this.retract();
+    if (this.ui) widgetStackHost().unbind(TODO_WIDGET_OWNER, this.ui);
     this.ui = ui;
-    this.tui = undefined;
-    this.registered = false;
+    if (ui) widgetStackHost().bind(TODO_WIDGET_OWNER, ui);
+  }
+
+  /** Removes this widget's own section; the host clears the aggregate only when the last one leaves. */
+  private retract(): void {
+    if (!this.published) return;
+    this.published = false;
+    widgetStackHost().publish(TODO_SECTION_ID, undefined);
   }
 
   update(tasks: readonly TodoTask[]): void {
     this.tasks = tasks;
     if (!this.ui) return;
     if (tasks.length === 0) {
-      if (this.registered) this.ui.setWidget(TODO_WIDGET_KEY, undefined);
-      this.registered = false;
-      this.tui = undefined;
+      this.retract();
       return;
     }
-    if (!this.registered) {
-      this.ui.setWidget(TODO_WIDGET_KEY, (tui, theme) => {
-        this.tui = tui;
-        return {
-          render: (width: number) => renderTodoLines(
-            this.tasks,
-            this.ui?.theme ?? theme,
-            width,
-            MAX_TODO_WIDGET_LINES,
-            readWidgetExpanded(this.ui),
-            widgetExpandHint(),
-          ),
-          invalidate() {},
-        };
-      }, { placement: "aboveEditor" });
-      this.registered = true;
+    if (!this.published) {
+      this.published = true;
+      widgetStackHost().publish(TODO_SECTION_ID, this.section);
       return;
     }
-    this.tui?.requestRender();
+    widgetStackHost().requestRender();
   }
 
   dispose(): void {
-    if (this.registered && this.ui) this.ui.setWidget(TODO_WIDGET_KEY, undefined);
+    this.retract();
+    if (this.ui) widgetStackHost().unbind(TODO_WIDGET_OWNER, this.ui);
     this.ui = undefined;
-    this.tui = undefined;
-    this.registered = false;
     this.tasks = [];
   }
 }

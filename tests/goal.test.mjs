@@ -4,7 +4,7 @@ import { registerHooks } from "node:module";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { realpathSync } from "node:fs";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 
 const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
 const piRoot = dirname(dirname(piEntry));
@@ -16,6 +16,9 @@ const dependencyMap = {
   "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
   "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
   "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
+  "./widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
+  "./widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -41,6 +44,10 @@ const {
   replayGoalBranch,
   retryDelayMs,
 } = await import("../extensions/oh-my-pi-slim/goal-runtime.ts");
+const { resetWidgetStackHost } = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
+
+// The aggregate widget host is a process-wide singleton, so every test starts from an empty one.
+beforeEach(() => resetWidgetStackHost());
 
 const START_MS = Date.parse("2026-06-01T00:00:00.000Z");
 

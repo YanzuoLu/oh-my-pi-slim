@@ -2,24 +2,14 @@ import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent"
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { GoalExecutionStats, GoalStatus, GoalView } from "./goal-runtime.js";
 import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
+import { widgetStackHost, type WidgetStackUI } from "./widget-stack-host.js";
+import type { WidgetStackSection } from "./widget-stack.js";
 
-export const GOAL_WIDGET_KEY = "oh-my-pi-slim:goal";
+export const GOAL_SECTION_ID = "goal";
+export const GOAL_WIDGET_OWNER = "oh-my-pi-slim:goal-widget";
 
 const ANSI_PATTERN = /[\u001b\u009b](?:\][^\u0007]*(?:\u0007|\u001b\\)|[\[\]()#;?]*(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~])))/g;
 const INLINE_CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]/g;
-
-export interface GoalWidgetTui {
-  requestRender(force?: boolean): void;
-}
-
-interface GoalWidgetUI {
-  readonly theme: Theme;
-  setWidget(
-    key: string,
-    content: undefined | ((tui: GoalWidgetTui, theme: Theme) => { render(width: number): string[]; invalidate(): void }),
-    options?: { placement?: "aboveEditor" | "belowEditor" },
-  ): void;
-}
 
 export interface GoalWidgetOptions {
   nowMs?: () => number;
@@ -95,8 +85,13 @@ function statsLabel(owner: "main" | "child", stats: GoalExecutionStats): string 
 }
 
 /** Pursuing goals keep working; idle goals are parked, finished, or abandoned. */
-function isGoalPursuing(status: GoalStatus): boolean {
+export function isGoalPursuing(status: GoalStatus): boolean {
   return status === "active" || status === "retry_wait";
+}
+
+/** The prefix's own pursuing test, shared with the widget stack so both agree by construction. */
+export function isGoalViewPursuing(view: GoalView): boolean {
+  return view.goal ? isGoalPursuing(view.goal.status) : false;
 }
 
 /** Ratio-free prefix shared with the other persistent widgets: filled accent-or-warning bold, or hollow dim. */
@@ -145,10 +140,10 @@ export function renderGoalWidgetLines(
 }
 
 export class GoalWidget {
-  private ui: GoalWidgetUI | undefined;
-  private tui: GoalWidgetTui | undefined;
-  private registered = false;
+  private ui: WidgetStackUI | undefined;
+  private published = false;
   private timer: unknown;
+  private readonly section: WidgetStackSection;
   private readonly getView: () => GoalView;
   private readonly nowMs: () => number;
   private readonly setIntervalFn: (callback: () => void, milliseconds: number) => unknown;
@@ -159,30 +154,45 @@ export class GoalWidget {
     this.nowMs = options.nowMs ?? (() => Date.now());
     this.setIntervalFn = options.setInterval ?? ((callback, milliseconds) => setInterval(callback, milliseconds));
     this.clearIntervalFn = options.clearInterval ?? ((timer) => clearInterval(timer as ReturnType<typeof setInterval>));
+    this.section = {
+      id: GOAL_SECTION_ID,
+      isActive: () => isGoalViewPursuing(this.getView()),
+      render: (input) => renderGoalWidgetLines(this.getView(), input.theme, input.width, this.nowMs()),
+    };
   }
 
   setContext(ui: ExtensionUIContext | undefined): void {
-    const next = ui as GoalWidgetUI | undefined;
+    const next: WidgetStackUI | undefined = ui;
     if (this.ui === next) {
+      // Re-binding the same UI is how a tree restore reclaims the host after `dispose` released it.
+      if (next) widgetStackHost().bind(GOAL_WIDGET_OWNER, next);
       this.update();
       return;
     }
-    if (this.registered && this.ui) this.ui.setWidget(GOAL_WIDGET_KEY, undefined);
+    this.retract();
+    if (this.ui) widgetStackHost().unbind(GOAL_WIDGET_OWNER, this.ui);
     this.stopTimer();
     this.ui = next;
-    this.tui = undefined;
-    this.registered = false;
+    if (next) widgetStackHost().bind(GOAL_WIDGET_OWNER, next);
     this.update();
+  }
+
+  /** Removes this widget's own section; the host clears the aggregate only when the last one leaves. */
+  private retract(): void {
+    if (!this.published) return;
+    this.published = false;
+    widgetStackHost().publish(GOAL_SECTION_ID, undefined);
   }
 
   private ensureTimer(): void {
     if (this.timer !== undefined) return;
     this.timer = this.setIntervalFn(() => {
-      if (!this.ui || !this.registered || !this.getView().goal) {
+      // A tick that lands after unbind or dispose falls through to update and never republishes.
+      if (!this.ui || !this.published || !this.getView().goal) {
         this.update();
         return;
       }
-      this.tui?.requestRender();
+      widgetStackHost().requestRender();
     }, 1_000);
     (this.timer as { unref?: () => void }).unref?.();
   }
@@ -196,36 +206,28 @@ export class GoalWidget {
   update(): void {
     if (!this.ui) {
       this.stopTimer();
+      this.retract();
       return;
     }
     const view = this.getView();
     if (!view.goal) {
-      if (this.registered) this.ui.setWidget(GOAL_WIDGET_KEY, undefined);
-      this.registered = false;
-      this.tui = undefined;
+      this.retract();
       this.stopTimer();
       return;
     }
     this.ensureTimer();
-    if (!this.registered) {
-      this.ui.setWidget(GOAL_WIDGET_KEY, (tui, theme) => {
-        this.tui = tui;
-        return {
-          render: (width: number) => renderGoalWidgetLines(this.getView(), this.ui?.theme ?? theme, width, this.nowMs()),
-          invalidate() {},
-        };
-      }, { placement: "aboveEditor" });
-      this.registered = true;
+    if (!this.published) {
+      this.published = true;
+      widgetStackHost().publish(GOAL_SECTION_ID, this.section);
       return;
     }
-    this.tui?.requestRender();
+    widgetStackHost().requestRender();
   }
 
   dispose(): void {
     this.stopTimer();
-    if (this.registered && this.ui) this.ui.setWidget(GOAL_WIDGET_KEY, undefined);
+    this.retract();
+    if (this.ui) widgetStackHost().unbind(GOAL_WIDGET_OWNER, this.ui);
     this.ui = undefined;
-    this.tui = undefined;
-    this.registered = false;
   }
 }

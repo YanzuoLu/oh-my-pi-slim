@@ -17,7 +17,7 @@ import { registerHooks } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 
 const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
 const piRoot = dirname(dirname(piEntry));
@@ -52,6 +52,8 @@ const dependencyMap = {
   "./subagent-widget-glyphs.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-glyphs.ts", import.meta.url).href,
   "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
   "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
+  "./widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
+  "./widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -105,6 +107,10 @@ const {
   writeControl,
   writeGoalStatsSidecar,
 } = await import("../extensions/oh-my-pi-slim/subagent-run-files.ts");
+const { resetWidgetStackHost } = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
+
+// The aggregate widget host is a process-wide singleton, so every test starts from an empty one.
+beforeEach(() => resetWidgetStackHost());
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CACHE = join(ROOT, ".cache");

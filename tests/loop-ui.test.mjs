@@ -5,7 +5,7 @@ import { registerHooks } from "node:module";
 import { dirname } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { pathToFileURL } from "node:url";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 
 const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
 const piRoot = dirname(dirname(piEntry));
@@ -17,6 +17,9 @@ const dependencyMap = {
   "./loop-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/loop-transcript-renderer.ts", import.meta.url).href,
   "./loop-widget.js": new URL("../extensions/oh-my-pi-slim/loop-widget.ts", import.meta.url).href,
   "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
+  "./widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
+  "./widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -33,11 +36,16 @@ const {
   renderLoopResult,
 } = await import("../extensions/oh-my-pi-slim/loop-transcript-renderer.ts");
 const {
-  LOOP_WIDGET_KEY,
   MAX_LOOP_WIDGET_LINES,
   LoopWidget,
   renderLoopWidgetLines,
 } = await import("../extensions/oh-my-pi-slim/loop-widget.ts");
+const {
+  WIDGET_STACK_KEY,
+  resetWidgetStackHost,
+} = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
+
+beforeEach(() => resetWidgetStackHost());
 
 const NOW_MS = Date.parse("2026-05-01T00:00:00.000Z");
 const theme = {
@@ -205,7 +213,7 @@ test("LoopWidget uses one shared 1s timer and clears widget and timer for empty,
   widget.update();
   widget.update();
   assert.equal(widgetCalls.length, 1);
-  assert.equal(widgetCalls[0].key, LOOP_WIDGET_KEY);
+  assert.equal(widgetCalls[0].key, WIDGET_STACK_KEY, "Loops joins the one aggregate widget instead of owning a key");
   assert.deepEqual(widgetCalls[0].options, { placement: "aboveEditor" });
   assert.equal(intervals.length, 1);
   assert.equal(intervals[0].milliseconds, 1_000);

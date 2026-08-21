@@ -2,23 +2,13 @@ import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent"
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { PublicLoop } from "./loop-runtime.js";
 import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
+import { widgetStackHost, type WidgetStackUI } from "./widget-stack-host.js";
+import type { WidgetStackSection } from "./widget-stack.js";
 
-export const LOOP_WIDGET_KEY = "oh-my-pi-slim:loops";
+export const LOOP_SECTION_ID = "loops";
+export const LOOP_WIDGET_OWNER = "oh-my-pi-slim:loop-widget";
 export const MAX_LOOP_WIDGET_LINES = 12;
 export const MAX_VISIBLE_LOOPS = 5;
-
-export interface LoopWidgetTui {
-  requestRender(force?: boolean): void;
-}
-
-interface LoopWidgetUI {
-  readonly theme: Theme;
-  setWidget(
-    key: string,
-    content: undefined | ((tui: LoopWidgetTui, theme: Theme) => { render(width: number): string[]; invalidate(): void }),
-    options?: { placement?: "aboveEditor" | "belowEditor" },
-  ): void;
-}
 
 export interface LoopWidgetOptions {
   nowMs?: () => number;
@@ -114,9 +104,14 @@ function secondLine(loop: PublicLoop, theme: Theme, width: number, continues: bo
   return truncateToWidth(`${tree} ${theme.fg(loop.lastError && loop.status === "active" ? "error" : "dim", parts.join(" · "))}`, Math.max(1, width), "…");
 }
 
+/** The heading's own filled-or-hollow test, shared with the widget stack so both agree by construction. */
+export function hasActiveLoops(loops: readonly PublicLoop[]): boolean {
+  return loops.some((loop) => loop.status === "active");
+}
+
 /** Ratio-free heading: filled accent bold while any loop is active, hollow dim once every loop is paused. */
 function loopWidgetHeading(loops: readonly PublicLoop[], theme: Theme): string {
-  const active = loops.some((loop) => loop.status === "active");
+  const active = hasActiveLoops(loops);
   const role = active ? "accent" : "dim";
   const glyph = active ? theme.bold("●") : "○";
   const label = active ? theme.bold("Loops") : "Loops";
@@ -148,10 +143,10 @@ export function renderLoopWidgetLines(
 }
 
 export class LoopWidget {
-  private ui: LoopWidgetUI | undefined;
-  private tui: LoopWidgetTui | undefined;
-  private registered = false;
+  private ui: WidgetStackUI | undefined;
+  private published = false;
   private timer: unknown;
+  private readonly section: WidgetStackSection;
   private readonly listLoops: () => PublicLoop[];
   private readonly nowMs: () => number;
   private readonly setIntervalFn: (callback: () => void, milliseconds: number) => unknown;
@@ -162,20 +157,34 @@ export class LoopWidget {
     this.nowMs = options.nowMs ?? (() => Date.now());
     this.setIntervalFn = options.setInterval ?? ((callback, milliseconds) => setInterval(callback, milliseconds));
     this.clearIntervalFn = options.clearInterval ?? ((timer) => clearInterval(timer as ReturnType<typeof setInterval>));
+    this.section = {
+      id: LOOP_SECTION_ID,
+      isActive: () => hasActiveLoops(this.listLoops()),
+      render: (input) => renderLoopWidgetLines(this.listLoops(), input.theme, input.width, this.nowMs()),
+    };
   }
 
   setContext(ui: ExtensionUIContext | undefined): void {
-    const next = ui as LoopWidgetUI | undefined;
+    const next: WidgetStackUI | undefined = ui;
     if (this.ui === next) {
+      // Re-binding the same UI is how a tree restore reclaims the host after `dispose` released it.
+      if (next) widgetStackHost().bind(LOOP_WIDGET_OWNER, next);
       this.update();
       return;
     }
-    if (this.registered && this.ui) this.ui.setWidget(LOOP_WIDGET_KEY, undefined);
+    this.retract();
+    if (this.ui) widgetStackHost().unbind(LOOP_WIDGET_OWNER, this.ui);
     this.stopTimer();
     this.ui = next;
-    this.tui = undefined;
-    this.registered = false;
+    if (next) widgetStackHost().bind(LOOP_WIDGET_OWNER, next);
     this.update();
+  }
+
+  /** Removes this widget's own section; the host clears the aggregate only when the last one leaves. */
+  private retract(): void {
+    if (!this.published) return;
+    this.published = false;
+    widgetStackHost().publish(LOOP_SECTION_ID, undefined);
   }
 
   private ensureTimer(): void {
@@ -193,37 +202,29 @@ export class LoopWidget {
   update(): void {
     if (!this.ui) {
       this.stopTimer();
+      this.retract();
       return;
     }
     const loops = this.listLoops();
     if (loops.length === 0) {
-      if (this.registered) this.ui.setWidget(LOOP_WIDGET_KEY, undefined);
-      this.registered = false;
-      this.tui = undefined;
+      this.retract();
       this.stopTimer();
       return;
     }
 
     this.ensureTimer();
-    if (!this.registered) {
-      this.ui.setWidget(LOOP_WIDGET_KEY, (tui, theme) => {
-        this.tui = tui;
-        return {
-          render: (width: number) => renderLoopWidgetLines(this.listLoops(), this.ui?.theme ?? theme, width, this.nowMs()),
-          invalidate() {},
-        };
-      }, { placement: "aboveEditor" });
-      this.registered = true;
+    if (!this.published) {
+      this.published = true;
+      widgetStackHost().publish(LOOP_SECTION_ID, this.section);
       return;
     }
-    this.tui?.requestRender();
+    widgetStackHost().requestRender();
   }
 
   dispose(): void {
     this.stopTimer();
-    if (this.registered && this.ui) this.ui.setWidget(LOOP_WIDGET_KEY, undefined);
+    this.retract();
+    if (this.ui) widgetStackHost().unbind(LOOP_WIDGET_OWNER, this.ui);
     this.ui = undefined;
-    this.tui = undefined;
-    this.registered = false;
   }
 }

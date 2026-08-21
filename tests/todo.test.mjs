@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 
 const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
 const piRoot = dirname(dirname(piEntry));
@@ -16,6 +16,10 @@ const dependencyMap = {
   "./widget.js": new URL("../extensions/todo/widget.ts", import.meta.url).href,
   "../oh-my-pi-slim/semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
   "../oh-my-pi-slim/widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
+  "../oh-my-pi-slim/widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
+  "../oh-my-pi-slim/widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
+  "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
+  "./widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -28,6 +32,13 @@ const { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, visibleWidth } = aw
 const { widgetExpandHint } = await import("../extensions/oh-my-pi-slim/widget-expansion.ts");
 const core = await import("../extensions/todo/core.ts");
 const todoModule = await import("../extensions/todo/index.ts");
+const {
+  WIDGET_STACK_KEY,
+  resetWidgetStackHost,
+  widgetStackHost,
+} = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
+
+beforeEach(() => resetWidgetStackHost());
 const widgetModule = await import("../extensions/todo/widget.ts");
 const {
   applyTodoUpdate,
@@ -570,6 +581,33 @@ test("main and child both register Todo while RPC sessions never register widget
   } finally {
     if (priorChild === undefined) delete process.env.PI_SUBAGENT_CHILD; else process.env.PI_SUBAGENT_CHILD = priorChild;
     if (priorOmpsChild === undefined) delete process.env.OMPS_SUBAGENT_CHILD; else process.env.OMPS_SUBAGENT_CHILD = priorOmpsChild;
+  }
+});
+
+test("session shutdown always disposes the Todo section while RPC and no-UI sessions still never register", () => {
+  const tui = createHarness({ mode: "tui" });
+  tui.emit("session_start", { reason: "startup" });
+  runUpdate(tui.tool, tui.ctx, [{ op: "append", subject: "Open", abstract: "open" }]);
+  assert.equal(typeof tui.widgetCalls.at(-1).content, "function");
+  assert.equal(tui.widgetCalls.at(-1).key, WIDGET_STACK_KEY, "Todos joins the one aggregate widget instead of owning a key");
+
+  // A shutdown whose session id no longer matches the recorded foreground must still release.
+  const renamedCtx = { ...tui.ctx, sessionManager: { ...tui.ctx.sessionManager, getSessionId: () => "renamed" } };
+  for (const handler of tui.handlers.get("session_shutdown")) handler({}, renamedCtx);
+  assert.equal(tui.widgetCalls.at(-1).content, undefined, "an unmatched shutdown still clears the aggregate");
+  assert.equal(widgetStackHost().boundUI(), undefined);
+
+  // Disposing again, and disposing a session that never had a widget, stay no-ops.
+  const clears = tui.widgetCalls.filter((call) => call.content === undefined).length;
+  for (const handler of tui.handlers.get("session_shutdown")) handler({}, tui.ctx);
+  assert.equal(tui.widgetCalls.filter((call) => call.content === undefined).length, clears, "a repeated shutdown clears nothing twice");
+
+  for (const mode of ["rpc", "print"]) {
+    const headless = createHarness({ mode });
+    headless.emit("session_start", { reason: "startup" });
+    runUpdate(headless.tool, headless.ctx, [{ op: "append", subject: "Headless", abstract: "headless" }]);
+    for (const handler of headless.handlers.get("session_shutdown")) handler({}, headless.ctx);
+    assert.deepEqual(headless.widgetCalls, [], `${mode} sessions never register or clear a widget`);
   }
 });
 

@@ -11,13 +11,17 @@ import {
   type TodoSnapshotDetails,
   type TodoTask,
 } from "./core.js";
+import { widgetStackHost } from "../oh-my-pi-slim/widget-stack-host.js";
 import {
   renderTodoListResult,
   renderTodoReceipts,
   sanitizeTodoBody,
   sanitizeTodoText,
+  TODO_SECTION_ID,
   TodoWidget,
 } from "./widget.js";
+
+const TODO_EXTENSION_OWNER = "oh-my-pi-slim:todo-extension";
 
 const statusSchema = Type.Union([
   Type.Literal("pending"),
@@ -163,6 +167,9 @@ function isListDetails(value: unknown): value is TodoListDetails {
 
 export default function todoExtension(pi: ExtensionAPI): void {
   const sessions = new Map<string, TodoTask[]>();
+  // A reload evaluates this module again: drop the previous instance's section before the new
+  // widget publishes, so a dead closure can never keep rendering rows for an unloaded extension.
+  widgetStackHost().publish(TODO_SECTION_ID, undefined);
   const widget = new TodoWidget();
   let foregroundSession = "";
 
@@ -279,6 +286,7 @@ export default function todoExtension(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     restore(ctx);
     const id = sessionId(ctx);
+    if (ctx.mode === "tui") widgetStackHost().bind(TODO_EXTENSION_OWNER, ctx.ui);
     if (ctx.mode === "tui" && foregroundSession === "") {
       foregroundSession = id;
       widget.setContext(ctx.ui);
@@ -288,6 +296,7 @@ export default function todoExtension(pi: ExtensionAPI): void {
 
   pi.on("session_tree", (_event, ctx) => {
     restore(ctx);
+    if (ctx.mode === "tui") widgetStackHost().bind(TODO_EXTENSION_OWNER, ctx.ui);
     refreshWidget(ctx);
   });
 
@@ -299,9 +308,11 @@ export default function todoExtension(pi: ExtensionAPI): void {
   pi.on("session_shutdown", (_event, ctx) => {
     const id = sessionId(ctx);
     sessions.delete(id);
-    if (id === foregroundSession) {
-      widget.dispose();
-      foregroundSession = "";
-    }
+    // Release only this extension's claim on this session's UI; OMPS may still own the aggregate.
+    if (ctx.mode === "tui") widgetStackHost().unbind(TODO_EXTENSION_OWNER, ctx.ui);
+    // Dispose unconditionally: the widget owns its own retract-and-unbind guard, and gating it on
+    // the foreground id would strand a published section whenever that id no longer matches.
+    widget.dispose();
+    if (id === foregroundSession) foregroundSession = "";
   });
 }

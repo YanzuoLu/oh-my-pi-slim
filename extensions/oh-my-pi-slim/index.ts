@@ -24,6 +24,8 @@ import {
 import { SPECIALIST_NAMES, type SpecialistName } from "./subagent-core.js";
 import { registerSubagentRuntime } from "./subagent-runtime.js";
 import { SUBAGENT_NOTIFICATION_TYPE } from "./subagent-transcript-renderer.js";
+import { widgetStackHost } from "./widget-stack-host.js";
+import type { WidgetStackSectionId } from "./widget-stack.js";
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(EXTENSION_DIR, "../..");
@@ -42,6 +44,8 @@ const PHASE_REMINDER = `<system-reminder>
 </system-reminder>`;
 
 const RELOAD_PRESET_STORE_KEY = "__ompsActivePresetForReload";
+const WIDGET_STACK_OWNER = "oh-my-pi-slim:extension";
+const OWNED_WIDGET_SECTIONS: readonly WidgetStackSectionId[] = ["goal", "agents", "monitors", "loops"];
 
 type RoleName = (typeof ROLE_NAMES)[number];
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -302,6 +306,10 @@ function assertNoLegacyBackend(pi: ExtensionAPI): void {
 
 export default function ohMyPiSlim(pi: ExtensionAPI): void {
   if (process.env.PI_SUBAGENT_CHILD === "1" || process.env.OMPS_SUBAGENT_CHILD === "1") return;
+
+  // A reload evaluates this module again: drop the previous instance's sections before the new
+  // widgets publish, so a dead closure can never keep rendering rows for an unloaded extension.
+  for (const id of OWNED_WIDGET_SECTIONS) widgetStackHost().publish(id, undefined);
 
   const asks = registerAskRuntime(pi);
   const loops = registerLoopRuntime(pi);
@@ -585,6 +593,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   pi.on("session_start", async (event, ctx) => {
     invalidateCheckpoint(false);
     clearTreeNotificationHold();
+    widgetStackHost().bind(WIDGET_STACK_OWNER, ctx.mode === "tui" ? ctx.ui : undefined);
     asks.reset();
     bindAskDriver(ctx);
     asks.reconcileHostMode(ctx);
@@ -684,6 +693,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
 
   pi.on("session_tree", async (_event, ctx) => {
     sessionCtx = ctx;
+    widgetStackHost().bind(WIDGET_STACK_OWNER, ctx.mode === "tui" ? ctx.ui : undefined);
     bindAskDriver(ctx);
     asks.reconcileHostMode(ctx);
     loops.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined);
@@ -854,6 +864,8 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     invalidateCheckpoint(false);
     clearTreeNotificationHold();
+    // Release only this extension's claim on this session's UI; Todo may still own the aggregate.
+    widgetStackHost().unbind(WIDGET_STACK_OWNER, ctx.mode === "tui" ? ctx.ui : undefined);
     asks.abortAll("Session shutdown aborted the questionnaire.");
     bindAskDriver();
     loops.shutdown();

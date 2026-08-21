@@ -4,7 +4,7 @@ import { registerHooks } from "node:module";
 import { realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 
 const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
 const piRoot = dirname(dirname(piEntry));
@@ -40,8 +40,12 @@ const localMap = {
   "./subagent-widget-glyphs.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-glyphs.ts", import.meta.url).href,
   "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
   "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
+  "./widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
+  "./widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
   "../oh-my-pi-slim/semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
   "../oh-my-pi-slim/widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
+  "../oh-my-pi-slim/widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
+  "../oh-my-pi-slim/widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
   "./widget.js": new URL("../extensions/todo/widget.ts", import.meta.url).href,
 };
 registerHooks({
@@ -65,6 +69,10 @@ const { monitorParameters } = await import("../extensions/oh-my-pi-slim/monitor-
 const { subagentParameters } = await import("../extensions/oh-my-pi-slim/subagent-runtime.ts");
 const { contactSupervisorParameters } = await import("../extensions/oh-my-pi-slim/child-supervisor.ts");
 const { todoParameters } = await import("../extensions/todo/index.ts");
+const { resetWidgetStackHost } = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
+
+// The aggregate widget host is a process-wide singleton, so every test starts from an empty one.
+beforeEach(() => resetWidgetStackHost());
 
 function providerJson(schema) {
   return JSON.parse(JSON.stringify(schema));

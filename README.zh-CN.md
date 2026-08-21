@@ -165,7 +165,7 @@ Loop 会跨 compaction 与 tree navigation 保留，但 reload、new session、s
 
 `checkAfter` 在 `create` 时必填，闭区间从 `10s` 到 `7d`，格式为一个正整数加 `s`、`m`、`h` 或 `d`。静默时长从 `create` 成功开始计时，并在最近一次原始 stdout/stderr chunk 处重新起算，因此半行输出与没有换行的输出同样算作活动。运行中的命令只要静默达到该阈值，就会收到一条 silence reminder，要求你用该 ID 调用 `monitor status`。每个 monitor 同时最多只排队一条 reminder：后续 interval 只会就地更新同一条 reminder 的累计静默时长，不会堆积。`status` 会返回 canonical 的 `checkAfter` 与 `lastOutputAt`，在命令产生第一段输出前 `lastOutputAt` 为 `null`。
 
-matcher 与 terminal notification 共用同一种形式：每条都说明 monitor 当前状态，并且只携带上一条 notification 之后新增的输出，不重发完整日志。要看一个 record 的完整 retained state 与合并输出，`status` 是唯一入口。
+matcher 与 terminal notification 共用同一种形式，每条都说明 monitor 当前状态。matcher notification 只携带命中 `notifyOn` literal 的新增行，同一行即使命中多个 literal 也只出现一次，而已交付位置仍会越过全部普通行，因此未命中的输出不会在之后被重放。terminal notification 始终报告最终状态、exit code、signal 与 error。completed 的命令只追加此前没有交付过的命中行，因此一次只有普通输出的正常退出不携带任何行。failed 或 killed 的命令还会追加最近二十条新增行作为有界诊断尾部，并按 seq 与尚未交付的命中行合并去重。所有 payload 都遵守同一套字节上限，`omitted` 会说明被留下的部分。要看一个 record 的完整 retained state 与合并输出，`status` 是唯一入口。
 
 terminal record 与相关输出会一直保留到 `delete`。先用 `status` 检查结果，不再需要时再 `delete`。
 

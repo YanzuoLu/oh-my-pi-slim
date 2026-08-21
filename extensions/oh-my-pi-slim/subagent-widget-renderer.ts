@@ -99,8 +99,17 @@ export function renderActiveRunLines(
 }
 
 /** Counts every retained run directly, so budget, overflow, and sorting never move the heading numbers. */
+export function countActiveSubagentRuns(runs: readonly WidgetRun[]): number {
+  return runs.filter((run) => ACTIVE_STATUSES.has(run.status)).length;
+}
+
+/** The heading's own filled-or-hollow test, shared with the widget stack so both agree by construction. */
+export function hasActiveSubagentRuns(runs: readonly WidgetRun[]): boolean {
+  return countActiveSubagentRuns(runs) > 0;
+}
+
 function subagentWidgetHeading(runs: readonly WidgetRun[], theme: WidgetTheme): string {
-  const live = runs.filter((run) => ACTIVE_STATUSES.has(run.status)).length;
+  const live = countActiveSubagentRuns(runs);
   const terminal = runs.length - live;
   const active = live > 0;
   const color = active ? "accent" : "dim";

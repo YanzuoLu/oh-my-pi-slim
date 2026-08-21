@@ -2,9 +2,11 @@ import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent"
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { MonitorStateChange, MonitorStatus } from "./monitor-runtime.js";
 import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
-import { readWidgetExpanded, widgetExpandHint } from "./widget-expansion.js";
+import { widgetStackHost, type WidgetStackUI } from "./widget-stack-host.js";
+import type { WidgetStackSection } from "./widget-stack.js";
 
-export const MONITOR_WIDGET_KEY = "oh-my-pi-slim:monitors";
+export const MONITOR_SECTION_ID = "monitors";
+export const MONITOR_WIDGET_OWNER = "oh-my-pi-slim:monitor-widget";
 export const MAX_MONITOR_WIDGET_LINES = 12;
 export const MAX_VISIBLE_MONITORS = 10;
 export const MONITOR_RENDER_THROTTLE_MS = 110;
@@ -18,20 +20,6 @@ export interface MonitorWidgetItem {
   abstract: string;
   createdAt: string;
   endedAt: string | null;
-}
-
-export interface MonitorWidgetTui {
-  requestRender(force?: boolean): void;
-}
-
-interface MonitorWidgetUI {
-  readonly theme: Theme;
-  getToolsExpanded?(): boolean;
-  setWidget(
-    key: string,
-    content: undefined | ((tui: MonitorWidgetTui, theme: Theme) => { render(width: number): string[]; invalidate(): void }),
-    options?: { placement?: "aboveEditor" | "belowEditor" },
-  ): void;
 }
 
 export interface MonitorWidgetOptions {
@@ -119,12 +107,23 @@ function monitorLine(
   return truncateToWidth(`${glyphPrefix}${theme.fg("dim", `[${id}] · ${status}`)}`, safeWidth, "…");
 }
 
-/** Ratio-free heading: filled accent bold while anything runs, hollow dim once every monitor is terminal. */
+/** Counts every retained monitor directly, so collapse, budget, overflow, and sorting never move the heading numbers. */
+export function countRunningMonitors(monitors: readonly MonitorWidgetItem[]): number {
+  return monitors.filter((monitor) => monitor.status === "running").length;
+}
+
+/** The heading's own filled-or-hollow test, shared with the widget stack so both agree by construction. */
+export function hasRunningMonitors(monitors: readonly MonitorWidgetItem[]): boolean {
+  return countRunningMonitors(monitors) > 0;
+}
+
 function monitorWidgetHeading(monitors: readonly MonitorWidgetItem[], theme: Theme): string {
-  const active = monitors.some((monitor) => monitor.status === "running");
+  const running = countRunningMonitors(monitors);
+  const terminal = monitors.length - running;
+  const active = running > 0;
   const role = active ? "accent" : "dim";
   const glyph = active ? theme.bold("●") : "○";
-  const label = active ? theme.bold("Monitors") : "Monitors";
+  const label = active ? theme.bold(`Monitors (${terminal}/${monitors.length})`) : `Monitors (${terminal}/${monitors.length})`;
   return `${formatSemanticGlyphPrefix(theme.fg(role, glyph))}${theme.fg(role, label)}`;
 }
 
@@ -150,7 +149,7 @@ export function renderMonitorWidgetLines(
   const policyHidden = sorted.length - shown.length;
   const visible = shown.slice(0, MAX_VISIBLE_MONITORS);
   const hidden = shown.length - visible.length;
-  const lines = [monitorHeadingLine(monitorWidgetHeading(sorted, theme), policyHidden > 0 ? hint : "", theme, safeWidth)];
+  const lines = [monitorHeadingLine(monitorWidgetHeading(monitors, theme), policyHidden > 0 ? hint : "", theme, safeWidth)];
 
   for (let index = 0; index < visible.length; index += 1) {
     const continues = index < visible.length - 1 || hidden > 0;
@@ -163,10 +162,10 @@ export function renderMonitorWidgetLines(
 }
 
 export class MonitorWidget {
-  private ui: MonitorWidgetUI | undefined;
-  private tui: MonitorWidgetTui | undefined;
-  private registered = false;
+  private ui: WidgetStackUI | undefined;
+  private published = false;
   private renderTimer: unknown;
+  private readonly section: WidgetStackSection;
   private readonly listMonitors: () => MonitorWidgetItem[];
   private readonly throttleMs: number;
   private readonly setTimeoutFn: (callback: () => void, milliseconds: number) => unknown;
@@ -177,16 +176,32 @@ export class MonitorWidget {
     this.throttleMs = options.throttleMs ?? MONITOR_RENDER_THROTTLE_MS;
     this.setTimeoutFn = options.setTimeout ?? ((callback, milliseconds) => setTimeout(callback, milliseconds));
     this.clearTimeoutFn = options.clearTimeout ?? ((timer) => clearTimeout(timer as ReturnType<typeof setTimeout>));
+    this.section = {
+      id: MONITOR_SECTION_ID,
+      isActive: () => hasRunningMonitors(this.listMonitors()),
+      render: (input) => renderMonitorWidgetLines(this.listMonitors(), input.theme, input.width, input.expanded, input.hint),
+    };
   }
 
   setContext(ui: ExtensionUIContext | undefined): void {
-    const next = ui as MonitorWidgetUI | undefined;
-    if (this.ui === next) return;
-    if (this.registered && this.ui) this.ui.setWidget(MONITOR_WIDGET_KEY, undefined);
+    const next: WidgetStackUI | undefined = ui;
+    if (this.ui === next) {
+      // Re-binding the same UI is how a tree restore reclaims the host after `dispose` released it.
+      if (next) widgetStackHost().bind(MONITOR_WIDGET_OWNER, next);
+      return;
+    }
+    this.retract();
+    if (this.ui) widgetStackHost().unbind(MONITOR_WIDGET_OWNER, this.ui);
     this.cancelScheduledRender();
     this.ui = next;
-    this.tui = undefined;
-    this.registered = false;
+    if (next) widgetStackHost().bind(MONITOR_WIDGET_OWNER, next);
+  }
+
+  /** Removes this widget's own section; the host clears the aggregate only when the last one leaves. */
+  private retract(): void {
+    if (!this.published) return;
+    this.published = false;
+    widgetStackHost().publish(MONITOR_SECTION_ID, undefined);
   }
 
   handleChange(change: MonitorStateChange): void {
@@ -200,15 +215,16 @@ export class MonitorWidget {
 
   private scheduleRender(): void {
     if (!this.ui) return;
-    if (!this.registered) {
+    if (!this.published) {
       this.update();
       return;
     }
     if (this.renderTimer !== undefined) return;
     this.renderTimer = this.setTimeoutFn(() => {
       this.renderTimer = undefined;
-      if (!this.ui || !this.registered) return;
-      this.tui?.requestRender();
+      // A throttled tick that lands after unbind or dispose must never resurrect the section.
+      if (!this.ui || !this.published) return;
+      widgetStackHost().requestRender();
     }, this.throttleMs);
     (this.renderTimer as { unref?: () => void }).unref?.();
   }
@@ -222,43 +238,29 @@ export class MonitorWidget {
   update(): void {
     if (!this.ui) {
       this.cancelScheduledRender();
+      this.retract();
       return;
     }
     const monitors = this.listMonitors();
     if (monitors.length === 0) {
       this.cancelScheduledRender();
-      if (this.registered) this.ui.setWidget(MONITOR_WIDGET_KEY, undefined);
-      this.registered = false;
-      this.tui = undefined;
+      this.retract();
       return;
     }
 
-    if (!this.registered) {
-      this.ui.setWidget(MONITOR_WIDGET_KEY, (tui, theme) => {
-        this.tui = tui;
-        return {
-          render: (width: number) => renderMonitorWidgetLines(
-            this.listMonitors(),
-            this.ui?.theme ?? theme,
-            width,
-            readWidgetExpanded(this.ui),
-            widgetExpandHint(),
-          ),
-          invalidate() {},
-        };
-      }, { placement: "aboveEditor" });
-      this.registered = true;
+    if (!this.published) {
+      this.published = true;
+      widgetStackHost().publish(MONITOR_SECTION_ID, this.section);
       return;
     }
     this.cancelScheduledRender();
-    this.tui?.requestRender();
+    widgetStackHost().requestRender();
   }
 
   dispose(): void {
     this.cancelScheduledRender();
-    if (this.registered && this.ui) this.ui.setWidget(MONITOR_WIDGET_KEY, undefined);
+    this.retract();
+    if (this.ui) widgetStackHost().unbind(MONITOR_WIDGET_OWNER, this.ui);
     this.ui = undefined;
-    this.tui = undefined;
-    this.registered = false;
   }
 }

@@ -5,7 +5,7 @@ import { registerHooks } from "node:module";
 import { dirname } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { pathToFileURL } from "node:url";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 
 const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
 const piRoot = dirname(dirname(piEntry));
@@ -20,6 +20,8 @@ const dependencyMap = {
   "./subagent-run-files.js": new URL("../extensions/oh-my-pi-slim/subagent-run-files.ts", import.meta.url).href,
   "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
   "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
+  "./widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
+  "./widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -36,6 +38,12 @@ const {
   sortRetainedSubagentRuns,
 } = await import("../extensions/oh-my-pi-slim/subagent-core.ts");
 const { SubagentWidget, assembleSubagentWidgetState } = await import("../extensions/oh-my-pi-slim/subagent-widget.ts");
+const {
+  WIDGET_STACK_KEY,
+  resetWidgetStackHost,
+} = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
+
+beforeEach(() => resetWidgetStackHost());
 const {
   MAX_SUBAGENT_WIDGET_LINES,
   formatWidgetModel,
@@ -567,6 +575,7 @@ test("widget registers its callback once, ticks at 80ms, then requests render", 
   assert.equal(intervals.length, 1);
   assert.equal(intervals[0].ms, 80);
   assert.equal(widgetCalls.length, 1);
+  assert.equal(widgetCalls[0].key, WIDGET_STACK_KEY, "Agents joins the one aggregate widget instead of owning a key");
   assert.deepEqual(widgetCalls[0].options, { placement: "aboveEditor" });
   assert.equal(statusCalls.at(-1).text, "1 running agent");
 

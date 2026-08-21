@@ -4,8 +4,12 @@
  */
 
 import type { PersistedRun, RunStatus } from "./subagent-core.js";
-import { renderSubagentWidgetLines, type WidgetTheme } from "./subagent-widget-renderer.js";
-import { readWidgetExpanded, widgetExpandHint } from "./widget-expansion.js";
+import { hasActiveSubagentRuns, renderSubagentWidgetLines } from "./subagent-widget-renderer.js";
+import { widgetStackHost, type WidgetStackUI } from "./widget-stack-host.js";
+import type { WidgetStackSection } from "./widget-stack.js";
+
+export const AGENTS_SECTION_ID = "agents";
+export const AGENTS_WIDGET_OWNER = "oh-my-pi-slim:subagent-widget";
 
 interface RunSummary {
   readonly id: string;
@@ -41,19 +45,9 @@ export function assembleSubagentWidgetState(runs: readonly RunSummary[]): Subage
   };
 }
 
-export interface SubagentWidgetTui {
-  readonly terminal: { readonly columns: number };
-  requestRender(): void;
-}
-
-export interface SubagentWidgetUI {
-  getToolsExpanded?(): boolean;
+/** The aggregate host's UI plus the status bar, which Agents owns on its own. */
+export interface SubagentWidgetUI extends WidgetStackUI {
   setStatus(key: string, text: string | undefined): void;
-  setWidget(
-    key: string,
-    content: undefined | ((tui: SubagentWidgetTui, theme: WidgetTheme) => { render(): string[]; invalidate(): void }),
-    options?: { placement?: "aboveEditor" | "belowEditor" },
-  ): void;
 }
 
 interface WidgetOptions {
@@ -65,9 +59,9 @@ export class SubagentWidget {
   private uiCtx: SubagentWidgetUI | undefined;
   private widgetFrame = 0;
   private widgetInterval: unknown;
-  private widgetRegistered = false;
-  private tui: SubagentWidgetTui | undefined;
+  private published = false;
   private lastStatusText: string | undefined;
+  private readonly section: WidgetStackSection;
   private readonly listRuns: () => PersistedRun[];
   private readonly setIntervalFn: (callback: () => void, ms: number) => unknown;
   private readonly clearIntervalFn: (timer: unknown) => void;
@@ -76,14 +70,31 @@ export class SubagentWidget {
     this.listRuns = listRuns;
     this.setIntervalFn = options.setInterval ?? ((callback, ms) => setInterval(callback, ms));
     this.clearIntervalFn = options.clearInterval ?? ((timer) => clearInterval(timer as ReturnType<typeof setInterval>));
+    this.section = {
+      id: AGENTS_SECTION_ID,
+      isActive: () => hasActiveSubagentRuns(this.listRuns()),
+      render: (input) => renderSubagentWidgetLines({
+        runs: this.listRuns(),
+        spinnerFrame: this.widgetFrame,
+        terminalWidth: input.width,
+        theme: input.theme,
+        expanded: input.expanded,
+        hint: input.hint,
+      }),
+    };
   }
 
   setUICtx(ctx: SubagentWidgetUI | undefined): void {
-    if (ctx === this.uiCtx) return;
+    if (ctx === this.uiCtx) {
+      // Re-binding the same UI is how a tree restore reclaims the host after `dispose` released it.
+      if (ctx) widgetStackHost().bind(AGENTS_WIDGET_OWNER, ctx);
+      return;
+    }
+    this.retract();
+    if (this.uiCtx) widgetStackHost().unbind(AGENTS_WIDGET_OWNER, this.uiCtx);
     this.uiCtx = ctx;
-    this.widgetRegistered = false;
-    this.tui = undefined;
     this.lastStatusText = undefined;
+    if (ctx) widgetStackHost().bind(AGENTS_WIDGET_OWNER, ctx);
   }
 
   onTurnStart(): void {
@@ -94,12 +105,15 @@ export class SubagentWidget {
     this.widgetInterval ??= this.setIntervalFn(() => this.update(), 80);
   }
 
+  /** Removes this widget's own section; the host clears the aggregate only when the last one leaves. */
+  private retract(): void {
+    if (!this.published) return;
+    this.published = false;
+    widgetStackHost().publish(AGENTS_SECTION_ID, undefined);
+  }
+
   private clearWidget(): void {
-    if (this.widgetRegistered) {
-      this.uiCtx!.setWidget("omps-subagents", undefined);
-      this.widgetRegistered = false;
-      this.tui = undefined;
-    }
+    this.retract();
     if (this.lastStatusText !== undefined) {
       this.uiCtx!.setStatus("subagents", undefined);
       this.lastStatusText = undefined;
@@ -135,28 +149,12 @@ export class SubagentWidget {
     if (state.hasActive) this.ensureTimer();
     this.updateStatusBar(state);
     this.widgetFrame += 1;
-    if (!this.widgetRegistered) {
-      this.uiCtx.setWidget("omps-subagents", (tui, theme) => {
-        this.tui = tui;
-        return {
-          render: () => renderSubagentWidgetLines({
-            runs: this.listRuns(),
-            spinnerFrame: this.widgetFrame,
-            terminalWidth: tui.terminal.columns,
-            theme,
-            expanded: readWidgetExpanded(this.uiCtx),
-            hint: widgetExpandHint(),
-          }),
-          invalidate: () => {
-            this.widgetRegistered = false;
-            this.tui = undefined;
-          },
-        };
-      }, { placement: "aboveEditor" });
-      this.widgetRegistered = true;
-    } else {
-      this.tui?.requestRender();
+    if (!this.published) {
+      this.published = true;
+      widgetStackHost().publish(AGENTS_SECTION_ID, this.section);
+      return;
     }
+    widgetStackHost().requestRender();
   }
 
   dispose(): void {
@@ -164,12 +162,13 @@ export class SubagentWidget {
       this.clearIntervalFn(this.widgetInterval);
       this.widgetInterval = undefined;
     }
+    this.retract();
     if (this.uiCtx) {
-      this.uiCtx.setWidget("omps-subagents", undefined);
       this.uiCtx.setStatus("subagents", undefined);
+      widgetStackHost().unbind(AGENTS_WIDGET_OWNER, this.uiCtx);
     }
-    this.widgetRegistered = false;
-    this.tui = undefined;
+    // Dropping the UI here is what makes a spinner tick that lands after dispose a no-op.
+    this.uiCtx = undefined;
     this.lastStatusText = undefined;
   }
 }

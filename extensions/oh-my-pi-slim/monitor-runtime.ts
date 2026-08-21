@@ -154,6 +154,8 @@ interface MonitorRecord {
   nextSeq: number;
   notificationCursor: number;
   recentLines: MonitorCombinedLine[];
+  pendingMatchLines: MonitorCombinedLine[];
+  pendingMatchTotal: number;
   child: ChildProcessWithoutNullStreams;
   streams: Record<MonitorStream, StreamState>;
   matchKeywords: Set<string>;
@@ -272,6 +274,8 @@ const DEFAULT_LOG_CAP = 64 * 1024 * 1024;
 const DEFAULT_LOG_RETAIN = 32 * 1024 * 1024;
 const DEFAULT_PARTIAL_MAX = 64 * 1024;
 const DEFAULT_RECENT_LINES = 100;
+const NOTIFICATION_LINE_CAP = 100;
+const TERMINAL_DIAGNOSTIC_TAIL_LINES = 20;
 const DEFAULT_NOTIFICATION_CONTENT_MAX = 50 * 1024;
 const DEFAULT_NOTIFICATION_DETAILS_MAX = 96 * 1024;
 const DEFAULT_TOOL_CONTENT_MAX = 50 * 1024;
@@ -574,12 +578,12 @@ export class MonitorRuntime {
       name: "monitor",
       label: "Monitor",
       executionMode: "sequential",
-      description: "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher and terminal notifications carry the current status and only the output added since the previous notification. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.",
+      description: "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.",
       promptSnippet: "Supervise long-running foreground commands.",
       promptGuidelines: [
         "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
         "Do not poll a running monitor with repeated `monitor status` calls.",
-        "`monitor list` summarizes records, notifications carry current status and incremental output, and `monitor status` returns full retained state and logs.",
+        "Matcher updates carry matching lines, terminal updates add pending matches and bounded failure tails, and `monitor status` returns everything retained.",
       ],
       parameters: monitorParameters,
       execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => this.execute(params as MonitorInput, ctx),
@@ -826,6 +830,8 @@ export class MonitorRuntime {
       nextSeq: 1,
       notificationCursor: 0,
       recentLines: [],
+      pendingMatchLines: [],
+      pendingMatchTotal: 0,
       child,
       streams: { stdout: streamState(), stderr: streamState() },
       matchKeywords: new Set(),
@@ -1042,6 +1048,11 @@ export class MonitorRuntime {
     if (matched.length > 0) {
       record.matchedCount += matched.length;
       for (const matcher of matched) record.matchKeywords.add(matcher);
+      record.pendingMatchTotal += 1;
+      record.pendingMatchLines.push(line);
+      if (record.pendingMatchLines.length > NOTIFICATION_LINE_CAP) {
+        record.pendingMatchLines.splice(0, record.pendingMatchLines.length - NOTIFICATION_LINE_CAP);
+      }
       this.scheduleMatcherBatch(record);
     }
     record.updatedAt = line.timestamp;
@@ -1320,12 +1331,17 @@ export class MonitorRuntime {
     (record.matchTimer as { unref?: () => void }).unref?.();
   }
 
+  /**
+   * A matcher batch delivers only the new lines that matched a `notifyOn` literal, while the cursor still
+   * advances past every new line so ordinary output stays behind `monitor status` instead of being replayed.
+   */
   private flushMatcherBatch(record: MonitorRecord): void {
     if (record.generation !== this.generation || record.deleting || record.matchKeywords.size === 0) return;
     const keywords = [...record.matchKeywords];
     record.matchKeywords.clear();
     const latest = record.nextSeq - 1;
-    const payload = this.notificationLines(record, record.notificationCursor, 100);
+    const payload = this.pendingMatchPayload(record);
+    this.clearPendingMatches(record);
     record.notificationCursor = latest;
     this.expireRateWindow();
     if (this.sentMatcherAt.length >= this.rateLimitCount) {
@@ -1402,6 +1418,35 @@ export class MonitorRuntime {
     };
   }
 
+  /** Matched lines are recorded once per line when they are appended, so one line never repeats per literal. */
+  private pendingMatchPayload(record: MonitorRecord): NotificationLines {
+    const lines = record.pendingMatchLines.map((line) => ({ ...line }));
+    const omitted = Math.max(0, record.pendingMatchTotal - lines.length);
+    return { lines, totalNew: record.pendingMatchTotal, omitted, truncated: omitted > 0 };
+  }
+
+  private clearPendingMatches(record: MonitorRecord): void {
+    record.pendingMatchLines = [];
+    record.pendingMatchTotal = 0;
+  }
+
+  /**
+   * Terminal payloads never replay ordinary retained output: a completed command carries only the matched
+   * lines no notification delivered yet, while failed and killed add a bounded recent diagnostic tail.
+   * Both sources merge by sequence number, so a pending match older than the tail still arrives exactly once.
+   */
+  private terminalPayload(record: MonitorRecord): NotificationLines {
+    const matches = this.pendingMatchPayload(record);
+    if (record.status === "completed") return matches;
+    const tail = this.notificationLines(record, record.notificationCursor, TERMINAL_DIAGNOSTIC_TAIL_LINES);
+    const merged = new Map<number, MonitorCombinedLine>();
+    for (const line of [...matches.lines, ...tail.lines]) merged.set(line.seq, line);
+    const lines = [...merged.values()].sort((left, right) => left.seq - right.seq);
+    const totalNew = Math.max(tail.totalNew, lines.length);
+    const omitted = Math.max(0, totalNew - lines.length);
+    return { lines, totalNew, omitted, truncated: omitted > 0 };
+  }
+
   private notificationLines(record: MonitorRecord, cursor: number, maximumLines: number): NotificationLines {
     const latest = record.nextSeq - 1;
     const totalNew = Math.max(0, latest - cursor);
@@ -1430,8 +1475,8 @@ export class MonitorRuntime {
 
   /**
    * Single payload builder for every running matcher batch and every terminal close.
-   * Each update states the monitor's current status and carries only the lines after
-   * the delivered notification position; full retained state stays behind `monitor status`.
+   * Each update states the monitor's current status and carries only the lines its caller
+   * selected from the undelivered range, while full retained state stays behind `monitor status`.
    */
   private buildUpdateNotification(
     record: MonitorRecord,
@@ -1479,17 +1524,18 @@ export class MonitorRuntime {
     record.updatedAt = now;
     this.cancelSilence(record);
     this.cancelMatchTimer(record);
+    const matched = [...record.matchKeywords];
     record.matchKeywords.clear();
     try { if (record.logFd >= 0) this.fs.closeSync(record.logFd); } catch { /* terminal state still resolves */ }
     record.logFd = -1;
     this.resolveTerminalOnce(record);
     this.detachListeners(record);
     this.emit({ type: "updated", reason: "lifecycle", id: record.id, status: record.status });
+    const payload = this.terminalPayload(record);
+    this.clearPendingMatches(record);
     if (!record.deleting && record.generation === this.generation && !this.shuttingDown) {
-      const latest = record.nextSeq - 1;
-      const payload = this.notificationLines(record, record.notificationCursor, 100);
-      record.notificationCursor = latest;
-      const fitted = this.buildUpdateNotification(record, [], payload);
+      record.notificationCursor = record.nextSeq - 1;
+      const fitted = this.buildUpdateNotification(record, matched, payload);
       this.queueNotification(record, "terminal", fitted.content, fitted.details);
     }
   }

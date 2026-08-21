@@ -5,7 +5,7 @@ import { registerHooks } from "node:module";
 import { dirname } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { pathToFileURL } from "node:url";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 
 const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
 const piRoot = dirname(dirname(piEntry));
@@ -17,6 +17,9 @@ const dependencyMap = {
   "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
   "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
   "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
+  "./widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
+  "./widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -40,11 +43,16 @@ const {
   renderGoalState,
 } = await import("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts");
 const {
-  GOAL_WIDGET_KEY,
   GoalWidget,
   compactGoalTokens,
   renderGoalWidgetLines,
 } = await import("../extensions/oh-my-pi-slim/goal-widget.ts");
+const {
+  WIDGET_STACK_KEY,
+  resetWidgetStackHost,
+} = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
+
+beforeEach(() => resetWidgetStackHost());
 
 const NOW_MS = Date.parse("2026-06-01T00:12:00.000Z");
 const theme = {
@@ -259,7 +267,7 @@ test("GoalWidget uses one shared 1s timer, keeps cached rendering, clears empty 
   widget.update();
   widget.update();
   assert.equal(firstCalls.length, 1);
-  assert.equal(firstCalls[0].key, GOAL_WIDGET_KEY);
+  assert.equal(firstCalls[0].key, WIDGET_STACK_KEY, "Goal joins the one aggregate widget instead of owning a key");
   assert.deepEqual(firstCalls[0].options, { placement: "aboveEditor" });
   assert.equal(intervals.length, 1);
   assert.equal(intervals[0].milliseconds, 1_000);

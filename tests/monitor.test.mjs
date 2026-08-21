@@ -14,7 +14,7 @@ import { dirname } from "node:path";
 import { PassThrough } from "node:stream";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 
 const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
 const piRoot = dirname(dirname(piEntry));
@@ -28,6 +28,8 @@ registerHooks({
     if (specifier === "./monitor-runtime.js") return { url: new URL("../extensions/oh-my-pi-slim/monitor-runtime.ts", import.meta.url).href, shortCircuit: true };
     if (specifier === "./semantic-glyph.js") return { url: new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href, shortCircuit: true };
     if (specifier === "./widget-expansion.js") return { url: new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href, shortCircuit: true };
+    if (specifier === "./widget-stack.js") return { url: new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href, shortCircuit: true };
+    if (specifier === "./widget-stack-host.js") return { url: new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href, shortCircuit: true };
     return nextResolve(specifier, context);
   },
 });
@@ -44,6 +46,10 @@ const {
   parseMonitorCheckAfter,
   registerMonitorRuntime,
 } = await import("../extensions/oh-my-pi-slim/monitor-runtime.ts");
+const { resetWidgetStackHost } = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
+
+// The aggregate widget host is a process-wide singleton, so every test starts from an empty one.
+beforeEach(() => resetWidgetStackHost());
 
 function wait(milliseconds = 0) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -109,12 +115,12 @@ test("monitor schema and registration expose the exact portable main-only contra
   const tool = harness.tools.get("monitor");
   assert.equal(tool.executionMode, "sequential");
   assert.equal(harness.tools.size, 1);
-  assert.equal(tool.description, "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher and terminal notifications carry the current status and only the output added since the previous notification. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.");
+  assert.equal(tool.description, "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.");
   assert.equal(tool.promptSnippet, "Supervise long-running foreground commands.");
   assert.deepEqual(tool.promptGuidelines, [
     "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
     "Do not poll a running monitor with repeated `monitor status` calls.",
-    "`monitor list` summarizes records, notifications carry current status and incremental output, and `monitor status` returns full retained state and logs.",
+    "Matcher updates carry matching lines, terminal updates add pending matches and bounded failure tails, and `monitor status` returns everything retained.",
   ]);
   assert.equal(schema.properties.action.description, "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.");
   assert.equal(schema.properties.command.description, "Foreground Bash command for create. Do not use nohup, setsid, disown, trailing &, or another detach escape.");
@@ -221,8 +227,8 @@ test("reverse status pagination returns chronological combined lines and never a
   await assert.rejects(harness.execute({ action: "status", id: "22222222", start: 2, end: 2 }), /0 <= start < end/);
   await assert.rejects(harness.execute({ action: "status", id: "22222222", start: 0, end: 2001 }), /at most 2000/);
   await wait(10);
-  assert.match(harness.messages[0].message.content, /one/);
-  assert.match(harness.messages[0].message.content, /four/);
+  assert.deepEqual(harness.messages[0].message.details.lines.map((line) => line.text), ["two hit"]);
+  assert.doesNotMatch(harness.messages[0].message.content, /\[stdout\] one|\[stdout\] three|\[stdout\] four/);
   closeChild(child);
 });
 
@@ -447,7 +453,7 @@ test("matcher delivery uses the bounded recent-line ring without reading the JSO
   child.stdout.write("before\nhit\nafter\n");
   await wait(5);
   assert.equal(readCalls, 0);
-  assert.deepEqual(harness.messages[0].message.details.lines.map((line) => line.text), ["before", "hit", "after"]);
+  assert.deepEqual(harness.messages[0].message.details.lines.map((line) => line.text), ["hit"]);
   assert.equal(changes.filter((change) => change.reason === "output").length, 3, "UI subscribers can throttle explicitly tagged high-frequency output changes");
   closeChild(child);
 });
@@ -508,7 +514,7 @@ test("matcher and terminal payloads include abstract and stay within content and
   assert.ok(matcher.details.omitted > 0);
   assert.match(matcher.content, /\n\[truncated: omitted \d+ lines and\/or shortened oversized lines; use monitor status\]$/);
 
-  for (let index = 0; index < 150; index += 1) child.stdout.write(`tail-${index}\n`);
+  for (let index = 0; index < 150; index += 1) child.stdout.write(`MATCH-tail-${index}\n`);
   closeChild(child);
   await wait();
   const terminal = harness.messages.at(-1).message;
@@ -553,18 +559,17 @@ test("matcher and terminal notifications share one incremental update contract t
   assert.equal(matcher.details.exitCode, null);
   assert.equal(matcher.details.signal, null);
   assert.equal(matcher.details.error, null);
-  assert.deepEqual(matcher.details.lines.map((line) => line.text), ["before", "hit one"]);
+  assert.deepEqual(matcher.details.lines.map((line) => line.text), ["hit one"], "a matcher batch carries only the lines that matched");
   assert.equal(matcher.details.omitted, 0);
   assert.equal(matcher.details.truncated, false);
   assert.deepEqual(matcher.content.split("\n"), [
     "Monitor 61616161 (unified) status running.",
     "Matched: hit.",
-    "[stdout] before",
     "[stdout] hit one",
   ]);
   assert.doesNotMatch(matcher.content, /Exit code/);
 
-  child.stdout.write("after\n");
+  child.stdout.write("after\nhit two\n");
   closeChild(child, 0, null);
   await wait();
   assert.equal(harness.messages.length, 2);
@@ -572,20 +577,21 @@ test("matcher and terminal notifications share one incremental update contract t
   assert.deepEqual(Object.keys(terminal.details), shape);
   assert.equal(terminal.details.kind, "update");
   assert.equal(terminal.details.status, "completed");
-  assert.deepEqual(terminal.details.matched, [], "terminal updates always carry an empty matched array");
+  assert.deepEqual(terminal.details.matched, ["hit"], "a terminal update names the literals its undelivered matches hit");
   assert.equal(terminal.details.exitCode, 0);
   assert.equal(terminal.details.signal, null);
   assert.equal(terminal.details.error, null);
   assert.deepEqual(terminal.content.split("\n"), [
     "Monitor 61616161 (unified) status completed.",
+    "Matched: hit.",
     "Exit code: 0; signal: null; error: null.",
-    "[stdout] after",
-  ]);
+    "[stdout] hit two",
+  ], "a completed close carries the undelivered match and never the ordinary line before it");
 
   const matcherSeqs = matcher.details.lines.map((line) => line.seq);
   const terminalSeqs = terminal.details.lines.map((line) => line.seq);
-  assert.deepEqual(matcherSeqs, [1, 2]);
-  assert.deepEqual(terminalSeqs, [3]);
+  assert.deepEqual(matcherSeqs, [2]);
+  assert.deepEqual(terminalSeqs, [4]);
   assert.equal(terminalSeqs.some((seq) => matcherSeqs.includes(seq)), false, "close after a matcher batch repeats no line");
 });
 
@@ -617,9 +623,11 @@ test("terminal updates report completed, failed, and killed while matcher update
     assert.equal(terminal.details.signal, signal);
     assert.equal(terminal.content.split("\n")[0], `Monitor ${id} (end ${status}) status ${status}.`);
     assert.equal(terminal.content.split("\n")[1], `Exit code: ${code ?? "null"}; signal: ${signal ?? "null"}; error: null.`);
-    for (const sent of harness.messages) {
-      if (sent.message.details.matched.length > 0) assert.equal(sent.message.details.status, "running");
+    for (const sent of harness.messages.slice(0, -1)) {
+      assert.equal(sent.message.details.status, "running");
+      assert.deepEqual(sent.message.details.matched, ["hit"]);
     }
+    assert.deepEqual(terminal.details.matched, [], "a batch delivered before the close leaves the terminal update with no literal");
   }
 });
 
@@ -641,8 +649,9 @@ test("a matcher batch still pending at close folds its lines into the single ter
   assert.equal(harness.messages.length, 1, "the cancelled batch produces no extra notification");
   const terminal = harness.messages[0].message;
   assert.equal(terminal.details.status, "completed");
-  assert.deepEqual(terminal.details.matched, []);
+  assert.deepEqual(terminal.details.matched, ["hit"], "the folded batch keeps its literals in the single terminal update");
   assert.deepEqual(terminal.details.lines.map((line) => line.text), ["hit one", "hit two"]);
+  assert.equal(terminal.content.split("\n")[1], "Matched: hit.");
 });
 
 test("zero incremental lines stay legal and never replay retained history", async (t) => {
@@ -672,6 +681,222 @@ test("zero incremental lines stay legal and never replay retained history", asyn
   assert.deepEqual(state.combined.map((line) => line.text), ["hit now"], "retained history stays reachable through monitor status");
 });
 
+test("a matcher batch carries one entry per matching line and leaves ordinary lines to monitor status", async (t) => {
+  let child;
+  const harness = createHarness({
+    randomHex: () => "67676767",
+    spawn() { child = fakeChild(); return child; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 2,
+  });
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "filtered", command: "unused", notifyOn: ["hit", "also"] });
+  child.stdout.write("noise one\nhit and also\nnoise two\nnoise three\n");
+  await wait(5);
+  assert.equal(harness.messages.length, 1);
+  const matcher = harness.messages[0].message;
+  assert.deepEqual(matcher.details.lines.map((line) => line.text), ["hit and also"], "one line matching two literals is delivered once");
+  assert.deepEqual([...matcher.details.matched].sort(), ["also", "hit"], "details.matched keeps every literal that hit");
+  assert.equal(matcher.details.omitted, 0);
+  assert.equal(matcher.details.truncated, false);
+  assert.deepEqual(matcher.content.split("\n").filter((line) => line.startsWith("[")), ["[stdout] hit and also"]);
+
+  const state = (await harness.execute({ action: "status", id: "67676767" })).details.monitor;
+  assert.deepEqual(state.combined.map((line) => line.text), ["noise one", "hit and also", "noise two", "noise three"]);
+  assert.equal(state.matchedCount, 2, "matchedCount still counts every literal hit");
+  closeChild(child);
+});
+
+test("more matched lines than the notification cap report an accurate omitted count of matches only", async (t) => {
+  let child;
+  const harness = createHarness({
+    randomHex: () => "68686868",
+    spawn() { child = fakeChild(); return child; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 5,
+  });
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "capped", command: "unused", notifyOn: ["MATCH"] });
+  for (let index = 0; index < 130; index += 1) child.stdout.write(`noise-${index}\nMATCH-${index}\n`);
+  await wait(15);
+  const matcher = harness.messages[0].message.details;
+  assert.equal(matcher.lines.length, 100);
+  assert.equal(matcher.omitted, 30, "omitted counts only the matched lines that did not fit");
+  assert.equal(matcher.truncated, true);
+  assert.equal(matcher.lines.every((line) => line.text.startsWith("MATCH-")), true);
+  assert.deepEqual(matcher.lines.at(0).text, "MATCH-30");
+  assert.deepEqual(matcher.lines.at(-1).text, "MATCH-129");
+  closeChild(child);
+});
+
+test("a rate-limited summary counts suppressed matched lines instead of all suppressed output", async (t) => {
+  let now = 1_000;
+  const children = [];
+  const messages = [];
+  const tools = new Map();
+  const runtime = new MonitorRuntime({
+    registerTool(tool) { tools.set(tool.name, tool); },
+    registerMessageRenderer() {},
+    sendMessage(message, options) { messages.push({ message, options }); },
+  }, {
+    nowMs: () => now,
+    randomHex: (() => { let id = 70; return () => String(id++).padStart(8, "0"); })(),
+    spawn() { const child = fakeChild(28000 + children.length); children.push(child); return child; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 2,
+    rateLimitCount: 1,
+    rateLimitWindowMs: 20,
+  });
+  runtime.registerTool();
+  const execute = (params) => tools.get("monitor").execute("call", params, undefined, undefined, { cwd: process.cwd() });
+  t.after(async () => { children.forEach((child) => { if (child.listenerCount("close")) closeChild(child); }); await runtime.shutdown(); });
+  await execute({ action: "create", checkAfter: "10m", abstract: "window owner", command: "unused", notifyOn: ["hit"] });
+  const suppressed = await execute({ action: "create", checkAfter: "10m", abstract: "suppressed", command: "unused", notifyOn: ["hit"] });
+  children[0].stdout.write("hit owner\n");
+  await wait(5);
+  assert.equal(messages.length, 1, "the first batch consumes the whole rate window");
+  children[1].stdout.write("noise\nhit one\nnoise\nhit two\nnoise\nhit three\nnoise\n");
+  await wait(5);
+  assert.equal(messages.length, 1);
+  now += 25;
+  await wait(25);
+  const summary = messages.at(-1).message.details;
+  assert.equal(summary.kind, "summary");
+  assert.deepEqual(summary.monitors.map((monitor) => monitor.id), [suppressed.details.monitor.id]);
+  assert.equal(summary.monitors[0].suppressedBatches, 1);
+  assert.equal(summary.monitors[0].suppressedLines, 3, "suppressedLines counts matched lines, not ordinary output");
+});
+
+test("a completed close stays status-only while a failed close adds a bounded diagnostic tail", async (t) => {
+  let completedChild;
+  const completed = createHarness({
+    randomHex: () => "71717171",
+    spawn() { completedChild = fakeChild(); return completedChild; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 2,
+  });
+  t.after(async () => completed.runtime.shutdown());
+  await completed.execute({ action: "create", checkAfter: "10m", abstract: "clean exit", command: "unused" });
+  for (let index = 0; index < 30; index += 1) completedChild.stdout.write(`noise-${index}\n`);
+  closeChild(completedChild, 0, null);
+  await wait();
+  assert.equal(completed.messages.length, 1);
+  const completedTerminal = completed.messages[0].message;
+  assert.deepEqual(completedTerminal.details.lines, [], "an empty notifyOn leaves a completed close with no lines at all");
+  assert.deepEqual(completedTerminal.details.matched, [], "a close without pending matches names no literal");
+  assert.doesNotMatch(completedTerminal.content, /Matched:/);
+  assert.equal(completedTerminal.details.omitted, 0);
+  assert.equal(completedTerminal.details.truncated, false);
+  assert.deepEqual(completedTerminal.content.split("\n"), [
+    "Monitor 71717171 (clean exit) status completed.",
+    "Exit code: 0; signal: null; error: null.",
+  ]);
+  const completedState = (await completed.execute({ action: "status", id: "71717171", start: 0, end: 100 })).details.monitor;
+  assert.equal(completedState.combined.length, 30, "monitor status still returns the whole retained log");
+
+  let failedChild;
+  const failed = createHarness({
+    randomHex: () => "72727272",
+    spawn() { failedChild = fakeChild(); return failedChild; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 2,
+  });
+  t.after(async () => failed.runtime.shutdown());
+  await failed.execute({ action: "create", checkAfter: "10m", abstract: "bad exit", command: "unused" });
+  for (let index = 0; index < 30; index += 1) failedChild.stdout.write(`noise-${index}\n`);
+  closeChild(failedChild, 1, null);
+  await wait();
+  const failedTerminal = failed.messages[0].message.details;
+  assert.equal(failedTerminal.status, "failed");
+  assert.equal(failedTerminal.lines.length, 20, "a failure carries the last twenty ordinary lines as diagnostics");
+  assert.deepEqual(failedTerminal.lines.at(0).text, "noise-10");
+  assert.deepEqual(failedTerminal.lines.at(-1).text, "noise-29");
+  assert.equal(failedTerminal.omitted, 10, "omitted stays honest about every new line left behind");
+  assert.equal(failedTerminal.truncated, true);
+  assert.deepEqual(failedTerminal.matched, [], "a diagnostic tail without pending matches names no literal");
+  assert.doesNotMatch(failed.messages[0].message.content, /Matched:/);
+
+  let killedChild;
+  const killed = createHarness({
+    randomHex: () => "73737373",
+    spawn() { killedChild = fakeChild(); return killedChild; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 2,
+  });
+  t.after(async () => killed.runtime.shutdown());
+  await killed.execute({ action: "create", checkAfter: "10m", abstract: "signalled", command: "unused" });
+  for (let index = 0; index < 5; index += 1) killedChild.stdout.write(`noise-${index}\n`);
+  closeChild(killedChild, null, "SIGTERM");
+  await wait();
+  const killedTerminal = killed.messages[0].message.details;
+  assert.equal(killedTerminal.status, "killed");
+  assert.equal(killedTerminal.signal, "SIGTERM");
+  assert.deepEqual(killedTerminal.lines.map((line) => line.text), ["noise-0", "noise-1", "noise-2", "noise-3", "noise-4"]);
+  assert.equal(killedTerminal.omitted, 0);
+});
+
+test("a failed close merges pending matches outside the tail with the tail itself by sequence", async (t) => {
+  let child;
+  const harness = createHarness({
+    randomHex: () => "74747474",
+    spawn() { child = fakeChild(); return child; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 5_000,
+  });
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "merge", command: "unused", notifyOn: ["hit"] });
+  child.stdout.write("hit early\n");
+  for (let index = 0; index < 24; index += 1) child.stdout.write(`noise-${index}\n`);
+  child.stdout.write("hit late\n");
+  await wait(5);
+  assert.equal(harness.messages.length, 0, "the matcher batch window has not elapsed yet");
+  closeChild(child, 2, null);
+  await wait();
+  assert.equal(harness.messages.length, 1, "a pending matcher batch is delivered exactly once through the terminal update");
+  const terminal = harness.messages[0].message.details;
+  assert.equal(terminal.status, "failed");
+  assert.deepEqual(terminal.matched, ["hit"], "the merged failure payload names the literals its pending matches hit");
+  assert.equal(harness.messages[0].message.content.split("\n")[1], "Matched: hit.");
+  const seqs = terminal.lines.map((line) => line.seq);
+  assert.deepEqual(seqs, [...seqs].sort((left, right) => left - right), "merged lines stay ordered by sequence");
+  assert.equal(new Set(seqs).size, seqs.length, "a match inside the tail window is never duplicated");
+  assert.deepEqual(seqs, [1, ...Array.from({ length: 20 }, (_, index) => index + 7)]);
+  assert.equal(terminal.lines.at(0).text, "hit early", "a pending match older than the tail is still delivered");
+  assert.equal(terminal.lines.at(-1).text, "hit late");
+  assert.equal(terminal.omitted, 5, "omitted counts every new line the merged payload left behind");
+  assert.equal(terminal.truncated, true);
+  const state = (await harness.execute({ action: "status", id: "74747474", start: 0, end: 100 })).details.monitor;
+  assert.equal(state.combined.length, 26, "monitor status stays the full log boundary");
+});
+
+test("matches already delivered by a matcher batch never repeat in a later failed close", async (t) => {
+  let child;
+  const harness = createHarness({
+    randomHex: () => "75757575",
+    spawn() { child = fakeChild(); return child; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 2,
+  });
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "no replay", command: "unused", notifyOn: ["hit"] });
+  child.stdout.write("noise one\nhit one\n");
+  await wait(5);
+  child.stdout.write("noise two\nhit two\n");
+  await wait(5);
+  assert.equal(harness.messages.length, 2);
+  assert.deepEqual(harness.messages[0].message.details.lines.map((line) => line.text), ["hit one"]);
+  assert.deepEqual(harness.messages[1].message.details.lines.map((line) => line.text), ["hit two"], "a second batch never resends the first match");
+  closeChild(child, 1, null);
+  await wait();
+  const terminal = harness.messages.at(-1).message.details;
+  assert.equal(terminal.status, "failed");
+  assert.deepEqual(terminal.lines, [], "a failure after a matcher batch replays neither delivered matches nor older ordinary lines");
+  assert.deepEqual(terminal.matched, [], "literals already reported by a delivered batch never repeat");
+  assert.doesNotMatch(harness.messages.at(-1).message.content, /Matched:/);
+  assert.equal(terminal.omitted, 0);
+  assert.equal(terminal.truncated, false);
+});
+
 test("small injected log cap rolls from complete line boundaries with a marker and counters", async (t) => {
   let child;
   const harness = createHarness({
@@ -695,7 +920,7 @@ test("small injected log cap rolls from complete line boundaries with a marker a
   const matcher = harness.messages[0].message.details;
   assert.equal(matcher.omitted, 0, "rollover markers do not count as new notification lines");
   assert.equal(matcher.lines.some((line) => /rollover/.test(line.text)), false);
-  assert.equal(matcher.lines.length, 30);
+  assert.deepEqual(matcher.lines.map((line) => line.seq), [30], "only the matching line survives into the batch");
   closeChild(child);
 });
 
@@ -1200,7 +1425,7 @@ test("silence reminders never move the incremental position or consume the match
   await wait();
   harness.advance(5_000);
   const matcher = harness.messages.find((sent) => sent.message.details.kind === "update");
-  assert.deepEqual(matcher.message.details.lines.map((line) => line.text), ["first line", "hit line"], "reminders never advance the delivered position");
+  assert.deepEqual(matcher.message.details.lines.map((line) => line.text), ["hit line"], "reminders never advance the delivered position");
   assert.deepEqual(matcher.message.details.matched, ["hit"], "reminders never consume the matcher rate-limit window");
 
   closeChild(harness.children[0]);

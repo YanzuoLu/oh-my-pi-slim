@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.9", "package version must be 0.10.9");
+check(packageJson.version === "0.10.10", "package version must be 0.10.10");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.9" && lock.packages?.[""]?.version === "0.10.9", "package-lock version must be 0.10.9");
+check(lock.version === "0.10.10" && lock.packages?.[""]?.version === "0.10.10", "package-lock version must be 0.10.10");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -205,6 +205,131 @@ const todoCore = read("extensions/todo/core.ts");
 const todoWidget = read("extensions/todo/widget.ts");
 const semanticGlyph = read("extensions/oh-my-pi-slim/semantic-glyph.ts");
 const widgetExpansion = read("extensions/oh-my-pi-slim/widget-expansion.ts");
+const widgetStack = read("extensions/oh-my-pi-slim/widget-stack.ts");
+const widgetStackHost = read("extensions/oh-my-pi-slim/widget-stack-host.ts");
+const subagentWidget = read("extensions/oh-my-pi-slim/subagent-widget.ts");
+const subagentWidgetRenderer = read("extensions/oh-my-pi-slim/subagent-widget-renderer.ts");
+
+// One aggregate foreground widget: the host is the only `setWidget` owner in the package, and the
+// five section renderers stay pure. The stack may reorder sections but never rewrites their lines.
+hasAll(widgetStack, [
+  'WIDGET_STACK_SECTION_IDS = ["goal", "todos", "agents", "monitors", "loops"] as const',
+  "export function widgetStackSectionRank", "export function orderWidgetStackSections", "export function renderWidgetStack",
+  "isActive(): boolean", "render(input: WidgetStackRenderInput): readonly string[]",
+  "(section.isActive() ? active : idle).push(section)",
+  "[...active.sort(byRank), ...idle.sort(byRank)]",
+  "lines.push(...section.render(input))",
+], "widget stack orders active sections above idle ones in fixed product order");
+hasNone(widgetStack, [
+  "setWidget", "requestRender", "globalThis", "truncateToWidth", "theme.fg(", "theme.bold(",
+  "join(", "push(\"\")", "slice(0,", "maxLines", "readWidgetExpanded",
+], "widget stack must add no separator, cap, style, or UI state of its own");
+hasAll(widgetStackHost, [
+  'WIDGET_STACK_KEY = "oh-my-pi-slim:widgets"', "WIDGET_STACK_HOST_PROTOCOL = 1",
+  'WIDGET_STACK_HOST_GLOBAL_KEY = "__ohMyPiSlimWidgetStackHost_v1"',
+  "bind(owner: string, ui: WidgetStackUI | undefined): void",
+  "unbind(owner: string, ui?: WidgetStackUI | undefined): void",
+  "publish(id: WidgetStackSectionId, section: WidgetStackSection | undefined): void",
+  "requestRender(): void", "export function widgetStackHost", "export function resetWidgetStackHost",
+  "if (previous === next && ui === next) return",
+  "if (expected !== undefined && bound !== expected) return",
+  "for (const value of owners.values()) if (value === ui) return",
+  "if (sections.size === 0) {", "clearWidget(ui)",
+  "target.setWidget(WIDGET_STACK_KEY,", 'placement: "aboveEditor"',
+  "renderWidgetStack([...sections.values()]", "resolveWidth(width, nextTui)",
+  "readWidgetExpanded(ui)", "widgetExpandHint()", "invalidate() {}",
+  // A binding released with no UI must release exactly this owner's recorded claim.
+  "host.unbind(owner, owners.get(owner))",
+  // The newest distinct UI takes over, and only owners of the live UI hold it open.
+  "if (ui !== next) {", "clearWidget(ui);",
+  // A factory the host never runs must not lock the aggregate into a dead registration.
+  "let announced = false", "let registered = false",
+  "if (announced && target) target.setWidget(WIDGET_STACK_KEY, undefined)",
+  "tui = undefined;\n    target.setWidget(WIDGET_STACK_KEY,",
+  "announced = true;", "registered = tui !== undefined;",
+  // An explicit width is authoritative down to zero.
+  "if (typeof width === \"number\" && Number.isFinite(width) && width >= 0) return Math.floor(width)",
+  "DEFAULT_WIDGET_STACK_WIDTH = 80",
+  "Reflect.get(globalThis, WIDGET_STACK_HOST_GLOBAL_KEY)",
+  "if (isWidgetStackHost(existing)) return existing", "Object.defineProperty(globalThis, WIDGET_STACK_HOST_GLOBAL_KEY",
+  "Reflect.deleteProperty(globalThis, WIDGET_STACK_HOST_GLOBAL_KEY)",
+  "candidate.protocol === WIDGET_STACK_HOST_PROTOCOL",
+], "widget stack host owns the single aggregate key through a versioned globalThis singleton");
+hasNone(widgetStackHost, [
+  "instanceof", "registerShortcut", "setStatus", "notify(", "overlay", "appendEntry", "registerTool",
+  "theme.fg(", "theme.bold(", "truncateToWidth", "as unknown as", "host.unbind(owner)",
+], "widget stack host must stay a binding and dispatch layer with no styling, cast, or module singleton");
+// One shared UI type: the widget classes hold `WidgetStackUI` directly instead of a partial copy,
+// and Agents extends it rather than redeclaring the host surface.
+for (const [name, source] of [
+  ["Goal widget", goalWidget],
+  ["Monitor widget", monitorWidget],
+  ["Loop widget", loopWidget],
+]) {
+  hasAll(source, [
+    'import { widgetStackHost, type WidgetStackUI } from "./widget-stack-host.js"',
+    "private ui: WidgetStackUI | undefined",
+    "const next: WidgetStackUI | undefined = ui;",
+  ], `${name} must hold the shared host UI type`);
+  hasNone(source, [
+    "WidgetUI {", "as unknown as", "as MonitorWidgetUI", "as GoalWidgetUI", "as LoopWidgetUI",
+  ], `${name} must not redeclare or cast around the host UI type`);
+}
+hasAll(subagentWidget, [
+  'import { widgetStackHost, type WidgetStackUI } from "./widget-stack-host.js"',
+  "export interface SubagentWidgetUI extends WidgetStackUI {",
+  "setStatus(key: string, text: string | undefined): void;",
+  "theme: input.theme,",
+], "Agents widget must extend the shared host UI type and keep its own status bar");
+hasNone(subagentWidget, ["as unknown as", "as WidgetTheme"], "Agents widget must not cast around the shared types");
+hasAll(todoWidget, [
+  "private ui: ExtensionUIContext | undefined",
+], "Todo widget keeps Pi's own extension UI type");
+hasNone(todoWidget, ["as unknown as"], "Todo widget must not cast around the shared types");
+// The host is the single `setWidget` owner: no other file in the package may register a widget.
+const widgetOwners = readdirSync(join(ROOT, "extensions"), { recursive: true, withFileTypes: true })
+  .filter((entry) => entry.isFile() && /\.(ts|mjs)$/.test(entry.name))
+  .map((entry) => join(entry.parentPath, entry.name))
+  .filter((path) => readFileSync(path, "utf8").includes("setWidget"))
+  .map((path) => path.slice(join(ROOT, "extensions").length + 1))
+  .sort();
+check(
+  JSON.stringify(widgetOwners) === JSON.stringify(["oh-my-pi-slim/widget-stack-host.ts"]),
+  `widget-stack-host must be the only setWidget owner, found: ${widgetOwners.join(", ")}`,
+);
+// Both extension entries bind the same host idempotently and release only their own claim.
+hasAll(extension, [
+  'WIDGET_STACK_OWNER = "oh-my-pi-slim:extension"',
+  'OWNED_WIDGET_SECTIONS: readonly WidgetStackSectionId[] = ["goal", "agents", "monitors", "loops"]',
+  "for (const id of OWNED_WIDGET_SECTIONS) widgetStackHost().publish(id, undefined);",
+  'widgetStackHost().bind(WIDGET_STACK_OWNER, ctx.mode === "tui" ? ctx.ui : undefined)',
+  'widgetStackHost().unbind(WIDGET_STACK_OWNER, ctx.mode === "tui" ? ctx.ui : undefined)',
+], "main extension binds the aggregate host on start and tree and releases only its own claim");
+hasAll(todoExtension, [
+  'TODO_EXTENSION_OWNER = "oh-my-pi-slim:todo-extension"',
+  "widgetStackHost().publish(TODO_SECTION_ID, undefined);",
+  'if (ctx.mode === "tui") widgetStackHost().bind(TODO_EXTENSION_OWNER, ctx.ui);',
+  'if (ctx.mode === "tui") widgetStackHost().unbind(TODO_EXTENSION_OWNER, ctx.ui);',
+  // Shutdown always disposes; the foreground id only tracks which session owns the widget.
+  "widget.dispose();\n    if (id === foregroundSession) foregroundSession = \"\";",
+], "Todo extension binds the same aggregate host and releases only its own claim");
+check(
+  !/if \(id === foregroundSession\) \{\s*\n\s*widget\.dispose\(\)/.test(todoExtension),
+  "Todo shutdown must not gate widget disposal on the foreground session id",
+);
+// Only the host may call setWidget; every widget class publishes a section instead of owning a key.
+for (const [name, source] of [
+  ["Goal widget", goalWidget],
+  ["Todo widget", todoWidget],
+  ["Agents widget", subagentWidget],
+  ["Monitor widget", monitorWidget],
+  ["Loop widget", loopWidget],
+]) {
+  hasNone(source, ["setWidget", "WIDGET_STACK_KEY", "aboveEditor", "belowEditor"], `${name} must not own a widget key`);
+  hasAll(source, [
+    "widgetStackHost()", ".publish(", ".bind(", ".unbind(", "requestRender()", "isActive: () =>", "render: (input)",
+  ], `${name} must publish one stack section and request aggregate renders`);
+}
 
 // Persistent widget expansion must reuse Pi's own global tool-output state and nothing else.
 hasAll(widgetExpansion, [
@@ -219,21 +344,31 @@ hasNone(widgetExpansion, [
   "registerShortcut", "setToolsExpanded", "setEditorComponent", "CustomEditor", "handleInput",
   "writeFileSync", "appendEntry", "localStorage", "globalThis", "let ", "theme.fg(", "theme.bold(", "registerTool",
 ], "shared widget expansion must own no keybinding, editor, store, persistence, or theme");
+hasAll(widgetStackHost, [
+  "readWidgetExpanded", "widgetExpandHint()",
+], "the aggregate host must read Pi global expansion live on every render");
 for (const [name, source] of [
   ["Monitor widget", monitorWidget],
   ["Todo widget", todoWidget],
-  ["Subagent widget", read("extensions/oh-my-pi-slim/subagent-widget.ts")],
+  ["Subagent widget", subagentWidget],
 ]) {
   hasAll(source, [
-    "readWidgetExpanded", "widgetExpandHint()",
-  ], `${name} must read Pi global expansion live on every render`);
+    "input.expanded", "input.hint",
+  ], `${name} must pass the host's live expansion state straight into its pure renderer`);
+}
+for (const [name, source] of [
+  ["Monitor widget", monitorWidget],
+  ["Todo widget", todoWidget],
+  ["Subagent widget", subagentWidget],
+  ["widget stack host", widgetStackHost],
+]) {
   hasNone(source, [
     "registerShortcut", "setToolsExpanded", "setEditorComponent",
   ], `${name} must not register or hijack the expansion keybinding`);
 }
 for (const [name, source] of [["Goal widget", goalWidget], ["Loop widget", loopWidget]]) {
   hasNone(source, [
-    "widget-expansion", "readWidgetExpanded", "widgetExpandHint", "getToolsExpanded", "to expand",
+    "widget-expansion", "readWidgetExpanded", "widgetExpandHint", "getToolsExpanded", "input.expanded", "input.hint", "to expand",
   ], `${name} must stay out of Ctrl+O expansion with a permanently full body`);
 }
 // Persistent widgets are presentation only: no tool schema, prompt text, or model-facing payload lives here.
@@ -422,18 +557,19 @@ hasAll(goalRuntime, [
 hasNone(goalRuntime, ["\"Rules:\"", '"- Pursue this Goal now."', '"- Make concrete progress in this run."'], "Goal frozen model text rewrite boundary");
 hasNone(goalRuntime, ["registerEntryRenderer", "registerShortcut", "goalId", "revision", "action: \"list\"", "action: \"clear\""], "Goal public-ID and action boundary");
 hasAll(goalWidget, [
-  "GOAL_WIDGET_KEY", "renderGoalWidgetLines", 'theme.bold("●")', 'theme.fg("accent", "↻")', '"Ⅱ"', '"◷"', '"✓"', '"×"',
+  'GOAL_SECTION_ID = "goal"', "renderGoalWidgetLines", 'theme.bold("●")', 'theme.fg("accent", "↻")', '"Ⅱ"', '"◷"', '"✓"', '"×"',
   '`${view.continuationCount} cont`', 'countLabel(view.ownedChildRunCount, "run")', 'statsLabel("main"', 'statsLabel("child"',
-  'setIntervalFn(() => {', "1_000", "unref?.()", "requestRender()", "truncateToWidth", "visibleWidth", "invalidate() {}", 'placement: "aboveEditor"',
+  'setIntervalFn(() => {', "1_000", "unref?.()", "requestRender()", "truncateToWidth", "visibleWidth",
   "sanitizeGoalText", "sanitizeGoalBody", "dispose()",
 ], "Goal fixed two-line width-safe cached widget contract");
 hasNone(goalWidget, ["\\u001b[", "registerShortcut", "setStatus("], "Goal widget theme-only contract");
 const goalPrefixBlock = goalWidget.slice(
-  goalWidget.indexOf("function isGoalPursuing"),
+  goalWidget.indexOf("export function isGoalPursuing"),
   goalWidget.indexOf("function headingLine"),
 );
 hasAll(goalPrefixBlock, [
   'return status === "active" || status === "retry_wait"',
+  "export function isGoalViewPursuing", "return view.goal ? isGoalPursuing(view.goal.status) : false",
   "const pursuing = isGoalPursuing(status)",
   'const role = pursuing ? statusRole(status) : "dim"',
   'const glyph = pursuing ? theme.bold("●") : "○"',
@@ -772,6 +908,9 @@ hasAll(monitorRuntime, [
   "export const monitorParameters = Type.Object({", "}, { additionalProperties: false });",
   'executionMode: "sequential"', 'name: "monitor"', 'spawnFn(shell, ["-lc", command]',
   'stdio: ["ignore", "pipe", "pipe"]', 'detached: true', "child.unref()", "StringDecoder", "notificationCursor",
+  "const NOTIFICATION_LINE_CAP = 100", "const TERMINAL_DIAGNOSTIC_TAIL_LINES = 20",
+  "pendingMatchLines: MonitorCombinedLine[]", "pendingMatchTotal: number",
+  "private pendingMatchPayload(record: MonitorRecord): NotificationLines", "private terminalPayload(record: MonitorRecord): NotificationLines",
   "hasRunning(): boolean", "hasBlockingWork(): boolean", "Reserved for Goal", "setDeliveryPaused(paused: boolean)",
   "acknowledgeNotificationMessage", "retryQueuedNotificationsAfterAgentSettled", 'deliverAs: "steer", triggerTurn: true',
   "finalKillWaitMs", "forceTerminal(record", "trySignal(record", "safeGroupAlive(record", "try", "finally",
@@ -886,54 +1025,111 @@ hasAll(monitorUpdateBuilder, [
 hasNone(monitorUpdateBuilder, [
   "operationalState(", "scanLogTail(", "logPath", "combined", "command", "cwd", "pid",
 ], "unified update payload must never embed full operational state");
+const monitorAppendLine = monitorRuntime.slice(
+  monitorRuntime.indexOf("private appendLine(record: MonitorRecord"),
+  monitorRuntime.indexOf("private writeStructuredLine(record: MonitorRecord"),
+);
+hasAll(monitorAppendLine, [
+  "const matched = record.notifyOn.filter((matcher) => text.includes(matcher))",
+  "record.matchedCount += matched.length",
+  "record.pendingMatchTotal += 1",
+  "record.pendingMatchLines.push(line)",
+  "if (record.pendingMatchLines.length > NOTIFICATION_LINE_CAP)",
+  "record.pendingMatchLines.splice(0, record.pendingMatchLines.length - NOTIFICATION_LINE_CAP)",
+], "Monitor records every matched line exactly once and bounds the pending match buffer");
+const monitorMatchPayloads = monitorRuntime.slice(
+  monitorRuntime.indexOf("private pendingMatchPayload(record: MonitorRecord)"),
+  monitorRuntime.indexOf("private notificationLines(record: MonitorRecord"),
+);
+hasAll(monitorMatchPayloads, [
+  "const lines = record.pendingMatchLines.map((line) => ({ ...line }))",
+  "const omitted = Math.max(0, record.pendingMatchTotal - lines.length)",
+  "totalNew: record.pendingMatchTotal",
+  "record.pendingMatchLines = []",
+  "record.pendingMatchTotal = 0",
+  "const matches = this.pendingMatchPayload(record)",
+  'if (record.status === "completed") return matches;',
+  "const tail = this.notificationLines(record, record.notificationCursor, TERMINAL_DIAGNOSTIC_TAIL_LINES)",
+  "const merged = new Map<number, MonitorCombinedLine>()",
+  "for (const line of [...matches.lines, ...tail.lines]) merged.set(line.seq, line)",
+  "const lines = [...merged.values()].sort((left, right) => left.seq - right.seq)",
+  "const totalNew = Math.max(tail.totalNew, lines.length)",
+], "Monitor match-only payloads, completed match-only terminal, and merged bounded failure tail");
+hasNone(monitorMatchPayloads, [
+  "scanLogTail", "logPath", "readSync", "operationalState(",
+], "Monitor match-only payloads must never read the retained log file");
 const monitorMatcherFlush = monitorRuntime.slice(
   monitorRuntime.indexOf("private flushMatcherBatch(record: MonitorRecord)"),
   monitorRuntime.indexOf("private expireRateWindow()"),
 );
 hasAll(monitorMatcherFlush, [
-  "this.notificationLines(record, record.notificationCursor, 100)",
+  "const payload = this.pendingMatchPayload(record)",
+  "this.clearPendingMatches(record)",
+  "record.notificationCursor = latest",
+  "suppressed.lines += payload.totalNew",
   "this.buildUpdateNotification(record, keywords, payload)",
   'this.queueNotification(record, "matcher", fitted.content, fitted.details)',
-], "Monitor matcher batch reuses the unified builder and keeps its private delivery kind");
-hasNone(monitorMatcherFlush, ['kind: "matcher"', "fitNotificationLines", "operationalState("], "Monitor matcher batch must not keep a second payload template");
+], "Monitor matcher batch delivers matched lines only while the cursor still passes every new line");
+hasNone(monitorMatcherFlush, [
+  'kind: "matcher"', "fitNotificationLines", "operationalState(", "this.notificationLines(", "recentLines",
+], "Monitor matcher batch must not keep a second payload template or replay unmatched lines");
 const monitorFinalize = monitorRuntime.slice(
   monitorRuntime.indexOf("private finalize(record: MonitorRecord)"),
   monitorRuntime.indexOf("private forceTerminal(record: MonitorRecord"),
 );
 hasAll(monitorFinalize, [
-  "this.notificationLines(record, record.notificationCursor, 100)",
-  "this.buildUpdateNotification(record, [], payload)",
+  "const matched = [...record.matchKeywords]",
+  "record.matchKeywords.clear()",
+  "const payload = this.terminalPayload(record)",
+  "this.clearPendingMatches(record)",
+  "record.notificationCursor = record.nextSeq - 1",
+  "this.buildUpdateNotification(record, matched, payload)",
   'this.queueNotification(record, "terminal", fitted.content, fitted.details)',
-], "Monitor terminal close reuses the unified builder and keeps its private delivery kind");
+], "Monitor terminal close reuses the unified builder and reports the literals its pending matches hit");
 hasNone(monitorFinalize, [
   "operationalState(record, 0, 100, 36 * 1024)", "operationalState(", "scanLogTail(", 'kind: "terminal"', "fitNotificationLines",
-], "Monitor terminal close must not scan the retained log or build a second payload template");
+  "this.notificationLines(record, record.notificationCursor, 100)",
+  "this.buildUpdateNotification(record, [], payload)",
+], "Monitor terminal close must not scan the retained log, replay unmatched history, or drop its pending literals");
+check(
+  monitorFinalize.indexOf("this.cancelMatchTimer(record)") < monitorFinalize.indexOf("const matched = [...record.matchKeywords]") &&
+  monitorFinalize.indexOf("const matched = [...record.matchKeywords]") < monitorFinalize.indexOf("record.matchKeywords.clear()"),
+  "Monitor terminal close must capture the still unflushed literals after the batch timer stops and before the keyword set clears",
+);
 hasAll(monitorWidget, [
-  'MONITOR_WIDGET_KEY = "oh-my-pi-slim:monitors"', "MAX_MONITOR_WIDGET_LINES = 12", "MAX_VISIBLE_MONITORS = 10",
+  'MONITOR_SECTION_ID = "monitors"', "MAX_MONITOR_WIDGET_LINES = 12", "MAX_VISIBLE_MONITORS = 10",
   "MONITOR_RENDER_THROTTLE_MS = 110", 'theme.bold("●")', 'theme.fg("accent", "↻")', '"✓"', '"!"', '"×"',
   "sortMonitorsForDisplay", "createdAt", "endedAt", 'theme.fg("dim", `… ${hidden} more`)', "lines.slice(0, MAX_MONITOR_WIDGET_LINES)",
-  'placement: "aboveEditor"', "change.reason === \"output\"", "scheduleRender()", "requestRender()", "invalidate() {}", "dispose()",
+  "change.reason === \"output\"", "scheduleRender()", "requestRender()", "dispose()",
+  "isActive: () => hasRunningMonitors(this.listMonitors())",
+  "if (!this.ui || !this.published) return;",
   "expanded = true", 'hint = ""', 'sorted.filter((monitor) => monitor.status === "running")',
   "const policyHidden = sorted.length - shown.length", "const hidden = shown.length - visible.length",
-  "monitorHeadingLine(monitorWidgetHeading(sorted, theme), policyHidden > 0 ? hint : \"\", theme, safeWidth)",
+  "monitorHeadingLine(monitorWidgetHeading(monitors, theme), policyHidden > 0 ? hint : \"\", theme, safeWidth)",
 ], "Monitor foreground widget visual, collapse policy, and throttle contract");
 hasNone(monitorWidget, ["notify(", "setStatus", "registerShortcut", "overlay", "setInterval("], "Monitor widget excluded UI");
+hasAll(monitorWidget, [
+  'export function countRunningMonitors(monitors: readonly MonitorWidgetItem[]): number {\n  return monitors.filter((monitor) => monitor.status === "running").length;',
+  "export function hasRunningMonitors(monitors: readonly MonitorWidgetItem[]): boolean {\n  return countRunningMonitors(monitors) > 0;",
+], "Monitor heading ratio and stack section share one running count");
 const monitorHeadingBlock = monitorWidget.slice(
   monitorWidget.indexOf("function monitorWidgetHeading"),
   monitorWidget.indexOf("export function renderMonitorWidgetLines"),
 );
 hasAll(monitorHeadingBlock, [
-  'const active = monitors.some((monitor) => monitor.status === "running")',
+  "const running = countRunningMonitors(monitors)",
+  "const terminal = monitors.length - running",
+  "const active = running > 0",
   'const role = active ? "accent" : "dim"',
   'const glyph = active ? theme.bold("●") : "○"',
-  'const label = active ? theme.bold("Monitors") : "Monitors"',
+  'const label = active ? theme.bold(`Monitors (${terminal}/${monitors.length})`) : `Monitors (${terminal}/${monitors.length})`',
   "formatSemanticGlyphPrefix(theme.fg(role, glyph))", "theme.fg(role, label)",
   'if (hint !== "" && visibleWidth(heading) + visibleWidth(hint) <= width)',
   '`${heading}${theme.fg("dim", hint)}`', 'return truncateToWidth(heading, width, "…")',
-], "Monitor ratio-free active-idle heading and atomic dim expand hint");
+], "Monitor terminal-over-total heading, active-idle emphasis, and atomic dim expand hint");
 hasNone(monitorHeadingBlock, [
-  'theme.bold("○")', "Monitors (", "${running}", "/${sorted.length}", "theme.bold(hint)",
-], "Monitor heading must drop the ratio and never bold the idle glyph or the hint");
+  'theme.bold("○")', "${running}/", "sorted", "shown", "policyHidden", "theme.bold(hint)",
+], "Monitor heading must count the whole retained set and never bold the idle glyph or the hint");
 hasAll(monitorTranscriptRenderer, [
   "renderMonitorCall", "renderMonitorResult", "renderMonitorNotification", 'theme.bold("monitor")', 'monitorStatusGlyph("running", theme)',
   '`· ${safeAction}${expanded ? "" : " (ctrl+o to expand)"}`', "spacedResult", "safeFirstLine", "sanitizeMonitorBody",
@@ -1008,7 +1204,7 @@ const monitorGuidelinesEnd = monitorRuntime.indexOf("      ],", monitorGuideline
 const monitorToolMetadata = monitorRuntime.slice(monitorToolStart, monitorGuidelinesEnd);
 const monitorDescription = propertyString(monitorToolMetadata, "description", "Monitor tool metadata");
 const monitorPromptSnippet = propertyString(monitorToolMetadata, "promptSnippet", "Monitor tool metadata");
-check(monitorDescription === "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher and terminal notifications carry the current status and only the output added since the previous notification. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.", "Monitor description must match the reviewed contract");
+check(monitorDescription === "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.", "Monitor description must match the reviewed contract");
 check(monitorPromptSnippet === "Supervise long-running foreground commands.", "Monitor promptSnippet must match the reviewed contract");
 checkSteBlock(monitorDescription, "Monitor description");
 checkSteBlock(monitorPromptSnippet, "Monitor promptSnippet");
@@ -1016,7 +1212,7 @@ const monitorGuidelines = staticStrings(monitorRuntime.slice(monitorGuidelinesSt
 const expectedMonitorGuidelines = [
   "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
   "Do not poll a running monitor with repeated `monitor status` calls.",
-  "`monitor list` summarizes records, notifications carry current status and incremental output, and `monitor status` returns full retained state and logs.",
+  "Matcher updates carry matching lines, terminal updates add pending matches and bounded failure tails, and `monitor status` returns everything retained.",
 ];
 check(JSON.stringify(monitorGuidelines) === JSON.stringify(expectedMonitorGuidelines), "Monitor promptGuidelines must match the reviewed array");
 checkSteGuidelines(monitorGuidelines, "Monitor promptGuideline", "monitor");
@@ -1052,11 +1248,11 @@ check(
 );
 hasNone(loopRuntime, ["appendEntry", "setInterval(", "maxFires", "expiresAt", "maxLength", "registerShortcut", "setWidget"], "Loop core semantic boundary");
 hasAll(loopWidget, [
-  'LOOP_WIDGET_KEY = "oh-my-pi-slim:loops"', "MAX_LOOP_WIDGET_LINES = 12", "MAX_VISIBLE_LOOPS = 5",
+  'LOOP_SECTION_ID = "loops"', "MAX_LOOP_WIDGET_LINES = 12", "MAX_VISIBLE_LOOPS = 5",
   "truncateToWidth(loopWidgetHeading(sorted, theme), safeWidth, \"…\")", 'theme.fg("accent", "↻")', '"Ⅱ"', '"!"',
   'parts.push(`next in ${formatLoopCountdown', 'parts.push("paused", fireLabel', "failureLabel(loop.failureCount)",
   "sortLoopsForDisplay", "nextFireAt", "createdAt", 'setIntervalFn(() => this.update(), 1_000)',
-  "requestRender()", 'placement: "aboveEditor"', "stopTimer()", "dispose()", 'setWidget(LOOP_WIDGET_KEY, undefined)',
+  "requestRender()", "stopTimer()", "dispose()", "publish(LOOP_SECTION_ID, undefined)",
   'theme.fg("dim", `… ${hidden} more`)', "lines.slice(0, MAX_LOOP_WIDGET_LINES)",
 ], "Loop foreground widget visual contract");
 hasNone(loopWidget, ["notify(", "registerShortcut", "custom(", "overlay"], "Loop widget excluded UI");
@@ -1065,12 +1261,16 @@ const loopHeadingBlock = loopWidget.slice(
   loopWidget.indexOf("export function renderLoopWidgetLines"),
 );
 hasAll(loopHeadingBlock, [
-  'const active = loops.some((loop) => loop.status === "active")',
+  "const active = hasActiveLoops(loops)",
   'const role = active ? "accent" : "dim"',
   'const glyph = active ? theme.bold("●") : "○"',
   'const label = active ? theme.bold("Loops") : "Loops"',
   "formatSemanticGlyphPrefix(theme.fg(role, glyph))", "theme.fg(role, label)",
 ], "Loop ratio-free active-idle heading visual");
+hasAll(loopWidget, [
+  'export function hasActiveLoops(loops: readonly PublicLoop[]): boolean {\n  return loops.some((loop) => loop.status === "active");',
+  "isActive: () => hasActiveLoops(this.listLoops())",
+], "Loop heading and stack section share one active predicate");
 hasNone(loopHeadingBlock, ['theme.bold("○")', "Loops (", "${active}", "hint"], "Loop heading must drop the ratio, the bold idle glyph, and any expand hint");
 hasAll(loopTranscriptRenderer, [
   "renderLoopCall", "renderLoopResult", "renderLoopFire", "styledTitle(", '"loop"', 'theme.fg("accent", "↻")',
@@ -1744,7 +1944,7 @@ hasNone(`${todoCore}\n${todoGuidelineText}`, [
 ], "Todo multiple in_progress contract");
 hasAll(todoWidget, [
   "MAX_TODO_WIDGET_LINES = 12", 'theme.bold("●")', 'theme.bold(`Todos (${completed}/${tasks.length})`)', '"○"', '"◐"', '"✓"', 'theme.fg("dim", "⛓")',
-  'theme.strikethrough', '"├─"', '"└─"', "hiddenSummary", "setWidget",
+  'theme.strikethrough', '"├─"', '"└─"', "hiddenSummary", 'TODO_SECTION_ID = "todos"',
   "isTodoTaskBlocked", "sortTodoTasksForWidget", "sorted.slice(0, taskBudget)", "sorted.slice(taskBudget)",
   "renderTodoListResult", "renderTodoReceipts", "expanded = false", "receiptStatusTransition",
   'operations.filter((operation) => operation.op === "append")',
@@ -1755,9 +1955,14 @@ hasAll(todoWidget, [
   'addResultField(container, theme, "Status"', 'addResultSection(container, theme, "Abstract"',
   'addResultList(container, theme, "Blocked by"', "no-change",
 ], "built-in Todo widget and result-renderer contract");
-const todoWidgetHeadingBlock = todoWidget.slice(todoWidget.indexOf("function todoWidgetHeading"), todoWidget.indexOf("export function isTodoTaskBlocked"));
+hasAll(todoWidget, [
+  'export function countCompletedTodoTasks(tasks: readonly TodoTask[]): number {\n  return tasks.filter((task) => task.status === "completed").length;',
+  "export function hasOpenTodoTasks(tasks: readonly TodoTask[]): boolean {\n  return countCompletedTodoTasks(tasks) < tasks.length;",
+  "isActive: () => hasOpenTodoTasks(this.tasks)",
+], "Todo heading counts and stack section share one open-task predicate");
+const todoWidgetHeadingBlock = todoWidget.slice(todoWidget.indexOf("function todoWidgetHeading"), todoWidget.indexOf("/** Appends the collapsed hint"));
 hasAll(todoWidgetHeadingBlock, [
-  'const active = completed < tasks.length', 'const color = active ? "accent" : "dim"',
+  "const completed = countCompletedTodoTasks(tasks)", "const active = hasOpenTodoTasks(tasks)", 'const color = active ? "accent" : "dim"',
   'const glyph = active ? theme.bold("●") : "○"',
   'const label = active ? theme.bold(`Todos (${completed}/${tasks.length})`) : `Todos (${completed}/${tasks.length})`',
   "formatSemanticGlyphPrefix(theme.fg(color, glyph))", "theme.fg(color, label)",
@@ -1779,7 +1984,7 @@ hasNone(todoHeadingLineBlock, ["theme.bold(hint)", "slice(0,", "to collapse"], "
 hasAll(todoWidget, [
   "expanded = true", 'hint = ""',
   'const sorted = expanded ? ranked : ranked.filter((task) => task.status !== "completed")',
-  'const policyHidden = expanded ? 0 : tasks.filter((task) => task.status === "completed").length',
+  "const policyHidden = expanded ? 0 : countCompletedTodoTasks(tasks)",
   "selectTodoWidgetLayout(tasks, maxLines, expanded)",
 ], "Todo collapsed policy hides only completed rows and ranks against the whole ledger");
 hasAll(todoExtension, [
@@ -1798,6 +2003,83 @@ check(existsSync(join(ROOT, "tests/loop.test.mjs")), "Loop core contract tests m
 check(existsSync(join(ROOT, "tests/loop-ui.test.mjs")), "Loop visual contract tests must exist");
 check(existsSync(join(ROOT, "tests/goal-ui.test.mjs")), "Goal visual contract tests must exist");
 check(existsSync(join(ROOT, "tests/monitor-ui.test.mjs")), "Monitor visual contract tests must exist");
+check(existsSync(join(ROOT, "tests/widget-stack.test.mjs")), "aggregate widget contract tests must exist");
+const widgetStackTests = read("tests/widget-stack.test.mjs");
+hasAll(widgetStackTests, [
+  "the stack sorts every active combination with active sections above idle ones in fixed product order",
+  "mask < 32", "Goal \u2192 Todos \u2192 Agents \u2192 Monitors \u2192 Loops inside each group",
+  "the stack concatenates section bodies with no separator, no blank line, and no global cap",
+  "the stack never inserts a blank line between sections",
+  "each section keeps its own budget and the stack adds no cap of its own",
+  "every section's active flag comes from the same source as its own heading glyph",
+  "five real widgets register one aggregate key once and reorder on every active flip without touching setWidget",
+  "five widgets produce exactly one setWidget call", "must not call setWidget again", "must request an aggregate render",
+  "an empty section contributes no lines and the aggregate key is revoked only when every section is gone",
+  "one empty section never revokes the shared key", "the last section leaving revokes the aggregate key",
+  "a third-party widget keeps its own key and its relative position never moves when a section flips",
+  "the package owns exactly one widget key",
+  "the host is a globalThis singleton shared by a second module graph of the same source",
+  "?graph=todo", "the two graphs really are separate module copies", "both copies resolve the same host instance",
+  "releasing one owner keeps the shared binding alive", "the last owner releasing clears the aggregate",
+  "rebinding moves the aggregate to the new UI and a late unbind never clears a newer binding",
+  "reload clears the previous providers before a new widget instance publishes the same section",
+  "dispose retracts only its own section and a late timer tick never resurrects it",
+  "a late tick never re-registers a disposed section", "a late tick never republishes a disposed section",
+  "a tree cycle drops the old sections and republishes them on the new UI without orphan rows",
+  "the pre-tree branch leaves no orphan rows behind", "a tree cycle reuses the single registration",
+  "the aggregate component reads live width, theme, and Ctrl+O state while invalidate stays a no-op",
+  "Ctrl+O never re-registers the aggregate", "invalidate is a no-op and never re-registers",
+  "one width reaches every section",
+  "a session without a TUI UI publishes freely and still calls setWidget zero times",
+  "an RPC or print session never registers the aggregate",
+  "a host that ignores component factories, as RPC does, never locks the aggregate into a dead registration",
+  "a factory the host never ran is not a live registration",
+  "later updates retry the factory instead of being dropped",
+  "an ignored factory still leaves a clearable key",
+  "the first executed factory becomes the live registration",
+  "an explicit width is authoritative down to zero and only a missing or invalid width falls back",
+  '"w=0"', "a zero-column frame is an instruction, not a missing width",
+  "a negative width is invalid and falls back",
+  "no width and no terminal falls back to the documented default",
+  "the newest distinct UI wins and only owners of that UI can hold it open",
+  "the superseded UI is cleared immediately", "the newest UI takes the aggregate over",
+  "a late unbind from the superseded owner changes nothing",
+  "an owner still recorded against a replaced UI cannot hold the live one open",
+  "binding no UI releases exactly this owner's recorded claim and nothing else",
+  "one owner leaving keeps the other owner's binding", "releasing an owner that never bound is a no-op",
+  "section ids are fixed, exhaustive, and unknown ids sort last instead of throwing",
+], "aggregate widget ordering, ownership, lifecycle, and dual module graph tests");
+hasAll(read("tests/todo.test.mjs"), [
+  "session shutdown always disposes the Todo section while RPC and no-UI sessions still never register",
+  "an unmatched shutdown still clears the aggregate", "a repeated shutdown clears nothing twice",
+  "sessions never register or clear a widget",
+], "Todo unconditional shutdown disposal and headless parity tests");
+for (const file of [
+  "tests/widget-stack.test.mjs", "tests/monitor-ui.test.mjs", "tests/goal-ui.test.mjs",
+  "tests/loop-ui.test.mjs", "tests/subagent-widget.test.mjs",
+]) {
+  hasAll(read(file), [
+    "./widget-stack.js", "./widget-stack-host.js", "resetWidgetStackHost",
+  ], `${file} aggregate widget load mapping and per-test host reset`);
+}
+hasAll(read("tests/todo.test.mjs"), [
+  "../oh-my-pi-slim/widget-stack.js", "../oh-my-pi-slim/widget-stack-host.js", "resetWidgetStackHost",
+], "tests/todo.test.mjs aggregate widget load mapping and per-test host reset");
+// Every suite that loads a widget class also loads the host it publishes through.
+for (const file of [
+  "tests/goal.test.mjs", "tests/loop.test.mjs", "tests/monitor.test.mjs",
+  "tests/provider-schema.test.mjs", "tests/subagent-runtime.test.mjs",
+]) {
+  hasAll(read(file), [
+    "./widget-expansion.js", "./widget-stack.js", "./widget-stack-host.js",
+    // The host is process-wide, so a suite that loads a widget must start each test from a clean one.
+    'import test, { beforeEach } from "node:test"',
+    "resetWidgetStackHost", "beforeEach(() => resetWidgetStackHost());",
+  ], `${file} aggregate widget load mapping and per-test host reset`);
+}
+hasAll(read("tests/provider-schema.test.mjs"), [
+  "../oh-my-pi-slim/widget-stack.js", "../oh-my-pi-slim/widget-stack-host.js",
+], "tests/provider-schema.test.mjs Todo aggregate widget load mapping");
 check(existsSync(join(ROOT, "tests/fixtures/todo-load-probe.ts")), "Todo real-Pi load probe must exist");
 check(existsSync(join(ROOT, "tests/fixtures/omps-load-probe.ts")), "OMPS real-Pi load probe must exist");
 check(existsSync(join(ROOT, "tests/fixtures/ask-rpc-probe.ts")), "Ask native RPC dialog probe must exist");
@@ -1903,7 +2185,10 @@ hasAll(monitorTests, [
   "share one incremental update contract that states current status",
   '["id", "abstract", "kind", "status", "matched", "exitCode", "signal", "error", "lines", "omitted", "truncated", "deliveryKey"]',
   'assert.equal(matcher.details.kind, "update")', 'assert.equal(terminal.details.kind, "update")',
-  "terminal updates always carry an empty matched array",
+  "a terminal update names the literals its undelivered matches hit",
+  "the merged failure payload names the literals its pending matches hit",
+  "a close without pending matches names no literal",
+  "literals already reported by a delivered batch never repeat",
   "terminal updates report completed, failed, and killed while matcher updates always stay running",
   "close after a matcher batch repeats no line",
   "a matcher batch still pending at close folds its lines into the single terminal update",
@@ -1913,7 +2198,7 @@ hasAll(monitorTests, [
 ], "Monitor focused process, logging, delivery, payload, and Goal-reservation tests");
 const monitorUiTests = read("tests/monitor-ui.test.mjs");
 hasAll(monitorUiTests, [
-  "exact heading, glyphs, running/terminal order, overflow, width safety, and empty state",
+  "the exact terminal/total heading ratio, glyphs, running/terminal order, overflow, width safety, and empty state",
   "throttles and coalesces output", "registers once", "invalidate a no-op", "rebinds", "disposes",
   "all four actions", "uniform hints", "full operational state", "forced warnings", "global summary notifications",
   "matched 2 (ctrl+o to expand)", "rate limited (ctrl+o to expand)", '${status} (ctrl+o to expand)',
@@ -1926,18 +2211,29 @@ hasAll(monitorUiTests, [
   "fallbacks and errors sanitize controls", "model-facing list data invariant", "without a TUI context",
   "narrow.map((line) => stripVTControlCharacters(line))", '"printf done"',
   "├─ ↻  running first", "[↻!×✓●○] [^ ]|[↻!×✓●○] {3}", "↻  Monitor [00000001]",
-  'assert.equal(lines[0], "●  Monitors")', "the Monitors heading carries no running/total ratio",
+  'assert.equal(lines[0], "●  Monitors (3/5)"', "completed, failed, and killed all count as terminal in the numerator",
+  '"●  Monitors (0/13)"', "the 12-line budget and overflow row never shrink the heading total",
+  '"●  Monitors (0/2)"', "a fully running widget reports a zero numerator",
+  '"○  Monitors (3/3)"', "an all-terminal widget reads N/N with the hollow dim glyph, even while every row stays hidden",
+  "collapsing away every terminal row leaves the heading ratio untouched",
+  "a narrow terminal keeps the whole ratio while the rows truncate",
+  "the widest hintless heading keeps the ratio whole",
+  "six rows hidden by the line budget still count in the heading",
+  "collapse plus budget never changes the ratio", "display sorting never reorders the counted set",
+  "a lifecycle refresh moves the ratio and drops the heading to idle",
   "collapsed body keeps only running rows", "one atomic dim expand hint",
-  '"●  Monitors · ctrl+o to expand"', '["○  Monitors · ctrl+o to expand"]',
+  '"●  Monitors (3/5) · ctrl+o to expand"', '["○  Monitors (3/3) · ctrl+o to expand"]',
   "a collapsed widget with nothing hidden shows no hint at all",
   "withConfiguredExpandKey", '"app.tools.expand"', '" · ctrl+shift+e to expand"',
   "the hint renders identically in the active and idle heading states",
+  "a running monitor keeps the filled accent bold glyph, label, and ratio",
+  "an all-terminal widget drops to a hollow dim non-bold glyph, label, and ratio",
   "the hint is never bold", "must drop the whole hint, never half of it",
   "only the two budget-hidden running rows are summarised", "policy-hidden terminal rows never reach the body",
   "reads Pi's live expansion state on every render without re-registering the widget",
   "Ctrl+O must not re-register the widget", "Ctrl+O toggles straight back to the full body",
   "a host without getToolsExpanded stays expanded", "roleAnsiTheme",
-], "Monitor focused widget, ratio-free heading, collapse, hint, and RPC visual tests");
+], "Monitor focused widget, terminal/total heading ratio, collapse, hint, and RPC visual tests");
 const loopLoadTests = read("tests/loop-load.test.mjs");
 hasAll(loopLoadTests, [
   "real Pi isolated RPC main and child sessions expose exact package tools without widgets",
@@ -2088,7 +2384,11 @@ const widgetRenderer = read("extensions/oh-my-pi-slim/subagent-widget-renderer.t
 const widgetDisplay = read("extensions/oh-my-pi-slim/subagent-widget-display.ts");
 const modelDisplay = read("extensions/oh-my-pi-slim/subagent-model-display.ts");
 const transcriptRenderer = read("extensions/oh-my-pi-slim/subagent-transcript-renderer.ts");
-hasAll(widget, ["setIntervalFn(() => this.update(), 80)", "requestRender()", 'placement: "aboveEditor"', "widgetRegistered", "dispose()"], "subagent widget lifecycle");
+hasAll(widget, [
+  "setIntervalFn(() => this.update(), 80)", "requestRender()", "dispose()",
+  'AGENTS_SECTION_ID = "agents"', "isActive: () => hasActiveSubagentRuns(this.listRuns())",
+  "terminalWidth: input.width", "this.uiCtx = undefined;",
+], "subagent widget lifecycle");
 hasNone(widget, ["finishedTurnAge", "shouldShowFinished", "ERROR_LINGER_TURNS", "seedFinishedRuns"], "retained-run widget parity");
 hasNone(widgetRenderer, ["shouldShowFinished"], "retained-run widget renderer parity");
 hasAll(widgetDisplay, ['formatSemanticGlyphPrefix(SUBAGENT_WIDGET_GLYPHS.turns)'], "subagent turn glyph fixed semantic padding");
@@ -2117,8 +2417,12 @@ const subagentHeadingBlock = widgetRenderer.slice(
   widgetRenderer.indexOf("function subagentWidgetHeading"),
   widgetRenderer.indexOf("function subagentHeadingLine"),
 );
+hasAll(widgetRenderer, [
+  "export function countActiveSubagentRuns(runs: readonly WidgetRun[]): number {\n  return runs.filter((run) => ACTIVE_STATUSES.has(run.status)).length;",
+  "export function hasActiveSubagentRuns(runs: readonly WidgetRun[]): boolean {\n  return countActiveSubagentRuns(runs) > 0;",
+], "Agents heading ratio and stack section share one live-run count");
 hasAll(subagentHeadingBlock, [
-  "runs.filter((run) => ACTIVE_STATUSES.has(run.status)).length", "const terminal = runs.length - live",
+  "const live = countActiveSubagentRuns(runs)", "const terminal = runs.length - live",
   "const active = live > 0", 'const color = active ? "accent" : "dim"',
   "theme.bold(SUBAGENT_WIDGET_GLYPHS.agentsActive)", "SUBAGENT_WIDGET_GLYPHS.agentsIdle",
   "theme.bold(`Agents (${terminal}/${runs.length})`)", "`Agents (${terminal}/${runs.length})`",
@@ -2263,6 +2567,9 @@ if (packCheck.status === 0) {
     check(files.includes("extensions/oh-my-pi-slim/goal-runtime.ts"), "npm pack must include the Goal runtime");
     check(files.includes("extensions/oh-my-pi-slim/goal-widget.ts"), "npm pack must include the Goal widget");
     check(files.includes("extensions/oh-my-pi-slim/goal-transcript-renderer.ts"), "npm pack must include the Goal transcript renderer");
+    check(files.includes("extensions/oh-my-pi-slim/widget-stack.ts"), "npm pack must include the widget stack ordering layer");
+    check(files.includes("extensions/oh-my-pi-slim/widget-stack-host.ts"), "npm pack must include the aggregate widget host");
+    check(files.includes("tests/widget-stack.test.mjs"), "npm pack must include the aggregate widget tests");
     check(files.includes("extensions/oh-my-pi-slim/subagent-run-files.ts"), "npm pack must include the Goal stats sidecar helper");
     check(files.includes("extensions/oh-my-pi-slim/subagent-runtime.ts"), "npm pack must include the Goal child ownership and sidecar runtime");
     check(files.includes("tests/loop.test.mjs"), "npm pack must include the Loop core tests");
