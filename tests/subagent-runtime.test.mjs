@@ -47,6 +47,7 @@ const dependencyMap = {
   "./subagent-run-files.js": new URL("../extensions/oh-my-pi-slim/subagent-run-files.ts", import.meta.url).href,
   "./subagent-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-transcript-renderer.ts", import.meta.url).href,
   "./subagent-viewer-data.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer-data.ts", import.meta.url).href,
+  "./subagent-viewer-transcript.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer-transcript.ts", import.meta.url).href,
   "./subagent-viewer.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer.ts", import.meta.url).href,
   "./subagent-widget.js": new URL("../extensions/oh-my-pi-slim/subagent-widget.ts", import.meta.url).href,
   "./subagent-widget-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-renderer.ts", import.meta.url).href,
@@ -3869,6 +3870,7 @@ test("viewerSnapshot hands the read-only viewer a deep copy of running and waiti
     assert.equal(runningSnapshot.live, true);
     assert.equal(runningSnapshot.model, "preset/fixer:high");
     assert.equal(runningSnapshot.sessionFile, join(childDir, `${running.id}.jsonl`));
+    assert.equal(runningSnapshot.cwd, ROOT, "the viewer needs the run cwd to resolve built-in tool renderers");
     assert.deepEqual(runningSnapshot.activity, {
       turnCount: 3,
       toolUses: 2,
@@ -3884,6 +3886,7 @@ test("viewerSnapshot hands the read-only viewer a deep copy of running and waiti
 
     runningSnapshot.activity.activeTools.call.name = "mutated";
     runningSnapshot.activity.activeTools.injected = { name: "injected" };
+    runningSnapshot.cwd = "/mutated";
     waitingSnapshot.request.interview.questions[0].prompt = "mutated";
     waitingSnapshot.request.message = "mutated";
     const second = harness.runtime.viewerSnapshot();
@@ -3891,6 +3894,7 @@ test("viewerSnapshot hands the read-only viewer a deep copy of running and waiti
     assert.deepEqual(secondRunning.activity.activeTools, {
       call: { name: "read", startedAt: "2026-04-17T00:00:01.000Z" },
     });
+    assert.equal(secondRunning.cwd, ROOT, "a mutated snapshot copy never reaches the registry");
     const secondWaiting = second.runs.find((run) => run.id === waiting.id);
     assert.deepEqual(secondWaiting.request.interview, { questions: [{ prompt: "which" }] });
     assert.equal(secondWaiting.request.message, "Choose a lane.");

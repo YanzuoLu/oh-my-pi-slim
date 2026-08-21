@@ -1,13 +1,14 @@
 /**
  * Read-only Subagent viewer.
  *
- * The viewer is a single full-screen overlay that owns its own layout: header, transcript,
- * live/waiting block, a `Read-Only` input placeholder, and a navigation footer. Main is item 0 of
- * the same cycle, so leaving the last run closes the overlay and returns to the untouched Main UI.
+ * The viewer is a single full-screen overlay that owns its own layout. Row 0 is already transcript:
+ * every identity, activity, and navigation row lives at the bottom, in the same place the Main UI
+ * keeps its dock. The transcript itself is rendered by Pi's own transcript components, so it reads
+ * like Main rather than like a second, competing renderer.
  *
  * The viewer never writes: no session entry, no control file, no run file, no session switch,
- * no editor replacement, and no draft mutation. Every byte it shows comes from a cloned runtime
- * snapshot or from a bounded read-only child JSONL read.
+ * no editor replacement, and no draft mutation. Its only host-state interaction is Pi's single
+ * global tool-output expansion flag, which Main and every run deliberately share.
  */
 
 import {
@@ -16,18 +17,20 @@ import {
   visibleWidth,
   type Component,
   type Focusable,
+  type KeybindingsManager,
   type OverlayHandle,
   type TUI,
 } from "@earendil-works/pi-tui";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { formatSubagentModel } from "./subagent-model-display.js";
-import { formatWidgetMs, formatWidgetTokens, formatWidgetTurns } from "./subagent-widget-display.js";
+import { formatWidgetTokens, formatWidgetTurns } from "./subagent-widget-display.js";
+import { readWidgetExpanded, widgetExpandHint, widgetExpandKey } from "./widget-expansion.js";
 import {
   cycleViewerSelection,
+  formatViewerElapsed,
   loadViewerTranscript,
   neighborAfterViewerRemoval,
   renderViewerLive,
-  renderViewerTranscript,
   sanitizeViewerInline,
   sanitizeViewerText,
   viewerLine,
@@ -37,6 +40,14 @@ import {
   type ViewerTheme,
   type ViewerTranscript,
 } from "./subagent-viewer-data.js";
+import {
+  buildViewerTranscriptBody,
+  readViewerTranscriptSettings,
+  viewerSettingsKey,
+  VIEWER_DEFAULT_SETTINGS,
+  type ViewerTranscriptBody,
+  type ViewerTranscriptSettings,
+} from "./subagent-viewer-transcript.js";
 
 export const VIEWER_EMPTY_MESSAGE = "No running or waiting subagents.";
 export const VIEWER_READ_ONLY_LABEL = "Read-Only";
@@ -45,15 +56,35 @@ export const VIEWER_REFRESH_MS = 250;
 export const VIEWER_MAX_LIVE_LINES = 6;
 /** Consecutive empty-overlay observations before the viewer decides the host dropped its entry. */
 export const VIEWER_GONE_TICKS = 2;
+/**
+ * Minimal SGR mouse reporting, enabled only while a regular-mode overlay is mounted.
+ * `?1000` reports button presses (wheel notches included) and `?1006` asks for the SGR encoding.
+ * Motion tracking is deliberately not enabled, so Shift-drag still reaches the terminal's own
+ * selection and the Main scrollback keeps working the moment the viewer disables it again.
+ */
+export const VIEWER_MOUSE_ENABLE = "\x1b[?1000h\x1b[?1006h";
+export const VIEWER_MOUSE_DISABLE = "\x1b[?1006l\x1b[?1000l";
+/** One transcript row per wheel notch, matching Pi's own fullscreen wheel step. */
+export const VIEWER_WHEEL_LINES = 1;
 const VIEWER_MIN_TRANSCRIPT_ROWS = 3;
 const VIEWER_FALLBACK_ROWS = 24;
 const VIEWER_FALLBACK_WIDTH = 80;
+const SGR_MOUSE_PATTERN = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
+const X10_MOUSE_PATTERN = /^\x1b\[M[\s\S]{3}$/;
 
 type TimerHandle = unknown;
 
 export interface ViewerViewState {
   scroll: number;
   follow: boolean;
+  /**
+   * Set when the user turned follow off while already at the end.
+   *
+   * While it is set, nothing implicit re-arms follow: not growth, not a resize clamp, and not
+   * another Down, PageDown, or wheel notch that lands on the end again. Only `f` turning follow
+   * back on or `End` clears it, plus deliberately leaving the end on the way up.
+   */
+  suppressed: boolean;
 }
 
 interface ViewerModel {
@@ -63,18 +94,34 @@ interface ViewerModel {
   readonly transcript: ViewerTranscript | undefined;
   readonly state: ViewerViewState;
   readonly updatedAtMs: number | undefined;
-  readonly revision: number;
+  readonly bodyRevision: number;
+  readonly statusRevision: number;
+  readonly bodyKey: string;
+  readonly expanded: boolean;
+  readonly settings: ViewerTranscriptSettings;
+  readonly cwd: string | undefined;
 }
 
-export type SubagentViewerUI = Pick<ExtensionUIContext, "custom" | "notify">;
+export type SubagentViewerUI = Pick<
+  ExtensionUIContext,
+  "custom" | "notify" | "getToolsExpanded" | "setToolsExpanded"
+>;
 
 export interface SubagentViewerOptions {
   snapshot: () => ViewerSnapshot;
   loadTranscript?: typeof loadViewerTranscript;
+  buildBody?: typeof buildViewerTranscriptBody;
+  readSettings?: typeof readViewerTranscriptSettings;
   setInterval?: (callback: () => void, ms: number) => TimerHandle;
   clearInterval?: (timer: TimerHandle) => void;
   nowMs?: () => number;
   refreshMs?: number;
+}
+
+export interface ViewerShortcutOptions {
+  enabled?: boolean;
+  cwd?: string;
+  projectTrusted?: boolean;
 }
 
 function timeOfDay(ms: number | undefined): string {
@@ -94,22 +141,71 @@ function padToWidth(line: string, width: number): string {
 }
 
 /**
+ * Joins status segments and drops the least important ones until the row fits.
+ * Truncating instead would silently eat the tail, which is where the live elapsed clock sits.
+ */
+export function fitViewerSegments(
+  segments: readonly string[],
+  dropOrder: readonly number[],
+  width: number,
+): string {
+  const kept = new Set(segments.map((_, index) => index));
+  const compose = () => segments.filter((_, index) => kept.has(index)).join(" · ");
+  for (const index of dropOrder) {
+    if (visibleWidth(compose()) <= width) break;
+    kept.delete(index);
+  }
+  return compose();
+}
+
+/** Wheel notch direction, or undefined when the sequence is any other mouse report. */
+export function parseViewerWheel(data: string): -1 | 1 | undefined {
+  const sgr = SGR_MOUSE_PATTERN.exec(data);
+  if (sgr) {
+    const button = Number.parseInt(sgr[1], 10);
+    if ((button & 64) === 0) return undefined;
+    const direction = button & 3;
+    return direction === 0 ? -1 : direction === 1 ? 1 : undefined;
+  }
+  if (X10_MOUSE_PATTERN.test(data)) {
+    const button = data.charCodeAt(3) - 32;
+    if ((button & 64) === 0) return undefined;
+    const direction = button & 3;
+    return direction === 0 ? -1 : direction === 1 ? 1 : undefined;
+  }
+  return undefined;
+}
+
+/** Any mouse report, wheel or not. Non-wheel reports are swallowed instead of typed into the UI. */
+export function isViewerMouseSequence(data: string): boolean {
+  return SGR_MOUSE_PATTERN.test(data) || X10_MOUSE_PATTERN.test(data);
+}
+
+/**
  * Full-screen read-only overlay component.
  * It renders exactly the terminal viewport, so nothing of the underlying Main UI shows through.
  */
 export class SubagentViewerComponent implements Component, Focusable {
   private readonly tui: TUI;
   private readonly theme: ViewerTheme;
+  private readonly keybindings: KeybindingsManager | undefined;
   private readonly controller: SubagentViewerKeyTarget;
-  private cache: { width: number; revision: number; rows: number; lines: string[] } | undefined;
-  /** Transcript body cache, so an activity-only revision bump never re-renders 4000 lines. */
-  private bodyCache: { width: number; transcript: ViewerTranscript | undefined; lines: string[] } | undefined;
+  private frameCache: { key: string; lines: string[] } | undefined;
+  /** The built component tree. Rebuilt only when the body key changes, never on a clock tick. */
+  private body: { key: string; body: ViewerTranscriptBody } | undefined;
   private lastWidth = VIEWER_FALLBACK_WIDTH;
   private _focused = false;
+  private disposed = false;
 
-  constructor(options: { tui: TUI; theme: ViewerTheme; controller: SubagentViewerKeyTarget }) {
+  constructor(options: {
+    tui: TUI;
+    theme: ViewerTheme;
+    keybindings?: KeybindingsManager;
+    controller: SubagentViewerKeyTarget;
+  }) {
     this.tui = options.tui;
     this.theme = options.theme;
+    this.keybindings = options.keybindings;
     this.controller = options.controller;
   }
 
@@ -121,8 +217,15 @@ export class SubagentViewerComponent implements Component, Focusable {
     this._focused = value;
   }
 
+  /** Theme-level invalidation: drop the frame and let the built components re-render themselves. */
   invalidate(): void {
-    this.cache = undefined;
+    this.frameCache = undefined;
+    this.body?.body.invalidate();
+  }
+
+  /** Cheap invalidation used by activity, clock, and scroll updates. The body tree is untouched. */
+  invalidateFrame(): void {
+    this.frameCache = undefined;
   }
 
   private rows(): number {
@@ -130,12 +233,12 @@ export class SubagentViewerComponent implements Component, Focusable {
     return Number.isFinite(rows) && Number(rows) > 0 ? Math.floor(Number(rows)) : VIEWER_FALLBACK_ROWS;
   }
 
-  /** Transcript rows currently visible, used by the controller for page and follow arithmetic. */
+  /** Transcript rows currently visible, used by the controller for page arithmetic. */
   viewportRows(): number {
     return this.layout(this.controller.model(), this.lastWidth, this.rows()).transcriptRows;
   }
 
-  private headerLines(model: ViewerModel, width: number): string[] {
+  private statusLines(model: ViewerModel, width: number): string[] {
     const theme = this.theme;
     const run = model.run;
     if (!run) return [padToWidth(theme.fg("dim", "No running or waiting subagent."), width)];
@@ -149,44 +252,50 @@ export class SubagentViewerComponent implements Component, Focusable {
       theme.fg("muted", sanitizeViewerInline(run.abstract)),
     ].join(theme.fg("dim", " · "));
     const activity = run.activity;
-    const stats = [
+    const segments = [
       run.live ? theme.fg("success", "live") : theme.fg("warning", "not live"),
       // The model string comes from a child run file, so it is untrusted text like everything else.
       sanitizeViewerInline(formatSubagentModel(sanitizeViewerText(run.model))),
       formatWidgetTurns(activity.turnCount),
       `${activity.toolUses} tool use${activity.toolUses === 1 ? "" : "s"}`,
       formatWidgetTokens(activity.tokens),
-      ...(activity.compactionCount > 0 ? [`${activity.compactionCount} compaction${activity.compactionCount === 1 ? "" : "s"}`] : []),
-      formatWidgetMs(this.controller.now() - Date.parse(run.createdAt)),
-    ].join(" · ");
+      activity.compactionCount > 0 ? `${activity.compactionCount} compaction${activity.compactionCount === 1 ? "" : "s"}` : "",
+      formatViewerElapsed(run.createdAt, this.controller.now()),
+    ].filter((segment) => segment !== "");
+    // Liveness and the elapsed clock are never dropped; everything between them can go.
+    const dropOrder = segments.length === 7 ? [5, 4, 3, 2, 1] : [4, 3, 2, 1];
+    const stats = fitViewerSegments(segments, dropOrder, width);
     return [padToWidth(title, width), padToWidth(theme.fg("dim", stats), width)];
   }
 
   /**
-   * Hints wrap across as many rows as the width needs, and the meta row is always exactly one line.
+   * Hint rows wrap to the width; the meta row is always exactly one line.
    * Both the layout pass and the render pass call this with the same width, so the height agrees.
    */
-  private footerLines(model: ViewerModel, width: number, total: number, rows: number): string[] {
+  private hintLines(model: ViewerModel, width: number): string[] {
     const theme = this.theme;
-    const scroll = model.state.scroll;
-    const position = total === 0
-      ? "0/0"
-      : `${Math.min(total, scroll + 1)}-${Math.min(total, scroll + rows)}/${total}`;
     const hints = [
       "←/→ or Ctrl+Shift+←/→ run",
       "↑/↓ line",
       "PgUp/PgDn page",
       "Home/End edge",
       `f follow ${model.state.follow ? "on" : "off"}`,
+      `${this.controller.expandKey()} ${model.expanded ? "expanded" : "collapsed"}`,
       "r refresh",
       "Esc/q Main",
     ].join(" · ");
+    return wrapViewerText(hints, width).map((line) => padToWidth(theme.fg("dim", line), width));
+  }
+
+  private metaLine(model: ViewerModel, width: number, total: number, rows: number): string {
+    const theme = this.theme;
+    const scroll = model.state.scroll;
+    const position = total === 0
+      ? "0/0"
+      : `${Math.min(total, scroll + 1)}-${Math.min(total, scroll + rows)}/${total}`;
     const warning = model.transcript?.warning;
     const meta = `${position} · updated ${timeOfDay(model.updatedAtMs)}${warning ? ` · ${sanitizeViewerInline(warning)}` : ""}`;
-    return [
-      ...wrapViewerText(hints, width).map((line) => padToWidth(theme.fg("dim", line), width)),
-      padToWidth(theme.fg(warning ? "warning" : "dim", meta), width),
-    ];
+    return padToWidth(theme.fg(warning ? "warning" : "dim", meta), width);
   }
 
   private readOnlyLines(width: number): string[] {
@@ -201,7 +310,10 @@ export class SubagentViewerComponent implements Component, Focusable {
 
   private liveLines(model: ViewerModel, width: number): string[] {
     if (!model.run || !model.transcript) return [];
-    const lines = renderViewerLive(model.run, model.transcript, width, this.theme);
+    const lines = renderViewerLive(model.run, model.transcript, width, this.theme, {
+      expanded: model.expanded,
+      expandHint: this.controller.expandHint(),
+    });
     if (lines.length <= VIEWER_MAX_LIVE_LINES) return lines;
     return [
       ...lines.slice(0, VIEWER_MAX_LIVE_LINES - 1),
@@ -210,41 +322,57 @@ export class SubagentViewerComponent implements Component, Focusable {
   }
 
   /**
-   * Fits the fixed rows into the terminal by dropping the live block first, then the stats row, then
-   * the Read-Only borders, then the key hints.
+   * Fits the fixed bottom rows into the terminal.
    *
-   * The smallest layout this can produce is five rows: title, separator, one transcript row, the
-   * `Read-Only` row, and one footer row. Below five rows `render` clamps to the terminal height, so
-   * a 4-row terminal loses the footer and a 3-row terminal also loses the `Read-Only` row. Nothing
-   * ever overflows the viewport; the survival order is a preference, not a guarantee at any height.
+   * Survival order, worst first: the live block goes, then the activity row, then the Read-Only
+   * borders, then the key hints, then the meta row. The transcript keeps at least one row, and the
+   * `Read-Only` row plus the status title outlive everything else because they are the only proof
+   * of what is on screen and that it cannot be typed into.
    */
   private layout(model: ViewerModel, width: number, rows: number): {
-    header: string[];
     live: string[];
     readOnly: string[];
-    footer: string[];
+    status: string[];
+    hints: string[];
+    meta: boolean;
     transcriptRows: number;
   } {
-    const fullHeader = this.headerLines(model, width);
+    const fullStatus = this.statusLines(model, width);
     const fullReadOnly = this.readOnlyLines(width);
-    const fullFooter = this.footerLines(model, width, 0, 1);
-    let header = fullHeader;
+    const fullHints = this.hintLines(model, width);
     let live = this.liveLines(model, width);
+    let status = fullStatus;
     let readOnly = fullReadOnly;
-    let footerRows = fullFooter.length;
+    let hints = fullHints;
+    let meta = true;
     const chrome = () =>
-      header.length + 1 + (live.length > 0 ? live.length + 1 : 0) + readOnly.length + footerRows;
+      (live.length > 0 ? live.length + 1 : 0) + readOnly.length + status.length + hints.length + (meta ? 1 : 0);
     if (chrome() + VIEWER_MIN_TRANSCRIPT_ROWS > rows) live = [];
-    if (chrome() + VIEWER_MIN_TRANSCRIPT_ROWS > rows) header = fullHeader.slice(0, 1);
+    if (chrome() + VIEWER_MIN_TRANSCRIPT_ROWS > rows) status = fullStatus.slice(0, 1);
     if (chrome() + 1 > rows) readOnly = [fullReadOnly[1]];
-    if (chrome() + 1 > rows) footerRows = 1;
-    return {
-      header,
-      live,
-      readOnly,
-      footer: fullFooter.slice(fullFooter.length - footerRows),
-      transcriptRows: Math.max(1, rows - chrome()),
-    };
+    if (chrome() + 1 > rows) hints = [];
+    if (chrome() + 1 > rows) meta = false;
+    return { live, readOnly, status, hints, meta, transcriptRows: Math.max(1, rows - chrome()) };
+  }
+
+  /** Builds or reuses the transcript component tree. Only a body-key change rebuilds it. */
+  private transcriptBody(model: ViewerModel): ViewerTranscriptBody {
+    if (this.body && this.body.key === model.bodyKey) return this.body.body;
+    const previous = this.body;
+    const body = this.controller.buildBody({
+      transcript: model.transcript,
+      tui: this.tui,
+      theme: this.theme,
+      cwd: model.cwd,
+      expanded: model.expanded,
+      settings: model.settings,
+    });
+    this.body = { key: model.bodyKey, body };
+    if (previous) {
+      try { previous.body.dispose(); }
+      catch { /* the replaced tree is unreachable either way */ }
+    }
+    return body;
   }
 
   render(width: number): string[] {
@@ -252,31 +380,25 @@ export class SubagentViewerComponent implements Component, Focusable {
     const rows = this.rows();
     this.lastWidth = safeWidth;
     const model = this.controller.model();
-    if (
-      this.cache && this.cache.width === safeWidth &&
-      this.cache.revision === model.revision && this.cache.rows === rows
-    ) return this.cache.lines;
+    const state = model.state;
+    const frameKey = [
+      safeWidth, rows, model.bodyRevision, model.statusRevision,
+      state.scroll, state.follow ? 1 : 0, state.suppressed ? 1 : 0,
+    ].join(":");
+    if (this.frameCache && this.frameCache.key === frameKey) return this.frameCache.lines;
 
     const theme = this.theme;
-    const { header, live, readOnly, footer, transcriptRows } = this.layout(model, safeWidth, rows);
-    // The data layer replaces the transcript object whenever the file changes, so identity is an
-    // exact change test. Scroll, follow, and activity updates therefore reuse the rendered body.
-    const body = this.bodyCache && this.bodyCache.width === safeWidth && this.bodyCache.transcript === model.transcript
-      ? this.bodyCache.lines
-      : (() => {
-        const lines = model.transcript
-          ? renderViewerTranscript(model.transcript, safeWidth, theme)
-          : [padToWidth(theme.fg("dim", "Loading transcript…"), safeWidth)];
-        this.bodyCache = { width: safeWidth, transcript: model.transcript, lines };
-        return lines;
-      })();
+    const { live, readOnly, status, hints, meta, transcriptRows } = this.layout(model, safeWidth, rows);
+    const body = this.transcriptBody(model).render(safeWidth);
     const maxScroll = Math.max(0, body.length - transcriptRows);
-    if (model.state.follow) model.state.scroll = maxScroll;
-    model.state.scroll = Math.max(0, Math.min(model.state.scroll, maxScroll));
-    const visible = body.slice(model.state.scroll, model.state.scroll + transcriptRows);
+    // Content growth pins a following view to the end; a clamp alone never means the user arrived.
+    if (state.follow) state.scroll = maxScroll;
+    state.scroll = Math.max(0, Math.min(state.scroll, maxScroll));
+    this.controller.noteViewport(body.length, transcriptRows);
+    const visible = body.slice(state.scroll, state.scroll + transcriptRows);
     const separator = padToWidth(theme.fg("dim", "─".repeat(safeWidth)), safeWidth);
 
-    const lines: string[] = [...header, separator];
+    const lines: string[] = [];
     for (let index = 0; index < transcriptRows; index += 1) {
       lines.push(padToWidth(visible[index] ?? "", safeWidth));
     }
@@ -288,15 +410,28 @@ export class SubagentViewerComponent implements Component, Focusable {
     // host composites, so it can still bleed through an overlay row. The viewer's own output never
     // contains one, because every transcript byte goes through the sanitizer first.
     lines.push(...readOnly);
-    const rendered = this.footerLines(model, safeWidth, body.length, transcriptRows);
-    lines.push(...rendered.slice(rendered.length - footer.length));
+    lines.push(...status);
+    lines.push(...hints);
+    if (meta) lines.push(this.metaLine(model, safeWidth, body.length, transcriptRows));
     while (lines.length < rows) lines.push(padToWidth("", safeWidth));
     const clamped = lines.slice(0, Math.max(1, rows));
-    this.cache = { width: safeWidth, revision: model.revision, rows, lines: clamped };
+    this.frameCache = { key: frameKey, lines: clamped };
     return clamped;
   }
 
   handleInput(data: string): void {
+    const wheel = parseViewerWheel(data);
+    if (wheel !== undefined) {
+      this.controller.scrollBy(wheel * VIEWER_WHEEL_LINES);
+      return;
+    }
+    // Clicks, drags, and releases are reports the viewer asked for but does not use. Swallowing
+    // them keeps raw escape bytes from leaking into any other handler.
+    if (isViewerMouseSequence(data)) return;
+    if (this.keybindings?.matches(data, "app.tools.expand") === true) {
+      this.controller.toggleExpanded();
+      return;
+    }
     if (matchesKey(data, Key.ctrlShift("right")) || matchesKey(data, Key.right)) {
       this.controller.step(1);
       return;
@@ -339,12 +474,29 @@ export class SubagentViewerComponent implements Component, Focusable {
     }
     if (matchesKey(data, "r")) this.controller.refreshNow();
   }
+
+  /** Releases the built transcript tree. Safe to call more than once. */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    const body = this.body;
+    this.body = undefined;
+    this.frameCache = undefined;
+    if (!body) return;
+    try { body.body.dispose(); }
+    catch { /* best-effort release */ }
+  }
 }
 
-/** The key-handling surface the component needs, kept narrow so tests can drive it directly. */
+/** The surface the component needs, kept narrow so tests can drive it directly. */
 export interface SubagentViewerKeyTarget {
   model(): ViewerModel;
   now(): number;
+  buildBody: typeof buildViewerTranscriptBody;
+  noteViewport(contentLines: number, transcriptRows: number): void;
+  expandKey(): string;
+  expandHint(): string;
+  toggleExpanded(): void;
   step(direction: 1 | -1): void;
   requestClose(): void;
   scrollBy(delta: number): void;
@@ -357,12 +509,15 @@ export interface SubagentViewerKeyTarget {
 export class SubagentViewer implements SubagentViewerKeyTarget {
   private readonly options: SubagentViewerOptions;
   private readonly loadTranscript: typeof loadViewerTranscript;
+  readonly buildBody: typeof buildViewerTranscriptBody;
+  private readonly readSettings: typeof readViewerTranscriptSettings;
   private readonly setIntervalFn: (callback: () => void, ms: number) => TimerHandle;
   private readonly clearIntervalFn: (timer: TimerHandle) => void;
   private readonly nowMs: () => number;
   private readonly refreshMs: number;
   private readonly viewStates = new Map<string, ViewerViewState>();
   private readonly transcripts = new Map<string, ViewerTranscript>();
+  private readonly transcriptSeqs = new Map<string, number>();
   private readonly fingerprints = new Map<string, string>();
   private readonly readAt = new Map<string, number>();
   private runs: ViewerRunSnapshot[] = [];
@@ -370,6 +525,7 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
   private childSessionDir: string | undefined;
   private currentRunId: string | undefined;
   private component: SubagentViewerComponent | undefined;
+  private ui: SubagentViewerUI | undefined;
   private tui: TUI | undefined;
   private done: ((value: void) => void) | undefined;
   /** The host's handle for this viewer's own overlay entry. Removal is by identity, never by rank. */
@@ -378,17 +534,29 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
   private abandonOpen: (() => void) | undefined;
   private timer: TimerHandle | undefined;
   private generation = 0;
-  private revision = 0;
+  private bodyRevision = 0;
+  private statusRevision = 0;
+  private transcriptSeq = 0;
   private opened = false;
   private goneTicks = 0;
   private readToken: number | undefined;
   private readSequence = 0;
   private pendingRead = false;
   private pendingForce = false;
+  private mouseEnabled = false;
+  private expanded = true;
+  private settings: ViewerTranscriptSettings = VIEWER_DEFAULT_SETTINGS;
+  private settingsKey = viewerSettingsKey(VIEWER_DEFAULT_SETTINGS);
+  /** The elapsed value as it is actually shown, so a repaint follows the string, not the clock. */
+  private lastElapsed = "";
+  private contentLines = 0;
+  private transcriptRows = 1;
 
   constructor(options: SubagentViewerOptions) {
     this.options = options;
     this.loadTranscript = options.loadTranscript ?? loadViewerTranscript;
+    this.buildBody = options.buildBody ?? buildViewerTranscriptBody;
+    this.readSettings = options.readSettings ?? readViewerTranscriptSettings;
     this.setIntervalFn = options.setInterval ?? ((callback, ms) => setInterval(callback, ms));
     this.clearIntervalFn = options.clearInterval ?? ((timer) => clearInterval(timer as ReturnType<typeof setInterval>));
     this.nowMs = options.nowMs ?? (() => Date.now());
@@ -407,37 +575,86 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
     return this.opened ? this.currentRunId : undefined;
   }
 
+  /** True only while this viewer owns the temporary regular-mode mouse reporting mode. */
+  isMouseEnabled(): boolean {
+    return this.mouseEnabled;
+  }
+
+  expandKey(): string {
+    return widgetExpandKey();
+  }
+
+  expandHint(): string {
+    return widgetExpandHint();
+  }
+
+  noteViewport(contentLines: number, transcriptRows: number): void {
+    this.contentLines = Math.max(0, contentLines);
+    this.transcriptRows = Math.max(1, transcriptRows);
+  }
+
+  private maxScroll(): number {
+    return Math.max(0, this.contentLines - this.transcriptRows);
+  }
+
+  /**
+   * The elapsed string exactly as the status row renders it for the selected run.
+   *
+   * The repaint decision compares this display value instead of a wall-clock bucket: a run created
+   * mid-second changes its shown value on its own phase, and once the format switches to minutes or
+   * hours most seconds change nothing at all.
+   */
+  private elapsedDisplay(): string {
+    const runId = this.currentRunId;
+    const run = runId === undefined ? undefined : this.runs.find((candidate) => candidate.id === runId);
+    return run === undefined ? "—" : formatViewerElapsed(run.createdAt, this.nowMs());
+  }
+
   model(): ViewerModel {
     const runId = this.currentRunId;
     const run = runId === undefined ? undefined : this.runs.find((candidate) => candidate.id === runId);
+    const transcript = runId === undefined ? undefined : this.transcripts.get(runId);
+    const seq = runId === undefined ? 0 : this.transcriptSeqs.get(runId) ?? 0;
     return {
       run,
       index: runId === undefined ? -1 : this.activeIds.indexOf(runId),
       total: this.activeIds.length,
-      transcript: runId === undefined ? undefined : this.transcripts.get(runId),
+      transcript,
       state: this.viewState(runId),
       updatedAtMs: runId === undefined ? undefined : this.readAt.get(runId),
-      revision: this.revision,
+      bodyRevision: this.bodyRevision,
+      statusRevision: this.statusRevision,
+      bodyKey: `${runId ?? "main"}:${seq}:${run?.cwd ?? ""}:${this.settingsKey}:${this.expanded ? 1 : 0}`,
+      expanded: this.expanded,
+      settings: this.settings,
+      cwd: run?.cwd,
     };
   }
 
   private viewState(runId: string | undefined): ViewerViewState {
-    if (runId === undefined) return { scroll: 0, follow: true };
+    if (runId === undefined) return { scroll: 0, follow: true, suppressed: false };
     let state = this.viewStates.get(runId);
     if (!state) {
-      state = { scroll: 0, follow: true };
+      state = { scroll: 0, follow: true, suppressed: false };
       this.viewStates.set(runId, state);
     }
     return state;
   }
 
-  private bump(): void {
-    this.revision += 1;
+  /** Transcript identity changed: the component tree must be rebuilt. */
+  private bumpBody(): void {
+    this.bodyRevision += 1;
+    this.statusRevision += 1;
+  }
+
+  /** Activity, clock, scroll, or hint changed: only the composed frame is stale. */
+  private bumpStatus(): void {
+    this.statusRevision += 1;
   }
 
   private requestRender(): void {
     if (!this.opened) return;
-    this.component?.invalidate();
+    this.component?.invalidateFrame();
     this.tui?.requestRender();
   }
 
@@ -448,7 +665,7 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
   async handleShortcut(
     ui: SubagentViewerUI,
     direction: 1 | -1,
-    options: { enabled?: boolean } = {},
+    options: ViewerShortcutOptions = {},
   ): Promise<void> {
     if (options.enabled === false) return;
     if (this.opened || this.openPromise) return;
@@ -463,6 +680,8 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
       ui.notify(VIEWER_EMPTY_MESSAGE, "info");
       return;
     }
+    this.settings = this.readSettings(options.cwd, options.projectTrusted === true);
+    this.settingsKey = viewerSettingsKey(this.settings);
     await this.openOverlay(ui, snapshot, selected);
   }
 
@@ -473,34 +692,62 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
     const known = new Set(this.activeIds);
     for (const id of [...this.viewStates.keys()]) if (!known.has(id)) this.viewStates.delete(id);
     for (const id of [...this.transcripts.keys()]) if (!known.has(id)) this.transcripts.delete(id);
+    for (const id of [...this.transcriptSeqs.keys()]) if (!known.has(id)) this.transcriptSeqs.delete(id);
     for (const id of [...this.fingerprints.keys()]) if (!known.has(id)) this.fingerprints.delete(id);
     for (const id of [...this.readAt.keys()]) if (!known.has(id)) this.readAt.delete(id);
+  }
+
+  /**
+   * Turns on minimal wheel reporting for a regular-mode overlay.
+   * Called only from `onHandle`, so a viewer that never mounts never touches the terminal mode.
+   */
+  private enableMouse(tui: TUI): void {
+    if (this.mouseEnabled) return;
+    // Fullscreen hosts already report the wheel and own the mode themselves.
+    if (tui.mode !== "regular") return;
+    try {
+      tui.terminal.write(VIEWER_MOUSE_ENABLE);
+      this.mouseEnabled = true;
+    } catch {
+      this.mouseEnabled = false;
+    }
+  }
+
+  /** Restores the terminal's own wheel behaviour. Idempotent and safe on every teardown path. */
+  private disableMouse(): void {
+    if (!this.mouseEnabled) return;
+    this.mouseEnabled = false;
+    try { this.tui?.terminal.write(VIEWER_MOUSE_DISABLE); }
+    catch { /* the terminal is already gone */ }
   }
 
   private async openOverlay(ui: SubagentViewerUI, snapshot: ViewerSnapshot, runId: string): Promise<void> {
     this.generation += 1;
     const generation = this.generation;
     this.opened = true;
+    this.ui = ui;
     this.handle = undefined;
     this.goneTicks = 0;
+    this.expanded = readWidgetExpanded(ui);
+    this.contentLines = 0;
+    this.transcriptRows = 1;
     this.adoptSnapshot(snapshot);
     this.currentRunId = runId;
+    this.lastElapsed = this.elapsedDisplay();
     this.viewState(runId);
-    this.bump();
+    this.bumpBody();
     this.startTimer(generation);
     this.scheduleRead(generation);
     let promise: Promise<void>;
     try {
-      promise = ui.custom<void>((tui, theme, _keybindings, done) => {
+      promise = ui.custom<void>((tui, theme, keybindings, done) => {
         const component = new SubagentViewerComponent({
           tui,
           theme: theme as unknown as ViewerTheme,
+          keybindings,
           controller: this,
         });
         // A close that lands before the host builds the component must not adopt this overlay.
-        // Resolving marks the open closed so the component is never mounted, but it is only safe
-        // while the host has nothing to pop; otherwise the `onHandle` guard below removes the
-        // late entry instead of letting `done` dismiss a foreign overlay.
         if (generation !== this.generation) {
           if (typeof tui.hasOverlay !== "function" || !tui.hasOverlay()) queueMicrotask(() => done());
           return component;
@@ -512,8 +759,9 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
       }, {
         overlay: true,
         overlayOptions: { width: "100%", maxHeight: "100%", row: 0, col: 0, margin: 0 },
-        // The public handle is the only way to remove exactly this overlay entry. Without it the
-        // host's `done` would call `hideOverlay()`, which pops whatever is on top of the stack.
+        // The public handle is the only way to remove exactly this overlay entry, and it is also
+        // the only proof that the host really mounted this viewer. Mouse reporting is turned on
+        // here and nowhere else.
         onHandle: (handle: OverlayHandle) => {
           if (generation !== this.generation) {
             // The close already ran for this open, so the entry is unwanted the moment it exists.
@@ -521,6 +769,7 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
             return;
           }
           this.handle = handle;
+          if (this.tui) this.enableMouse(this.tui);
         },
       });
     } catch (error) {
@@ -562,13 +811,7 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
    * temporarily hidden overlays sit above it, and it never touches anybody else's entry. The host's
    * `done` is deliberately not used on that path, because `showExtensionCustom` answers it with an
    * unconditional `hideOverlay()` on the TUI, which pops the top of the stack rather than this
-   * viewer. Under a foreign overlay that would dismiss the foreign one and leave the viewer entry
-   * behind as a full-screen zombie that reappears the moment the foreign overlay goes away.
-   *
-   * The raw `ui.custom` promise stays pending, but the host keeps no promise registry and the handle
-   * has already removed its overlay entry. Once local references are cleared, that isolated object
-   * island is unreachable and can be collected. The viewer awaits the internal race below, so no
-   * caller ever waits on the orphan.
+   * viewer.
    */
   private completeClose(): void {
     const generation = this.generation;
@@ -579,16 +822,17 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
     const component = this.component;
     if (handle) {
       try { handle.hide(); } catch { /* the host already removed this entry */ }
-      try { (component as { dispose?: () => void } | undefined)?.dispose?.(); }
+      try { component?.dispose(); }
       catch { /* a component dispose failure must not block teardown */ }
       this.teardown(generation);
       return;
     }
     // No handle yet: the host has not shown an overlay for this open, so `done` is still the right
-    // answer. It also marks the pending open as closed, which stops the factory result from ever
-    // being mounted. It is only safe while the stack has nothing for `hideOverlay` to pop; if some
-    // other overlay is up, the `onHandle` guard above removes this entry instead.
+    // answer. It is only safe while the stack has nothing for `hideOverlay` to pop; if some other
+    // overlay is up, the `onHandle` guard above removes this entry instead.
     const resolvable = done !== undefined && !(typeof this.tui?.hasOverlay === "function" && this.tui.hasOverlay());
+    try { component?.dispose(); }
+    catch { /* a component dispose failure must not block teardown */ }
     this.teardown(generation);
     if (resolvable && done) done();
   }
@@ -625,7 +869,11 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
     this.timer = undefined;
   }
 
-  /** Periodic reconciliation: adopt the new snapshot, keep or move the selection, refresh the read. */
+  /**
+   * Periodic reconciliation on the single 250 ms tick.
+   * Activity repaints immediately, the elapsed clock repaints when its displayed string changes,
+   * and neither ever rebuilds the transcript component tree.
+   */
   private refresh(generation: number): void {
     if (generation !== this.generation || !this.opened) return;
     const previousIds = this.activeIds;
@@ -644,13 +892,30 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
       return;
     }
     this.scheduleRead(generation);
+    let repaint = false;
     if (signature !== this.signature()) {
-      this.bump();
-      this.requestRender();
+      this.bumpStatus();
+      repaint = true;
     }
+    // Pi's one global expansion flag can change from Main, another extension, or a reload.
+    const expanded = readWidgetExpanded(this.ui);
+    if (expanded !== this.expanded) {
+      this.expanded = expanded;
+      this.bumpBody();
+      repaint = true;
+    }
+    // The clock repaints only when the rendered elapsed string really changes, and it shares this
+    // tick's single render request with any activity change above.
+    const elapsed = this.elapsedDisplay();
+    if (elapsed !== this.lastElapsed) {
+      this.lastElapsed = elapsed;
+      this.bumpStatus();
+      repaint = true;
+    }
+    if (repaint) this.requestRender();
   }
 
-  /** Cheap change detector, so an idle viewer never repaints on the 250 ms tick. */
+  /** Cheap change detector, so an idle viewer never repaints beyond its one-second clock. */
   private signature(): string {
     const runId = this.currentRunId;
     const run = runId === undefined ? undefined : this.runs.find((candidate) => candidate.id === runId);
@@ -677,8 +942,10 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
   private select(runId: string, generation: number): void {
     if (generation !== this.generation || !this.opened) return;
     this.currentRunId = runId;
+    this.lastElapsed = this.elapsedDisplay();
     this.viewState(runId);
-    this.bump();
+    this.contentLines = 0;
+    this.bumpBody();
     this.scheduleRead(generation, true);
     this.requestRender();
   }
@@ -712,8 +979,10 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
         if (load.fingerprint !== undefined) this.fingerprints.set(runId, load.fingerprint);
         if (load.status === "unchanged" || !load.transcript) return;
         this.transcripts.set(runId, load.transcript);
+        this.transcriptSeq += 1;
+        this.transcriptSeqs.set(runId, this.transcriptSeq);
         this.readAt.set(runId, this.nowMs());
-        this.bump();
+        this.bumpBody();
         this.requestRender();
       })
       .catch(() => undefined)
@@ -739,39 +1008,84 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
     this.select(next, this.generation);
   }
 
+  /**
+   * Bottom-aware scrolling.
+   *
+   * Moving up always leaves follow, and leaving the end that way clears suppression, so a later
+   * scroll back down may re-arm. Moving down re-arms only by actually reaching the end and only
+   * while the user has not suppressed it, which is what makes a wheel or PageDown to the bottom
+   * behave like `End` in the normal case and behave like nothing at all after `f`.
+   */
   scrollBy(delta: number): void {
-    if (!this.opened) return;
+    if (!this.opened || delta === 0) return;
     const state = this.viewState(this.currentRunId);
-    state.scroll = Math.max(0, state.scroll + delta);
-    state.follow = false;
-    this.bump();
+    const max = this.maxScroll();
+    const next = Math.max(0, Math.min(state.scroll + delta, max));
+    state.scroll = next;
+    if (delta < 0) {
+      state.follow = false;
+      // Only really leaving the end counts; an up key that cannot move is not a change of mind.
+      if (next < max) state.suppressed = false;
+    } else if (next >= max && !state.suppressed) {
+      state.follow = true;
+    } else {
+      state.follow = false;
+    }
+    this.bumpStatus();
     this.requestRender();
   }
 
   scrollToTop(): void {
     if (!this.opened) return;
     const state = this.viewState(this.currentRunId);
-    state.scroll = 0;
     state.follow = false;
-    this.bump();
+    // Home leaves the end for real whenever there is anywhere to go, so suppression is done with.
+    if (this.maxScroll() > 0) state.suppressed = false;
+    state.scroll = 0;
+    this.bumpStatus();
     this.requestRender();
   }
 
+  /** `End` is the explicit request to be at the end again, so it also lifts suppression. */
   scrollToBottom(): void {
     if (!this.opened) return;
     const state = this.viewState(this.currentRunId);
     state.follow = true;
-    state.scroll = Number.MAX_SAFE_INTEGER;
-    this.bump();
+    state.suppressed = false;
+    state.scroll = this.maxScroll();
+    this.bumpStatus();
     this.requestRender();
   }
 
+  /** `f` off at the end suppresses re-arming, so later output cannot silently start following. */
   toggleFollow(): void {
     if (!this.opened) return;
     const state = this.viewState(this.currentRunId);
-    state.follow = !state.follow;
-    if (state.follow) state.scroll = Number.MAX_SAFE_INTEGER;
-    this.bump();
+    if (state.follow) {
+      state.follow = false;
+      state.suppressed = state.scroll >= this.maxScroll();
+    } else {
+      state.follow = true;
+      state.suppressed = false;
+      state.scroll = this.maxScroll();
+    }
+    this.bumpStatus();
+    this.requestRender();
+  }
+
+  /**
+   * Flips Pi's single global tool-output expansion state.
+   * Main, every other viewer run, and the package widgets all read that same flag, so one keypress
+   * changes all of them and the value survives closing and reopening the viewer.
+   */
+  toggleExpanded(): void {
+    if (!this.opened) return;
+    const ui = this.ui;
+    const next = !this.expanded;
+    try { ui?.setToolsExpanded?.(next); }
+    catch { /* a host without the setter keeps the viewer's read-only view unchanged */ }
+    this.expanded = readWidgetExpanded(ui);
+    this.bumpBody();
     this.requestRender();
   }
 
@@ -815,6 +1129,7 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
     this.close();
     this.viewStates.clear();
     this.transcripts.clear();
+    this.transcriptSeqs.clear();
     this.fingerprints.clear();
     this.readAt.clear();
     this.runs = [];
@@ -825,6 +1140,9 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
 
   private teardown(generation: number): void {
     if (generation !== this.generation) return;
+    // Mouse reporting is released before anything else, so the terminal is normal again even if a
+    // later step throws. The disable write is a no-op when this viewer never enabled it.
+    this.disableMouse();
     // A later timer tick or read completion can no longer match this generation, so nothing revives.
     this.generation += 1;
     this.stopTimer();
@@ -833,12 +1151,17 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
     this.openPromise = undefined;
     this.done = undefined;
     this.handle = undefined;
+    try { this.component?.dispose(); }
+    catch { /* best-effort release */ }
     this.component = undefined;
     this.tui = undefined;
+    this.ui = undefined;
     this.currentRunId = undefined;
     this.readToken = undefined;
     this.pendingRead = false;
     this.pendingForce = false;
+    this.contentLines = 0;
+    this.transcriptRows = 1;
     // Releasing the awaited race keeps `handleShortcut` from hanging on a promise the host dropped.
     const abandon = this.abandonOpen;
     this.abandonOpen = undefined;

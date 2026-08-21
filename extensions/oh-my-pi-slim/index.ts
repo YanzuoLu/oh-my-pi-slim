@@ -360,7 +360,12 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
         ? "Open the read-only Subagent viewer and cycle forward through running or waiting runs"
         : "Open the read-only Subagent viewer and cycle backward through running or waiting runs",
       handler: async (ctx) => {
-        await subagentViewer.handleShortcut(ctx.ui, direction, { enabled: ctx.hasUI && ctx.mode === "tui" });
+        // The viewer reads Main's own presentation settings from this context and never writes them.
+        await subagentViewer.handleShortcut(ctx.ui, direction, {
+          enabled: ctx.hasUI && ctx.mode === "tui",
+          cwd: ctx.cwd,
+          projectTrusted: ctx.isProjectTrusted(),
+        });
       },
     });
   }

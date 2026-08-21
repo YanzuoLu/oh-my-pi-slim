@@ -507,6 +507,7 @@ export class OmpsSubagentRuntime {
         status: run.status,
         live: this.registry.isLive(run.id),
         model: run.model,
+        cwd: run.cwd,
         createdAt: run.createdAt,
         updatedAt: run.updatedAt,
         sessionFile: run.sessionFile,

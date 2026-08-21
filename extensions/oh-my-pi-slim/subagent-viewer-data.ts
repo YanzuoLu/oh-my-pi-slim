@@ -57,6 +57,8 @@ export interface ViewerRunSnapshot {
   readonly status: "running" | "waiting";
   readonly live: boolean;
   readonly model: string;
+  /** The run's own working directory, used to resolve Pi's built-in tool renderers. */
+  readonly cwd: string;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly sessionFile?: string;
@@ -98,6 +100,26 @@ function boundedTail(text: string, maxChars: number): { text: string; trimmed: b
 function boundedHead(text: string, maxChars: number): string {
   const characters = Array.from(text);
   return characters.length <= maxChars ? text : `${characters.slice(0, maxChars).join("")}…`;
+}
+
+/** Bounded head copy used before any untrusted text reaches a Pi transcript component. */
+export function boundViewerText(text: string, maxChars: number): string {
+  return boundedHead(text, Math.max(1, maxChars));
+}
+
+/**
+ * Human-readable elapsed time for the bottom status row.
+ * The row repaints on a one-second bucket, so the format never shows sub-second digits.
+ */
+export function formatViewerElapsed(startedAt: string, nowMs: number): string {
+  const started = Date.parse(startedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(nowMs)) return "—";
+  const seconds = Math.max(0, Math.floor((nowMs - started) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m${String(seconds % 60).padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${String(minutes % 60).padStart(2, "0")}m`;
 }
 
 /** Every viewer line goes through this, so no rendered row can exceed the overlay width. */
@@ -428,36 +450,14 @@ export function loadViewerTranscript(
 }
 
 /* ------------------------------------------------------------------------------------------------
- * Entry rendering.
+ * Shared helpers for the live block. Transcript entries are rendered by Pi's own components in
+ * subagent-viewer-transcript.ts, so this module keeps only bounded text utilities.
  * ---------------------------------------------------------------------------------------------- */
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
-}
-
-function contentText(content: unknown, theme: ViewerTheme): string {
-  if (typeof content === "string") return sanitizeViewerText(content);
-  if (!Array.isArray(content)) return "";
-  const parts: string[] = [];
-  for (const raw of content) {
-    const part = record(raw);
-    if (!part) continue;
-    if (part.type === "text" && typeof part.text === "string") parts.push(sanitizeViewerText(part.text));
-    // Image bytes are never rendered: only a placeholder that names the media type.
-    else if (part.type === "image") parts.push(theme.fg("muted", `[image ${sanitizeViewerInline(String(part.mimeType ?? "unknown"))}]`));
-  }
-  return parts.join("\n");
-}
-
-function argsSummary(args: unknown): string {
-  if (args === undefined) return "";
-  let text: string;
-  try { text = JSON.stringify(args); }
-  catch { return "…"; }
-  if (typeof text !== "string") return "";
-  return boundedHead(sanitizeViewerInline(text), VIEWER_MAX_ARGS_CHARS);
 }
 
 function blockLines(text: string, width: number, theme: ViewerTheme, prefix: string, color?: string): string[] {
@@ -470,141 +470,6 @@ function blockLines(text: string, width: number, theme: ViewerTheme, prefix: str
     ...lines.slice(0, VIEWER_MAX_BLOCK_LINES),
     viewerLine(`${prefix}${theme.fg("dim", `… ${lines.length - VIEWER_MAX_BLOCK_LINES} more line(s) hidden`)}`, width),
   ];
-}
-
-function heading(theme: ViewerTheme, color: string, label: string, detail: string, width: number): string {
-  const tail = detail ? ` ${theme.fg("dim", detail)}` : "";
-  return viewerLine(`${theme.fg(color, "▌")} ${theme.bold(theme.fg(color, label))}${tail}`, width);
-}
-
-function messageLines(message: Record<string, unknown>, width: number, theme: ViewerTheme): string[] {
-  const body = Math.max(1, width - 2);
-  const role = typeof message.role === "string" ? message.role : "";
-  if (role === "user") {
-    return [heading(theme, "accent", "user", "", width), ...blockLines(contentText(message.content, theme), body, theme, "  ")];
-  }
-  if (role === "assistant") {
-    const lines: string[] = [];
-    const content = Array.isArray(message.content) ? message.content : [];
-    for (const raw of content) {
-      const part = record(raw);
-      if (!part) continue;
-      if (part.type === "text" && typeof part.text === "string") {
-        lines.push(heading(theme, "success", "assistant", "", width));
-        lines.push(...blockLines(sanitizeViewerText(part.text), body, theme, "  "));
-      } else if (part.type === "thinking" && typeof part.thinking === "string") {
-        lines.push(heading(theme, "muted", "thinking", "", width));
-        lines.push(...blockLines(sanitizeViewerText(part.thinking), body, theme, "  ", "dim"));
-      } else if (part.type === "toolCall") {
-        const name = sanitizeViewerInline(String(part.name ?? "tool"));
-        lines.push(heading(theme, "warning", `⚙ ${name}`, argsSummary(part.arguments), width));
-      }
-    }
-    if (lines.length === 0 && typeof message.errorMessage === "string") {
-      lines.push(heading(theme, "error", "assistant error", "", width));
-      lines.push(...blockLines(sanitizeViewerText(message.errorMessage), body, theme, "  ", "error"));
-    }
-    return lines;
-  }
-  if (role === "toolResult") {
-    const name = sanitizeViewerInline(String(message.toolName ?? "tool"));
-    const failed = message.isError === true;
-    return [
-      heading(theme, failed ? "error" : "dim", `↳ ${name}`, failed ? "error" : "", width),
-      ...blockLines(contentText(message.content, theme), body, theme, "  ", failed ? "error" : "dim"),
-    ];
-  }
-  if (role === "bashExecution") {
-    return [
-      heading(theme, "warning", "! bash", sanitizeViewerInline(String(message.command ?? "")), width),
-      ...blockLines(sanitizeViewerText(String(message.output ?? "")), body, theme, "  ", "dim"),
-    ];
-  }
-  if (role === "custom") {
-    const customType = sanitizeViewerInline(String(message.customType ?? "custom"));
-    if (message.display === false) return [];
-    return [
-      heading(theme, "accent", `[${customType}]`, "", width),
-      ...blockLines(contentText(message.content, theme), body, theme, "  "),
-    ];
-  }
-  if (role === "compactionSummary" || role === "branchSummary") {
-    return [
-      heading(theme, "warning", role === "compactionSummary" ? "⟳ compaction summary" : "⟳ branch summary", "", width),
-      ...blockLines(sanitizeViewerText(String(message.summary ?? "")), body, theme, "  ", "dim"),
-    ];
-  }
-  return [];
-}
-
-/** Renders one active-branch entry. Unknown and state-only entry types render nothing at all. */
-export function renderViewerEntry(entry: SessionEntry, width: number, theme: ViewerTheme): string[] {
-  const body = Math.max(1, width - 2);
-  if (entry.type === "message") {
-    const message = record((entry as { message?: unknown }).message);
-    return message ? messageLines(message, width, theme) : [];
-  }
-  if (entry.type === "compaction") {
-    const compaction = entry as { summary?: unknown; tokensBefore?: unknown };
-    const detail = typeof compaction.tokensBefore === "number" ? `${compaction.tokensBefore} tokens before` : "";
-    return [
-      heading(theme, "warning", "⟳ compaction", detail, width),
-      ...blockLines(sanitizeViewerText(String(compaction.summary ?? "")), body, theme, "  ", "dim"),
-    ];
-  }
-  if (entry.type === "branch_summary") {
-    const summary = entry as { summary?: unknown };
-    return [
-      heading(theme, "warning", "⟳ branch summary", "", width),
-      ...blockLines(sanitizeViewerText(String(summary.summary ?? "")), body, theme, "  ", "dim"),
-    ];
-  }
-  if (entry.type === "custom_message") {
-    const custom = entry as { customType?: unknown; content?: unknown; display?: unknown };
-    if (custom.display === false) return [];
-    return [
-      heading(theme, "accent", `[${sanitizeViewerInline(String(custom.customType ?? "custom"))}]`, "", width),
-      ...blockLines(contentText(custom.content, theme), body, theme, "  "),
-    ];
-  }
-  return [];
-}
-
-/**
- * Renders newest-first into a line budget and then restores reading order.
- * The tail is what a follower needs, so an over-budget transcript drops its oldest lines.
- */
-export function renderViewerTranscript(
-  transcript: ViewerTranscript,
-  width: number,
-  theme: ViewerTheme,
-): string[] {
-  const blocks: string[][] = [];
-  let budget = VIEWER_MAX_TRANSCRIPT_LINES;
-  let trimmed = false;
-  for (let index = transcript.entries.length - 1; index >= 0; index -= 1) {
-    const block = renderViewerEntry(transcript.entries[index], width, theme);
-    if (block.length === 0) continue;
-    if (block.length + 1 > budget) {
-      trimmed = true;
-      break;
-    }
-    blocks.push(block);
-    budget -= block.length + 1;
-  }
-  blocks.reverse();
-  const lines: string[] = [];
-  if (transcript.hiddenEntries > 0) {
-    lines.push(viewerLine(theme.fg("dim", `… ${transcript.hiddenEntries} older entr${transcript.hiddenEntries === 1 ? "y" : "ies"} hidden`), width));
-  }
-  if (trimmed) {
-    lines.push(viewerLine(theme.fg("dim", "… older lines trimmed to the viewer line budget"), width));
-  }
-  for (const block of blocks) {
-    if (lines.length > 0) lines.push("");
-    lines.push(...block);
-  }
-  return lines;
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -642,17 +507,51 @@ export function liveTextIsRedundant(liveText: string, persistedText: string): bo
   return persisted.includes(live) || live.includes(persisted);
 }
 
+function liveHeading(theme: ViewerTheme, color: string, label: string, detail: string, width: number): string {
+  const tail = detail ? ` ${theme.fg("dim", detail)}` : "";
+  return viewerLine(`${theme.fg(color, "▌")} ${theme.bold(theme.fg(color, label))}${tail}`, width);
+}
+
+function firstLine(text: string): string {
+  return text.split("\n").find((line) => line.trim() !== "")?.trim() ?? "";
+}
+
+function lastLine(text: string): string {
+  const lines = text.split("\n").filter((line) => line.trim() !== "");
+  return lines.length > 0 ? lines[lines.length - 1].trim() : "";
+}
+
+export interface ViewerLiveOptions {
+  /** Pi's one global tool-output expansion state, shared with the Main transcript. */
+  readonly expanded: boolean;
+  /** Ready-made ` · <key> to expand` hint, produced from the user's real keybinding. */
+  readonly expandHint: string;
+}
+
+/**
+ * Live overlay content for one run: the waiting request, active tools, and the partial response
+ * that has not reached the child session file yet.
+ *
+ * Collapsed mode mirrors the package widgets: one summary line per section plus the expand hint.
+ */
 export function renderViewerLive(
   run: ViewerRunSnapshot,
   transcript: ViewerTranscript,
   width: number,
   theme: ViewerTheme,
+  options: ViewerLiveOptions,
 ): string[] {
   const body = Math.max(1, width - 2);
   const lines: string[] = [];
+  const hint = options.expanded ? "" : theme.fg("dim", options.expandHint);
   if (run.status === "waiting" && run.request) {
-    lines.push(heading(theme, "warning", "waiting", sanitizeViewerInline(run.request.reason), width));
-    lines.push(...blockLines(sanitizeViewerText(run.request.message), body, theme, "  ", "warning"));
+    const message = sanitizeViewerText(run.request.message);
+    lines.push(`${liveHeading(theme, "warning", "waiting", sanitizeViewerInline(run.request.reason), width)}`);
+    if (!options.expanded) {
+      lines.push(viewerLine(`  ${theme.fg("warning", boundedHead(firstLine(message), VIEWER_MAX_ARGS_CHARS))}${hint}`, width));
+      return lines;
+    }
+    lines.push(...blockLines(message, body, theme, "  ", "warning"));
     const questions = record(run.request.interview)?.questions;
     if (Array.isArray(questions)) {
       lines.push(viewerLine(theme.fg("dim", `  interview: ${questions.length} question(s)`), width));
@@ -663,13 +562,21 @@ export function renderViewerLive(
     .map((tool) => sanitizeViewerInline(tool.name))
     .filter((name) => name !== "");
   if (tools.length > 0) {
-    lines.push(heading(theme, "warning", "active tools", "", width));
-    lines.push(viewerLine(`  ${theme.fg("warning", boundedHead(tools.join(", "), VIEWER_MAX_ARGS_CHARS))}`, width));
+    if (options.expanded) {
+      lines.push(liveHeading(theme, "warning", "active tools", "", width));
+      lines.push(viewerLine(`  ${theme.fg("warning", boundedHead(tools.join(", "), VIEWER_MAX_ARGS_CHARS))}`, width));
+    } else {
+      lines.push(viewerLine(
+        `${liveHeading(theme, "warning", "active tools", `${tools.length}`, width)}${hint}`,
+        width,
+      ));
+    }
   }
   const live = boundedTail(sanitizeViewerText(run.activity.responseText), VIEWER_MAX_LIVE_CHARS).text.trim();
   if (live !== "" && !liveTextIsRedundant(live, lastAssistantText(transcript))) {
-    lines.push(heading(theme, "success", "live response", "not yet on disk", width));
-    lines.push(...blockLines(live, body, theme, "  ", "dim"));
+    lines.push(liveHeading(theme, "success", "live response", "not yet on disk", width));
+    if (options.expanded) lines.push(...blockLines(live, body, theme, "  ", "dim"));
+    else lines.push(viewerLine(`  ${theme.fg("dim", boundedHead(lastLine(live), VIEWER_MAX_ARGS_CHARS))}${hint}`, width));
   }
   return lines;
 }

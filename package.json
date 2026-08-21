@@ -1,6 +1,6 @@
 {
   "name": "oh-my-pi-slim",
-  "version": "0.10.13",
+  "version": "0.10.14",
   "private": true,
   "description": "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.",
   "type": "module",

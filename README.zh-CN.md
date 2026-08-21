@@ -251,15 +251,22 @@ Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree res
 
 - Main 是循环中的第 0 项。`ctrl+shift+right` 从 Main 进入第一个 active run，逐个前进，最后回到 Main；`ctrl+shift+left` 沿同一个环反向移动。`starting` 与 terminal run 不在循环内。
 - 在 viewer 内，普通 `Left`/`Right` 与 `ctrl+shift+left`/`ctrl+shift+right` 的循环方向一致；`Escape` 或 `q` 回到 Main。
+- transcript 从屏幕第一行开始；其余信息全部位于底部，顺序与 Main 自己的底部区域一致：live/waiting 区、`Read-Only` 输入占位栏、run 状态行、导航提示。
+- transcript 由 Pi 自己的 transcript 组件渲染，因此 user 消息、assistant Markdown、thinking 块、tool call、tool result、compaction summary 与 branch summary 都保持 Main 的配色、间距与框架。
 - `Up`/`Down` 滚动一行，`PageUp`/`PageDown` 翻页，`Home` 跳到顶部，`End` 跳到底部并开启 follow，`f` 切换 follow，`r` 立即重新读取 transcript。
-- viewer 每秒刷新约四次，每个 run 各自保留自己的滚动位置与 follow 状态。
+- follow 是"到底感知"的：向上滚动会关闭它；用滚动、翻页或滚轮重新回到最后一行会重新开启。在底部用 `f` 显式关闭后会进入 suppressed 状态：此后新输出、终端 resize，以及在最后一行继续按 `Down`/`PageDown` 或向下滚轮，都不会重新开启 follow，只有再次按 `f`，或用 `End` 显式回到底部才会恢复。若你主动向上滚动离开底部，suppression 即被清除，之后再滚回底部会照常重新开启 follow。
+- 鼠标滚轮每格滚动一行 transcript。viewer 打开期间会启用最小滚轮上报，并在每一条退出路径上关闭它，因此离开 viewer 后 Main 的原生 scrollback 与终端选择立即恢复正常。viewer 打开时按住 `Shift` 拖动即可使用终端原生选择（Ghostty、iTerm2 等）。快捷键与滚轮都是普通终端字节序列，SSH 下同样可用。
+- `Ctrl+O`（或你为 `app.tools.expand` 绑定的实际键）切换 tool 输出的折叠与展开。Pi 中这个状态只有一份：Main、所有 subagent transcript 与 package widget 共用，因此在 viewer 内切换后回到 Main 即已生效，反之亦然。折叠隐藏 tool result 正文与冗长参数，展开显示完整（有界）内容。底部提示始终显示你的实际按键与当前状态。
+- viewer 每秒刷新约四次：activity 计数按该频率更新，elapsed 时钟只在其显示值真正变化的那一次刷新时重绘，两者都不会重建 transcript。
+- 展示相关设置（thinking 块、输出内边距、Markdown 代码块缩进）直接从全局 settings 文件读取；项目受信任时再叠加项目 settings 文件。viewer 只读取它们，绝不创建、加锁或写入 settings 文件。
+- 每个 run 各自保留自己的滚动位置、follow 状态与 suppression。
 - 正在查看的 run 离开 active 集合时，视图交给相邻的 active run；没有 active run 时自动回到 Main。新 run 加入循环不会移动当前选择。
-- transcript 取自 child session 文件中 compaction-aware 的当前分支。不符合 entry 形状的行会被跳过；branch metadata 不可用（父链成环或 entry id 重复）时降级为有界的文件顺序 tail 并在 footer 给出 warning，而不是盲目信任。符号链接、目录以及本 session child session 目录之外的路径一律拒绝；文件尚未创建时显示为 waiting；超大文件降级为有界的只读文件顺序 tail 并给出 warning。图片只渲染占位符，绝不渲染原始数据。
+- transcript 取自 child session 文件中 compaction-aware 的当前分支。非法条目行会被跳过；分支元数据不可用（父链成环或 entry id 重复）时，降级为有界的文件顺序 tail 并在 footer 给出 warning，而不是继续信任它。符号链接、目录以及本 session child session 目录之外的路径一律拒绝；文件尚未创建时显示为 waiting；超大文件降级为有界只读文件顺序 tail 并给出 warning。图片只渲染占位符，绝不渲染原始数据，也绝不执行 child extension 自己的消息 renderer。
 - viewer 打开期间占据整个屏幕，并自带 `Read-Only` 输入占位栏，退出后原样交还 Main UI。viewer 从不替换 editor，因此你的草稿、光标与 undo 历史都不会被修改。
-- 问卷总是优先占屏：`ask_user_question` 会先关闭 viewer 并等它真正消失，然后才打开自己的 overlay。
-- 关闭时按 handle 精确移除 viewer 自己的 overlay，而不是按栈顶位置弹出。压在 viewer 之上的其他 package overlay 绝不会被误关，viewer 也不会以隐藏全屏层的形式残留、在那个 overlay 关闭后重新冒出来。关闭在任何情况下都是立即生效的，也不依赖键盘焦点归属。
-- 已知限制：宿主已经绘制的 inline terminal image 是由宿主合成的原始转义序列，可能仍会从 overlay 行穿透。viewer 自身渲染的内容不会造成这种情况。
-- 该快捷键是普通的带修饰方向键，因此 SSH 会原样透明转发。只要终端模拟器自身能报告方向键上 Ctrl 与 Shift 的组合修饰，它就能生效。若某个终端吞掉或重绑了这个组合，按键就到不了 Pi，所以这并不是“所有终端通用”的断言。package 只注册 `ctrl+shift+left` 与 `ctrl+shift+right`，不提供任何 fallback 快捷键，也不提供 slash command。
+- 问卷始终优先占屏：`ask_user_question` 会先关闭 viewer 并等待其真正消失，再打开自己的 overlay。
+- 关闭只移除 viewer 自己的那一个 overlay，按 handle 而不是按栈位置。位于 viewer 之上的其他 package overlay 不会被误关，viewer 也不会以隐藏全屏层的形式残留并在对方关闭后重新出现。关闭在任何情况下都是立即完成的，且不依赖键盘焦点在哪个组件上。
+- 已知限制：宿主已经绘制的终端内联图片是由宿主合成的原始转义序列，因此它仍可能透过 overlay 行显示。viewer 自身渲染的内容不会产生这种情况。
+- 快捷键是普通的带修饰方向键，SSH 会原样转发。只要终端本身会上报方向键上的 Ctrl+Shift 组合，它就能工作；丢弃或改绑该组合的终端不会把它交给 Pi，因此这不是对所有终端的保证。package 只注册 `ctrl+shift+left` 与 `ctrl+shift+right`，不提供任何 fallback 快捷键，也不提供 slash command。
 
 ## 有意限制
 

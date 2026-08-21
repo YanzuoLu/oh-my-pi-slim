@@ -13,8 +13,16 @@
  *   marks the open closed so the component is never shown at all.
  * - `nonCapturing` entries never take focus, and `hidden` entries neither render nor take focus.
  */
-export function createOverlayHost({ rows = 24, columns = 80, theme, onRender = () => {} } = {}) {
+export function createOverlayHost({
+  rows = 24,
+  columns = 80,
+  theme,
+  mode = "regular",
+  keybindings,
+  onRender = () => {},
+} = {}) {
   const stack = [];
+  const writes = [];
   let focusOrder = 0;
   let focused = null;
 
@@ -43,7 +51,10 @@ export function createOverlayHost({ rows = 24, columns = 80, theme, onRender = (
   };
 
   const tui = {
-    terminal: { rows, columns },
+    mode,
+    // Only the members the viewer is allowed to touch: dimensions and a raw write for the
+    // temporary wheel-reporting mode.
+    terminal: { rows, columns, write(data) { writes.push(data); } },
     requestRender() { onRender(); },
     hasOverlay: () => stack.some(isVisible),
     getFocusedComponent: () => focused,
@@ -77,6 +88,7 @@ export function createOverlayHost({ rows = 24, columns = 80, theme, onRender = (
 
   return {
     tui,
+    writes: () => [...writes],
     entries: () => [...stack],
     components: () => stack.map((entry) => entry.component),
     contains: (component) => stack.some((entry) => entry.component === component),
@@ -99,7 +111,7 @@ export function createOverlayHost({ rows = 24, columns = 80, theme, onRender = (
           component?.dispose?.();
           hooks.onDispose?.();
         };
-        component = factory(tui, theme, {}, done);
+        component = factory(tui, theme, keybindings ?? { matches: () => false }, done);
         void Promise.resolve().then(() => {
           if (closed) return;
           const handle = tui.showOverlay(component, options?.overlayOptions);

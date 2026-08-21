@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.13", "package version must be 0.10.13");
+check(packageJson.version === "0.10.14", "package version must be 0.10.14");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.13" && lock.packages?.[""]?.version === "0.10.13", "package-lock version must be 0.10.13");
+check(lock.version === "0.10.14" && lock.packages?.[""]?.version === "0.10.14", "package-lock version must be 0.10.14");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -2320,7 +2320,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
   // mapping, no raw ESC sequence, and no per-emulator promise at all.
   hasNone(text, [
     "super+left", "super+right", "Terminal.app", "Send Text", "cat -v",
-    "\\033", "[1;9D", "[1;9C", "^[[1;9D", "^[[1;9C", "kitty", "Kitty", "Ghostty", "WezTerm",
+    "\\033", "[1;9D", "[1;9C", "^[[1;9D", "^[[1;9C",
   ], `${file} viewer shortcut documentation`);
   check(
     !/(all|every)[^.\n]*terminals?[^.\n]*(work|support)/i.test(text),
@@ -2581,7 +2581,7 @@ hasAll(viewer, [
   "VIEWER_GONE_TICKS",
   "async closeAsync(): Promise<void>",
   "ui.notify(`Subagent viewer could not open:",
-  "private bodyCache:", "this.pendingForce = this.pendingForce || force;",
+  "this.pendingForce = this.pendingForce || force;",
 ], "viewer closes by hiding its own overlay handle and self-heals a host-dropped entry");
 hasNone(viewer, [
   "tui.hideOverlay", "overlayStack", "prototype.", "Object.defineProperty", "[\"__", "as any",
@@ -2667,7 +2667,7 @@ hasAll(viewerData, [
   "VIEWER_MAX_FILE_BYTES", "VIEWER_MAX_ENTRIES", "VIEWER_MAX_BLOCK_LINES", "VIEWER_MAX_TRANSCRIPT_LINES",
   "VIEWER_MAX_ARGS_CHARS", "VIEWER_MAX_LIVE_CHARS",
   "stripTerminalSequences", "truncateToWidth", "previousFingerprint",
-  "[image ", "liveTextIsRedundant",
+  "boundViewerText", "formatViewerElapsed", "liveTextIsRedundant",
 ], "viewer reads child sessions read-only, inside containment, and within bounds");
 check(
   !viewerData.includes('inside.startsWith("..") ||'),
@@ -2679,12 +2679,164 @@ check(
 );
 check(!viewerData.includes("part.data"), "the viewer must never render image bytes");
 
+// The transcript body is Pi's own Main components, reached through root exports only.
+const viewerTranscript = read("extensions/oh-my-pi-slim/subagent-viewer-transcript.ts");
+hasAll(viewerTranscript, [
+  "UserMessageComponent", "AssistantMessageComponent", "ToolExecutionComponent",
+  "BashExecutionComponent", "CustomMessageComponent", "CompactionSummaryMessageComponent",
+  "BranchSummaryMessageComponent", "SkillInvocationMessageComponent",
+  "getMarkdownTheme", "sessionEntryToContextMessages", "parseSkillBlock",
+  "showImages: false", "PROMPT_ZONE_PATTERN", "sanitizeViewerText", "boundViewerText",
+  "VIEWER_MAX_TRANSCRIPT_LINES", "dispose(): void", "setExpanded(expanded: boolean): void",
+], "viewer transcript body reuses Pi's Main components with sanitized, bounded input");
+
+// Presentation settings are read, never managed: SettingsManager locks and can create files.
+hasAll(viewerTranscript, [
+  'import { readFileSync } from "node:fs";',
+  'const SETTINGS_FILE = "settings.json";',
+  'const PROJECT_SETTINGS_RELATIVE = ".pi/settings.json";',
+  "export type ViewerSettingsFileReader = (path: string) => string;",
+  'readFileSync(path, "utf-8")',
+  "join(agentDir, SETTINGS_FILE)",
+  "resolve(cwd, PROJECT_SETTINGS_RELATIVE)",
+  "&& projectTrusted",
+], "viewer settings are read straight from the two settings files");
+hasNone(viewerTranscript, [
+  "SettingsManager", "writeFileSync", "appendFileSync", "mkdirSync", "rmSync", "renameSync",
+  "createWriteStream", "lockfile", "openSync",
+], "the viewer transcript body must never create, lock, or write a settings file");
+check(
+  (viewerTranscript.match(/readFileSync\(/g) ?? []).length === 1,
+  "the viewer transcript body reads files through exactly one readFileSync seam",
+);
+
+// A bash row whose fill-in throws must not leave Pi's Loader interval running.
+hasAll(viewerTranscript, [
+  "function releaseBashComponent(component: BashExecutionComponent): void",
+  "try { component.setComplete(undefined, true); }",
+  "if (!ready) releaseBashComponent(component);",
+  "export type ViewerBashComponentFactory = (",
+  "readonly bashComponent?: ViewerBashComponentFactory;",
+], "a half-built bash row stops its loader before the entry degrades to a note");
+check(
+  viewerTranscript.indexOf("if (output) component.appendOutput(output);") <
+    viewerTranscript.indexOf("if (!ready) releaseBashComponent(component);"),
+  "the bash loader cleanup must sit in the finally that guards appendOutput",
+);
+check(
+  !/from "@earendil-works\/(pi-coding-agent|pi-tui)\/[^"]+"/.test(viewerTranscript),
+  "the viewer transcript body must import only root package entry points",
+);
+check(
+  viewerTranscript.includes("new ToolExecutionComponent(") && viewerTranscript.includes("undefined,\n              tui,\n              cwd,"),
+  "tool rows must use Pi's built-in renderer fallback with the run's own cwd",
+);
+check(
+  !viewerTranscript.includes("getMessageRenderer") && viewerTranscript.includes("new CustomMessageComponent(safeMessage, undefined,"),
+  "a child extension's message renderer must never be resolved or executed",
+);
+check(!viewerTranscript.includes("part.data"), "the transcript body must never hand image bytes to a component");
+hasAll(viewerTranscript, ["[image "], "images render as a placeholder");
+
+// Regular-mode wheel reporting is owned by the viewer, enabled only after a real mount.
+hasAll(viewer, [
+  'VIEWER_MOUSE_ENABLE = "\\x1b[?1000h\\x1b[?1006h"',
+  'VIEWER_MOUSE_DISABLE = "\\x1b[?1006l\\x1b[?1000l"',
+  "private enableMouse(tui: TUI): void",
+  "private disableMouse(): void",
+  'if (tui.mode !== "regular") return;',
+  "if (this.tui) this.enableMouse(this.tui);",
+  "export function parseViewerWheel", "export function isViewerMouseSequence",
+  "if (isViewerMouseSequence(data)) return;",
+], "the viewer owns minimal wheel reporting and swallows every other mouse report");
+check(
+  (viewer.match(/terminal\.write\(/g) ?? []).length === 2,
+  "the viewer may write exactly the two mouse mode sequences",
+);
+check(!viewer.includes("?1002") && !viewer.includes("?1003"),
+  "motion tracking must stay off so the terminal keeps its own drag selection");
+check(
+  viewer.indexOf("this.disableMouse();") < viewer.indexOf("this.generation += 1;\n    this.stopTimer();"),
+  "teardown must release wheel reporting before anything else can throw",
+);
+
+// Bottom-aware follow, with an explicit suppression flag that really gates re-arming.
+hasAll(viewer, [
+  "suppressed: boolean;",
+  "state.suppressed = state.scroll >= this.maxScroll();",
+  "} else if (next >= max && !state.suppressed) {",
+  "if (next < max) state.suppressed = false;",
+  "if (this.maxScroll() > 0) state.suppressed = false;",
+  "private maxScroll(): number",
+  "noteViewport(contentLines: number, transcriptRows: number): void",
+], "follow re-arms only by reaching the end and stays off when the user suppressed it");
+check(
+  (viewer.match(/^ +state\.suppressed = false;$/gm) ?? []).length === 2,
+  "only turning follow back on and End may clear suppression unconditionally",
+);
+
+// One global expansion state, resolved through the user's own keybinding.
+hasAll(viewer, [
+  '"getToolsExpanded"',
+  '"setToolsExpanded"',
+  'this.keybindings?.matches(data, "app.tools.expand") === true',
+  "readWidgetExpanded(ui)",
+  "ui?.setToolsExpanded?.(next)",
+  "widgetExpandKey()",
+  "widgetExpandHint()",
+], "the viewer shares Pi's one tool-output expansion state and never hardcodes its key");
+check(!/"ctrl\+o"/i.test(viewer), "the viewer must not hardcode the expansion key");
+
+// Bottom-anchored layout and the split body/status caches.
+hasAll(viewer, [
+  "private statusLines(", "private hintLines(", "private metaLine(", "private readOnlyLines(",
+  "private bodyRevision = 0;", "private statusRevision = 0;",
+  "private bumpBody(): void", "private bumpStatus(): void",
+  "invalidateFrame(): void",
+  "if (chrome() + VIEWER_MIN_TRANSCRIPT_ROWS > rows) live = [];",
+  "if (chrome() + 1 > rows) hints = [];",
+], "the viewer keeps the status at the bottom and separates body from status repaints");
+
+// The clock repaints on the string the status row shows, not on a wall-clock bucket.
+hasAll(viewer, [
+  "private elapsedDisplay(): string",
+  "formatViewerElapsed(run.createdAt, this.nowMs())",
+  "const elapsed = this.elapsedDisplay();",
+  "if (elapsed !== this.lastElapsed) {",
+], "the elapsed repaint follows the displayed value");
+hasNone(viewer, [
+  "Math.floor(this.nowMs() / 1000)", "lastSecond",
+], "the viewer must not bucket the wall clock for the elapsed row");
+check(
+  (viewer.match(/if \(repaint\) this\.requestRender\(\);/g) ?? []).length === 1,
+  "one tick may request at most one render for activity and the clock together",
+);
+check(!viewer.includes("private headerLines("), "the viewer must not render a top header");
+const viewerComponentSource = viewer.slice(
+  viewer.indexOf("export class SubagentViewerComponent"),
+  viewer.indexOf("export interface SubagentViewerKeyTarget"),
+);
+check(!/Date\.now\(\)/.test(viewerComponentSource), "viewer rendering must use the injected clock, never Date.now");
+check(
+  (viewer.match(/Date\.now\(\)/g) ?? []).length === 1 && viewer.includes("this.nowMs = options.nowMs ?? (() => Date.now());"),
+  "the injected clock default is the only Date.now in the viewer",
+);
+check(!viewerTranscript.includes("Date.now()"), "the transcript body must not read the wall clock");
+const renderBody = viewer.slice(viewer.indexOf("  render(width: number): string[] {"), viewer.indexOf("  handleInput(data: string): void {"));
+check(
+  renderBody.indexOf("for (let index = 0; index < transcriptRows; index += 1)") < renderBody.indexOf("lines.push(...readOnly);") &&
+  renderBody.indexOf("lines.push(...readOnly);") < renderBody.indexOf("lines.push(...status);") &&
+  renderBody.indexOf("lines.push(...status);") < renderBody.indexOf("lines.push(...hints);"),
+  "rendered rows must run transcript, live, Read-Only, status, then hints",
+);
+
 // One cloned snapshot API on the runtime, filtered to the viewer statuses.
 hasAll(runtime, [
   "viewerSnapshot(): ViewerSnapshot",
   "if (!isViewerStatus(run.status)) continue;",
   "cloneViewerValue(run.request)",
   "cloneViewerActivity(this.activity.get(run.id))",
+  "cwd: run.cwd,",
 ], "runtime exposes exactly one cloned read-only viewer snapshot");
 
 // The package entry owns exactly two shortcuts, no command, and the full viewer lifecycle.
@@ -2705,6 +2857,30 @@ hasAll(read("tests/loop.test.mjs"), [
 ], "registration tests must pin two main shortcuts and none in a child");
 
 hasAll(viewerTests, [
+  "a mounted regular-mode overlay enables wheel reporting exactly once and restores it on close",
+  "a stale handle from an already closed open never enables wheel reporting",
+  "a host that throws on open leaves no wheel reporting behind",
+  "a host that drops the overlay entry still restores wheel reporting",
+  "follow re-arms only by actually reaching the end",
+  "f at the end suppresses re-arming until follow is turned back on",
+  "a suppressed view never re-arms on Down, PageDown, the wheel, growth, or a resize",
+  "f turns follow back on for a suppressed view and pins it to the end again",
+  "leaving the end upward clears suppression so the way back down re-arms follow",
+  "Home clears suppression only by really leaving the end",
+  "a resize clamp never counts as the user reaching the end",
+  "Ctrl+O uses the user's real binding and flips Pi's one global expansion state",
+  "the elapsed clock repaints on the first tick where its shown value changes",
+  "an hour-old run repaints on its minute, not on every second",
+  "a run with an unusable createdAt never churns the status row",
+  "a bash row that throws while filling in stops its loader and keeps the next block",
+  "the viewer defaults are Pi's own defaults",
+  "transcript settings read the global file even without a project",
+  "a trusted project overrides only the values it defines",
+  "an untrusted project is never read",
+  "malformed, unreadable, and invalid settings fall back to Pi's defaults",
+  "the transcript module holds no settings manager and no write API",
+  "the transcript body is rendered by Pi's own Main components",
+  "the bottom rows shed in order and always keep the transcript, Read-Only, and status title",
   "the overlay opens full screen at the viewport origin",
   "a read that completes after close cannot render or revive the viewer",
   "a timer tick after close never reopens the viewer",
@@ -2817,6 +2993,7 @@ if (packCheck.status === 0) {
     check(files.includes("extensions/oh-my-pi-slim/widget-expansion.ts"), "npm pack must include the shared widget expansion module");
     check(files.includes("extensions/oh-my-pi-slim/subagent-viewer.ts"), "npm pack must include the read-only Subagent viewer");
     check(files.includes("extensions/oh-my-pi-slim/subagent-viewer-data.ts"), "npm pack must include the viewer read-only data layer");
+    check(files.includes("extensions/oh-my-pi-slim/subagent-viewer-transcript.ts"), "npm pack must include the viewer transcript body");
     check(files.includes("tests/subagent-viewer.test.mjs"), "npm pack must include the viewer contract tests");
     check(files.includes("tests/fixtures/overlay-host.mjs"), "npm pack must include the real-semantics overlay host fixture");
     check(files.includes("tests/todo.test.mjs"), "npm pack must include the Todo contract tests");
