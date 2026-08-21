@@ -108,9 +108,9 @@ test("Ctrl+O expands complete action-specific call input without duplicate Actio
   };
   const resumeCollapsed = render(renderSubagentCall(resumeArgs, theme, { expanded: false }));
   assertFull(resumeCollapsed, ["subagent · resume (ctrl+o to expand)", "Source run: source-run-full", "Abstract: Fresh continuation abstract"]);
-  assert.doesNotMatch(resumeCollapsed, /Action:|Continuation task|Continuation line/);
+  assert.doesNotMatch(resumeCollapsed, /Action:|Cwd:|Continuation task|Continuation line/);
   const resumeExpanded = render(renderSubagentCall(resumeArgs, theme, { expanded: true }));
-  assertFull(resumeExpanded, ["subagent · resume", "Source run: source-run-full", "Abstract: Fresh continuation abstract", "Continuation line one", "Continuation line two"]);
+  assertFull(resumeExpanded, ["subagent · resume", "Source run: source-run-full", "Abstract: Fresh continuation abstract", "Cwd: (source run cwd)", "Continuation line one", "Continuation line two"]);
 
   const steerArgs = { action: "steer", id: "run-steer-full", message: "Guidance line one\n<results>guidance payload</results>" };
   const steerCollapsed = render(renderSubagentCall(steerArgs, theme, { expanded: false }));
@@ -154,6 +154,27 @@ test("Ctrl+O expands complete action-specific call input without duplicate Actio
   }
   for (const value of [createExpanded, resumeExpanded, steerExpanded, replyExpanded, statusExpanded, interruptExpanded, listExpanded, clearExpanded]) {
     assert.doesNotMatch(value, /\(ctrl\+o to expand\)|Action:/);
+  }
+});
+
+test("expanded resume calls show a cwd override and fall back to the source run cwd", () => {
+  const base = { action: "resume", id: "source-run-cwd", abstract: "Continuation abstract", message: "Continue there" };
+
+  const overrideExpanded = render(renderSubagentCall({ ...base, cwd: "/override/resume/cwd" }, theme, { cwd: "/context/cwd", expanded: true }));
+  assertFull(overrideExpanded, ["subagent · resume", "Source run: source-run-cwd", "Cwd: /override/resume/cwd", "Continue there"]);
+  assert.doesNotMatch(overrideExpanded, /source run cwd|\/context\/cwd/);
+
+  const relativeExpanded = render(renderSubagentCall({ ...base, cwd: "packages/api" }, theme, { cwd: "/context/cwd", expanded: true }));
+  assertFull(relativeExpanded, ["Cwd: packages/api"]);
+
+  const inheritedExpanded = render(renderSubagentCall(base, theme, { cwd: "/context/cwd", expanded: true }));
+  assertFull(inheritedExpanded, ["subagent · resume", "Cwd: (source run cwd)"]);
+  assert.doesNotMatch(inheritedExpanded, /\/context\/cwd/);
+
+  for (const args of [{ ...base, cwd: "/override/resume/cwd" }, base]) {
+    const collapsed = render(renderSubagentCall(args, theme, { cwd: "/context/cwd", expanded: false }));
+    assert.doesNotMatch(collapsed, /Cwd:|override\/resume|source run cwd/);
+    assert.match(collapsed.split("\n")[0], /\(ctrl\+o to expand\)$/);
   }
 });
 

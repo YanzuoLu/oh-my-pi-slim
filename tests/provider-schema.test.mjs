@@ -144,13 +144,19 @@ test("all production model-tool schemas survive the Kimi strict-provider portabi
   assert.equal(schemas.goal.properties.action.description, "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status and resume accept no other fields.");
   assert.equal(schemas.loop.properties.action.description, "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. list accepts no other fields.");
   assert.equal(schemas.loop.properties.interval.description, "Fixed delay for create or modify, from 10s through 7d. Format: one positive integer plus s, m, h, or d.");
-  assert.equal(schemas.monitor.properties.action.description, "Choose an action. create requires abstract and command, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.");
+  assert.equal(schemas.monitor.properties.action.description, "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.");
   assert.equal(schemas.monitor.properties.command.description, "Foreground Bash command for create. Do not use nohup, setsid, disown, trailing &, or another detach escape.");
+  assert.equal(schemas.monitor.properties.checkAfter.description, "Required silence threshold for create, from 10s through 7d. A reminder arrives whenever the command stays silent that long. Format: one positive integer plus s, m, h, or d.");
+  assert.equal(schemas.monitor.properties.checkAfter.type, "string");
+  assert.equal(schemas.monitor.required?.includes("checkAfter") ?? false, false, "checkAfter stays optional in the shared action schema and is enforced by the Monitor runtime");
   assert.equal(schemas.monitor.properties.end.description, "Reverse log offset ending the status window. Defaults to 100 and must exceed start by at most 2000.");
   assert.deepEqual(schemas.subagent.properties.action.anyOf.map(({ const: action }) => action), [
     "create", "list", "status", "interrupt", "steer", "resume", "reply", "clear",
   ]);
-  assert.equal(schemas.subagent.properties.action.description, "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message. list and clear accept no other fields.");
+  assert.equal(schemas.subagent.properties.action.description, "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.");
+  assert.equal(schemas.subagent.properties.cwd.description, "Working directory for create or resume. Relative paths resolve against the parent working directory. Create defaults to the parent working directory. Resume defaults to the source run's working directory.");
+  assert.equal(schemas.subagent.properties.cwd.type, "string");
+  assert.equal(schemas.subagent.required.includes("cwd"), false, "cwd stays optional for create and resume");
   assert.equal(schemas.subagent.properties.id.description, "Retained run ID for status, steer, interrupt, resume, or reply.");
   assert.equal(schemas.subagent.properties.message.description, "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.");
 

@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.8", "package version must be 0.10.8");
+check(packageJson.version === "0.10.9", "package version must be 0.10.9");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.8" && lock.packages?.[""]?.version === "0.10.8", "package-lock version must be 0.10.8");
+check(lock.version === "0.10.9" && lock.packages?.[""]?.version === "0.10.9", "package-lock version must be 0.10.9");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -766,6 +766,9 @@ hasAll(interruptDispatch, ["return this.interruptRun(id, signal);"], "interrupt 
 hasNone(interruptDispatch, ["Interrupt requested"], "interrupt must not return an enqueue-only receipt");
 hasAll(monitorRuntime, [
   'export const MONITOR_ACTIONS = ["create", "delete", "list", "status"] as const',
+  'export const MONITOR_PUBLIC_FIELDS = ["action", "abstract", "command", "cwd", "checkAfter", "notifyOn", "id", "start", "end"] as const',
+  "export const MONITOR_MIN_CHECK_AFTER_MS = 10_000", "export const MONITOR_MAX_CHECK_AFTER_MS = 7 * 24 * 60 * 60 * 1_000",
+  'export type MonitorNotificationKind = "matcher" | "silence" | "summary" | "terminal"',
   "export const monitorParameters = Type.Object({", "}, { additionalProperties: false });",
   'executionMode: "sequential"', 'name: "monitor"', 'spawnFn(shell, ["-lc", command]',
   'stdio: ["ignore", "pipe", "pipe"]', 'detached: true', "child.unref()", "StringDecoder", "notificationCursor",
@@ -779,7 +782,87 @@ hasAll(monitorRuntime, [
   "registerMessageRenderer(MONITOR_NOTIFICATION_TYPE, renderMonitorNotification)", "renderCall: renderMonitorCall", "renderResult: renderMonitorResult",
   "setUICtx(ui: ExtensionUIContext | undefined)", "refreshUI(): void", "this.widget.handleChange(change)", "this.widget.dispose()",
   "private buildUpdateNotification(", 'kind: "update"', "const state = this.operationalState(record, start, end, this.toolContentMaxBytes)", "combined: scan.lines",
+  "lastOutputAt: record.lastOutputAt", "checkAfter: record.checkAfter",
 ], "Monitor runtime and visual wiring contract");
+hasNone(monitorRuntime, [
+  "parseLoopInterval", "canonicalizeLoopInterval", "./loop-runtime.js",
+  "silenceReminderCount", "nextCheckAt",
+], "Monitor silence threshold must stay self-contained and expose no extra public counters");
+const monitorCheckAfterParser = monitorRuntime.slice(
+  monitorRuntime.indexOf("export function canonicalizeMonitorCheckAfter"),
+  monitorRuntime.indexOf("function formatSilenceDuration"),
+);
+hasAll(monitorCheckAfterParser, [
+  "/^([1-9][0-9]*)([smhd])$/",
+  "checkAfter must use one positive integer and one unit: s, m, h, or d.",
+  "checkAfter must be between 10s and 7d inclusive.",
+  "milliseconds < BigInt(MONITOR_MIN_CHECK_AFTER_MS) || milliseconds > BigInt(MONITOR_MAX_CHECK_AFTER_MS)",
+  "checkAfter: canonicalizeMonitorCheckAfter(numericMilliseconds)",
+], "Monitor checkAfter parser strict format, inclusive bounds, and canonical unit contract");
+const monitorAcceptChunk = monitorRuntime.slice(
+  monitorRuntime.indexOf("private acceptChunk(record: MonitorRecord"),
+  monitorRuntime.indexOf("private flushStream(record: MonitorRecord"),
+);
+check(
+  monitorAcceptChunk.indexOf("if (chunk.length > 0) this.noteOutputActivity(record)") >
+    monitorAcceptChunk.indexOf('if (record.generation !== this.generation || record.status !== "running") return;') &&
+  monitorAcceptChunk.indexOf("if (chunk.length > 0) this.noteOutputActivity(record)") < monitorAcceptChunk.indexOf("state.decoder.write(chunk)"),
+  "Monitor silence anchor must update inside the generation and status guard and before any decoding",
+);
+const monitorSilenceBlock = monitorRuntime.slice(
+  monitorRuntime.indexOf("private noteOutputActivity(record: MonitorRecord)"),
+  monitorRuntime.indexOf("private trySignal(record: MonitorRecord"),
+);
+hasAll(monitorSilenceBlock, [
+  "record.lastActivityMs = now", "record.lastOutputAt = new Date(now).toISOString()", "this.cancelSilenceReminder(record)",
+  "if (deliveryKey !== undefined) this.notifications.delete(deliveryKey)",
+  "record.silenceToken += 1", "const token = record.silenceToken + 1",
+  "const delay = Math.min(Math.max(0, delayMs), record.checkAfterMs)",
+  "(timer as { unref?: () => void }).unref?.()",
+  "if (!current || current !== record || current.silenceToken !== token || generation !== this.generation) return;",
+  "this.defer(() => this.onSilenceTimeout(record, token, generation))",
+  "const elapsed = this.nowMs() - record.lastActivityMs",
+  "if (elapsed < record.checkAfterMs) {",
+  "this.prepareSilenceCheck(record, record.checkAfterMs - elapsed)",
+  "this.notifySilence(record, elapsed)",
+  "if (!this.silenceTimeoutStillOwns(record, token, generation)) return;",
+  "if (!current || current !== record || current.silenceToken !== token || generation !== this.generation) return false;",
+  'if (record.status !== "running" || record.deleting || this.shuttingDown) return false;',
+], "Monitor lazy silence deadline, timer token, defer seam, and cancellation guards");
+hasNone(monitorSilenceBlock, [
+  "notificationCursor", "buildUpdateNotification", "sentMatcherAt", "rateLimitCount",
+], "Monitor silence scheduling must not touch the incremental cursor or the matcher rate window");
+const monitorSilenceBuilder = monitorRuntime.slice(
+  monitorRuntime.indexOf("private buildSilenceNotification(record: MonitorRecord"),
+  monitorRuntime.indexOf("private queueNotification(record: MonitorRecord"),
+);
+hasAll(monitorSilenceBuilder, [
+  'kind: "silence"', 'status: "running"', "checkAfter: record.checkAfter", "silentFor,", "silentForMs: silentForRoundedMs",
+  "lastOutputAt: record.lastOutputAt",
+  "Math.max(0, Math.floor(silentForMs / 1_000)) * 1_000",
+  "has produced no stdout or stderr output for ${silentFor}.",
+  "Call monitor status with id ${record.id} now to check the current state of this monitor.",
+  "const pending = pendingKey === undefined ? undefined : this.notifications.get(pendingKey)",
+  "pending.content = built.content", "pending.details = built.details",
+  'record.pendingSilenceKey = this.queueNotification(record, "silence", built.content, built.details)',
+], "Monitor silence reminder payload and single in-place queue entry");
+hasNone(monitorSilenceBuilder, [
+  "buildUpdateNotification", "notificationCursor", "fitNotificationLines", "lines", "operationalState(",
+], "Monitor silence reminder must never reuse the incremental update payload");
+for (const [label, block] of [
+  ["delete", monitorRuntime.slice(monitorRuntime.indexOf("private async delete(record: MonitorRecord"), monitorRuntime.indexOf("private attachProcess(record: MonitorRecord"))],
+  ["finalize", monitorRuntime.slice(monitorRuntime.indexOf("private finalize(record: MonitorRecord"), monitorRuntime.indexOf("private forceTerminal(record: MonitorRecord"))],
+  ["dispose", monitorRuntime.slice(monitorRuntime.indexOf("private disposeRecord(record: MonitorRecord"), monitorRuntime.indexOf("private detachListeners(record: MonitorRecord"))],
+]) hasAll(block, ["this.cancelSilence(record)"], `Monitor ${label} must clear the silence timer and its queued reminder`);
+const monitorCreateCommit = monitorRuntime.slice(
+  monitorRuntime.indexOf("this.records.set(id, record);"),
+  monitorRuntime.indexOf('this.emit({ type: "created"'),
+);
+hasAll(monitorCreateCommit, [
+  "record.lastActivityMs = this.nowMs()",
+  "this.applySilenceCheck(record, this.prepareSilenceCheck(record, record.checkAfterMs))",
+  "this.records.delete(id)", 'this.trySignal(record, "SIGKILL", "create silence rollback KILL")',
+], "Monitor silence timer activates only after the record is committed and rolls back the child on failure");
 hasNone(monitorRuntime, ["registerCommand", "registerShortcut", "setWidget", "notify(", "nohup parser", "readFileSync", "writeFileSync", "partialLineMaxChars"], "Monitor delegated visual boundary");
 check((monitorRuntime.match(/buildUpdateNotification\(/g) ?? []).length === 3, "Monitor matcher and terminal notifications must share exactly one payload builder and two call sites");
 const monitorUpdateBuilder = monitorRuntime.slice(
@@ -855,7 +938,14 @@ hasAll(monitorTranscriptRenderer, [
   "renderMonitorCall", "renderMonitorResult", "renderMonitorNotification", 'theme.bold("monitor")', 'monitorStatusGlyph("running", theme)',
   '`· ${safeAction}${expanded ? "" : " (ctrl+o to expand)"}`', "spacedResult", "safeFirstLine", "sanitizeMonitorBody",
   'theme.bold(`Monitors (${running}/${monitors.length})`)', "renderOperationalState", 'addCombinedLines(container, theme, "Combined lines"',
-  'details?.kind === "update"', 'details?.kind === "matcher"', 'details?.kind === "terminal"', 'details?.kind === "summary"',
+  'details?.kind === "update"', 'details?.kind === "silence"', 'details?.kind === "matcher"', 'details?.kind === "terminal"', 'details?.kind === "summary"',
+  "function silenceNotification(value: UnknownRecord): SilenceNotification | undefined",
+  "function renderSilenceNotification(details: SilenceNotification, expanded: boolean, theme: Theme): Component",
+  "const lastOutputAt = state.lastOutputAt === undefined ? null : asNullableString(state.lastOutputAt)",
+  'const checkAfter = state.checkAfter === undefined ? "" : asString(state.checkAfter)',
+  'addField(container, theme, "Last output", state.lastOutputAt, 2)',
+  'addField(container, theme, "Check after", state.checkAfter === "" ? null : state.checkAfter, 2)',
+  'addField(container, theme, "Check after", args.checkAfter)',
   'Monitors · rate limited', 'matched ${details.matched.length}', "Incremental lines", "Forced deletion",
   "ExpandableNotificationLine", 'theme.fg("muted", " (ctrl+o to expand)")', "visibleWidth(this.hint)",
   "function updateNotification(value: UnknownRecord): UpdateNotification | undefined",
@@ -878,6 +968,19 @@ hasAll(monitorUpdateRenderBlock, [
 hasNone(monitorUpdateRenderBlock, [
   "renderOperationalState", "Log path", "Combined lines", "Notification stats", "operationalStateFromValue",
 ], "unified update notification renderer must not display full operational state");
+const monitorSilenceRenderBlock = monitorTranscriptRenderer.slice(
+  monitorTranscriptRenderer.indexOf("function renderSilenceNotification"),
+  monitorTranscriptRenderer.indexOf("interface MatcherNotification"),
+);
+hasAll(monitorSilenceRenderBlock, [
+  "monitorStatusGlyph(details.status, theme)", "` · silent ${sanitizeMonitorText(details.silentFor)}`",
+  "if (!expanded) return new ExpandableNotificationLine(head, tail, theme)",
+  'addField(container, theme, "Status", details.status)', 'addField(container, theme, "Check after", details.checkAfter)',
+  'addField(container, theme, "Silent for", details.silentFor)', 'addField(container, theme, "Last output", details.lastOutputAt)',
+], "silence reminder notification renderer layout");
+hasNone(monitorSilenceRenderBlock, [
+  "renderOperationalState", "addCombinedLines", "Incremental lines", "operationalStateFromValue", "Matched",
+], "silence reminder renderer must not display incremental output or full operational state");
 const trustedBashStart = monitorRuntime.indexOf('candidates.push(\n    "/bin/bash"');
 const pathBashFallback = monitorRuntime.indexOf('String(process.env.PATH ?? "").split(delimiter)', trustedBashStart);
 check(trustedBashStart >= 0 && trustedBashStart < pathBashFallback, "Monitor must prefer trusted absolute bash candidates before PATH fallback");
@@ -887,10 +990,11 @@ const monitorSchema = monitorRuntime.slice(monitorSchemaStart, monitorSchemaEnd)
 check(!monitorSchema.includes("anyOf:") && !monitorSchema.includes("oneOf:"), "Monitor schema root must not declare anyOf or oneOf");
 const monitorSchemaDescriptions = [...monitorSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
 const expectedMonitorSchemaDescriptions = [
-  "Choose an action. create requires abstract and command, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.",
+  "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.",
   "Short command summary for create.",
   "Foreground Bash command for create. Do not use nohup, setsid, disown, trailing &, or another detach escape.",
   "Working directory for create. Defaults to the current session directory.",
+  "Required silence threshold for create, from 10s through 7d. A reminder arrives whenever the command stays silent that long. Format: one positive integer plus s, m, h, or d.",
   "Up to 20 unique case-sensitive literal matchers for create. Each matcher is at most 500 characters.",
   "Exact eight-character lowercase hexadecimal monitor ID for delete or status.",
   "Newest retained log lines to skip for status. Defaults to 0.",
@@ -904,7 +1008,7 @@ const monitorGuidelinesEnd = monitorRuntime.indexOf("      ],", monitorGuideline
 const monitorToolMetadata = monitorRuntime.slice(monitorToolStart, monitorGuidelinesEnd);
 const monitorDescription = propertyString(monitorToolMetadata, "description", "Monitor tool metadata");
 const monitorPromptSnippet = propertyString(monitorToolMetadata, "promptSnippet", "Monitor tool metadata");
-check(monitorDescription === "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher and terminal notifications carry the current status and only the output added since the previous notification. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.", "Monitor description must match the reviewed contract");
+check(monitorDescription === "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher and terminal notifications carry the current status and only the output added since the previous notification. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.", "Monitor description must match the reviewed contract");
 check(monitorPromptSnippet === "Supervise long-running foreground commands.", "Monitor promptSnippet must match the reviewed contract");
 checkSteBlock(monitorDescription, "Monitor description");
 checkSteBlock(monitorPromptSnippet, "Monitor promptSnippet");
@@ -1111,6 +1215,17 @@ hasAll(runtime, [
   'throw new Error(`${action} does not accept message.`)',
   'const createFields = ["agent", "abstract", "task", "cwd"]',
 ], "status action field isolation");
+const resumeDispatchStart = runtime.indexOf('if (action === "resume") {');
+const resumeDispatchEnd = runtime.indexOf("const createFields =", resumeDispatchStart);
+check(resumeDispatchStart >= 0 && resumeDispatchEnd > resumeDispatchStart, "resume must dispatch before the shared create-field rejection");
+const resumeDispatch = runtime.slice(resumeDispatchStart, resumeDispatchEnd);
+hasAll(resumeDispatch, [
+  'const invalidFields = ["agent", "task"]',
+  "resume does not accept field(s): ${invalidFields.join(\", \")}",
+  'const cwd = input.cwd === undefined ? undefined : requireString(input.cwd, "cwd")',
+  "return this.resume(id, abstract, message, cwd)",
+], "resume optional cwd dispatch");
+check(!resumeDispatch.includes('["agent", "task", "cwd"]'), "resume must accept an optional cwd override");
 const clearActionStart = runtime.indexOf('if (action === "clear") return this.clearRetainedRuns();');
 check(clearActionStart > listActionStart, "clear must dispatch from the same action switch as list");
 const clearStart = runtime.indexOf("private async clearRetainedRuns()");
@@ -1149,6 +1264,18 @@ hasAll(runtime, [
   "if (this.shuttingDown || this.clearing) return", "if (this.clearing) return",
 ], "clear safety, cleared-ID reservation, and callback race guards");
 hasNone(purge, ["realpathSync", "isSafePathSegment", "rmSync", "unlinkSync", "lstatSync"], "clear must delegate to the shared run-file security helpers");
+const resumeStart = runtime.indexOf("private async resume(");
+const resumeEnd = runtime.indexOf("private reply(", resumeStart);
+check(resumeStart >= 0 && resumeEnd > resumeStart, "resume implementation must precede reply");
+const resumeImplementation = runtime.slice(resumeStart, resumeEnd);
+hasAll(resumeImplementation, [
+  "private async resume(sourceId: string, abstract: string, message: string, cwd?: string)",
+  "cwd: cwd === undefined ? source.cwd : resolve(this.ctx?.cwd ?? process.cwd(), cwd),",
+  "const result = await this.launchRun(run, source.sessionFile)",
+], "resume must inherit the source directory and resolve a relative override against the parent session");
+hasNone(resumeImplementation, [
+  "existsSync(cwd", "statSync", "readLaunchConfig", "shouldApproveChildProject", "isProjectTrusted",
+], "resume cwd override must reuse the shared launch and approval chain without extra preconditions");
 const publicSchema = runtime.slice(runtime.indexOf("export const subagentParameters"), runtime.indexOf("export class OmpsSubagentRuntime"));
 hasNone(publicSchema, REMOVED_CAPABILITIES, "public tool schemas");
 hasAll(publicSchema, [
@@ -1156,7 +1283,7 @@ hasAll(publicSchema, [
   'description: "Specialist role for create."',
   'description: "Short run summary for create or resume."',
   'description: "Complete bounded objective for create."',
-  'description: "Working directory for create. Defaults to the parent working directory."',
+  "description: \"Working directory for create or resume. Relative paths resolve against the parent working directory. Create defaults to the parent working directory. Resume defaults to the source run's working directory.\"",
   'description: "Retained run ID for status, steer, interrupt, resume, or reply."',
 ], "subagent schema descriptions");
 const publicSchemaDescriptions = [...publicSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
@@ -1164,8 +1291,8 @@ const expectedSubagentSchemaDescriptions = [
   "Specialist role for create.",
   "Short run summary for create or resume.",
   "Complete bounded objective for create.",
-  "Working directory for create. Defaults to the parent working directory.",
-  "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message. list and clear accept no other fields.",
+  "Working directory for create or resume. Relative paths resolve against the parent working directory. Create defaults to the parent working directory. Resume defaults to the source run's working directory.",
+  "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.",
   "Retained run ID for status, steer, interrupt, resume, or reply.",
   "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.",
 ];
@@ -1179,7 +1306,7 @@ const subagentDescription = propertyString(subagentToolMetadata, "description", 
 const subagentPromptSnippet = propertyString(subagentToolMetadata, "promptSnippet", "subagent tool metadata");
 const subagentGuidelineBlock = runtime.slice(subagentGuidelinesStart, subagentGuidelinesEnd);
 const subagentGuidelines = staticStrings(subagentGuidelineBlock, "subagent promptGuidelines");
-check(subagentDescription === "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.", "subagent description must match the reviewed contract");
+check(subagentDescription === "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context, optionally in another working directory. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.", "subagent description must match the reviewed contract");
 check(subagentPromptSnippet === "Delegate and manage specialist runs.", "subagent promptSnippet must match the reviewed contract");
 checkSteBlock(subagentDescription, "subagent description");
 checkSteBlock(subagentPromptSnippet, "subagent promptSnippet");
@@ -1376,9 +1503,14 @@ hasAll(subagentRuntimeTests, [
   "an interrupt waits out a reconciliation that already owns the stop and never duplicates it",
   "a handed-back terminal event never replays after restore",
 ], "synchronous subagent interrupt handoff tests");
+hasAll(subagentRuntimeTests, [
+  "resume inherits the source run working directory and resolves cwd overrides like create",
+  "resume rejects a blank cwd and still refuses agent and task",
+], "resume optional cwd override tests");
 hasAll(read("tests/subagent-transcript-renderer.test.mjs"), [
   "synchronous interrupt outcomes collapse to the final result and expand its complete output and error",
-], "synchronous interrupt outcome renderer test");
+  "expanded resume calls show a cwd override and fall back to the source run cwd",
+], "synchronous interrupt outcome and resume cwd renderer tests");
 hasAll(subagentRuntimeTests, [
   '["abstract", "agent", "id", "live", "status"]',
   'assert.equal(controls(harness, id).length, 0, "a terminal run never receives a steer control")',
@@ -1902,10 +2034,11 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "never automatically uninstalls external packages",
         "every retained run", "compact public state", "never includes terminal `output` or `error`", "`status` with one retained run ID", "same retained set and ordering",
         "refused while any run is `starting`, `running`, or `waiting`", "without rolling back file changes", "never changes Goal statistics",
-        "saved child session as a new run with a new ID", "continue that same run",
+        "saved child session as a new run with a new ID and optionally override its cwd. Omitted cwd inherits the source run's working directory", "continue that same run",
         "matched exactly", "atomic", "still names the target in `blockedBy`", "Multiple items may be `in_progress`", "acyclic graph", "`clear` requires an empty or fully completed current group",
         "runtime-only fixed-delay", "Creation and resume wait one full interval", "reload, new session, session resume, fork, or quit",
         "case-sensitive literal matching", "remain available until `delete`", "Use `status`",
+        "`checkAfter` is required on `create`", "a silence reminder asks you to call `monitor status`", "`lastOutputAt`",
         "one to four questions", "single-select", "multi-select", "custom responses", "previews", "unavailable while a Goal is active",
         "branch-local durable Goal", "restore unfinished work as paused", "Provider failures retry automatically", "user aborts pause instead of cancelling", "one non-empty evidence item for each criterion",
         "active or waiting subagents", "Monitor work", "waiting Ask dialog",
@@ -1918,10 +2051,11 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "不会自动卸载外部 package",
         "全部 retained run", "精简公开状态", "绝不包含 terminal `output` 或 `error`", "单个 retained run ID 调用 `status`", "相同的 retained 集合与排序",
         "存在 `starting`、`running` 或 `waiting` run，`clear` 就会被拒绝", "不回滚文件修改", "不会改变 Goal statistics",
-        "保存的 child session 创建新 run，并生成新 ID", "继续同一个 run",
+        "保存的 child session 创建新 run，并生成新 ID。可选覆盖 cwd，省略时继承 source run 的工作目录", "继续同一个 run",
         "使用 exact match", "原子的", "仍在 `blockedBy` 中引用目标", "多个 item 可以同时处于 `in_progress`", "无环图", "`clear` 要求当前组为空或全部 completed",
         "runtime-only fixed-delay", "创建和恢复后都会先等待一个完整 interval", "reload、new session、session resume、fork 或 quit",
         "区分大小写的 literal match", "一直保留到 `delete`", "用 `status`",
+        "`checkAfter` 在 `create` 时必填", "就会收到一条 silence reminder", "`lastOutputAt`",
         "一到四个 question", "single-select", "multi-select", "custom response", "preview", "Goal active 时不可用",
         "branch-local durable Goal", "恢复为 paused", "provider failure 会自动重试", "用户 abort 也会暂停而不是取消", "每条 criterion 必须精确对应一条非空 evidence",
         "active 或 waiting subagent", "Monitor 工作", "waiting Ask dialog",
@@ -2005,6 +2139,8 @@ hasAll(transcriptRenderer, [
   'actionFromContext(context, "create")',
   "immediateAck", "renderRunStatus", "renderRunList", "addRunSummaryDetails", "addFinalOutput", "spacedToolResult", '"Live response"',
   '"Retained subagent run status"', "run.abstract", "run.reason", 'addField(container, theme, "Abstract", args.abstract',
+  'addField(container, theme, "Cwd", args.cwd ?? context.cwd, "(parent session cwd)")',
+  'addField(container, theme, "Cwd", args.cwd, "(source run cwd)")',
   "clearReceipt", "details.clearedCount", "details.warnings", "details.changed === true",
   "expanded?: boolean", "context.expanded === true", "options.expanded === true", "terminal && expanded",
   "fallbackResult(result, theme, options.isPartial === true, expanded)",

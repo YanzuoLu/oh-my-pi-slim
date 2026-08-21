@@ -26,14 +26,16 @@ import {
 import { MonitorWidget, type MonitorWidgetItem } from "./monitor-widget.js";
 
 export const MONITOR_ACTIONS = ["create", "delete", "list", "status"] as const;
-export const MONITOR_PUBLIC_FIELDS = ["action", "abstract", "command", "cwd", "notifyOn", "id", "start", "end"] as const;
+export const MONITOR_PUBLIC_FIELDS = ["action", "abstract", "command", "cwd", "checkAfter", "notifyOn", "id", "start", "end"] as const;
 export const MONITOR_NOTIFICATION_TYPE = "oh-my-pi-slim:monitor-notification";
 export const MONITOR_STATUSES = ["running", "completed", "failed", "killed"] as const;
+export const MONITOR_MIN_CHECK_AFTER_MS = 10_000;
+export const MONITOR_MAX_CHECK_AFTER_MS = 7 * 24 * 60 * 60 * 1_000;
 
 export type MonitorAction = (typeof MONITOR_ACTIONS)[number];
 export type MonitorStatus = (typeof MONITOR_STATUSES)[number];
 export type MonitorStream = "stdout" | "stderr";
-export type MonitorNotificationKind = "matcher" | "summary" | "terminal";
+export type MonitorNotificationKind = "matcher" | "silence" | "summary" | "terminal";
 export type MonitorStateChangeReason = "lifecycle" | "output" | "notification";
 
 export interface MonitorCombinedLine {
@@ -49,6 +51,11 @@ export interface MonitorListItem {
   abstract: string;
 }
 
+export interface ParsedMonitorCheckAfter {
+  checkAfter: string;
+  milliseconds: number;
+}
+
 export interface MonitorOperationalState {
   id: string;
   abstract: string;
@@ -58,10 +65,12 @@ export interface MonitorOperationalState {
   status: MonitorStatus;
   createdAt: string;
   updatedAt: string;
+  lastOutputAt: string | null;
   endedAt: string | null;
   exitCode: number | null;
   signal: string | null;
   error: string | null;
+  checkAfter: string;
   notifyOn: string[];
   matchedCount: number;
   notificationCount: number;
@@ -91,6 +100,7 @@ export interface MonitorInput {
   abstract?: unknown;
   command?: unknown;
   cwd?: unknown;
+  checkAfter?: unknown;
   notifyOn?: unknown;
   id?: unknown;
   start?: unknown;
@@ -120,10 +130,17 @@ interface MonitorRecord {
   status: MonitorStatus;
   createdAt: string;
   updatedAt: string;
+  lastOutputAt: string | null;
   endedAt: string | null;
   exitCode: number | null;
   signal: string | null;
   error: string | null;
+  checkAfter: string;
+  checkAfterMs: number;
+  lastActivityMs: number;
+  silenceTimer?: TimerHandle;
+  silenceToken: number;
+  pendingSilenceKey?: string;
   notifyOn: string[];
   matchedCount: number;
   notificationCount: number;
@@ -201,6 +218,12 @@ interface DeleteResult {
   warning?: string;
 }
 
+interface PreparedSilenceCheck {
+  timer: TimerHandle;
+  token: number;
+  activate(): void;
+}
+
 type TimerHandle = ReturnType<typeof setTimeout>;
 type SpawnFn = typeof nodeSpawn;
 type SendMessage = (
@@ -217,6 +240,7 @@ export interface MonitorRuntimeOptions {
   killGroup?: (pid: number, signal: NodeJS.Signals | 0) => void;
   setTimeout?: (callback: () => void, milliseconds: number) => TimerHandle;
   clearTimeout?: (timer: TimerHandle) => void;
+  defer?: (callback: () => void) => void;
   sleep?: (milliseconds: number) => Promise<void>;
   sendMessage?: SendMessage;
   logCapBytes?: number;
@@ -237,7 +261,7 @@ export interface MonitorRuntimeOptions {
 }
 
 const ACTION_FIELDS: Record<MonitorAction, readonly string[]> = {
-  create: ["action", "abstract", "command", "cwd", "notifyOn"],
+  create: ["action", "abstract", "command", "cwd", "checkAfter", "notifyOn"],
   delete: ["action", "id"],
   list: ["action"],
   status: ["action", "id", "start", "end"],
@@ -251,6 +275,18 @@ const DEFAULT_RECENT_LINES = 100;
 const DEFAULT_NOTIFICATION_CONTENT_MAX = 50 * 1024;
 const DEFAULT_NOTIFICATION_DETAILS_MAX = 96 * 1024;
 const DEFAULT_TOOL_CONTENT_MAX = 50 * 1024;
+const CHECK_AFTER_UNIT_MILLISECONDS = {
+  s: 1_000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+} as const;
+const CHECK_AFTER_CANONICAL_UNITS = [
+  ["d", 86_400_000],
+  ["h", 3_600_000],
+  ["m", 60_000],
+  ["s", 1_000],
+] as const;
 const STATUS_SCAN_CHUNK = 64 * 1024;
 const STATUS_LINE_COLLECTION_MAX = 80 * 1024;
 const RESPONSE_COMMAND_MAX = 16 * 1024;
@@ -303,6 +339,40 @@ function errorText(error: unknown): string {
 
 function sanitizeText(text: string): string {
   return text.replace(ANSI_PATTERN, "").replace(CONTROL_PATTERN, "");
+}
+
+/** Monitor owns its own bounded duration parser so the silence contract never depends on another runtime. */
+export function canonicalizeMonitorCheckAfter(milliseconds: number): string {
+  if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0) throw new Error("checkAfter milliseconds must be a positive safe integer.");
+  for (const [unit, unitMs] of CHECK_AFTER_CANONICAL_UNITS) {
+    if (milliseconds % unitMs === 0) return `${milliseconds / unitMs}${unit}`;
+  }
+  throw new Error("checkAfter milliseconds must resolve to whole seconds.");
+}
+
+export function parseMonitorCheckAfter(value: unknown): ParsedMonitorCheckAfter {
+  const checkAfter = trimmedString(value, "checkAfter");
+  const match = /^([1-9][0-9]*)([smhd])$/.exec(checkAfter);
+  if (!match) throw new Error("checkAfter must use one positive integer and one unit: s, m, h, or d.");
+  const amount = BigInt(match[1]);
+  const unitMs = BigInt(CHECK_AFTER_UNIT_MILLISECONDS[match[2] as keyof typeof CHECK_AFTER_UNIT_MILLISECONDS]);
+  const milliseconds = amount * unitMs;
+  if (milliseconds < BigInt(MONITOR_MIN_CHECK_AFTER_MS) || milliseconds > BigInt(MONITOR_MAX_CHECK_AFTER_MS)) {
+    throw new Error("checkAfter must be between 10s and 7d inclusive.");
+  }
+  const numericMilliseconds = Number(milliseconds);
+  return { checkAfter: canonicalizeMonitorCheckAfter(numericMilliseconds), milliseconds: numericMilliseconds };
+}
+
+function formatSilenceDuration(milliseconds: number): string {
+  let remaining = Math.max(0, Math.floor(milliseconds / 1_000)) * 1_000;
+  const parts: string[] = [];
+  for (const [unit, unitMs] of CHECK_AFTER_CANONICAL_UNITS) {
+    const count = Math.floor(remaining / unitMs);
+    if (count > 0) parts.push(`${count}${unit}`);
+    remaining -= count * unitMs;
+  }
+  return parts.length > 0 ? parts.join(" ") : "0s";
 }
 
 function parseNotifyOn(value: unknown): string[] {
@@ -389,13 +459,16 @@ function parseStructuredLine(buffer: Buffer): StructuredLogLine | undefined {
 
 export const monitorParameters = Type.Object({
   action: Type.Union(MONITOR_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Choose an action. create requires abstract and command, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.",
+    description: "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.",
   }),
   abstract: Type.Optional(Type.String({ description: "Short command summary for create." })),
   command: Type.Optional(Type.String({
     description: "Foreground Bash command for create. Do not use nohup, setsid, disown, trailing &, or another detach escape.",
   })),
   cwd: Type.Optional(Type.String({ description: "Working directory for create. Defaults to the current session directory." })),
+  checkAfter: Type.Optional(Type.String({
+    description: "Required silence threshold for create, from 10s through 7d. A reminder arrives whenever the command stays silent that long. Format: one positive integer plus s, m, h, or d.",
+  })),
   notifyOn: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), {
     maxItems: 20,
     uniqueItems: true,
@@ -423,6 +496,7 @@ export class MonitorRuntime {
   private readonly killGroupFn: (pid: number, signal: NodeJS.Signals | 0) => void;
   private readonly setTimeoutFn: (callback: () => void, milliseconds: number) => TimerHandle;
   private readonly clearTimeoutFn: (timer: TimerHandle) => void;
+  private readonly defer: (callback: () => void) => void;
   private readonly sleepFn: (milliseconds: number) => Promise<void>;
   private readonly sendMessage: SendMessage;
   private readonly logCapBytes: number;
@@ -465,6 +539,7 @@ export class MonitorRuntime {
     this.killGroupFn = options.killGroup ?? ((pid, signal) => process.kill(-pid, signal));
     this.setTimeoutFn = options.setTimeout ?? ((callback, milliseconds) => setTimeout(callback, milliseconds));
     this.clearTimeoutFn = options.clearTimeout ?? ((timer) => clearTimeout(timer));
+    this.defer = options.defer ?? ((callback) => queueMicrotask(callback));
     this.sleepFn = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.sendMessage = options.sendMessage ?? ((message, sendOptions) => this.pi.sendMessage(message, sendOptions));
     this.logCapBytes = options.logCapBytes ?? DEFAULT_LOG_CAP;
@@ -499,7 +574,7 @@ export class MonitorRuntime {
       name: "monitor",
       label: "Monitor",
       executionMode: "sequential",
-      description: "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher and terminal notifications carry the current status and only the output added since the previous notification. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.",
+      description: "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher and terminal notifications carry the current status and only the output added since the previous notification. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.",
       promptSnippet: "Supervise long-running foreground commands.",
       promptGuidelines: [
         "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
@@ -678,7 +753,7 @@ export class MonitorRuntime {
     const allowed = ACTION_FIELDS[action];
     const unknown = Object.keys(input).filter((field) => !allowed.includes(field));
     if (unknown.length > 0) throw new Error(`${action} does not accept field(s): ${unknown.join(", ")}.`);
-    const required = action === "create" ? ["abstract", "command"] : action === "list" ? [] : ["id"];
+    const required = action === "create" ? ["abstract", "command", "checkAfter"] : action === "list" ? [] : ["id"];
     for (const field of required) if (input[field] === undefined) throw new Error(`${action} requires ${field}.`);
   }
 
@@ -686,6 +761,7 @@ export class MonitorRuntime {
     const abstract = trimmedString(input.abstract, "abstract");
     const command = trimmedString(input.command, "command");
     const cwd = input.cwd === undefined ? trimmedString(ctx?.cwd, "cwd") : trimmedString(input.cwd, "cwd");
+    const check = parseMonitorCheckAfter(input.checkAfter);
     const notifyOn = parseNotifyOn(input.notifyOn);
     const id = this.newId();
     const root = this.ensureLogRoot();
@@ -728,10 +804,15 @@ export class MonitorRuntime {
       status: "running",
       createdAt: now,
       updatedAt: now,
+      lastOutputAt: null,
       endedAt: null,
       exitCode: null,
       signal: null,
       error: null,
+      checkAfter: check.checkAfter,
+      checkAfterMs: check.milliseconds,
+      lastActivityMs: this.nowMs(),
+      silenceToken: 0,
       notifyOn,
       matchedCount: 0,
       notificationCount: 0,
@@ -775,6 +856,16 @@ export class MonitorRuntime {
             return;
           }
           this.records.set(id, record);
+          try {
+            record.lastActivityMs = this.nowMs();
+            this.applySilenceCheck(record, this.prepareSilenceCheck(record, record.checkAfterMs));
+          } catch (error) {
+            this.records.delete(id);
+            record.deleting = true;
+            this.trySignal(record, "SIGKILL", "create silence rollback KILL");
+            reject(error instanceof Error ? error : new Error(errorText(error)));
+            return;
+          }
           this.emit({ type: "created", reason: "lifecycle", id, status: record.status });
           resolve();
         };
@@ -788,6 +879,7 @@ export class MonitorRuntime {
       });
     } catch (error) {
       this.records.delete(id);
+      this.cancelSilence(record);
       this.detachListeners(record);
       try { this.fs.closeSync(record.logFd); } catch { /* create still fails atomically */ }
       try { this.fs.rmSync(logPath, { force: true }); } catch { /* create still fails atomically */ }
@@ -800,6 +892,7 @@ export class MonitorRuntime {
 
   private async delete(record: MonitorRecord): Promise<ReturnType<typeof toolText>> {
     record.deleting = true;
+    this.cancelSilence(record);
     this.cancelNotifications(record.id);
     this.cancelMatchTimer(record);
     const initialError = record.error;
@@ -860,6 +953,7 @@ export class MonitorRuntime {
 
   private acceptChunk(record: MonitorRecord, stream: MonitorStream, chunk: Buffer | string): void {
     if (record.generation !== this.generation || record.status !== "running") return;
+    if (chunk.length > 0) this.noteOutputActivity(record);
     try {
       const state = record.streams[stream];
       const text = typeof chunk === "string" ? chunk : state.decoder.write(chunk);
@@ -1179,10 +1273,12 @@ export class MonitorRuntime {
       status: record.status,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
+      lastOutputAt: record.lastOutputAt,
       endedAt: record.endedAt,
       exitCode: record.exitCode,
       signal: record.signal,
       error: error.text,
+      checkAfter: record.checkAfter,
       notifyOn: [...record.notifyOn],
       matchedCount: record.matchedCount,
       notificationCount: record.notificationCount,
@@ -1381,6 +1477,7 @@ export class MonitorRuntime {
     else record.status = "failed";
     record.endedAt = now;
     record.updatedAt = now;
+    this.cancelSilence(record);
     this.cancelMatchTimer(record);
     record.matchKeywords.clear();
     try { if (record.logFd >= 0) this.fs.closeSync(record.logFd); } catch { /* terminal state still resolves */ }
@@ -1416,15 +1513,57 @@ export class MonitorRuntime {
     record.resolveTerminal();
   }
 
-  private queueNotification(record: MonitorRecord, kind: MonitorNotificationKind, content: string, details: Record<string, unknown>): void {
-    this.enqueueNotification({ monitorIds: new Set([record.id]), kind, content, details });
+  /**
+   * Silence reminders are their own kind: they never reuse the incremental update payload, never move the
+   * delivered notification position, and never consume the matcher rate-limit window.
+   */
+  private buildSilenceNotification(record: MonitorRecord, silentForMs: number): { content: string; details: Record<string, unknown> } {
+    const abstract = boundedText(record.abstract, RESPONSE_TEXT_MAX).text;
+    const silentForRoundedMs = Math.max(0, Math.floor(silentForMs / 1_000)) * 1_000;
+    const silentFor = formatSilenceDuration(silentForRoundedMs);
+    const content = [
+      `Monitor ${record.id} (${abstract}) has produced no stdout or stderr output for ${silentFor}.`,
+      `Its checkAfter threshold is ${record.checkAfter} and it is still running.`,
+      `Call monitor status with id ${record.id} now to check the current state of this monitor.`,
+    ].join(" ");
+    const details = {
+      kind: "silence",
+      id: record.id,
+      abstract,
+      status: "running",
+      checkAfter: record.checkAfter,
+      silentFor,
+      silentForMs: silentForRoundedMs,
+      lastOutputAt: record.lastOutputAt,
+    };
+    return { content, details };
   }
 
-  private enqueueNotification(input: Omit<PendingNotification, "deliveryKey" | "inFlight" | "counted" | "generation">): void {
+  /** At most one silence reminder per monitor stays queued: later intervals update the same delivery in place. */
+  private notifySilence(record: MonitorRecord, silentForMs: number): void {
+    if (record.generation !== this.generation || this.shuttingDown) return;
+    const built = this.buildSilenceNotification(record, silentForMs);
+    const pendingKey = record.pendingSilenceKey;
+    const pending = pendingKey === undefined ? undefined : this.notifications.get(pendingKey);
+    if (pending) {
+      pending.content = built.content;
+      pending.details = built.details;
+      this.flushNotifications();
+      return;
+    }
+    record.pendingSilenceKey = this.queueNotification(record, "silence", built.content, built.details);
+  }
+
+  private queueNotification(record: MonitorRecord, kind: MonitorNotificationKind, content: string, details: Record<string, unknown>): string {
+    return this.enqueueNotification({ monitorIds: new Set([record.id]), kind, content, details });
+  }
+
+  private enqueueNotification(input: Omit<PendingNotification, "deliveryKey" | "inFlight" | "counted" | "generation">): string {
     const deliveryKey = `oh-my-pi-slim:monitor:${this.generation}:${++this.notificationSequence}:${randomBytes(8).toString("hex")}`;
     const notification: PendingNotification = { ...input, deliveryKey, inFlight: false, counted: false, generation: this.generation };
     this.notifications.set(deliveryKey, notification);
     this.flushNotifications();
+    return deliveryKey;
   }
 
   private flushNotifications(): void {
@@ -1482,6 +1621,95 @@ export class MonitorRuntime {
     record.matchTimer = undefined;
   }
 
+  /** Raw non-empty chunks are the only silence anchor, so partial UTF-8, unterminated text, and pure ANSI all count. */
+  private noteOutputActivity(record: MonitorRecord): void {
+    const now = this.nowMs();
+    record.lastActivityMs = now;
+    record.lastOutputAt = new Date(now).toISOString();
+    this.cancelSilenceReminder(record);
+  }
+
+  /** Recovered output retires the queued reminder even in flight, so agent-settled retry never replays a stale silence. */
+  private cancelSilenceReminder(record: MonitorRecord): void {
+    const deliveryKey = record.pendingSilenceKey;
+    record.pendingSilenceKey = undefined;
+    if (deliveryKey !== undefined) this.notifications.delete(deliveryKey);
+  }
+
+  private cancelSilenceTimer(record: MonitorRecord): void {
+    record.silenceToken += 1;
+    if (record.silenceTimer !== undefined) {
+      try { this.clearTimeoutFn(record.silenceTimer); } catch { /* cleanup continues */ }
+    }
+    record.silenceTimer = undefined;
+  }
+
+  private cancelSilence(record: MonitorRecord): void {
+    this.cancelSilenceTimer(record);
+    this.cancelSilenceReminder(record);
+  }
+
+  private prepareSilenceCheck(record: MonitorRecord, delayMs: number): PreparedSilenceCheck {
+    const generation = this.generation;
+    const token = record.silenceToken + 1;
+    const delay = Math.min(Math.max(0, delayMs), record.checkAfterMs);
+    let active = false;
+    let fired = false;
+    let firedBeforeActivation = false;
+    const onTimeout = () => {
+      if (fired) return;
+      fired = true;
+      if (!active) {
+        firedBeforeActivation = true;
+        return;
+      }
+      this.acceptSilenceTimeout(record, token, generation);
+    };
+    const timer = this.setTimeoutFn(onTimeout, delay);
+    (timer as { unref?: () => void }).unref?.();
+    return {
+      timer,
+      token,
+      activate: () => {
+        active = true;
+        if (firedBeforeActivation) this.acceptSilenceTimeout(record, token, generation);
+      },
+    };
+  }
+
+  private applySilenceCheck(record: MonitorRecord, scheduled: PreparedSilenceCheck): void {
+    record.silenceTimer = scheduled.timer;
+    record.silenceToken = scheduled.token;
+    scheduled.activate();
+  }
+
+  private acceptSilenceTimeout(record: MonitorRecord, token: number, generation: number): void {
+    const current = this.records.get(record.id);
+    if (!current || current !== record || current.silenceToken !== token || generation !== this.generation) return;
+    current.silenceTimer = undefined;
+    this.defer(() => this.onSilenceTimeout(record, token, generation));
+  }
+
+  /** One lazy deadline check per monitor: the timer recomputes elapsed silence instead of restarting on every chunk. */
+  private onSilenceTimeout(record: MonitorRecord, token: number, generation: number): void {
+    if (!this.silenceTimeoutStillOwns(record, token, generation)) return;
+    const elapsed = this.nowMs() - record.lastActivityMs;
+    if (elapsed < record.checkAfterMs) {
+      this.applySilenceCheck(record, this.prepareSilenceCheck(record, record.checkAfterMs - elapsed));
+      return;
+    }
+    this.notifySilence(record, elapsed);
+    if (!this.silenceTimeoutStillOwns(record, token, generation)) return;
+    this.applySilenceCheck(record, this.prepareSilenceCheck(record, record.checkAfterMs));
+  }
+
+  private silenceTimeoutStillOwns(record: MonitorRecord, token: number, generation: number): boolean {
+    const current = this.records.get(record.id);
+    if (!current || current !== record || current.silenceToken !== token || generation !== this.generation) return false;
+    if (record.status !== "running" || record.deleting || this.shuttingDown) return false;
+    return true;
+  }
+
   private trySignal(record: MonitorRecord, signal: NodeJS.Signals, context: string): boolean {
     try {
       this.killGroupFn(record.pid, signal);
@@ -1536,6 +1764,7 @@ export class MonitorRuntime {
   }
 
   private disposeRecord(record: MonitorRecord, removeLog: boolean): void {
+    this.cancelSilence(record);
     this.cancelMatchTimer(record);
     this.detachListeners(record);
     try { record.child.stdout.destroy(); } catch { /* cleanup continues */ }

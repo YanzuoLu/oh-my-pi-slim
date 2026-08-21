@@ -85,10 +85,12 @@ function monitor(overrides = {}) {
     status: "running",
     createdAt: "2026-05-01T00:00:00.000Z",
     updatedAt: "2026-05-01T00:00:02.000Z",
+    lastOutputAt: "2026-05-01T00:00:02.000Z",
     endedAt: null,
     exitCode: null,
     signal: null,
     error: null,
+    checkAfter: "10m",
     notifyOn: ["ready", "failed"],
     matchedCount: 3,
     notificationCount: 2,
@@ -466,7 +468,7 @@ test("MonitorRuntime registers renderers, binds one foreground subscription, sur
   runtime.setUICtx(uiA);
   runtime.refreshUI();
   const execute = (params) => tools.get("monitor").execute("call", params, undefined, undefined, { cwd: process.cwd() });
-  await execute({ action: "create", abstract: "runtime one", command: "unused" });
+  await execute({ action: "create", checkAfter: "10m", abstract: "runtime one", command: "unused" });
   assert.equal(widgetCallsA.filter((call) => typeof call.content === "function").length, 1);
   const rendersBeforeTree = rendersA;
   runtime.setUICtx(uiA);
@@ -487,7 +489,7 @@ test("MonitorRuntime registers renderers, binds one foreground subscription, sur
   assert.equal(widgetCallsB.at(-1).content, undefined);
   runtime.setUICtx(uiB);
   runtime.refreshUI();
-  await execute({ action: "create", abstract: "runtime two", command: "unused" });
+  await execute({ action: "create", checkAfter: "10m", abstract: "runtime two", command: "unused" });
   assert.equal(widgetCallsB.filter((call) => typeof call.content === "function").length, 2, "session reset rebinds the cleared subscriber");
   closeChild(children[1]);
   await runtime.shutdown();
@@ -496,10 +498,10 @@ test("MonitorRuntime registers renderers, binds one foreground subscription, sur
 test("Monitor tool calls render all four actions with uniform hints, complete expansion, and no duplicate Action row", () => {
   const cases = [
     {
-      args: { action: "create", abstract: "Build\nrelease\u0000", command: "npm run build\necho done", cwd: "/workspace", notifyOn: ["ready", "failed"] },
+      args: { action: "create", checkAfter: "10m", abstract: "Build\nrelease\u0000", command: "npm run build\necho done", cwd: "/workspace", notifyOn: ["ready", "failed"] },
       collapsed: ["Abstract: Build release"],
-      hidden: ["npm run build", "Cwd:", "Notify on:"],
-      expanded: ["Abstract:", "Build", "release", "Command:", "npm run build", "echo done", "Cwd: /workspace", "Notify on:", "ready", "failed"],
+      hidden: ["npm run build", "Cwd:", "Check after:", "Notify on:"],
+      expanded: ["Abstract:", "Build", "release", "Command:", "npm run build", "echo done", "Cwd: /workspace", "Check after: 10m", "Notify on:", "ready", "failed"],
     },
     { args: { action: "delete", id: "00000001" }, collapsed: ["ID: 00000001"], hidden: [], expanded: ["ID: 00000001"] },
     { args: { action: "list" }, collapsed: [], hidden: [], expanded: [] },
@@ -537,7 +539,8 @@ test("Monitor create/status/list/delete results render compact receipts, full op
     const expanded = render(expandedComponent);
     for (const expected of [
       "Monitor [00000001] · Compile the release bundle · running", "Abstract:", "Command:", "npm run build", "printf done",
-      "Cwd: /workspace/project", "PID: 24680", "Status: running", "Created:", "Updated:", "Ended: —",
+      "Cwd: /workspace/project", "PID: 24680", "Status: running", "Created:", "Updated:",
+      "Last output: 2026-05-01T00:00:02.000Z", "Check after: 10m", "Ended: —",
       "Exit code: —", "Signal: —", "Error:", "Matchers:", "ready", "Matched: 3", "Notifications: 2",
       "Suppressed: 1", "Log path: /private/logs/00000001.jsonl", "Log bytes: 1024", "Log lines: 7",
       "Dropped bytes: 11", "Dropped lines: 1", "Window: [0,100)", "Returned: 2", "Omitted: 5",
@@ -752,11 +755,91 @@ test("Monitor keeps model-facing list data invariant and never registers a foreg
   runtime.registerTool();
   runtime.setUICtx(undefined);
   runtime.refreshUI();
-  const created = await tools.get("monitor").execute("call", { action: "create", abstract: "rpc monitor", command: "unused" }, undefined, undefined, { cwd: process.cwd(), mode: "rpc", ui: { setWidget(...args) { widgetCalls.push(args); } } });
+  const created = await tools.get("monitor").execute("call", { action: "create", checkAfter: "10m", abstract: "rpc monitor", command: "unused" }, undefined, undefined, { cwd: process.cwd(), mode: "rpc", ui: { setWidget(...args) { widgetCalls.push(args); } } });
   const listed = await tools.get("monitor").execute("call", { action: "list" }, undefined, undefined, { cwd: process.cwd(), mode: "rpc" });
   assert.deepEqual(Object.keys(listed.details.monitors[0]).sort(), ["abstract", "id", "status"]);
   assert.equal(listed.details.monitors[0].id, created.details.monitor.id);
   assert.deepEqual(widgetCalls, []);
   closeChild(child);
   await runtime.shutdown();
+});
+
+test("Monitor silence reminders collapse to one silent line and expand without incremental output", () => {
+  const silence = (overrides = {}) => ({
+    kind: "silence",
+    id: "00000001",
+    abstract: "compile release",
+    status: "running",
+    checkAfter: "10m",
+    silentFor: "21m 30s",
+    silentForMs: 1_290_000,
+    lastOutputAt: "2026-05-01T00:00:02.000Z",
+    ...overrides,
+  });
+
+  const message = { content: "MODEL SILENCE CONTENT MUST STAY UNCHANGED", details: silence() };
+  const before = structuredClone(message);
+  assert.equal(
+    render(renderMonitorNotification(message, { expanded: false, outputPad: 0 }, theme)).trim(),
+    "↻  Monitor [00000001] · compile release · silent 21m 30s (ctrl+o to expand)",
+  );
+  const narrow = renderLines(renderMonitorNotification(message, { expanded: false, outputPad: 0 }, theme), 30);
+  assert.ok(narrow.every((line) => visibleWidth(line) <= 30));
+  assert.match(narrow.join("\n").trim(), /\(ctrl\+o to expand\)$/);
+  const expanded = render(renderMonitorNotification(message, { expanded: true, outputPad: 0 }, theme));
+  for (const expected of [
+    "Monitor [00000001] · compile release · silent 21m 30s", "Status: running", "Check after: 10m",
+    "Silent for: 21m 30s", "Last output: 2026-05-01T00:00:02.000Z",
+  ]) assert.match(expanded, escaped(expected));
+  assert.doesNotMatch(expanded, /Incremental lines:|Combined lines:|Matched:|Exit code:|Log path:|MODEL SILENCE CONTENT/);
+  assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)|\u001b|\u0000/);
+  assert.deepEqual(message, before);
+
+  const neverWrote = { content: "model silence", details: silence({ lastOutputAt: null, silentFor: "10s", silentForMs: 10_000 }) };
+  assert.equal(
+    render(renderMonitorNotification(neverWrote, { expanded: false, outputPad: 0 }, theme)).trim(),
+    "↻  Monitor [00000001] · compile release · silent 10s (ctrl+o to expand)",
+  );
+  assert.match(render(renderMonitorNotification(neverWrote, { expanded: true, outputPad: 0 }, theme)), /Last output: —/);
+
+  for (const broken of [{ silentFor: 90 }, { checkAfter: undefined }, { status: "sleeping" }, { silentForMs: "10s" }, { lastOutputAt: 5 }]) {
+    const malformed = { content: "Fallback silence line\nsecond line", details: silence(broken) };
+    assert.equal(render(renderMonitorNotification(malformed, { expanded: false, outputPad: 0 }, theme), 80).trim(), "Fallback silence line (ctrl+o to expand)");
+  }
+
+  const ansi = renderMonitorNotification(message, { expanded: false, outputPad: 0 }, roleAnsiTheme).render(240);
+  assert.match(stripVTControlCharacters(ansi.join("\n")).trim(), /^↻ {2}Monitor \[00000001\] · compile release · silent 21m 30s/);
+  for (const width of [24, 40, 120]) {
+    const lines = renderMonitorNotification(message, { expanded: false, outputPad: 0 }, roleAnsiTheme).render(width);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width), `collapsed reminder must fit width ${width}`);
+  }
+});
+
+test("Monitor operational state renders transcripts recorded before checkAfter and lastOutputAt existed", () => {
+  const legacy = monitor();
+  delete legacy.checkAfter;
+  delete legacy.lastOutputAt;
+  const result = { content: [{ type: "text", text: "model content" }], details: { monitor: legacy } };
+  const collapsed = render(renderMonitorResult(result, { expanded: false }, theme, { args: { action: "status" } }));
+  assert.match(collapsed, /^↻  Monitor \[00000001\] Compile the release bundle · running · 2 returned · 5 omitted · truncated$/);
+  const expanded = render(renderMonitorResult(result, { expanded: true }, theme, { args: { action: "status" } }));
+  assert.match(expanded, escaped("Check after: —"));
+  assert.match(expanded, escaped("Last output: —"));
+  for (const expected of ["Command:", "npm run build", "Log path: /private/logs/00000001.jsonl", "Combined lines:", "[stdout] ready now"]) {
+    assert.match(expanded, escaped(expected));
+  }
+
+  const legacyTerminal = {
+    content: "MODEL TERMINAL CONTENT MUST STAY UNCHANGED",
+    details: { id: "00000001", abstract: "compile release", kind: "terminal", status: legacy, lines: [], omitted: 0, truncated: false },
+  };
+  assert.equal(
+    render(renderMonitorNotification(legacyTerminal, { expanded: false, outputPad: 0 }, theme)).trim(),
+    "↻  Monitor [00000001] · compile release · running (ctrl+o to expand)",
+  );
+  assert.match(render(renderMonitorNotification(legacyTerminal, { expanded: true, outputPad: 0 }, theme)), escaped("Check after: —"));
+
+  const broken = { ...monitor(), checkAfter: 600 };
+  const brokenResult = { content: [{ type: "text", text: "Fallback status line\nsecond line" }], details: { monitor: broken } };
+  assert.equal(render(renderMonitorResult(brokenResult, { expanded: false }, theme, { args: { action: "status" } }), 80), "Fallback status line");
 });

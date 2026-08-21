@@ -352,9 +352,9 @@ export const subagentParameters = Type.Object({
   agent: Type.Optional(Type.String({ description: "Specialist role for create." })),
   abstract: Type.Optional(Type.String({ description: "Short run summary for create or resume." })),
   task: Type.Optional(Type.String({ description: "Complete bounded objective for create." })),
-  cwd: Type.Optional(Type.String({ description: "Working directory for create. Defaults to the parent working directory." })),
+  cwd: Type.Optional(Type.String({ description: "Working directory for create or resume. Relative paths resolve against the parent working directory. Create defaults to the parent working directory. Resume defaults to the source run's working directory." })),
   action: Type.Union(SUBAGENT_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message. list and clear accept no other fields.",
+    description: "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.",
   }),
   id: Type.Optional(Type.String({ description: "Retained run ID for status, steer, interrupt, resume, or reply." })),
   message: Type.Optional(Type.String({
@@ -490,7 +490,7 @@ export class OmpsSubagentRuntime {
     this.pi.registerTool({
       name: "subagent",
       label: "Subagent",
-      description: "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.",
+      description: "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context, optionally in another working directory. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.",
       promptSnippet: "Delegate and manage specialist runs.",
       promptGuidelines: [
         "Delegate bounded specialist work with `subagent create` when an independent lane improves progress.",
@@ -1333,13 +1333,14 @@ export class OmpsSubagentRuntime {
       return this.launchCreate(input);
     }
     if (action === "resume") {
-      const invalidFields = ["agent", "task", "cwd"].filter((field) => input[field as keyof RuntimeInput] !== undefined);
+      const invalidFields = ["agent", "task"].filter((field) => input[field as keyof RuntimeInput] !== undefined);
       if (invalidFields.length > 0) throw new Error(`resume does not accept field(s): ${invalidFields.join(", ")}.`);
       const id = requireString(input.id, "id");
       const abstract = requireString(input.abstract, "abstract");
       const message = requireString(input.message, "message");
+      const cwd = input.cwd === undefined ? undefined : requireString(input.cwd, "cwd");
       await this.reconcileRun(id);
-      return this.resume(id, abstract, message);
+      return this.resume(id, abstract, message, cwd);
     }
     const createFields = ["agent", "abstract", "task", "cwd"].filter((field) => input[field as keyof RuntimeInput] !== undefined);
     if (createFields.length > 0) throw new Error(`${action} does not accept create field(s): ${createFields.join(", ")}.`);
@@ -1488,7 +1489,8 @@ export class OmpsSubagentRuntime {
     );
   }
 
-  private async resume(sourceId: string, abstract: string, message: string) {
+  /** An omitted cwd inherits the source run's working directory, while a relative override resolves like create against the parent session. */
+  private async resume(sourceId: string, abstract: string, message: string, cwd?: string) {
     const source = this.requireRun(sourceId);
     if (!isTerminalStatus(source.status)) throw new Error(`resume requires a terminal source run; ${sourceId} is ${source.status}.`);
     if (!source.sessionFile || !existsSync(source.sessionFile)) throw new Error(`Run ${sourceId} has no recoverable child session file.`);
@@ -1503,7 +1505,7 @@ export class OmpsSubagentRuntime {
       agent: source.agent,
       abstract,
       task: message,
-      cwd: source.cwd,
+      cwd: cwd === undefined ? source.cwd : resolve(this.ctx?.cwd ?? process.cwd(), cwd),
       model: source.model,
       deniedTools: normalizeDeniedTools(this.denyResolver(source.agent)),
       status: "starting",

@@ -34,10 +34,14 @@ registerHooks({
 
 const {
   MONITOR_ACTIONS,
+  MONITOR_MAX_CHECK_AFTER_MS,
+  MONITOR_MIN_CHECK_AFTER_MS,
   MONITOR_NOTIFICATION_TYPE,
   MONITOR_PUBLIC_FIELDS,
   MonitorRuntime,
+  canonicalizeMonitorCheckAfter,
   monitorParameters,
+  parseMonitorCheckAfter,
   registerMonitorRuntime,
 } = await import("../extensions/oh-my-pi-slim/monitor-runtime.ts");
 
@@ -105,15 +109,18 @@ test("monitor schema and registration expose the exact portable main-only contra
   const tool = harness.tools.get("monitor");
   assert.equal(tool.executionMode, "sequential");
   assert.equal(harness.tools.size, 1);
-  assert.equal(tool.description, "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher and terminal notifications carry the current status and only the output added since the previous notification. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.");
+  assert.equal(tool.description, "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher and terminal notifications carry the current status and only the output added since the previous notification. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.");
   assert.equal(tool.promptSnippet, "Supervise long-running foreground commands.");
   assert.deepEqual(tool.promptGuidelines, [
     "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
     "Do not poll a running monitor with repeated `monitor status` calls.",
     "`monitor list` summarizes records, notifications carry current status and incremental output, and `monitor status` returns full retained state and logs.",
   ]);
-  assert.equal(schema.properties.action.description, "Choose an action. create requires abstract and command, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.");
+  assert.equal(schema.properties.action.description, "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.");
   assert.equal(schema.properties.command.description, "Foreground Bash command for create. Do not use nohup, setsid, disown, trailing &, or another detach escape.");
+  assert.equal(schema.properties.checkAfter.type, "string");
+  assert.equal(schema.required?.includes("checkAfter") ?? false, false, "the shared action schema keeps checkAfter optional at the root");
+  assert.equal(schema.properties.checkAfter.description, "Required silence threshold for create, from 10s through 7d. A reminder arrives whenever the command stays silent that long. Format: one positive integer plus s, m, h, or d.");
   assert.equal(schema.properties.end.description, "Reverse log offset ending the status window. Defaults to 100 and must exceed start by at most 2000.");
 
   const windowsTools = [];
@@ -129,22 +136,22 @@ test("actions isolate fields and validate trimmed values, notify literals, windo
   });
   t.after(async () => { for (const child of children) if (child.listenerCount("close")) closeChild(child); await harness.runtime.shutdown(); });
 
-  await assert.rejects(harness.execute({ action: "create", abstract: "x", command: "x", id: "12345678" }), /does not accept field/);
+  await assert.rejects(harness.execute({ action: "create", checkAfter: "10m", abstract: "x", command: "x", id: "12345678" }), /does not accept field/);
   await assert.rejects(harness.execute({ action: "list", id: "12345678" }), /does not accept field/);
   await assert.rejects(harness.execute({ action: "status", id: "12345678", command: "x" }), /does not accept field/);
-  await assert.rejects(harness.execute({ action: "create", abstract: " ", command: "x" }), /abstract must be a non-empty/);
-  await assert.rejects(harness.execute({ action: "create", abstract: "x", command: " " }), /command must be a non-empty/);
-  await assert.rejects(harness.execute({ action: "create", abstract: "x", command: "x", notifyOn: ["A", "A"] }), /duplicate literal/);
-  await assert.rejects(harness.execute({ action: "create", abstract: "x", command: "x", notifyOn: [" "] }), /non-empty/);
-  await assert.rejects(harness.execute({ action: "create", abstract: "x", command: "x", notifyOn: ["x".repeat(501)] }), /at most 500/);
-  await assert.rejects(harness.execute({ action: "create", abstract: "x", command: "x", notifyOn: Array.from({ length: 21 }, (_, i) => String(i)) }), /at most 20/);
+  await assert.rejects(harness.execute({ action: "create", checkAfter: "10m", abstract: " ", command: "x" }), /abstract must be a non-empty/);
+  await assert.rejects(harness.execute({ action: "create", checkAfter: "10m", abstract: "x", command: " " }), /command must be a non-empty/);
+  await assert.rejects(harness.execute({ action: "create", checkAfter: "10m", abstract: "x", command: "x", notifyOn: ["A", "A"] }), /duplicate literal/);
+  await assert.rejects(harness.execute({ action: "create", checkAfter: "10m", abstract: "x", command: "x", notifyOn: [" "] }), /non-empty/);
+  await assert.rejects(harness.execute({ action: "create", checkAfter: "10m", abstract: "x", command: "x", notifyOn: ["x".repeat(501)] }), /at most 500/);
+  await assert.rejects(harness.execute({ action: "create", checkAfter: "10m", abstract: "x", command: "x", notifyOn: Array.from({ length: 21 }, (_, i) => String(i)) }), /at most 20/);
   await assert.rejects(harness.execute({ action: "status", id: "ABCDEF12" }), /exact 8-character/);
   await assert.rejects(harness.execute({ action: "delete", id: "abcdef1" }), /exact 8-character/);
 });
 
 test("spawn failure is atomic while IDs collide safely and cwd defaults from context", async (t) => {
   const failed = createHarness({ spawn() { throw new Error("spawn unavailable"); }, resolveShell: () => "/bin/bash", randomHex: () => "00000001" });
-  await assert.rejects(failed.execute({ action: "create", abstract: "a", command: "echo a" }), /spawn unavailable/);
+  await assert.rejects(failed.execute({ action: "create", checkAfter: "10m", abstract: "a", command: "echo a" }), /spawn unavailable/);
   assert.deepEqual(failed.runtime.list(), []);
   await failed.runtime.shutdown();
 
@@ -156,8 +163,8 @@ test("spawn failure is atomic while IDs collide safely and cwd defaults from con
     resolveShell: () => "/bin/bash",
   });
   t.after(async () => { children.forEach((child) => closeChild(child)); await harness.runtime.shutdown(); });
-  const first = await harness.execute({ action: "create", abstract: " first ", command: " echo first " });
-  const second = await harness.execute({ action: "create", abstract: "second", command: "echo second" });
+  const first = await harness.execute({ action: "create", checkAfter: "10m", abstract: " first ", command: " echo first " });
+  const second = await harness.execute({ action: "create", checkAfter: "10m", abstract: "second", command: "echo second" });
   assert.equal(first.details.monitor.id, "00000001");
   assert.equal(second.details.monitor.id, "00000002");
   assert.equal(first.details.monitor.abstract, "first");
@@ -175,7 +182,7 @@ test("stream decoding reconstructs UTF-8 and chunks, normalizes CR, sanitizes co
     resolveShell: () => "/bin/bash",
   });
   t.after(async () => harness.runtime.shutdown());
-  await harness.execute({ action: "create", abstract: "decode", command: "unused" });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "decode", command: "unused" });
   const snowman = Buffer.from("snow ☃\n");
   child.stdout.write(Buffer.concat([Buffer.from("split "), snowman.subarray(0, 6)]));
   child.stdout.write(snowman.subarray(6));
@@ -207,7 +214,7 @@ test("reverse status pagination returns chronological combined lines and never a
     resolveShell: () => "/bin/bash",
   });
   t.after(async () => harness.runtime.shutdown());
-  await harness.execute({ action: "create", abstract: "paging", command: "unused", notifyOn: ["hit"] });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "paging", command: "unused", notifyOn: ["hit"] });
   child.stdout.write("one\ntwo hit\nthree\nfour\n");
   const page = (await harness.execute({ action: "status", id: "22222222", start: 1, end: 3 })).details.monitor;
   assert.deepEqual(page.combined.map((line) => line.text), ["two hit", "three"]);
@@ -237,8 +244,8 @@ test("matcher batches repeat matches, aggregate keywords, cap lines, rate-limit 
   runtime.registerTool();
   const execute = (params) => tools.get("monitor").execute("call", params, undefined, undefined, { cwd: process.cwd() });
   t.after(async () => { children.forEach((child) => { if (child.listenerCount("close")) closeChild(child); }); await runtime.shutdown(); });
-  const first = await execute({ action: "create", abstract: "first", command: "unused", notifyOn: ["A", "B"] });
-  const second = await execute({ action: "create", abstract: "second", command: "unused", notifyOn: ["X"] });
+  const first = await execute({ action: "create", checkAfter: "10m", abstract: "first", command: "unused", notifyOn: ["A", "B"] });
+  const second = await execute({ action: "create", checkAfter: "10m", abstract: "second", command: "unused", notifyOn: ["X"] });
   children[0].stdout.write(`${Array.from({ length: 105 }, (_, i) => `A${i}`).join("\n")}\nB A\n`);
   await wait(5);
   assert.equal(messages.length, 1);
@@ -284,7 +291,7 @@ test("notification gate, acknowledgement, retry, terminal blocker, retention, an
   const execute = (params) => tools.get("monitor").execute("call", params, undefined, undefined, { cwd: process.cwd() });
   t.after(async () => runtime.shutdown());
   runtime.setDeliveryPaused(true);
-  const created = await execute({ action: "create", abstract: "notify", command: "unused", notifyOn: ["hit"] });
+  const created = await execute({ action: "create", checkAfter: "10m", abstract: "notify", command: "unused", notifyOn: ["hit"] });
   child.stdout.write("hit\n");
   await wait(5);
   assert.equal(attempts, 0);
@@ -325,7 +332,7 @@ test("delete cancels terminal and matcher notifications that are still gated", a
   });
   t.after(async () => harness.runtime.shutdown());
   harness.runtime.setDeliveryPaused(true);
-  await harness.execute({ action: "create", abstract: "cancel", command: "unused", notifyOn: ["hit"] });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "cancel", command: "unused", notifyOn: ["hit"] });
   child.stdout.write("hit\n");
   await wait(5);
   closeChild(child);
@@ -351,7 +358,7 @@ test("active delete sends TERM then KILL to the process group, confirms close, r
     },
   });
   t.after(async () => harness.runtime.shutdown());
-  const created = await harness.execute({ action: "create", abstract: "delete", command: "unused" });
+  const created = await harness.execute({ action: "create", checkAfter: "10m", abstract: "delete", command: "unused" });
   const deleted = await harness.execute({ action: "delete", id: "44444444" });
   assert.deepEqual(signals, [[44444, "SIGTERM"], [44444, 0], [44444, "SIGKILL"]]);
   assert.equal(deleted.details.deleted, true);
@@ -372,7 +379,7 @@ test("delete bounds the post-KILL wait, resolves once, destroys held pipes, and 
     killGroup(pid, signal) { signals.push([pid, signal]); },
   });
   t.after(async () => harness.runtime.shutdown());
-  const created = await harness.execute({ action: "create", abstract: "held pipe", command: "unused" });
+  const created = await harness.execute({ action: "create", checkAfter: "10m", abstract: "held pipe", command: "unused" });
   const deleted = await harness.execute({ action: "delete", id: "45454545" });
   assert.deepEqual(signals, [[45454, "SIGTERM"], [45454, 0], [45454, "SIGKILL"]]);
   assert.equal(deleted.details.forced, true);
@@ -393,7 +400,7 @@ test("delete and shutdown isolate EPERM or unknown process-group errors and alwa
     sleep: async () => {},
     killGroup() { const error = new Error("operation denied"); error.code = "EPERM"; throw error; },
   });
-  await deleteHarness.execute({ action: "create", abstract: "eperm delete", command: "unused" });
+  await deleteHarness.execute({ action: "create", checkAfter: "10m", abstract: "eperm delete", command: "unused" });
   const deleted = await deleteHarness.execute({ action: "delete", id: "46464646" });
   assert.equal(deleted.details.forced, true);
   assert.deepEqual(deleteHarness.runtime.list(), []);
@@ -412,8 +419,8 @@ test("delete and shutdown isolate EPERM or unknown process-group errors and alwa
       throw error;
     },
   });
-  const first = await shutdownHarness.execute({ action: "create", abstract: "one", command: "unused" });
-  await shutdownHarness.execute({ action: "create", abstract: "two", command: "unused" });
+  const first = await shutdownHarness.execute({ action: "create", checkAfter: "10m", abstract: "one", command: "unused" });
+  await shutdownHarness.execute({ action: "create", checkAfter: "10m", abstract: "two", command: "unused" });
   const root = dirname(first.details.monitor.logPath);
   await shutdownHarness.runtime.shutdown();
   assert.deepEqual(shutdownHarness.runtime.list(), []);
@@ -435,7 +442,7 @@ test("matcher delivery uses the bounded recent-line ring without reading the JSO
   t.after(async () => harness.runtime.shutdown());
   const changes = [];
   harness.runtime.subscribe((change) => changes.push(change));
-  await harness.execute({ action: "create", abstract: "ring", command: "unused", notifyOn: ["hit"] });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "ring", command: "unused", notifyOn: ["hit"] });
   readCalls = 0;
   child.stdout.write("before\nhit\nafter\n");
   await wait(5);
@@ -462,7 +469,7 @@ test("status scans JSONL from the tail in chunks and bounds large status and cre
     },
   });
   t.after(async () => harness.runtime.shutdown());
-  const created = await harness.execute({ action: "create", abstract: "payload", command: hugeCommand });
+  const created = await harness.execute({ action: "create", checkAfter: "10m", abstract: "payload", command: hugeCommand });
   assert.ok(Buffer.byteLength(created.content[0].text) <= 50 * 1024);
   assert.equal(created.details.monitor.truncated, true);
   for (let index = 0; index < 2000; index += 1) child.stdout.write(`line-${index}-${"z".repeat(120)}\n`);
@@ -490,7 +497,7 @@ test("matcher and terminal payloads include abstract and stay within content and
     matcherBatchMs: 2,
   });
   t.after(async () => harness.runtime.shutdown());
-  await harness.execute({ action: "create", abstract: "bounded payload", command: "unused", notifyOn: ["MATCH"] });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "bounded payload", command: "unused", notifyOn: ["MATCH"] });
   for (let index = 0; index < 100; index += 1) child.stdout.write(`MATCH-${index}-${"q".repeat(1000)}\n`);
   await wait(5);
   const matcher = harness.messages[0].message;
@@ -533,7 +540,7 @@ test("matcher and terminal notifications share one incremental update contract t
     matcherBatchMs: 2,
   });
   t.after(async () => harness.runtime.shutdown());
-  await harness.execute({ action: "create", abstract: "unified", command: "unused", notifyOn: ["hit"] });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "unified", command: "unused", notifyOn: ["hit"] });
   child.stdout.write("before\nhit one\n");
   await wait(5);
 
@@ -597,7 +604,7 @@ test("terminal updates report completed, failed, and killed while matcher update
       matcherBatchMs: 2,
     });
     t.after(async () => harness.runtime.shutdown());
-    await harness.execute({ action: "create", abstract: `end ${status}`, command: "unused", notifyOn: ["hit"] });
+    await harness.execute({ action: "create", checkAfter: "10m", abstract: `end ${status}`, command: "unused", notifyOn: ["hit"] });
     child.stdout.write("hit\n");
     await wait(5);
     assert.equal(harness.messages[0].message.details.status, "running");
@@ -625,7 +632,7 @@ test("a matcher batch still pending at close folds its lines into the single ter
     matcherBatchMs: 5_000,
   });
   t.after(async () => harness.runtime.shutdown());
-  await harness.execute({ action: "create", abstract: "fold", command: "unused", notifyOn: ["hit"] });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "fold", command: "unused", notifyOn: ["hit"] });
   child.stdout.write("hit one\nhit two\n");
   await wait(5);
   assert.equal(harness.messages.length, 0, "the batch window has not elapsed yet");
@@ -647,7 +654,7 @@ test("zero incremental lines stay legal and never replay retained history", asyn
     matcherBatchMs: 2,
   });
   t.after(async () => harness.runtime.shutdown());
-  await harness.execute({ action: "create", abstract: "quiet", command: "unused", notifyOn: ["hit"] });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "quiet", command: "unused", notifyOn: ["hit"] });
   child.stdout.write("hit now\n");
   await wait(5);
   assert.equal(harness.messages.length, 1);
@@ -676,7 +683,7 @@ test("small injected log cap rolls from complete line boundaries with a marker a
     matcherBatchMs: 2,
   });
   t.after(async () => harness.runtime.shutdown());
-  await harness.execute({ action: "create", abstract: "roll", command: "unused", notifyOn: ["line-29"] });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "roll", command: "unused", notifyOn: ["line-29"] });
   for (let index = 0; index < 30; index += 1) child.stdout.write(`line-${index}-${"x".repeat(40)}\n`);
   const status = (await harness.execute({ action: "status", id: "55555555", start: 0, end: 100 })).details.monitor;
   assert.ok(status.logBytes <= 900);
@@ -726,7 +733,7 @@ test("write, rename, and rollover reopen failures stay inside stream listeners a
     });
     t.after(async () => harness.runtime.shutdown());
     const id = mode === "write" ? "51515151" : mode === "rename" ? "52525252" : "53535353";
-    await harness.execute({ action: "create", abstract: mode, command: "unused" });
+    await harness.execute({ action: "create", checkAfter: "10m", abstract: mode, command: "unused" });
     for (let index = 0; index < 30; index += 1) child.stdout.write(`${mode}-${index}-${"x".repeat(40)}\n`);
     const status = (await harness.execute({ action: "status", id })).details.monitor;
     assert.match(status.error, /log (write|rollover)/);
@@ -748,8 +755,8 @@ test("deleting one monitor rebuilds a gated global rate summary for the remainin
   });
   t.after(async () => harness.runtime.shutdown());
   harness.runtime.setDeliveryPaused(true);
-  await harness.execute({ action: "create", abstract: "remove me", command: "unused", notifyOn: ["hit"] });
-  await harness.execute({ action: "create", abstract: "keep me", command: "unused", notifyOn: ["hit"] });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "remove me", command: "unused", notifyOn: ["hit"] });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "keep me", command: "unused", notifyOn: ["hit"] });
   children[0].stdout.write("hit first\n");
   children[1].stdout.write("hit second\n");
   await wait(12);
@@ -783,8 +790,8 @@ test("shutdown invalidates first, signals all groups in parallel, kills survivor
       }
     },
   });
-  const first = await harness.execute({ action: "create", abstract: "one", command: "unused" });
-  const second = await harness.execute({ action: "create", abstract: "two", command: "unused" });
+  const first = await harness.execute({ action: "create", checkAfter: "10m", abstract: "one", command: "unused" });
+  const second = await harness.execute({ action: "create", checkAfter: "10m", abstract: "two", command: "unused" });
   const root = dirname(first.details.monitor.logPath);
   assert.equal(dirname(second.details.monitor.logPath), root);
   await harness.runtime.shutdown();
@@ -808,7 +815,7 @@ test("partial-line truncation reports dropped UTF-8 bytes", async (t) => {
     resolveShell: () => "/bin/bash",
   });
   t.after(async () => harness.runtime.shutdown());
-  await harness.execute({ action: "create", abstract: "bytes", command: "unused" });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "bytes", command: "unused" });
   child.stdout.write("☃☃☃");
   closeChild(child);
   await wait();
@@ -832,6 +839,7 @@ test("real detached descendant holding a pipe cannot block sequential delete", a
   const script = "const {spawn}=require('node:child_process');const c=spawn('/bin/sleep',['30'],{detached:true,stdio:['ignore',1,2]});console.log(c.pid);c.unref();";
   await harness.execute({
     action: "create",
+    checkAfter: "10m",
     abstract: "held descendant pipe",
     command: `${shellQuote(process.execPath)} -e ${shellQuote(script)}`,
   });
@@ -856,6 +864,7 @@ test("a real foreground bash process uses one combined private log and reaches c
   t.after(async () => harness.runtime.shutdown());
   const created = await harness.execute({
     action: "create",
+    checkAfter: "10m",
     abstract: "real",
     command: "printf 'out\\n'; printf 'err\\n' >&2",
   });
@@ -868,4 +877,388 @@ test("a real foreground bash process uses one combined private log and reaches c
   assert.equal((await import("node:fs")).statSync(status.logPath).mode & 0o777, 0o600);
   assert.equal((await import("node:fs")).statSync(dirname(status.logPath)).mode & 0o777, 0o700);
   await harness.execute({ action: "delete", id: created.details.monitor.id });
+});
+
+function silenceHarness(options = {}) {
+  const { send, ...runtimeOptions } = options;
+  const tools = new Map();
+  const messages = [];
+  const children = [];
+  const timers = new Map();
+  const created = [];
+  const cleared = [];
+  const deferred = [];
+  let nextTimerId = 1;
+  let now = 1_000_000;
+  const pi = {
+    registerTool(definition) { tools.set(definition.name, definition); },
+    registerMessageRenderer() {},
+    sendMessage(message, sendOptions) {
+      if (send) send(message, sendOptions);
+      messages.push({ message, options: sendOptions });
+    },
+  };
+  const runtime = new MonitorRuntime(pi, {
+    randomHex: (() => { let id = 1; return () => String(id++).padStart(8, "0"); })(),
+    resolveShell: () => "/bin/bash",
+    spawn() { const child = fakeChild(70000 + children.length); children.push(child); return child; },
+    nowMs: () => now,
+    setTimeout(callback, milliseconds) {
+      const timer = { id: nextTimerId++, callback, milliseconds, at: now + milliseconds, unrefs: 0, unref() { this.unrefs += 1; } };
+      timers.set(timer.id, timer);
+      created.push(timer);
+      return timer;
+    },
+    clearTimeout(timer) { cleared.push(timer); timers.delete(timer.id); },
+    defer(callback) { deferred.push(callback); },
+    ...runtimeOptions,
+  });
+  runtime.registerTool();
+  const ctx = { cwd: process.cwd() };
+  const flush = () => { while (deferred.length > 0) deferred.shift()(); };
+  const fireOnly = (milliseconds) => {
+    now += milliseconds;
+    for (const timer of [...timers.values()]) {
+      if (timer.at <= now) { timers.delete(timer.id); timer.callback(); }
+    }
+  };
+  return {
+    runtime, tools, messages, children, created, cleared, timers, flush, fireOnly,
+    nowMs: () => now,
+    execute(params) { return tools.get("monitor").execute("call", params, undefined, undefined, ctx); },
+    advance(milliseconds) { fireOnly(milliseconds); flush(); },
+    pending() { return [...timers.values()]; },
+    silences() { return messages.filter((sent) => sent.message.details.kind === "silence"); },
+  };
+}
+
+test("checkAfter parsing enforces one strict format, inclusive 10s..7d bounds, and canonical units", () => {
+  assert.equal(MONITOR_MIN_CHECK_AFTER_MS, 10_000);
+  assert.equal(MONITOR_MAX_CHECK_AFTER_MS, 7 * 24 * 60 * 60 * 1_000);
+
+  for (const [input, checkAfter, milliseconds] of [
+    ["10s", "10s", 10_000],
+    [" 10m ", "10m", 600_000],
+    ["60s", "1m", 60_000],
+    ["600s", "10m", 600_000],
+    ["90s", "90s", 90_000],
+    ["120m", "2h", 7_200_000],
+    ["1440m", "1d", 86_400_000],
+    ["48h", "2d", 172_800_000],
+    ["168h", "7d", 604_800_000],
+    ["7d", "7d", 604_800_000],
+  ]) assert.deepEqual(parseMonitorCheckAfter(input), { checkAfter, milliseconds }, `${input} must canonicalize to ${checkAfter}`);
+
+  for (const input of ["9s", "0d", "8d", "604801s", "10081m", "169h"]) {
+    assert.throws(() => parseMonitorCheckAfter(input), /between 10s and 7d inclusive|positive integer and one unit/, `${input} must be rejected`);
+  }
+  for (const input of ["10", "10x", "10S", "10 s", "1m30s", "1.5m", "-10m", "+10m", "010s", "0s", "1e3s", "", "   ", "10m ago"]) {
+    assert.throws(() => parseMonitorCheckAfter(input), /checkAfter must (use one positive integer and one unit|be a non-empty string)/, `${input} must be rejected`);
+  }
+  for (const input of [600_000, null, undefined, {}, [], true]) {
+    assert.throws(() => parseMonitorCheckAfter(input), /checkAfter must be a non-empty string/);
+  }
+
+  assert.equal(canonicalizeMonitorCheckAfter(600_000), "10m");
+  assert.equal(canonicalizeMonitorCheckAfter(604_800_000), "7d");
+  assert.equal(canonicalizeMonitorCheckAfter(10_000), "10s");
+  for (const invalid of [0, -1_000, 1.5]) assert.throws(() => canonicalizeMonitorCheckAfter(invalid), /positive safe integer/);
+  assert.throws(() => canonicalizeMonitorCheckAfter(1_500), /whole seconds/);
+});
+
+test("create requires checkAfter, other actions reject it, and the committed record keeps the canonical value", async (t) => {
+  const harness = silenceHarness();
+  t.after(async () => harness.runtime.shutdown());
+
+  await assert.rejects(harness.execute({ action: "create", abstract: "a", command: "unused" }), /create requires checkAfter/);
+  await assert.rejects(harness.execute({ action: "create", abstract: "a", command: "unused", checkAfter: "5s" }), /between 10s and 7d inclusive/);
+  await assert.rejects(harness.execute({ action: "create", abstract: "a", command: "unused", checkAfter: "10 minutes" }), /positive integer and one unit/);
+  await assert.rejects(harness.execute({ action: "list", checkAfter: "10m" }), /list does not accept field\(s\): checkAfter/);
+  await assert.rejects(harness.execute({ action: "delete", id: "00000001", checkAfter: "10m" }), /delete does not accept field\(s\): checkAfter/);
+  await assert.rejects(harness.execute({ action: "status", id: "00000001", checkAfter: "10m" }), /status does not accept field\(s\): checkAfter/);
+  assert.deepEqual(harness.runtime.list(), [], "rejected creates leave no retained record");
+
+  const created = await harness.execute({ action: "create", abstract: "canonical", command: "unused", checkAfter: "600s" });
+  assert.equal(created.details.monitor.checkAfter, "10m");
+  assert.equal(created.details.monitor.lastOutputAt, null);
+  assert.equal("silenceReminderCount" in created.details.monitor, false);
+  assert.equal("nextCheckAt" in created.details.monitor, false);
+  const status = (await harness.execute({ action: "status", id: created.details.monitor.id })).details.monitor;
+  assert.equal(status.checkAfter, "10m");
+  assert.equal(status.lastOutputAt, null);
+  closeChild(harness.children[0]);
+  harness.flush();
+});
+
+test("a silent monitor reminds once per checkAfter interval with accumulated silence and one unref'd lazy timer", async (t) => {
+  const harness = silenceHarness();
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", abstract: "quiet build", command: "unused", checkAfter: "10s" });
+  assert.equal(harness.pending().length, 1);
+  assert.equal(harness.pending()[0].milliseconds, 10_000);
+
+  harness.advance(9_999);
+  assert.equal(harness.silences().length, 0, "the deadline is exclusive of the final millisecond");
+  harness.advance(1);
+  assert.equal(harness.silences().length, 1);
+  const first = harness.silences()[0].message;
+  assert.deepEqual(harness.silences()[0].options, { deliverAs: "steer", triggerTurn: true });
+  assert.deepEqual(Object.keys(first.details), ["kind", "id", "abstract", "status", "checkAfter", "silentFor", "silentForMs", "lastOutputAt", "deliveryKey"]);
+  assert.equal(first.details.kind, "silence");
+  assert.equal(first.details.id, "00000001");
+  assert.equal(first.details.abstract, "quiet build");
+  assert.equal(first.details.status, "running");
+  assert.equal(first.details.checkAfter, "10s");
+  assert.equal(first.details.silentFor, "10s");
+  assert.equal(first.details.silentForMs, 10_000);
+  assert.equal(first.details.lastOutputAt, null);
+  assert.match(first.content, /Monitor 00000001 \(quiet build\) has produced no stdout or stderr output for 10s\./);
+  assert.match(first.content, /Its checkAfter threshold is 10s and it is still running\./);
+  assert.match(first.content, /Call monitor status with id 00000001 now to check the current state of this monitor\./);
+
+  assert.equal(ack(harness.runtime, harness.silences()[0]), true);
+  harness.advance(10_000);
+  assert.equal(harness.silences().length, 2, "an acknowledged reminder allows a fresh reminder next interval");
+  const second = harness.silences()[1].message;
+  assert.equal(second.details.silentFor, "20s");
+  assert.equal(second.details.silentForMs, 20_000);
+  assert.notEqual(second.details.deliveryKey, first.details.deliveryKey);
+
+  harness.advance(10_000);
+  assert.equal(harness.silences().length, 2, "an unacknowledged reminder never stacks a second delivery");
+  harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+  assert.equal(harness.silences().length, 3);
+  const retried = harness.silences()[2].message;
+  assert.equal(retried.details.deliveryKey, second.details.deliveryKey, "the in-place update keeps one delivery key");
+  assert.equal(retried.details.silentFor, "30s");
+  assert.equal(retried.details.silentForMs, 30_000);
+
+  const status = (await harness.execute({ action: "status", id: "00000001" })).details.monitor;
+  assert.equal(status.notificationCount, 2, "a safely retried reminder still counts once");
+  assert.equal(status.matchedCount, 0);
+  assert.ok(harness.created.every((timer) => timer.unrefs >= 1), "every silence timer is unref'd");
+  closeChild(harness.children[0]);
+  harness.flush();
+});
+
+test("readable silence durations round down to whole seconds across units", async (t) => {
+  const harness = silenceHarness();
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", abstract: "long quiet", command: "unused", checkAfter: "1h" });
+  harness.advance(3_600_000);
+  assert.equal(harness.silences()[0].message.details.silentFor, "1h");
+  assert.equal(ack(harness.runtime, harness.silences()[0]), true);
+  harness.advance(3_600_000 + 900);
+  const second = harness.silences()[1].message.details;
+  assert.equal(second.silentFor, "2h");
+  assert.equal(second.silentForMs, 7_200_000, "sub-second remainders are dropped");
+  assert.equal(ack(harness.runtime, harness.silences()[1]), true);
+  harness.advance(3_600_000 + 61_100);
+  assert.equal(harness.silences()[2].message.details.silentFor, "3h 1m 2s");
+  closeChild(harness.children[0]);
+  harness.flush();
+});
+
+test("raw output chunks reset silence lazily without clearing or replacing the pending timer", async (t) => {
+  const harness = silenceHarness();
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", abstract: "chatty", command: "unused", checkAfter: "10s" });
+  const timer = harness.pending()[0];
+  const clearedBefore = harness.cleared.length;
+
+  harness.advance(4_000);
+  harness.children[0].stdout.write("partial without newline");
+  await wait();
+  assert.deepEqual(harness.pending(), [timer], "the output hot path never re-arms the timer");
+  assert.equal(harness.cleared.length, clearedBefore, "the output hot path never clears the timer");
+
+  harness.advance(6_000);
+  assert.equal(harness.silences().length, 0, "the expired timer re-arms for the remaining silence instead of firing");
+  assert.equal(harness.pending().length, 1);
+  assert.equal(harness.pending()[0].milliseconds, 4_000);
+
+  harness.advance(4_000);
+  assert.equal(harness.silences().length, 1);
+  assert.equal(harness.silences()[0].message.details.silentFor, "10s");
+  assert.equal(harness.silences()[0].message.details.lastOutputAt, new Date(1_004_000).toISOString());
+  const status = (await harness.execute({ action: "status", id: "00000001" })).details.monitor;
+  assert.equal(status.lastOutputAt, new Date(1_004_000).toISOString());
+  closeChild(harness.children[0]);
+  harness.flush();
+});
+
+test("split UTF-8, pure ANSI, and newline-free chunks all count as activity while EOF flush does not", async (t) => {
+  const snowman = Buffer.from("☃");
+  const cases = [
+    ["split utf-8 lead", () => snowman.subarray(0, 2)],
+    ["split utf-8 tail", () => snowman.subarray(2)],
+    ["pure ansi", () => Buffer.from("\u001b[31m")],
+    ["no newline", () => Buffer.from("still working")],
+  ];
+  for (const [label, chunk] of cases) {
+    const harness = silenceHarness();
+    t.after(async () => harness.runtime.shutdown());
+    await harness.execute({ action: "create", abstract: label, command: "unused", checkAfter: "10s" });
+    harness.advance(6_000);
+    harness.children[0].stdout.write(chunk());
+    await wait();
+    harness.advance(6_000);
+    assert.equal(harness.silences().length, 0, `${label} must reset the silence anchor`);
+    harness.advance(4_000);
+    assert.equal(harness.silences().length, 1, `${label} reminds one full interval after the raw chunk`);
+    assert.equal(harness.silences()[0].message.details.silentFor, "10s");
+
+    closeChild(harness.children[0]);
+    await wait();
+    harness.flush();
+    assert.equal(harness.silences().length, 1, "the EOF flush is not new output and creates no reminder");
+    assert.equal(harness.pending().length, 0, "a terminal monitor keeps no silence timer");
+  }
+});
+
+test("a gated or failing delivery keeps exactly one silence reminder that updates in place", async (t) => {
+  const gated = silenceHarness();
+  t.after(async () => gated.runtime.shutdown());
+  gated.runtime.setDeliveryPaused(true);
+  await gated.execute({ action: "create", abstract: "gated", command: "unused", checkAfter: "10s" });
+  gated.advance(10_000);
+  gated.advance(10_000);
+  gated.advance(10_000);
+  assert.equal(gated.messages.length, 0);
+  gated.runtime.setDeliveryPaused(false);
+  assert.equal(gated.silences().length, 1, "three gated intervals merge into one reminder");
+  assert.equal(gated.silences()[0].message.details.silentFor, "30s");
+  assert.equal((await gated.execute({ action: "status", id: "00000001" })).details.monitor.notificationCount, 1);
+  closeChild(gated.children[0]);
+  gated.flush();
+
+  let attempts = 0;
+  const failing = silenceHarness({
+    send() { attempts += 1; if (attempts === 1) throw new Error("queue busy"); },
+  });
+  t.after(async () => failing.runtime.shutdown());
+  await failing.execute({ action: "create", abstract: "retry", command: "unused", checkAfter: "10s" });
+  failing.advance(10_000);
+  assert.equal(attempts, 1);
+  assert.equal(failing.messages.length, 0);
+  failing.advance(10_000);
+  assert.equal(attempts, 2, "a failed send stays retryable and never duplicates the queue entry");
+  assert.equal(failing.silences().length, 1);
+  assert.equal(failing.silences()[0].message.details.silentFor, "20s");
+  failing.runtime.retryQueuedNotificationsAfterAgentSettled();
+  assert.equal(failing.silences().length, 2);
+  assert.equal((await failing.execute({ action: "status", id: "00000001" })).details.monitor.notificationCount, 1, "one logical reminder counts once");
+  closeChild(failing.children[0]);
+  failing.flush();
+});
+
+test("recovered output retires a queued or in-flight reminder so agent-settled retry never replays it", async (t) => {
+  const gated = silenceHarness();
+  t.after(async () => gated.runtime.shutdown());
+  gated.runtime.setDeliveryPaused(true);
+  await gated.execute({ action: "create", abstract: "recovers gated", command: "unused", checkAfter: "10s" });
+  gated.advance(10_000);
+  gated.children[0].stdout.write("back to work\n");
+  await wait();
+  gated.runtime.setDeliveryPaused(false);
+  assert.equal(gated.messages.length, 0, "output deletes the still-gated reminder");
+  closeChild(gated.children[0]);
+  await wait();
+  gated.flush();
+  assert.equal(gated.silences().length, 0);
+
+  const inFlight = silenceHarness();
+  t.after(async () => inFlight.runtime.shutdown());
+  await inFlight.execute({ action: "create", abstract: "recovers live", command: "unused", checkAfter: "10s" });
+  inFlight.advance(10_000);
+  assert.equal(inFlight.silences().length, 1);
+  inFlight.children[0].stdout.write("back to work\n");
+  await wait();
+  inFlight.runtime.retryQueuedNotificationsAfterAgentSettled();
+  assert.equal(inFlight.silences().length, 1, "a delivered but unacknowledged reminder is not replayed once output returns");
+  inFlight.advance(10_000);
+  assert.equal(inFlight.silences().length, 2, "silence after recovery starts a fresh reminder");
+  assert.equal(inFlight.silences()[1].message.details.silentFor, "10s");
+  assert.notEqual(inFlight.silences()[1].message.details.deliveryKey, inFlight.silences()[0].message.details.deliveryKey);
+  closeChild(inFlight.children[0]);
+  inFlight.flush();
+});
+
+test("silence reminders never move the incremental position or consume the matcher rate window", async (t) => {
+  const harness = silenceHarness({ matcherBatchMs: 5_000, rateLimitCount: 1, rateLimitWindowMs: 600_000 });
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", abstract: "cursor", command: "unused", checkAfter: "10s", notifyOn: ["hit"] });
+  harness.children[0].stdout.write("first line\n");
+  await wait();
+  harness.advance(10_000);
+  assert.equal(ack(harness.runtime, harness.silences()[0]), true);
+  harness.advance(10_000);
+  assert.equal(harness.silences().length, 2);
+  assert.equal(harness.messages.every((sent) => sent.message.details.kind === "silence"), true);
+
+  harness.children[0].stdout.write("hit line\n");
+  await wait();
+  harness.advance(5_000);
+  const matcher = harness.messages.find((sent) => sent.message.details.kind === "update");
+  assert.deepEqual(matcher.message.details.lines.map((line) => line.text), ["first line", "hit line"], "reminders never advance the delivered position");
+  assert.deepEqual(matcher.message.details.matched, ["hit"], "reminders never consume the matcher rate-limit window");
+
+  closeChild(harness.children[0]);
+  await wait();
+  harness.flush();
+  const terminal = harness.messages.at(-1).message;
+  assert.equal(terminal.details.kind, "update");
+  assert.equal(terminal.details.status, "completed");
+});
+
+test("terminal, delete, and shutdown clear the silence timer, drop the reminder, and ignore stale callbacks", async (t) => {
+  const terminal = silenceHarness();
+  t.after(async () => terminal.runtime.shutdown());
+  terminal.runtime.setDeliveryPaused(true);
+  await terminal.execute({ action: "create", abstract: "closes", command: "unused", checkAfter: "10s" });
+  terminal.advance(10_000);
+  closeChild(terminal.children[0]);
+  await wait();
+  terminal.flush();
+  assert.equal(terminal.pending().length, 0, "a terminal monitor keeps no silence timer");
+  terminal.runtime.setDeliveryPaused(false);
+  assert.equal(terminal.silences().length, 0, "the terminal update supersedes the queued reminder");
+  assert.equal(terminal.messages.length, 1);
+  assert.equal(terminal.messages[0].message.details.kind, "update");
+  assert.equal(terminal.runtime.hasBlockingWork(), true, "only the terminal delivery blocks completion");
+  assert.equal(ack(terminal.runtime, terminal.messages[0]), true);
+  assert.equal(terminal.runtime.hasBlockingWork(), false, "silence reminders never add blocking work of their own");
+
+  const removed = silenceHarness({ deleteGraceMs: 1, finalKillWaitMs: 1, sleep: async () => {}, killGroup() {} });
+  t.after(async () => removed.runtime.shutdown());
+  removed.runtime.setDeliveryPaused(true);
+  await removed.execute({ action: "create", abstract: "deletes", command: "unused", checkAfter: "10s" });
+  removed.advance(10_000);
+  await removed.execute({ action: "delete", id: "00000001" });
+  removed.runtime.setDeliveryPaused(false);
+  assert.equal(removed.messages.length, 0);
+  assert.equal(removed.pending().length, 0);
+  assert.equal(removed.runtime.hasBlockingWork(), false);
+
+  const stopped = silenceHarness({ shutdownGraceMs: 1, sleep: async () => {}, killGroup() {} });
+  await stopped.execute({ action: "create", abstract: "shuts down", command: "unused", checkAfter: "10s" });
+  stopped.fireOnly(10_000);
+  await stopped.runtime.shutdown();
+  assert.equal(stopped.pending().length, 0, "shutdown clears every pending silence timer");
+  stopped.flush();
+  assert.equal(stopped.silences().length, 0, "a deferred callback that survives shutdown stays inert");
+
+  const reused = silenceHarness({ randomHex: () => "0000beef", deleteGraceMs: 1, finalKillWaitMs: 1, sleep: async () => {}, killGroup() {} });
+  t.after(async () => reused.runtime.shutdown());
+  await reused.execute({ action: "create", abstract: "first owner", command: "unused", checkAfter: "10s" });
+  reused.fireOnly(10_000);
+  await reused.execute({ action: "delete", id: "0000beef" });
+  await reused.execute({ action: "create", abstract: "second owner", command: "unused", checkAfter: "10s" });
+  reused.flush();
+  assert.equal(reused.silences().length, 0, "a stale callback never revives against a reused monitor ID");
+  reused.advance(10_000);
+  assert.equal(reused.silences().length, 1);
+  assert.equal(reused.silences()[0].message.details.abstract, "second owner");
+  closeChild(reused.children[1]);
+  reused.flush();
 });

@@ -328,6 +328,7 @@ export function renderSubagentCall(argsValue: unknown, theme: Theme, context: To
     addField(container, theme, "Source run", args.id, "(pending)");
     addField(container, theme, "Abstract", args.abstract, "(pending)");
     if (expanded) {
+      addField(container, theme, "Cwd", args.cwd, "(source run cwd)");
       if (typeof args.message === "string") addFullSection(container, theme, "Continuation task", args.message);
       else addField(container, theme, "Continuation task", undefined, "(pending)");
     }

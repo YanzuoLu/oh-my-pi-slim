@@ -207,6 +207,8 @@ function operationalStateFromValue(value: unknown): MonitorOperationalState | un
   const status = asStatus(state.status);
   const createdAt = asString(state.createdAt);
   const updatedAt = asString(state.updatedAt);
+  const lastOutputAt = state.lastOutputAt === undefined ? null : asNullableString(state.lastOutputAt);
+  const checkAfter = state.checkAfter === undefined ? "" : asString(state.checkAfter);
   const endedAt = asNullableString(state.endedAt);
   const exitCode = asNullableNumber(state.exitCode);
   const signal = asNullableString(state.signal);
@@ -227,13 +229,14 @@ function operationalStateFromValue(value: unknown): MonitorOperationalState | un
   const truncated = asBoolean(state.truncated);
   const combined = combinedLinesFromValue(state.combined);
   if (!id || abstract === undefined || command === undefined || cwd === undefined || pid === undefined || !status || !createdAt ||
-      !updatedAt || endedAt === undefined || exitCode === undefined || signal === undefined || error === undefined || !notifyOn ||
+      !updatedAt || lastOutputAt === undefined || checkAfter === undefined ||
+      endedAt === undefined || exitCode === undefined || signal === undefined || error === undefined || !notifyOn ||
       matchedCount === undefined || notificationCount === undefined || suppressedCount === undefined || !logPath || logBytes === undefined ||
       logLines === undefined || droppedBytes === undefined || droppedLines === undefined || start === undefined || end === undefined ||
       returned === undefined || omitted === undefined || truncated === undefined || !combined) return;
   return {
-    id, abstract, command, cwd, pid, status, createdAt, updatedAt, endedAt, exitCode, signal, error, notifyOn,
-    matchedCount, notificationCount, suppressedCount, logPath, logBytes, logLines, droppedBytes, droppedLines,
+    id, abstract, command, cwd, pid, status, createdAt, updatedAt, lastOutputAt, endedAt, exitCode, signal, error,
+    checkAfter, notifyOn, matchedCount, notificationCount, suppressedCount, logPath, logBytes, logLines, droppedBytes, droppedLines,
     start, end, returned, omitted, truncated, combined,
   };
 }
@@ -282,10 +285,12 @@ function renderOperationalState(
   addField(container, theme, "Status", state.status, 2);
   addField(container, theme, "Created", state.createdAt, 2);
   addField(container, theme, "Updated", state.updatedAt, 2);
+  addField(container, theme, "Last output", state.lastOutputAt, 2);
   addField(container, theme, "Ended", state.endedAt, 2);
   addField(container, theme, "Exit code", state.exitCode, 2);
   addField(container, theme, "Signal", state.signal, 2);
   addSection(container, theme, "Error", state.error ?? "—", 2);
+  addField(container, theme, "Check after", state.checkAfter === "" ? null : state.checkAfter, 2);
   addStringList(container, theme, "Matchers", state.notifyOn, 2);
   addField(container, theme, "Matched", state.matchedCount, 2);
   addField(container, theme, "Notifications", state.notificationCount, 2);
@@ -347,6 +352,7 @@ export function renderMonitorCall(argsValue: unknown, theme: Theme, context: Too
       addSection(container, theme, "Abstract", args.abstract);
       addSection(container, theme, "Command", args.command);
       addField(container, theme, "Cwd", args.cwd ?? context.cwd, 0, "(current cwd)");
+      addField(container, theme, "Check after", args.checkAfter);
       addStringList(container, theme, "Notify on", stringArray(args.notifyOn) ?? []);
     } else {
       addField(container, theme, "Abstract", args.abstract);
@@ -457,6 +463,43 @@ function renderUpdateNotification(details: UpdateNotification, expanded: boolean
   addField(container, theme, "Omitted", details.omitted);
   addField(container, theme, "Truncated", details.truncated);
   addCombinedLines(container, theme, "Incremental lines", details.lines);
+  return container;
+}
+
+interface SilenceNotification {
+  id: string;
+  abstract: string;
+  status: MonitorStatus;
+  checkAfter: string;
+  silentFor: string;
+  silentForMs: number;
+  lastOutputAt: string | null;
+}
+
+function silenceNotification(value: UnknownRecord): SilenceNotification | undefined {
+  const id = asString(value.id);
+  const abstract = asString(value.abstract);
+  const status = asStatus(value.status);
+  const checkAfter = asString(value.checkAfter);
+  const silentFor = asString(value.silentFor);
+  const silentForMs = asNumber(value.silentForMs);
+  const lastOutputAt = asNullableString(value.lastOutputAt);
+  if (!id || abstract === undefined || !status || !checkAfter || !silentFor || silentForMs === undefined ||
+      lastOutputAt === undefined) return;
+  return { id, abstract, status, checkAfter, silentFor, silentForMs, lastOutputAt };
+}
+
+/** Silence reminders keep their own layout: no incremental lines, only how long the monitor has stayed quiet. */
+function renderSilenceNotification(details: SilenceNotification, expanded: boolean, theme: Theme): Component {
+  const head = `${formatSemanticGlyphPrefix(monitorStatusGlyph(details.status, theme))}${theme.fg("customMessageText", `Monitor [${sanitizeMonitorText(details.id)}] · ${sanitizeMonitorText(details.abstract)}`)}`;
+  const tail = theme.fg("customMessageText", ` · silent ${sanitizeMonitorText(details.silentFor)}`);
+  if (!expanded) return new ExpandableNotificationLine(head, tail, theme);
+  const container = new Container();
+  container.addChild(new Text(`${head}${tail}`, 0, 0));
+  addField(container, theme, "Status", details.status);
+  addField(container, theme, "Check after", details.checkAfter);
+  addField(container, theme, "Silent for", details.silentFor);
+  addField(container, theme, "Last output", details.lastOutputAt);
   return container;
 }
 
@@ -577,6 +620,9 @@ export function renderMonitorNotification(
   if (details?.kind === "update") {
     const parsed = updateNotification(details);
     if (parsed) content = renderUpdateNotification(parsed, options.expanded === true, theme);
+  } else if (details?.kind === "silence") {
+    const parsed = silenceNotification(details);
+    if (parsed) content = renderSilenceNotification(parsed, options.expanded === true, theme);
   } else if (details?.kind === "matcher") {
     const parsed = matcherNotification(details);
     if (parsed) content = renderMatcherNotification(parsed, options.expanded === true, theme);

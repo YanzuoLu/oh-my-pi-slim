@@ -103,7 +103,7 @@ Runs specialists in isolated background child sessions and returns control immed
 | `status` | Return one retained run's public state and its terminal result when available |
 | `interrupt` | Stop a non-terminal run without rolling back file changes and return its final result |
 | `steer` | Send guidance to a running run |
-| `resume` | Continue a terminal run's saved child session as a new run with a new ID |
+| `resume` | Continue a terminal run's saved child session as a new run with a new ID and optionally override its cwd. Omitted cwd inherits the source run's working directory |
 | `reply` | Answer a waiting child and continue that same run |
 | `clear` | Remove all retained terminal history |
 
@@ -156,12 +156,14 @@ Runs and observes long-running foreground Bash commands on POSIX systems.
 
 | Action | Effect |
 | --- | --- |
-| `create` | Start a command with an abstract, optional cwd, and optional `notifyOn` literals |
+| `create` | Start a command with an abstract, a required `checkAfter` silence threshold, optional cwd, and optional `notifyOn` literals |
 | `delete` | Stop if needed, then remove the monitor and its retained record |
 | `list` | List compact monitor states |
 | `status` | Inspect current state and retained combined output |
 
 `notifyOn` uses case-sensitive literal matching. Commands must remain in the foreground: do not use `nohup`, `setsid`, `disown`, trailing `&`, or another detach escape.
+
+`checkAfter` is required on `create` and is inclusive from `10s` through `7d`, written as one positive integer plus `s`, `m`, `h`, or `d`. Silence is measured from a successful `create` and restarts at the last raw stdout or stderr chunk, so partial lines and output without a newline both count as activity. Whenever a running command stays silent that long, a silence reminder asks you to call `monitor status` for that ID. Only one reminder per monitor is queued at a time: later intervals update the same reminder with the accumulated silent time instead of stacking new ones. `status` reports the canonical `checkAfter` and `lastOutputAt`, which stays `null` until the command writes its first output.
 
 Matcher and terminal notifications share one shape: each states the monitor's current status and carries only the output added since the previous notification, never the whole log. `status` is the single entry point for a record's full retained state and combined output.
 

@@ -498,8 +498,8 @@ test("public schema and package-agent boundaries remain minimal", async () => {
     agent: "Specialist role for create.",
     abstract: "Short run summary for create or resume.",
     task: "Complete bounded objective for create.",
-    cwd: "Working directory for create. Defaults to the parent working directory.",
-    action: "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message. list and clear accept no other fields.",
+    cwd: "Working directory for create or resume. Relative paths resolve against the parent working directory. Create defaults to the parent working directory. Resume defaults to the source run's working directory.",
+    action: "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.",
     id: "Retained run ID for status, steer, interrupt, resume, or reply.",
     message: "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.",
   });
@@ -825,7 +825,7 @@ test("registered subagent metadata describes the unified lifecycle", () => {
   const harness = createHarness();
   try {
     const subagent = harness.tools.get("subagent");
-    assert.equal(subagent.description, "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.");
+    assert.equal(subagent.description, "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context, optionally in another working directory. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.");
     assert.equal(subagent.promptSnippet, "Delegate and manage specialist runs.");
     assertSteBlock(subagent.description);
     assertSteBlock(subagent.promptSnippet);
@@ -842,7 +842,8 @@ test("registered subagent metadata describes the unified lifecycle", () => {
       "`subagent interrupt` is not rollback, so inspect partial file changes before continuing.",
       "Use `subagent clear` only when every run is terminal and all retained history should be removed.",
     ];
-    assert.equal(subagent.parameters.properties.action.description, "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message. list and clear accept no other fields.");
+    assert.equal(subagent.parameters.properties.cwd.description, "Working directory for create or resume. Relative paths resolve against the parent working directory. Create defaults to the parent working directory. Resume defaults to the source run's working directory.");
+    assert.equal(subagent.parameters.properties.action.description, "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.");
     assert.equal(subagent.parameters.properties.id.description, "Retained run ID for status, steer, interrupt, resume, or reply.");
     assert.equal(subagent.parameters.properties.message.description, "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.");
     assert.deepEqual(subagent.promptGuidelines, expectedGuidelines);
@@ -3287,6 +3288,103 @@ test("resume creates a new run ID and a complete --session invocation", async ()
     const denyIndex = config.piInvocation.args.indexOf("--exclude-tools");
     assert.notEqual(denyIndex, -1);
     assert.equal(config.piInvocation.args[denyIndex + 1], "ask_user_question");
+  } finally { harness.cleanup(); }
+});
+
+test("resume inherits the source run working directory and resolves cwd overrides like create", async () => {
+  const harness = createHarness();
+  const sourceCwd = join(ROOT, "extensions");
+  try {
+    await harness.restore();
+    harness.runtime.setDenyResolver(() => []);
+    const launchFor = (id) => harness.launches.find((launch) => launch.configFile.includes(id));
+    const resumeWith = async (suffix, args) => {
+      const sessionFile = join(harness.tempDir, `${suffix}.jsonl`);
+      writeFileSync(sessionFile, "session");
+      harness.runtime.registry.add(persistedRun({
+        id: `source-${suffix}`, status: "completed", sessionFile, cwd: sourceCwd,
+      }));
+      const result = await harness.tools.get("subagent").execute(`resume-${suffix}`, {
+        action: "resume", id: `source-${suffix}`, abstract: `abstract ${suffix}`, message: "continue", ...args,
+      });
+      const id = result.details.run.id;
+      return { id, result, config: readConfig(harness, id), launch: launchFor(id) };
+    };
+
+    const inherited = await resumeWith("inherit", {});
+    assert.equal(inherited.result.details.run.cwd, sourceCwd, "an omitted cwd inherits the source run working directory");
+    assert.equal(inherited.config.cwd, sourceCwd);
+    assert.equal(inherited.launch.options.cwd, sourceCwd);
+    assert.equal(inherited.config.resumeSessionFile, join(harness.tempDir, "inherit.jsonl"));
+    assert.equal(inherited.config.approve, true);
+    assert.equal(inherited.config.piInvocation.args.includes("--approve"), true);
+
+    const relative = await resumeWith("relative", { cwd: "extensions/oh-my-pi-slim" });
+    const expectedRelative = resolve(ROOT, "extensions/oh-my-pi-slim");
+    assert.equal(relative.result.details.run.cwd, expectedRelative, "a relative override resolves against the parent session cwd");
+    assert.notEqual(relative.result.details.run.cwd, resolve(sourceCwd, "extensions/oh-my-pi-slim"));
+    assert.equal(relative.config.cwd, expectedRelative);
+    assert.equal(relative.launch.options.cwd, expectedRelative);
+    assert.equal(relative.config.resumeSessionFile, join(harness.tempDir, "relative.jsonl"));
+
+    const absoluteTarget = realpathSync(harness.tempDir);
+    const absolute = await resumeWith("absolute", { cwd: absoluteTarget });
+    assert.equal(absolute.result.details.run.cwd, absoluteTarget, "an absolute override is used verbatim");
+    assert.equal(absolute.config.cwd, absoluteTarget);
+    assert.equal(absolute.launch.options.cwd, absoluteTarget);
+
+    const untrimmed = await resumeWith("untrimmed", { cwd: "  extensions  " });
+    assert.equal(untrimmed.result.details.run.cwd, sourceCwd, "a padded override still resolves from the trimmed path");
+
+    const missing = await resumeWith("missing", { cwd: "never-created-directory" });
+    assert.equal(missing.result.details.run.status, "starting", "resume adds no directory existence precondition");
+    assert.equal(missing.config.cwd, resolve(ROOT, "never-created-directory"));
+
+    const outside = await resumeWith("outside", { cwd: dirname(ROOT.replace(/\/$/, "")) });
+    assert.equal(outside.config.approve, false, "an out-of-project override reuses the shared no-approve decision");
+    assert.equal(outside.config.piInvocation.args.includes("--no-approve"), true);
+    assert.equal(outside.config.piInvocation.args.includes("--approve"), false);
+    assert.equal(outside.config.resumeSessionFile, join(harness.tempDir, "outside.jsonl"));
+
+    for (const resumed of [inherited, relative, absolute, untrimmed, missing, outside]) {
+      assert.equal(resumed.config.agent, "fixer");
+      assert.equal(resumed.config.model, "provider/model:high");
+      assert.equal(resumed.result.details.run.sourceRunId.startsWith("source-"), true);
+    }
+  } finally { harness.cleanup(); }
+});
+
+test("resume rejects a blank cwd and still refuses agent and task", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const subagent = harness.tools.get("subagent");
+    const base = { action: "resume", id: "source", abstract: "new summary", message: "continue" };
+    for (const cwd of ["", "   ", "\t\n"]) {
+      await assert.rejects(
+        subagent.execute("resume-blank-cwd", { ...base, cwd }),
+        /cwd must be a non-empty string/i,
+      );
+    }
+    for (const cwd of [null, 5, {}, []]) {
+      await assert.rejects(
+        subagent.execute("resume-typed-cwd", { ...base, cwd }),
+        /cwd must be a non-empty string/i,
+      );
+    }
+    assert.equal(harness.launches.length, 0, "a rejected cwd never launches a run");
+    await assert.rejects(
+      subagent.execute("resume-agent", { ...base, agent: "fixer" }),
+      /resume does not accept field\(s\): agent/i,
+    );
+    await assert.rejects(
+      subagent.execute("resume-agent-task", { ...base, agent: "fixer", task: "forbidden", cwd: ROOT }),
+      /resume does not accept field\(s\): agent, task/i,
+    );
+    await assert.rejects(
+      subagent.execute("resume-unknown-source", { ...base, cwd: ROOT }),
+      /source/i,
+    );
   } finally { harness.cleanup(); }
 });
 

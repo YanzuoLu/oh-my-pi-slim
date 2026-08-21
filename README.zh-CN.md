@@ -103,7 +103,7 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 | `status` | 返回单个 retained run 的公开状态，并在 terminal 时返回已有结果 |
 | `interrupt` | 停止未结束的 run，但不回滚文件修改，并返回其最终结果 |
 | `steer` | 向 running run 发送补充指导 |
-| `resume` | 从 terminal run 保存的 child session 创建新 run，并生成新 ID |
+| `resume` | 从 terminal run 保存的 child session 创建新 run，并生成新 ID。可选覆盖 cwd，省略时继承 source run 的工作目录 |
 | `reply` | 回复 waiting child，并继续同一个 run |
 | `clear` | 删除全部 retained terminal history |
 
@@ -156,12 +156,14 @@ Loop 会跨 compaction 与 tree navigation 保留，但 reload、new session、s
 
 | Action | 作用 |
 | --- | --- |
-| `create` | 用 abstract、可选 cwd 与可选 `notifyOn` literal 启动命令 |
+| `create` | 用 abstract、必填 `checkAfter` 静默阈值、可选 cwd 与可选 `notifyOn` literal 启动命令 |
 | `delete` | 必要时停止进程，再删除 monitor 与 retained record |
 | `list` | 列出精简的 monitor 状态 |
 | `status` | 查看当前状态与保留的合并输出 |
 
 `notifyOn` 使用区分大小写的 literal match。命令必须保持前台运行：不要使用 `nohup`、`setsid`、`disown`、尾随 `&` 或其他 detach escape。
+
+`checkAfter` 在 `create` 时必填，闭区间从 `10s` 到 `7d`，格式为一个正整数加 `s`、`m`、`h` 或 `d`。静默时长从 `create` 成功开始计时，并在最近一次原始 stdout/stderr chunk 处重新起算，因此半行输出与没有换行的输出同样算作活动。运行中的命令只要静默达到该阈值，就会收到一条 silence reminder，要求你用该 ID 调用 `monitor status`。每个 monitor 同时最多只排队一条 reminder：后续 interval 只会就地更新同一条 reminder 的累计静默时长，不会堆积。`status` 会返回 canonical 的 `checkAfter` 与 `lastOutputAt`，在命令产生第一段输出前 `lastOutputAt` 为 `null`。
 
 matcher 与 terminal notification 共用同一种形式：每条都说明 monitor 当前状态，并且只携带上一条 notification 之后新增的输出，不重发完整日志。要看一个 record 的完整 retained state 与合并输出，`status` 是唯一入口。
 
