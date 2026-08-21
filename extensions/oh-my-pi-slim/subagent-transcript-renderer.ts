@@ -269,6 +269,9 @@ function renderRunStatus(run: UnknownRecord, theme: Theme, expanded: boolean): C
 function renderRunList(runs: unknown[], theme: Theme, expanded: boolean): Container {
   const container = new Container();
   container.addChild(styledTitle(theme, "Retained subagent run status", `· ${runs.length}`));
+  // A collapsed list keeps only the heading count; every run row, empty-list note, and summary
+  // field stays behind ctrl+o so a long retained list never floods the transcript.
+  if (!expanded) return container;
   if (runs.length === 0) {
     container.addChild(new Text(theme.fg("dim", "No retained runs."), 0, 0));
     return container;
@@ -277,7 +280,7 @@ function renderRunList(runs: unknown[], theme: Theme, expanded: boolean): Contai
     const run = asRecord(value) ?? {};
     container.addChild(new Spacer(1));
     container.addChild(compactRunHeader(run, theme, undefined, true));
-    if (expanded) addRunSummaryDetails(container, theme, run);
+    addRunSummaryDetails(container, theme, run);
   });
   return container;
 }

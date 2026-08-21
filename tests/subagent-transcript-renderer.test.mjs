@@ -399,16 +399,15 @@ test("Ctrl+O expands list public summary fields without leaking terminal results
     },
   };
   const before = structuredClone(result);
-  const collapsed = render(renderSubagentResult(result, { expanded: false, isPartial: false }, theme, { args: { action: "list" } }));
-  assertFull(collapsed, [
-    "Retained subagent run status · 3",
-    "✓  fixer [terminal-id] · completed  TERMINAL_ABSTRACT_SENTINEL",
-    "●  explorer [active-id] · running  active abstract",
-    "!  fixer [waiting-id] · waiting  waiting abstract",
-  ]);
+  const collapsedLines = renderLines(renderSubagentResult(result, { expanded: false, isPartial: false }, theme, { args: { action: "list" } }));
+  const collapsed = collapsedLines.join("\n").replace(/^\n+|\n+$/g, "");
+  // Collapsed is exactly one heading line after the shared tool-result separator: no run rows, no blank filler.
+  assert.deepEqual(collapsedLines, ["", "Retained subagent run status · 3"]);
+  assert.equal(collapsed, "Retained subagent run status · 3");
+  assert.doesNotMatch(collapsed, /terminal-id|active-id|waiting-id|fixer|explorer|No retained runs/);
   assert.doesNotMatch(collapsed, /Reason:|Source run:|Live:|interview_request|OUTPUT_SENTINEL|ERROR_SENTINEL/);
-  assert.doesNotMatch(collapsed, /[✓●!] [^ ]|[✓●!] {3}/);
   const expanded = render(renderSubagentResult(result, { expanded: true, isPartial: false }, theme, { args: { action: "list" } }));
+  assert.doesNotMatch(expanded, /[✓●!] [^ ]|[✓●!] {3}/);
   assertFull(expanded, [
     "Retained subagent run status · 3",
     "✓  fixer [terminal-id] · completed  TERMINAL_ABSTRACT_SENTINEL",
@@ -521,17 +520,61 @@ test("clear receipts stay compact when collapsed and list every retained-item wa
 
 test("legacy transcript list derives a Unicode-safe abstract or shows an explicit unavailable placeholder", () => {
   const task = `${"文".repeat(98)}😀🚀tail`;
-  const listText = render(renderSubagentResult({
+  const legacy = {
     details: {
       runs: [
         run({ id: "legacy-task", status: "running", abstract: undefined, task }),
         run({ id: "legacy-empty", status: "waiting", abstract: undefined, task: undefined, reason: "need_decision" }),
       ],
     },
-  }, { expanded: false, isPartial: false }, theme, { args: { action: "list" } }));
+  };
+  const context = { args: { action: "list" } };
+  const collapsed = render(renderSubagentResult(legacy, { expanded: false, isPartial: false }, theme, context));
+  assert.equal(collapsed, "Retained subagent run status · 2");
+  assert.doesNotMatch(collapsed, /legacy-task|legacy-empty|Legacy run summary unavailable|文/);
+  const listText = render(renderSubagentResult(legacy, { expanded: true, isPartial: false }, theme, context));
   assert.match(listText, new RegExp(`${"文".repeat(98)}😀🚀\\.\\.\\.`));
   assert.match(listText, /Legacy run summary unavailable/);
   assert.doesNotMatch(listText, /tail/);
+});
+
+test("collapsed list results show only the retained-run heading count", () => {
+  const empty = {
+    content: [{ type: "text", text: "EMPTY_LIST_MODEL_CONTENT_SENTINEL" }],
+    details: { runs: [] },
+  };
+  const emptyBefore = structuredClone(empty);
+  const context = { args: { action: "list" } };
+  const emptyCollapsedLines = renderLines(renderSubagentResult(empty, { expanded: false, isPartial: false }, theme, context));
+  // An empty retained list collapses to the same single heading line, never to "No retained runs.".
+  assert.deepEqual(emptyCollapsedLines, ["", "Retained subagent run status · 0"]);
+  const emptyCollapsed = render(renderSubagentResult(empty, { expanded: false, isPartial: false }, theme, context));
+  assert.equal(emptyCollapsed, "Retained subagent run status · 0");
+  assert.doesNotMatch(emptyCollapsed, /No retained runs|EMPTY_LIST_MODEL_CONTENT_SENTINEL/);
+  const emptyExpanded = render(renderSubagentResult(empty, { expanded: true, isPartial: false }, theme, context));
+  assert.equal(emptyExpanded, "Retained subagent run status · 0\nNo retained runs.");
+  assert.doesNotMatch(emptyExpanded, /EMPTY_LIST_MODEL_CONTENT_SENTINEL/);
+  assert.deepEqual(empty, emptyBefore);
+
+  const single = {
+    content: [{ type: "text", text: "SINGLE_LIST_MODEL_CONTENT_SENTINEL" }],
+    details: { runs: [run({ id: "only-id", status: "running", abstract: "ONLY_ABSTRACT_SENTINEL", live: true })] },
+  };
+  const singleBefore = structuredClone(single);
+  const singleCollapsedLines = renderLines(renderSubagentResult(single, { expanded: false, isPartial: false }, theme, context));
+  assert.deepEqual(singleCollapsedLines, ["", "Retained subagent run status · 1"]);
+  const singleCollapsed = render(renderSubagentResult(single, { expanded: false, isPartial: false }, theme, context));
+  assert.equal(singleCollapsed, "Retained subagent run status · 1");
+  assert.doesNotMatch(singleCollapsed, /only-id|ONLY_ABSTRACT_SENTINEL|Live:|SINGLE_LIST_MODEL_CONTENT_SENTINEL/);
+  const singleExpanded = render(renderSubagentResult(single, { expanded: true, isPartial: false }, theme, context));
+  assertFull(singleExpanded, [
+    "Retained subagent run status · 1",
+    "●  fixer [only-id] · running  ONLY_ABSTRACT_SENTINEL",
+    "Live: true",
+    "Source run: source-run-0",
+  ]);
+  assert.doesNotMatch(singleExpanded, /SINGLE_LIST_MODEL_CONTENT_SENTINEL|Output:|Error:|Task:/);
+  assert.deepEqual(single, singleBefore);
 });
 
 test("Ctrl+O collapses waiting notification details without changing model content", () => {

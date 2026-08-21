@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.10", "package version must be 0.10.10");
+check(packageJson.version === "0.10.11", "package version must be 0.10.11");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.10" && lock.packages?.[""]?.version === "0.10.10", "package-lock version must be 0.10.10");
+check(lock.version === "0.10.11" && lock.packages?.[""]?.version === "0.10.11", "package-lock version must be 0.10.11");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -2152,6 +2152,10 @@ hasAll(todoTests, [
 ], "Todo focused Ctrl+O, active-idle, and collapsed-widget visual tests");
 const subagentTranscriptTests = read("tests/subagent-transcript-renderer.test.mjs");
 hasAll(subagentTranscriptTests, [
+  "collapsed list results show only the retained-run heading count",
+  'assert.deepEqual(collapsedLines, ["", "Retained subagent run status · 3"])',
+  'assert.deepEqual(emptyCollapsedLines, ["", "Retained subagent run status · 0"])',
+  'assert.equal(emptyExpanded, "Retained subagent run status · 0\\nNo retained runs.")',
   "clear receipts stay compact when collapsed and list every retained-item warning when expanded",
   "subagent · clear (ctrl+o to expand)", "Clears retained Subagent history", "run files", "child session files",
   "assert.doesNotMatch(clearExpanded, /Goal|sidecar/i)", "Retained subagent run status · 3",
@@ -2501,8 +2505,15 @@ hasAll(statusRenderer, [
   "TERMINAL_STATUSES.has(runIdentity(run).status)", "addFinalOutput(container, theme, run)",
 ], "single retained-run status renderer");
 hasAll(listRenderer, [
-  "styledTitle", "compactRunHeader", "undefined, true", "if (expanded) addRunSummaryDetails(container, theme, run)",
+  "styledTitle", "compactRunHeader", "undefined, true", "addRunSummaryDetails(container, theme, run)",
+  "if (!expanded) return container",
 ], "retained-run list renderer");
+check(
+  listRenderer.indexOf("if (!expanded) return container") <
+    listRenderer.indexOf('theme.fg("dim", "No retained runs.")') &&
+  listRenderer.indexOf("if (!expanded) return container") < listRenderer.indexOf("runs.forEach"),
+  "a collapsed retained-run list must return right after the heading, before any run row or empty-list note",
+);
 hasNone(listRenderer, [
   "addFinalOutput", "run.output", "run.error", "addLiveActivity", "addRequest", "run.task", "run.cwd", "run.model",
   "run.deniedTools", "run.activity", "run.request)",
