@@ -266,6 +266,7 @@ Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree res
 - 已结束的 run 还会在 transcript 下方显示 `[completed]`、`[failed]` 或 `[interrupted]` 块。失败或中断原因始终可见；与最后一条 assistant 消息重复的最终答案不会重复打印。即使没有可读的 session 文件，retained 结果仍会显示。
 - `starting` run 在 child session 文件出现前显示为等待状态，等待期间不会反复重绘。
 - transcript 取自 child session 文件中 compaction-aware 的当前分支。非法条目行会被跳过；分支元数据不可用（父链成环或 entry id 重复）时，降级为有界的文件顺序 tail 并在 footer 给出 warning，而不是继续信任它。符号链接、目录以及本 session child session 目录之外的路径一律拒绝；文件尚未创建时显示为 waiting；超大文件降级为有界只读文件顺序 tail 并给出 warning。图片只渲染占位符，绝不渲染原始数据，也绝不执行 child extension 自己的消息 renderer。
+- 长 block 保留真实结尾。普通 transcript block（消息正文、thinking、tool result、bash 输出、custom message、summary 以及 outcome 块）在 64K 字符以内完整显示；超过该预算时，在同一预算内同时保留头部与尾部，中间插入 `… N characters omitted …` 标记，因此 child 真正说的最后一句总是可见。只有 tool 调用参数仍使用短的只取头部摘要。整份 transcript 仍受行数预算限制，被裁掉的总是最旧的行。
 - viewer 打开期间占据整个屏幕，并自带 `Read-Only` 输入占位栏，退出后原样交还 Main UI。viewer 从不替换 editor，因此你的草稿、光标与 undo 历史都不会被修改。
 - 问卷始终优先占屏：`ask_user_question` 会先关闭 viewer 并等待其真正消失，再打开自己的 overlay。
 - 关闭只移除 viewer 自己的那一个 overlay，按 handle 而不是按栈位置。位于 viewer 之上的其他 package overlay 不会被误关，viewer 也不会以隐藏全屏层的形式残留并在对方关闭后重新出现。关闭在任何情况下都是立即完成的，且不依赖键盘焦点在哪个组件上。

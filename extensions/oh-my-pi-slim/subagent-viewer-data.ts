@@ -20,8 +20,16 @@ import type { RunStatus, SpecialistName, SupervisorRequest } from "./subagent-co
 export const VIEWER_MAX_FILE_BYTES = 2 * 1024 * 1024;
 /** Newest context entries kept for rendering; older ones are summarized by a single hidden-count line. */
 export const VIEWER_MAX_ENTRIES = 400;
-/** Character budget for one rendered text block before it is tail-trimmed. */
+/** Character budget for one live-overlay text block before it is tail-trimmed. */
 export const VIEWER_MAX_BLOCK_CHARS = 4000;
+/**
+ * Character budget for one transcript block handed to a Pi component.
+ *
+ * A transcript block is a finished message, so its ending carries the answer, the failure, or the
+ * final tool output. The budget is therefore large enough that a normal block is never cut, and a
+ * block that does exceed it keeps both ends instead of a head with a misleading ellipsis.
+ */
+export const VIEWER_MAX_TRANSCRIPT_BLOCK_CHARS = 64 * 1024;
 /** Line budget for one rendered block, applied after wrapping. */
 export const VIEWER_MAX_BLOCK_LINES = 120;
 /** Total rendered transcript line budget, so a huge session can never produce unbounded output. */
@@ -112,9 +120,41 @@ function boundedHead(text: string, maxChars: number): string {
   return characters.length <= maxChars ? text : `${characters.slice(0, maxChars).join("")}…`;
 }
 
-/** Bounded head copy used before any untrusted text reaches a Pi transcript component. */
+/**
+ * Bounded head copy, for short inline values only: tool-call argument strings and one-line details.
+ *
+ * This is the head bound: it keeps the beginning and marks the cut with a trailing `…`, which is
+ * correct for a value that is only ever shown as a summary. A transcript block must not use it,
+ * because the trailing `…` would claim the message ends there. Use `boundViewerBlockText` instead.
+ */
 export function boundViewerText(text: string, maxChars: number): string {
   return boundedHead(text, Math.max(1, maxChars));
+}
+
+/**
+ * Bounded head-and-tail copy used before any untrusted transcript text reaches a Pi component.
+ *
+ * Text within the budget is returned untouched, so an ordinary block is never truncated. Beyond it,
+ * the head and the tail together stay inside the budget and an explicit marker states how many code
+ * points were dropped between them. The real ending is always present, so the block can never end
+ * in an ellipsis that hides the last thing the child actually said.
+ */
+export function boundViewerBlockText(
+  text: string,
+  maxChars: number = VIEWER_MAX_TRANSCRIPT_BLOCK_CHARS,
+): string {
+  const budget = Math.max(1, Math.floor(maxChars));
+  // Code points, not UTF-16 units: a budget must never split a surrogate pair.
+  const characters = Array.from(text);
+  if (characters.length <= budget) return text;
+  // The tail wins the odd character: the ending is the part that must survive.
+  const tailBudget = Math.max(1, Math.ceil(budget / 2));
+  const headBudget = budget - tailBudget;
+  const omitted = characters.length - headBudget - tailBudget;
+  const tail = characters.slice(characters.length - tailBudget).join("");
+  const marker = `… ${omitted} characters omitted …`;
+  if (headBudget <= 0) return `${marker}\n${tail}`;
+  return `${characters.slice(0, headBudget).join("")}\n${marker}\n${tail}`;
 }
 
 /**

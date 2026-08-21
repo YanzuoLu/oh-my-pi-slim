@@ -35,8 +35,8 @@ import { Spacer, Text, type Component, type MarkdownTheme, type TUI } from "@ear
 import type { RunStatus } from "./subagent-core.js";
 import {
   VIEWER_MAX_ARGS_CHARS,
-  VIEWER_MAX_BLOCK_CHARS,
   VIEWER_MAX_TRANSCRIPT_LINES,
+  boundViewerBlockText,
   boundViewerText,
   lastAssistantText,
   liveTextIsRedundant,
@@ -154,6 +154,10 @@ function record(value: unknown): Record<string, unknown> | undefined {
  * Deep copy of tool-call arguments with every string sanitized and bounded.
  * Built-in renderers read fields such as `path` or `command`, so the shape is preserved while the
  * content stays terminal-safe and bounded in depth, width, and element count.
+ *
+ * Arguments keep the small head bound: a renderer shows them as a one-line summary, so the head is
+ * the informative part and a trailing `…` reads correctly there. Transcript bodies are different
+ * and use `boundViewerBlockText`, which never drops the real ending.
  */
 function sanitizeArgs(value: unknown, depth = 0): unknown {
   if (typeof value === "string") return boundViewerText(sanitizeViewerText(value), VIEWER_MAX_ARGS_CHARS * 4);
@@ -172,10 +176,13 @@ function sanitizeArgs(value: unknown, depth = 0): unknown {
   return copy;
 }
 
-/** Text content parts, sanitized and bounded. Image parts become a placeholder, never bytes. */
+/**
+ * Text content parts, sanitized and bounded head-and-tail. Image parts become a placeholder, never
+ * bytes.
+ */
 function sanitizeContentParts(content: unknown): { type: "text"; text: string }[] {
   if (typeof content === "string") {
-    return [{ type: "text", text: boundViewerText(sanitizeViewerText(content), VIEWER_MAX_BLOCK_CHARS) }];
+    return [{ type: "text", text: boundViewerBlockText(sanitizeViewerText(content)) }];
   }
   if (!Array.isArray(content)) return [];
   const parts: { type: "text"; text: string }[] = [];
@@ -183,7 +190,7 @@ function sanitizeContentParts(content: unknown): { type: "text"; text: string }[
     const part = record(raw);
     if (!part) continue;
     if (part.type === "text" && typeof part.text === "string") {
-      parts.push({ type: "text", text: boundViewerText(sanitizeViewerText(part.text), VIEWER_MAX_BLOCK_CHARS) });
+      parts.push({ type: "text", text: boundViewerBlockText(sanitizeViewerText(part.text)) });
     } else if (part.type === "image") {
       // The placeholder replaces the part entirely: no `data` field ever reaches a component.
       parts.push({ type: "text", text: `[image ${sanitizeViewerInline(String(part.mimeType ?? "unknown"))}]` });
@@ -209,11 +216,11 @@ function sanitizeAssistant(message: Record<string, unknown>): SanitizedAssistant
     const part = record(raw);
     if (!part) continue;
     if (part.type === "text" && typeof part.text === "string") {
-      content.push({ type: "text", text: boundViewerText(sanitizeViewerText(part.text), VIEWER_MAX_BLOCK_CHARS) });
+      content.push({ type: "text", text: boundViewerBlockText(sanitizeViewerText(part.text)) });
     } else if (part.type === "thinking" && typeof part.thinking === "string") {
       content.push({
         type: "thinking",
-        thinking: boundViewerText(sanitizeViewerText(part.thinking), VIEWER_MAX_BLOCK_CHARS),
+        thinking: boundViewerBlockText(sanitizeViewerText(part.thinking)),
       });
     } else if (part.type === "toolCall") {
       const id = typeof part.id === "string" && part.id !== "" ? part.id : `tool-${toolCalls.length}`;
@@ -528,7 +535,7 @@ export function buildViewerTranscriptBody(input: ViewerTranscriptBodyInput): Vie
         if (message.role === "compactionSummary") {
           const safeMessage = {
             ...message,
-            summary: boundViewerText(sanitizeViewerText(String(message.summary ?? "")), VIEWER_MAX_BLOCK_CHARS),
+            summary: boundViewerBlockText(sanitizeViewerText(String(message.summary ?? ""))),
           } as never;
           push("compaction summary", [new Spacer(1), new CompactionSummaryMessageComponent(safeMessage, markdownTheme)]);
           continue;
@@ -536,7 +543,7 @@ export function buildViewerTranscriptBody(input: ViewerTranscriptBodyInput): Vie
         if (message.role === "branchSummary") {
           const safeMessage = {
             ...message,
-            summary: boundViewerText(sanitizeViewerText(String(message.summary ?? "")), VIEWER_MAX_BLOCK_CHARS),
+            summary: boundViewerBlockText(sanitizeViewerText(String(message.summary ?? ""))),
           } as never;
           push("branch summary", [new Spacer(1), new BranchSummaryMessageComponent(safeMessage, markdownTheme)]);
           continue;
@@ -546,7 +553,7 @@ export function buildViewerTranscriptBody(input: ViewerTranscriptBodyInput): Vie
           const component = makeBashComponent(command, tui, message.excludeFromContext === true);
           let ready = false;
           try {
-            const output = boundViewerText(sanitizeViewerText(String(message.output ?? "")), VIEWER_MAX_BLOCK_CHARS);
+            const output = boundViewerBlockText(sanitizeViewerText(String(message.output ?? "")));
             if (output) component.appendOutput(output);
             // Completing immediately stops the component's own spinner timer, which a read-only
             // viewer must never leave running.
@@ -576,11 +583,11 @@ export function buildViewerTranscriptBody(input: ViewerTranscriptBodyInput): Vie
     const label = outcomeLabel(outcome.status);
     const color = outcome.status === "completed" ? "success" : outcome.status === "failed" ? "error" : "warning";
     lines.push(theme.bold(theme.fg(color, `[${label}]`)));
-    const error = boundViewerText(sanitizeViewerText(outcome.error ?? ""), VIEWER_MAX_BLOCK_CHARS).trim();
+    const error = boundViewerBlockText(sanitizeViewerText(outcome.error ?? "")).trim();
     // A failure or interruption reason is the whole point of the run's ending, so it is shown even
     // when the transcript already scrolled past it.
     if (error !== "") lines.push(theme.fg(color, error));
-    const output = boundViewerText(sanitizeViewerText(outcome.output ?? ""), VIEWER_MAX_BLOCK_CHARS).trim();
+    const output = boundViewerBlockText(sanitizeViewerText(outcome.output ?? "")).trim();
     if (output !== "") {
       // The final answer usually is the last assistant message; repeating it would only push the
       // real ending off screen.

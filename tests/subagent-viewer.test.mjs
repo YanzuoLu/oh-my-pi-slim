@@ -52,10 +52,12 @@ const {
   VIEWER_MAX_BLOCK_LINES,
   VIEWER_MAX_ENTRIES,
   VIEWER_MAX_FILE_BYTES,
+  VIEWER_MAX_TRANSCRIPT_BLOCK_CHARS,
   VIEWER_MAX_TRANSCRIPT_LINES,
   cycleViewerSelection,
   lastAssistantText,
   liveTextIsRedundant,
+  boundViewerBlockText,
   boundViewerText,
   formatViewerElapsed,
   loadViewerTranscript,
@@ -1366,6 +1368,161 @@ test("the body honours the shared expansion flag and its own line budget", () =>
   }
 });
 
+/** Rendered text with every wrap and indent removed, so a needle can be found across line breaks. */
+function squashed(text) {
+  return text.replace(/\s+/gu, "");
+}
+
+test("a long assistant block keeps its real ending instead of a 4 KB head", () => {
+  // The regression: a finished answer longer than the old 4000-character head bound lost its last
+  // paragraph and ended in an ellipsis that looked like the child had stopped mid-sentence.
+  const ending = "使用 ctx.ui.custom(..., { overlay: true } 完成。";
+  const filler = "the viewer must not cut this answer short. ".repeat(300);
+  assert.ok(filler.length > 4000 && filler.length < VIEWER_MAX_TRANSCRIPT_BLOCK_CHARS);
+  const text = bodyText([assistantText("m1", null, `${filler}\n\n${ending}`)]);
+  assert.ok(squashed(text).includes(squashed(ending)), "the last sentence must be rendered in full");
+  assert.equal(text.includes("…"), false, "nothing may be elided below the block budget");
+  assert.equal(text.includes("characters omitted"), false);
+});
+
+test("a block past the block budget keeps both ends and counts what it dropped", () => {
+  const head = "UNIQUE-HEAD-MARKER";
+  const tail = "UNIQUE-TAIL-MARKER 使用 ctx.ui.custom(..., { overlay: true } 完成。";
+  const middle = "filler paragraph that is far past the budget. ".repeat(2000);
+  assert.ok(middle.length > VIEWER_MAX_TRANSCRIPT_BLOCK_CHARS);
+  const text = bodyText([assistantText("m1", null, `${head}\n\n${middle}\n\n${tail}`)]);
+  const flat = squashed(text);
+  assert.ok(flat.includes(head), "the head of an oversized block is kept");
+  assert.ok(flat.includes(squashed(tail)), "the tail of an oversized block is kept in full");
+  const omitted = Number(/…(\d+)charactersomitted…/.exec(flat)?.[1]);
+  assert.ok(Number.isInteger(omitted) && omitted > 0, "the omission is stated, not silent");
+  assert.equal(
+    omitted,
+    Array.from(`${head}\n\n${middle}\n\n${tail}`).length - VIEWER_MAX_TRANSCRIPT_BLOCK_CHARS,
+    "the marker reports the exact number of dropped code points",
+  );
+});
+
+test("every ordinary block kind is bounded head and tail, not head only", () => {
+  const tail = "UNIQUE-TAIL-MARKER 使用 ctx.ui.custom(..., { overlay: true } 完成。";
+  const huge = (label) => `UNIQUE-HEAD-${label}\n${`${label} filler. `.repeat(8000)}\n${tail}-${label}`;
+  const cases = [
+    ["thinking", () => bodyText([messageEntry("m1", null, {
+      role: "assistant",
+      content: [{ type: "thinking", thinking: huge("THINKING") }],
+      timestamp: 0,
+    })])],
+    ["toolresult", () => bodyText([
+      messageEntry("m1", null, {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "/f" } }],
+        timestamp: 0,
+      }),
+      messageEntry("m2", "m1", {
+        role: "toolResult",
+        toolCallId: "t1",
+        toolName: "read",
+        content: [{ type: "text", text: huge("TOOLRESULT") }],
+        isError: false,
+        timestamp: 0,
+      }),
+    ])],
+    // Pi's own bash component shows a tail window of the output it is given, so only the ending of
+    // the bounded text can be asserted here. That is exactly the part the old head bound destroyed.
+    ["bash", () => bodyText([messageEntry("m1", null, {
+      role: "bashExecution",
+      command: "ls -la",
+      output: huge("BASH"),
+      exitCode: 0,
+      timestamp: 0,
+    })]), { head: false }],
+    ["user", () => bodyText([messageEntry("m1", null, { role: "user", content: huge("USER"), timestamp: 0 })])],
+    ["custom", () => bodyText([{
+      type: "custom_message",
+      id: "x1",
+      parentId: null,
+      timestamp: "2026-04-17T00:00:00.000Z",
+      customType: "oh-my-pi-slim:note",
+      content: huge("CUSTOM"),
+      display: true,
+    }])],
+    ["compaction", () => bodyText([{
+      type: "compaction",
+      id: "c1",
+      parentId: null,
+      timestamp: "2026-04-17T00:00:00.000Z",
+      summary: huge("COMPACTION"),
+      firstKeptEntryId: "c1",
+      tokensBefore: 4242,
+    }])],
+    ["branch", () => bodyText([{
+      type: "branch_summary",
+      id: "b1",
+      parentId: null,
+      timestamp: "2026-04-17T00:00:00.000Z",
+      fromId: "m0",
+      summary: huge("BRANCH"),
+    }])],
+  ];
+  for (const [label, render, expect = {}] of cases) {
+    const flat = squashed(render());
+    if (expect.head !== false) {
+      assert.ok(flat.includes(`UNIQUE-HEAD-${label.toUpperCase()}`), `${label}: head kept`);
+    }
+    assert.ok(flat.includes(squashed(`${tail}-${label.toUpperCase()}`)), `${label}: real ending kept`);
+    assert.match(flat, /…\d+charactersomitted…/, `${label}: the omission is stated`);
+  }
+});
+
+test("a terminal outcome block is bounded head and tail as well", () => {
+  const tail = "UNIQUE-TAIL-MARKER 使用 ctx.ui.custom(..., { overlay: true } 完成。";
+  const huge = (label) => `UNIQUE-HEAD-${label}\n${`${label} filler. `.repeat(8000)}\n${tail}-${label}`;
+  const host = createOverlayHost({ theme });
+  const body = buildViewerTranscriptBody({
+    transcript: transcriptOf([assistantText("m1", null, "a short turn")]),
+    tui: host.tui,
+    theme,
+    cwd: "/work/project",
+    expanded: true,
+    settings: VIEWER_DEFAULT_SETTINGS,
+    outcome: { status: "failed", error: huge("ERROR"), output: huge("OUTPUT") },
+  });
+  try {
+    const flat = squashed(body.render(70).map((line) => stripVTControlCharacters(line)).join("\n"));
+    for (const label of ["ERROR", "OUTPUT"]) {
+      assert.ok(flat.includes(`UNIQUE-HEAD-${label}`), `${label}: head kept`);
+      assert.ok(flat.includes(squashed(`${tail}-${label}`)), `${label}: real ending kept`);
+    }
+    assert.match(flat, /…\d+charactersomitted…/);
+  } finally {
+    body.dispose();
+  }
+});
+
+test("the global line budget still trims the oldest lines and keeps the newest ending", () => {
+  const ending = "UNIQUE-LAST-LINE 使用 ctx.ui.custom(..., { overlay: true } 完成。";
+  const entries = Array.from({ length: 200 }, (_, index) => assistantText(
+    `m${index}`,
+    index === 0 ? null : `m${index - 1}`,
+    index === 0
+      ? `UNIQUE-FIRST-LINE\n${"oldest turn body. ".repeat(80)}`
+      : index === 199
+        ? `turn ${index}\n${"newest turn body. ".repeat(80)}\n${ending}`
+        : `turn ${index}\n${"middle turn body. ".repeat(80)}`,
+  ));
+  const body = realBodyOf(entries);
+  try {
+    const lines = body.render(70).map((line) => stripVTControlCharacters(line));
+    assert.equal(lines.length, VIEWER_MAX_TRANSCRIPT_LINES + 1, "the line budget still holds");
+    assert.match(lines[0], /older lines trimmed to the viewer line budget/);
+    const flat = squashed(lines.join("\n"));
+    assert.equal(flat.includes("UNIQUE-FIRST-LINE"), false, "the oldest lines are the ones dropped");
+    assert.ok(flat.includes(squashed(ending)), "the newest ending is always on screen");
+  } finally {
+    body.dispose();
+  }
+});
+
 test("a bash row that throws while filling in stops its loader and keeps the next block", () => {
   const stops = [];
   const timers = [];
@@ -1574,6 +1731,42 @@ test("bounded text helpers keep untrusted input inside the viewer budget", () =>
   assert.equal(boundViewerText("abc", 10), "abc");
   assert.equal(boundViewerText("abcdef", 3), "abc…");
   assert.equal(Array.from(boundViewerText("x".repeat(9999), 100)).length, 101);
+});
+
+test("the transcript block bound keeps both ends and never invents an ending", () => {
+  assert.equal(VIEWER_MAX_TRANSCRIPT_BLOCK_CHARS, 64 * 1024);
+
+  // Anything inside the budget is returned byte for byte, including a text right at the limit.
+  const atBudget = "y".repeat(VIEWER_MAX_TRANSCRIPT_BLOCK_CHARS);
+  assert.equal(boundViewerBlockText(atBudget), atBudget);
+  assert.equal(boundViewerBlockText("short answer."), "short answer.");
+  assert.equal(boundViewerBlockText("x".repeat(50_000)), "x".repeat(50_000));
+
+  const over = `HEAD-TOKEN${"m".repeat(VIEWER_MAX_TRANSCRIPT_BLOCK_CHARS)}TAIL-TOKEN`;
+  const bounded = boundViewerBlockText(over);
+  assert.ok(bounded.startsWith("HEAD-TOKEN"), "the real beginning survives");
+  assert.ok(bounded.endsWith("TAIL-TOKEN"), "the real ending survives");
+  assert.equal(bounded.endsWith("…"), false, "a bounded block must never end in an ellipsis");
+  const omitted = Number(/… (\d+) characters omitted …/.exec(bounded)?.[1]);
+  assert.ok(Number.isInteger(omitted) && omitted > 0, "the marker states how much was dropped");
+  const kept = Array.from(bounded).length - `… ${omitted} characters omitted …`.length - 2;
+  assert.equal(kept, VIEWER_MAX_TRANSCRIPT_BLOCK_CHARS, "head and tail together stay inside the budget");
+  assert.equal(kept + omitted, Array.from(over).length, "the count is the exact number of dropped code points");
+
+  // Code points, not UTF-16 units: an astral character is never split into a lone surrogate.
+  const astral = "🙂".repeat(20);
+  const smallAstral = boundViewerBlockText(astral, 9);
+  assert.equal(smallAstral.includes("\uFFFD"), false);
+  assert.equal(/[\uD800-\uDFFF]/.test(smallAstral.replace(/🙂/gu, "")), false, "no lone surrogate survives");
+  assert.ok(smallAstral.endsWith("🙂"));
+  assert.match(smallAstral, /… 11 characters omitted …/);
+
+  // A tiny budget still spends everything it has on the ending.
+  assert.equal(boundViewerBlockText("abcdef", 1), "… 5 characters omitted …\nf");
+  assert.equal(boundViewerBlockText("abcdef", 0), "… 5 characters omitted …\nf");
+  assert.equal(boundViewerBlockText("abcdef", -10), "… 5 characters omitted …\nf");
+  assert.equal(boundViewerBlockText("abcdef", 2), "a\n… 4 characters omitted …\nf");
+  assert.equal(boundViewerBlockText("abcdef", 6), "abcdef");
 });
 
 test("the live block shows waiting requests, active tools, and unsaved response text", () => {

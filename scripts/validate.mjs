@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.15", "package version must be 0.10.15");
+check(packageJson.version === "0.10.16", "package version must be 0.10.16");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.15" && lock.packages?.[""]?.version === "0.10.15", "package-lock version must be 0.10.15");
+check(lock.version === "0.10.16" && lock.packages?.[""]?.version === "0.10.16", "package-lock version must be 0.10.16");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -2679,10 +2679,22 @@ hasAll(viewerData, [
   'inside === ".." || inside.startsWith(`..${sep}`)',
   "stat.isSymbolicLink()", "!stat.isFile()",
   "VIEWER_MAX_FILE_BYTES", "VIEWER_MAX_ENTRIES", "VIEWER_MAX_BLOCK_LINES", "VIEWER_MAX_TRANSCRIPT_LINES",
-  "VIEWER_MAX_ARGS_CHARS", "VIEWER_MAX_LIVE_CHARS",
+  "VIEWER_MAX_ARGS_CHARS", "VIEWER_MAX_LIVE_CHARS", "VIEWER_MAX_TRANSCRIPT_BLOCK_CHARS",
   "stripTerminalSequences", "truncateToWidth", "previousFingerprint",
-  "boundViewerText", "formatViewerElapsed", "liveTextIsRedundant",
+  "boundViewerText", "boundViewerBlockText", "formatViewerElapsed", "liveTextIsRedundant",
 ], "viewer reads child sessions read-only, inside containment, and within bounds");
+
+// A transcript block keeps its real ending: the head-only bound belongs to inline summaries alone.
+hasAll(viewerData, [
+  "export const VIEWER_MAX_TRANSCRIPT_BLOCK_CHARS = 64 * 1024;",
+  "export function boundViewerBlockText(",
+  "const characters = Array.from(text);",
+  "if (characters.length <= budget) return text;",
+  "const tailBudget = Math.max(1, Math.ceil(budget / 2));",
+  "const headBudget = budget - tailBudget;",
+  "const omitted = characters.length - headBudget - tailBudget;",
+  "const marker = `… ${omitted} characters omitted …`;",
+], "an oversized transcript block keeps head and tail inside the budget and states what it dropped");
 check(
   !viewerData.includes('inside.startsWith("..") ||'),
   "containment must reject only a real `..` path segment, not every name starting with dots",
@@ -2700,9 +2712,22 @@ hasAll(viewerTranscript, [
   "BashExecutionComponent", "CustomMessageComponent", "CompactionSummaryMessageComponent",
   "BranchSummaryMessageComponent", "SkillInvocationMessageComponent",
   "getMarkdownTheme", "sessionEntryToContextMessages", "parseSkillBlock",
-  "showImages: false", "PROMPT_ZONE_PATTERN", "sanitizeViewerText", "boundViewerText",
+  "showImages: false", "PROMPT_ZONE_PATTERN", "sanitizeViewerText", "boundViewerBlockText",
   "VIEWER_MAX_TRANSCRIPT_LINES", "dispose(): void", "setExpanded(expanded: boolean): void",
 ], "viewer transcript body reuses Pi's Main components with sanitized, bounded input");
+check(
+  !viewerTranscript.includes("VIEWER_MAX_BLOCK_CHARS"),
+  "no transcript block may be cut to the live-overlay head budget",
+);
+check(
+  (viewerTranscript.match(/boundViewerText\(/g) ?? []).length === 1
+  && viewerTranscript.includes("boundViewerText(sanitizeViewerText(value), VIEWER_MAX_ARGS_CHARS * 4)"),
+  "the head-only bound may serve tool-call arguments and nothing else",
+);
+check(
+  (viewerTranscript.match(/boundViewerBlockText\(sanitizeViewerText\(/g) ?? []).length === 9,
+  "every ordinary transcript block is sanitized first and then bounded head and tail",
+);
 
 // Presentation settings are read, never managed: SettingsManager locks and can create files.
 hasAll(viewerTranscript, [
@@ -2838,8 +2863,8 @@ hasAll(viewerTranscript, [
   "if (error !== \"\") lines.push(theme.fg(color, error));",
   "liveTextIsRedundant(output, persisted)",
   "input.placeholder ?? emptyBodyNote(transcript)",
-  "boundViewerText(sanitizeViewerText(outcome.error ?? \"\"), VIEWER_MAX_BLOCK_CHARS)",
-  "boundViewerText(sanitizeViewerText(outcome.output ?? \"\"), VIEWER_MAX_BLOCK_CHARS)",
+  "boundViewerBlockText(sanitizeViewerText(outcome.error ?? \"\"))",
+  "boundViewerBlockText(sanitizeViewerText(outcome.output ?? \"\"))",
 ], "the outcome block always shows a failure reason and never repeats the final answer");
 
 // Bottom-anchored layout and the split body/status caches.
