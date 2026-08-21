@@ -16,6 +16,11 @@ const dependencyMap = {
   "./ask-runtime.js": new URL("../extensions/oh-my-pi-slim/ask-runtime.ts", import.meta.url).href,
   "./ask-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts", import.meta.url).href,
   "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
+  "./subagent-model-display.js": new URL("../extensions/oh-my-pi-slim/subagent-model-display.ts", import.meta.url).href,
+  "./subagent-viewer-data.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer-data.ts", import.meta.url).href,
+  "./subagent-widget-display.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-display.ts", import.meta.url).href,
+  "./subagent-widget-glyphs.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-glyphs.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -28,6 +33,8 @@ const { CURSOR_MARKER, visibleWidth } = await import("@earendil-works/pi-tui");
 const { initTheme } = await import("@earendil-works/pi-coding-agent");
 initTheme(undefined, false);
 const { AskTuiDriver } = await import("../extensions/oh-my-pi-slim/ask-tui.ts");
+const { createSubagentViewer } = await import("../extensions/oh-my-pi-slim/subagent-viewer.ts");
+const { createOverlayHost } = await import("./fixtures/overlay-host.mjs");
 const { AskRuntime, buildAskResult, createRpcAskDriver, validateQuestionnaire } = await import("../extensions/oh-my-pi-slim/ask-runtime.ts");
 
 const KEY = {
@@ -484,5 +491,104 @@ test("main lifecycle binds fresh TUI drivers and clears them before switch, fork
     assert.match(handler, /bindAskDriver\(\)/);
     assert.ok(handler.indexOf("asks.abortAll(") < handler.indexOf("bindAskDriver()"));
   }
-  assert.match(source, /new AskTuiDriver\(ctx\.ui\)/);
+  assert.match(source, /new AskTuiDriver\(ctx\.ui, \{ beforeOpen: \(\) => subagentViewer\.closeAsync\(\) \}\)/);
+});
+
+/* ------------------------------------------------------------------------------------------------
+ * Ask and the read-only Subagent viewer never stack: the viewer closes first, and Ask waits for it.
+ * ---------------------------------------------------------------------------------------------- */
+
+function viewerSnapshotForTests() {
+  return {
+    runs: [{
+      id: "run-a",
+      agent: "fixer",
+      abstract: "fix it",
+      status: "running",
+      live: true,
+      model: "provider/model",
+      createdAt: "2026-04-17T00:00:00.000Z",
+      updatedAt: "2026-04-17T00:00:00.000Z",
+      activity: { turnCount: 0, toolUses: 0, activeTools: {}, responseText: "", tokens: 0, compactionCount: 0 },
+    }],
+    childSessionDir: undefined,
+  };
+}
+
+function createViewerAskHost() {
+  const events = [];
+  const timers = [];
+  const host = createOverlayHost({ rows: 40, columns: 140, theme });
+  const ui = {
+    notify() {},
+    custom(factory, options) {
+      events.push(`custom:${host.entries().length}`);
+      return host.custom(factory, options, { onResolve: () => events.push("done") });
+    },
+  };
+  const viewer = createSubagentViewer({
+    snapshot: viewerSnapshotForTests,
+    loadTranscript: () => ({ status: "waiting", transcript: { status: "waiting", entries: [], hiddenEntries: 0 } }),
+    setInterval: (callback, ms) => {
+      const timer = { callback, ms, cleared: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearInterval: (timer) => { timer.cleared = true; },
+  });
+  return { events, host, timers, ui, viewer };
+}
+
+test("Ask closes the read-only viewer before it opens its own overlay", async () => {
+  const { events, host, timers, ui, viewer } = createViewerAskHost();
+  const viewerOpen = viewer.handleShortcut(ui, 1, { enabled: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(viewer.isOpen(), true);
+  assert.equal(host.entries().length, 1);
+  const viewerComponent = host.entries()[0].component;
+
+  const driver = new AskTuiDriver(ui, { beforeOpen: () => viewer.closeAsync() });
+  const controller = new AbortController();
+  const pending = driver.ask(validateQuestionnaire({ questions: [question()] }), controller.signal);
+  await viewerOpen;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // The viewer's overlay entry is gone before Ask asks for one, so the two can never stack. The
+  // viewer removes itself through its own handle, so the host's `done` never runs for it.
+  assert.deepEqual(events, ["custom:0", "custom:0"]);
+  assert.equal(viewer.isOpen(), false);
+  assert.equal(host.contains(viewerComponent), false, "no zombie viewer entry may survive");
+  assert.equal(host.entries().length, 1, "only the questionnaire may be mounted");
+  assert.equal(host.focusedComponent(), host.entries()[0].component);
+  assert.equal(timers.every((timer) => timer.cleared), true, "the viewer refresh timer must be cleared");
+
+  controller.abort();
+  await assert.rejects(pending, /aborted/i);
+  assert.equal(host.entries().length, 0);
+});
+
+test("Ask still opens when the viewer sits under a foreign overlay, and pops neither", async () => {
+  const { events, host, timers, ui, viewer } = createViewerAskHost();
+  const viewerOpen = viewer.handleShortcut(ui, 1, { enabled: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  const viewerComponent = host.entries()[0].component;
+  const foreign = host.pushForeignOverlay();
+  assert.equal(host.entries().length, 2);
+
+  const driver = new AskTuiDriver(ui, { beforeOpen: () => viewer.closeAsync() });
+  const controller = new AbortController();
+  const pending = driver.ask(validateQuestionnaire({ questions: [question()] }), controller.signal);
+  await viewerOpen;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(events, ["custom:0", "custom:1"]);
+  assert.equal(viewer.isOpen(), false);
+  assert.equal(host.contains(viewerComponent), false, "only the viewer entry may be removed");
+  assert.equal(host.contains(foreign.component), true, "the foreign overlay must survive");
+  assert.equal(host.entries().length, 2, "the foreign overlay plus the questionnaire");
+  assert.equal(timers.every((timer) => timer.cleared), true);
+
+  controller.abort();
+  await assert.rejects(pending, /aborted/i);
+  assert.deepEqual(host.components(), [foreign.component], "closing Ask returns to the foreign overlay");
 });

@@ -245,6 +245,34 @@ Provider, model, and thinking level are independently configurable per role. Aut
 - Loop and Monitor are runtime services rather than durable schedules. Session transitions shut them down; Loop follows the explicit clearing rules above.
 - Child processes are isolated Pi RPC sessions. On session shutdown, active runs are interrupted rather than adopted silently by a later session; retained terminal sessions can be continued with `resume`, which creates a new run.
 
+### Subagent viewer
+
+`super+left` and `super+right` open a read-only, full-screen viewer for the child transcript of any `running` or `waiting` subagent. The viewer only shows: it has no reply, steer, or interrupt, and it never writes a session entry, a control file, or a run file.
+
+- Main is item 0 of one cycle. `super+right` moves Main to the first active run, then run by run, then back to Main. `super+left` moves the same ring in reverse. `starting` and terminal runs are not part of the cycle.
+- Inside the viewer, plain `Left`/`Right` and `super+left`/`super+right` cycle the same way. `Escape` or `q` returns to Main.
+- `Up`/`Down` scroll one line, `PageUp`/`PageDown` scroll one page, `Home` jumps to the top, `End` jumps to the bottom and turns follow on, `f` toggles follow, and `r` re-reads the transcript immediately.
+- The viewer refreshes about four times a second, and every run keeps its own scroll position and follow state.
+- A run that leaves the active set while you watch it hands the view to a neighboring active run, or returns to Main when no active run is left. A new run joins the cycle without moving your current selection.
+- The transcript is the child session file's active, compaction-aware branch. Rows that are not well-formed entries are skipped, and a session file whose branch metadata is unusable (a parent cycle or a duplicate entry id) falls back to a bounded file-order tail with a footer warning instead of being trusted. Symbolic links, directories, and paths outside this session's own child session directory are refused, a file that does not exist yet reads as waiting, and an oversized file degrades to a bounded read-only file-order tail with a footer warning. Images render as a placeholder and never as raw data.
+- The viewer takes the whole screen while it is open, including its own `Read-Only` input placeholder, and hands the untouched Main UI back on exit. Your draft, cursor, and undo history are never modified, because the viewer never replaces the editor.
+- A questionnaire always wins the screen: `ask_user_question` closes the viewer and waits for it to be gone before it opens its own overlay.
+- Closing removes exactly the viewer's own overlay, by handle rather than by stack position. Another package's overlay on top of the viewer is never dismissed, and the viewer never survives as a hidden full-screen layer that reappears when that overlay closes. Closing is immediate in every case, and it never depends on which component holds keyboard focus.
+- Known limitation: an inline terminal image the host already drew is a raw escape sequence the host composites, so it can still show through an overlay row. Nothing the viewer itself renders can do that.
+
+**Terminal.app needs a one-time key mapping.** macOS Terminal.app consumes Command+Arrow before Pi can see it. Open `Terminal → Settings → Profiles → Keyboard` and add two entries with the action set to `Send Text`.
+
+The `Send Text` field needs a real ESC control byte, not the six characters `\033`. Click into the field, press the `Escape` key once (Terminal shows it as a small marker), then type the remaining characters:
+
+| Key | Modifier | Type into `Send Text` |
+| --- | --- | --- |
+| `Left` | `Command` | `Escape` key, then `[1;9D` |
+| `Right` | `Command` | `Escape` key, then `[1;9C` |
+
+Verify the mapping with `cat -v`: Command+Left must print `^[[1;9D` and Command+Right must print `^[[1;9C`. If `cat -v` prints nothing, the terminal is still swallowing the key; if it prints something else, that terminal sends a different sequence.
+
+Other terminals vary. iTerm2, Ghostty, WezTerm, and Kitty usually send a Command or Super modified arrow without extra configuration, but the exact bytes depend on the version and on whether the kitty keyboard protocol is active, and a kitty-protocol sequence is not the same as `^[[1;9D`. Treat `cat -v` output, or Pi actually responding to the shortcut, as the only proof. The package registers only `super+left` and `super+right`, with no fallback shortcut and no slash command.
+
 ## Deliberate scope
 
 - No nested child orchestration: specialists cannot create subagents.

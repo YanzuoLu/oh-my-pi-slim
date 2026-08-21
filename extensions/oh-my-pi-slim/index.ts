@@ -24,6 +24,7 @@ import {
 import { SPECIALIST_NAMES, type SpecialistName } from "./subagent-core.js";
 import { registerSubagentRuntime } from "./subagent-runtime.js";
 import { SUBAGENT_NOTIFICATION_TYPE } from "./subagent-transcript-renderer.js";
+import { createSubagentViewer } from "./subagent-viewer.js";
 import { widgetStackHost } from "./widget-stack-host.js";
 import type { WidgetStackSectionId } from "./widget-stack.js";
 
@@ -315,6 +316,8 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   const loops = registerLoopRuntime(pi);
   const monitors = registerMonitorRuntime(pi);
   const subagents = registerSubagentRuntime(pi);
+  // Read-only viewer: it owns no session state, writes nothing, and only reads cloned snapshots.
+  const subagentViewer = createSubagentViewer({ snapshot: () => subagents.viewerSnapshot() });
   let goal: GoalRuntime | undefined;
   const notificationGate = new NotificationDeliveryPauseGate((paused) => {
     loops.setDeliveryPaused(paused);
@@ -351,6 +354,17 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   } | undefined;
   let treeNotificationHold: TreeNotificationHold | undefined;
 
+  for (const [shortcut, direction] of [["super+left", -1], ["super+right", 1]] as const) {
+    pi.registerShortcut(shortcut, {
+      description: direction === 1
+        ? "Open the read-only Subagent viewer and cycle forward through running or waiting runs"
+        : "Open the read-only Subagent viewer and cycle backward through running or waiting runs",
+      handler: async (ctx) => {
+        await subagentViewer.handleShortcut(ctx.ui, direction, { enabled: ctx.hasUI && ctx.mode === "tui" });
+      },
+    });
+  }
+
   pi.registerFlag("omps", {
     description: "Run the main Pi session as the oh-my-pi-slim orchestrator",
     type: "boolean",
@@ -367,7 +381,13 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   }
 
   function bindAskDriver(ctx?: ExtensionContext): void {
-    asks.setTuiDriver(ctx?.hasUI === true && ctx.mode === "tui" ? new AskTuiDriver(ctx.ui) : undefined);
+    // The questionnaire owns the screen while it is up, so the read-only viewer closes first and
+    // the driver awaits that close before it opens its own overlay.
+    asks.setTuiDriver(
+      ctx?.hasUI === true && ctx.mode === "tui"
+        ? new AskTuiDriver(ctx.ui, { beforeOpen: () => subagentViewer.closeAsync() })
+        : undefined,
+    );
   }
 
   function updateStatus(ctx: ExtensionContext): void {
@@ -595,6 +615,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     clearTreeNotificationHold();
     widgetStackHost().bind(WIDGET_STACK_OWNER, ctx.mode === "tui" ? ctx.ui : undefined);
     asks.reset();
+    subagentViewer.reset();
     bindAskDriver(ctx);
     asks.reconcileHostMode(ctx);
     loops.reset();
@@ -640,7 +661,10 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   pi.on("session_before_switch", async () => {
     invalidateCheckpoint(false);
     clearTreeNotificationHold();
+    // Ask aborts first: its overlay sits above the viewer, and the viewer refuses to resolve while
+    // a foreign overlay is on top, so closing it first would only queue a pending close.
     asks.abortAll("Session switch aborted the questionnaire.");
+    subagentViewer.close();
     bindAskDriver();
     loops.shutdown();
     goal?.setUICtx(undefined);
@@ -651,6 +675,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     invalidateCheckpoint(false);
     clearTreeNotificationHold();
     asks.abortAll("Session fork aborted the questionnaire.");
+    subagentViewer.close();
     bindAskDriver();
     loops.shutdown();
     goal?.setUICtx(undefined);
@@ -661,6 +686,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     invalidateCheckpoint(false);
     clearTreeNotificationHold();
     asks.abortAll("Session tree navigation aborted the questionnaire.");
+    subagentViewer.close();
     bindAskDriver();
     goal?.setUICtx(undefined);
     const generation = notificationGate.pause();
@@ -867,6 +893,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     // Release only this extension's claim on this session's UI; Todo may still own the aggregate.
     widgetStackHost().unbind(WIDGET_STACK_OWNER, ctx.mode === "tui" ? ctx.ui : undefined);
     asks.abortAll("Session shutdown aborted the questionnaire.");
+    subagentViewer.dispose();
     bindAskDriver();
     loops.shutdown();
     goal?.shutdown();

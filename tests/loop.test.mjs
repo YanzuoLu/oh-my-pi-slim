@@ -33,6 +33,8 @@ const dependencyMap = {
   "./subagent-model-display.js": new URL("../extensions/oh-my-pi-slim/subagent-model-display.ts", import.meta.url).href,
   "./subagent-run-files.js": new URL("../extensions/oh-my-pi-slim/subagent-run-files.ts", import.meta.url).href,
   "./subagent-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-transcript-renderer.ts", import.meta.url).href,
+  "./subagent-viewer-data.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer-data.ts", import.meta.url).href,
+  "./subagent-viewer.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer.ts", import.meta.url).href,
   "./subagent-widget.js": new URL("../extensions/oh-my-pi-slim/subagent-widget.ts", import.meta.url).href,
   "./subagent-widget-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-renderer.ts", import.meta.url).href,
   "./subagent-widget-display.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-display.ts", import.meta.url).href,
@@ -657,6 +659,7 @@ test("tree integration pauses delivery, defers matching release, survives stale 
       registerCommand() {},
       registerMessageRenderer() {},
       registerFlag() {},
+      registerShortcut() {},
       on(name, handler) { handlers.set(name, handler); },
       getAllTools() { return []; },
       sendMessage(message, options) { messages.push({ message, options }); },
@@ -761,6 +764,7 @@ test("tree abort waits for shutdown completion and shutdown errors release the m
       registerCommand() {},
       registerMessageRenderer() {},
       registerFlag() {},
+      registerShortcut() {},
       on(name, handler) { handlers.set(name, handler); },
       getAllTools() { return []; },
       sendMessage(message, options) { messages.push({ message, options }); },
@@ -821,14 +825,16 @@ test("main sessions register Ask and runtime tools while child sessions return b
   function registrationHarness() {
     const tools = [];
     const commands = [];
+    const shortcuts = [];
     const handlers = new Map();
     return {
-      tools, commands, handlers,
+      tools, commands, shortcuts, handlers,
       pi: {
         registerTool(definition) { tools.push(definition.name); },
         registerCommand(name) { commands.push(name); },
         registerMessageRenderer() {},
         registerFlag() {},
+        registerShortcut(shortcut) { shortcuts.push(shortcut); },
         on(name, handler) { handlers.set(name, handler); },
         getAllTools() { return tools.map((name) => ({ name })); },
         getActiveTools() { return [...tools]; },
@@ -854,6 +860,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.ok(main.commands.includes("goal"));
     assert.ok(main.commands.includes("loop"));
     assert.equal(main.commands.includes("monitor"), false);
+    assert.deepEqual(main.shortcuts, ["super+left", "super+right"], "main sessions register exactly the two viewer shortcuts");
     assert.ok(main.handlers.has("session_before_fork"));
     assert.ok(main.handlers.has("session_before_tree"));
     assert.ok(main.handlers.has("session_tree"));
@@ -876,6 +883,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
     ohMyPiSlim(child.pi);
     assert.deepEqual(child.tools, []);
     assert.deepEqual(child.commands, []);
+    assert.deepEqual(child.shortcuts, [], "child sessions register no viewer shortcut");
   } finally {
     if (previousPiChild === undefined) delete process.env.PI_SUBAGENT_CHILD;
     else process.env.PI_SUBAGENT_CHILD = previousPiChild;

@@ -57,6 +57,8 @@ function runPi(agentDir, input, child = false) {
   assert.doesNotMatch(result.stderr, /extension_error|runtime not initialized/i);
   assert.equal(events.some((event) => event.type === "extension_error"), false);
   assert.equal(events.some((event) => event.type === "extension_ui_request" && event.method === "setWidget"), false);
+  // The read-only Subagent viewer is TUI-only: neither a main RPC session nor a child session may open it.
+  assert.equal(events.some((event) => event.type === "extension_ui_request" && event.method === "custom"), false);
   return events;
 }
 

@@ -46,6 +46,8 @@ const dependencyMap = {
   "./subagent-model-display.js": new URL("../extensions/oh-my-pi-slim/subagent-model-display.ts", import.meta.url).href,
   "./subagent-run-files.js": new URL("../extensions/oh-my-pi-slim/subagent-run-files.ts", import.meta.url).href,
   "./subagent-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-transcript-renderer.ts", import.meta.url).href,
+  "./subagent-viewer-data.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer-data.ts", import.meta.url).href,
+  "./subagent-viewer.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer.ts", import.meta.url).href,
   "./subagent-widget.js": new URL("../extensions/oh-my-pi-slim/subagent-widget.ts", import.meta.url).href,
   "./subagent-widget-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-renderer.ts", import.meta.url).href,
   "./subagent-widget-display.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-display.ts", import.meta.url).href,
@@ -3821,4 +3823,89 @@ test("guarded child session removal rejects unsafe paths directly", () => {
     assert.equal(removeChildSessionFile("", file).removed, false);
     assert.deepEqual(removeChildSessionFile(join(tempDir, "missing-root"), file), { removed: true });
   } finally { rmSync(tempDir, { recursive: true, force: true }); }
+});
+
+test("viewerSnapshot hands the read-only viewer a deep copy of running and waiting runs only", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const childDir = resolve(harness.sessionDir, "omps-subagents");
+    const running = await startRunningRun(harness, (runId) => ({
+      status: "running",
+      sessionFile: join(childDir, `${runId}.jsonl`),
+      activeTools: { call: { name: "read", startedAt: "2026-04-17T00:00:01.000Z" } },
+      responseText: "partial tail",
+      turnCount: 3,
+      toolUses: 2,
+      tokens: 1234,
+      contextPercent: 41,
+      compactionCount: 1,
+    }));
+    const waiting = await startRunningRun(harness, (runId) => ({
+      status: "waiting",
+      waitingSeq: 1,
+      sessionFile: join(childDir, `${runId}.jsonl`),
+      request: {
+        runId,
+        reason: "need_decision",
+        message: "Choose a lane.",
+        interview: { questions: [{ prompt: "which" }] },
+        createdAt: "2026-04-17T00:00:02.000Z",
+      },
+    }));
+    const starting = await createRun(harness);
+    const terminal = seedTerminalRun(harness, { id: "terminal-run" });
+
+    const journalWritesBefore = harness.journalWrites.length;
+    const snapshot = harness.runtime.viewerSnapshot();
+    assert.equal(harness.journalWrites.length, journalWritesBefore, "viewerSnapshot must not write a journal entry");
+    assert.deepEqual(snapshot.runs.map((run) => run.id).sort(), [running.id, waiting.id].sort());
+    assert.equal(snapshot.runs.some((run) => run.id === starting.details.run.id), false);
+    assert.equal(snapshot.runs.some((run) => run.id === terminal.id), false);
+    assert.equal(snapshot.childSessionDir, childDir);
+
+    const runningSnapshot = snapshot.runs.find((run) => run.id === running.id);
+    assert.equal(runningSnapshot.status, "running");
+    assert.equal(runningSnapshot.live, true);
+    assert.equal(runningSnapshot.model, "preset/fixer:high");
+    assert.equal(runningSnapshot.sessionFile, join(childDir, `${running.id}.jsonl`));
+    assert.deepEqual(runningSnapshot.activity, {
+      turnCount: 3,
+      toolUses: 2,
+      activeTools: { call: { name: "read", startedAt: "2026-04-17T00:00:01.000Z" } },
+      responseText: "partial tail",
+      tokens: 1234,
+      contextPercent: 41,
+      compactionCount: 1,
+    });
+    const waitingSnapshot = snapshot.runs.find((run) => run.id === waiting.id);
+    assert.equal(waitingSnapshot.status, "waiting");
+    assert.deepEqual(waitingSnapshot.request.interview, { questions: [{ prompt: "which" }] });
+
+    runningSnapshot.activity.activeTools.call.name = "mutated";
+    runningSnapshot.activity.activeTools.injected = { name: "injected" };
+    waitingSnapshot.request.interview.questions[0].prompt = "mutated";
+    waitingSnapshot.request.message = "mutated";
+    const second = harness.runtime.viewerSnapshot();
+    const secondRunning = second.runs.find((run) => run.id === running.id);
+    assert.deepEqual(secondRunning.activity.activeTools, {
+      call: { name: "read", startedAt: "2026-04-17T00:00:01.000Z" },
+    });
+    const secondWaiting = second.runs.find((run) => run.id === waiting.id);
+    assert.deepEqual(secondWaiting.request.interview, { questions: [{ prompt: "which" }] });
+    assert.equal(secondWaiting.request.message, "Choose a lane.");
+    assert.notEqual(second.runs[0], snapshot.runs[0]);
+
+    assert.deepEqual(harness.runtime.registry.require(running.id).status, "running");
+    assert.deepEqual(harness.runtime.registry.get(waiting.id).request.message, "Choose a lane.");
+  } finally { harness.cleanup(); }
+});
+
+test("viewerSnapshot stays empty and safe without an attached session", () => {
+  const harness = createHarness();
+  try {
+    const snapshot = harness.runtime.viewerSnapshot();
+    assert.deepEqual(snapshot.runs, []);
+    assert.equal(snapshot.childSessionDir, undefined);
+  } finally { harness.cleanup(); }
 });

@@ -59,6 +59,12 @@ import {
   renderSubagentNotification,
   renderSubagentResult,
 } from "./subagent-transcript-renderer.js";
+import {
+  isViewerStatus,
+  type ViewerRunActivity,
+  type ViewerRunSnapshot,
+  type ViewerSnapshot,
+} from "./subagent-viewer-data.js";
 import { SubagentWidget, type SubagentWidgetUI } from "./subagent-widget.js";
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
@@ -318,6 +324,30 @@ function stateRequest(value: Record<string, unknown> | undefined, runId: string)
   };
 }
 
+/** Structured deep copy for viewer payloads, so no nested runtime object is ever handed out. */
+function cloneViewerValue<T>(value: T): T | undefined {
+  if (value === undefined) return undefined;
+  try { return JSON.parse(JSON.stringify(value)) as T; }
+  catch { return undefined; }
+}
+
+function cloneViewerActivity(activity: DetachedRunActivity | undefined): ViewerRunActivity {
+  const activeTools: Record<string, { name: string; startedAt?: string }> = {};
+  for (const [key, tool] of Object.entries(activity?.activeTools ?? {})) {
+    if (!tool || typeof tool.name !== "string") continue;
+    activeTools[key] = tool.startedAt === undefined ? { name: tool.name } : { name: tool.name, startedAt: tool.startedAt };
+  }
+  return {
+    turnCount: activity?.turnCount ?? 0,
+    toolUses: activity?.toolUses ?? 0,
+    activeTools,
+    responseText: activity?.responseText ?? "",
+    tokens: activity?.tokens ?? 0,
+    contextPercent: activity?.contextPercent,
+    compactionCount: activity?.compactionCount ?? 0,
+  };
+}
+
 function stateActivity(state: DetachedRunState): DetachedRunActivity {
   return {
     turnCount: state.turnCount,
@@ -459,6 +489,35 @@ export class OmpsSubagentRuntime {
 
   hasActiveRuns(): boolean {
     return this.registry.list().some((run) => ACTIVE_STATUSES.has(run.status));
+  }
+
+  /**
+   * Read-only snapshot for the Subagent viewer.
+   * Every field is copied, so the viewer can never reach the registry, the activity map, or a
+   * retained run object. Only running and waiting runs are included, matching the viewer cycle.
+   */
+  viewerSnapshot(): ViewerSnapshot {
+    const runs: ViewerRunSnapshot[] = [];
+    for (const run of this.registry.list()) {
+      if (!isViewerStatus(run.status)) continue;
+      runs.push({
+        id: run.id,
+        agent: run.agent,
+        abstract: run.abstract,
+        status: run.status,
+        live: this.registry.isLive(run.id),
+        model: run.model,
+        createdAt: run.createdAt,
+        updatedAt: run.updatedAt,
+        sessionFile: run.sessionFile,
+        request: cloneViewerValue(run.request),
+        activity: cloneViewerActivity(this.activity.get(run.id)),
+      });
+    }
+    let childSessionDir: string | undefined;
+    try { childSessionDir = this.ctx ? this.childSessionDir() : undefined; }
+    catch { childSessionDir = undefined; }
+    return { runs, childSessionDir };
   }
 
   hasPendingNotifications(): boolean {

@@ -454,11 +454,24 @@ export class AskQuestionnaireComponent implements Component, Focusable {
   }
 }
 
+export interface AskTuiDriverOptions {
+  /**
+   * Awaited immediately before the questionnaire overlay opens.
+   *
+   * The package uses it to close its own full-screen overlay first, so a questionnaire can never
+   * land behind one. It is awaited rather than fired off, which is what keeps the close and the new
+   * overlay out of a microtask race. A hook that throws is ignored: Ask still opens.
+   */
+  beforeOpen?: () => void | Promise<void>;
+}
+
 export class AskTuiDriver implements AskDriver {
   private readonly ui: Pick<ExtensionUIContext, "custom">;
+  private readonly beforeOpen?: () => void | Promise<void>;
 
-  constructor(ui: Pick<ExtensionUIContext, "custom">) {
+  constructor(ui: Pick<ExtensionUIContext, "custom">, options: AskTuiDriverOptions = {}) {
     this.ui = ui;
+    this.beforeOpen = options.beforeOpen;
   }
 
   async ask(questionnaire: ValidatedQuestionnaire, signal: AbortSignal): Promise<AskDriverResult> {
@@ -477,6 +490,11 @@ export class AskTuiDriver implements AskDriver {
     };
     signal.addEventListener("abort", abortListener, { once: true });
     try {
+      if (this.beforeOpen) {
+        try { await this.beforeOpen(); }
+        catch { /* a coordination failure must never block the questionnaire */ }
+        if (aborted || signal.aborted) throw abortError(signal.reason);
+      }
       const result = await this.ui.custom<AskOverlayResult>((tui, theme, _keybindings, done) => {
         closeOverlay = done;
         if (closed) queueMicrotask(() => done(ABORTED));

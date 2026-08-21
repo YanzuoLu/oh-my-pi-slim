@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.11", "package version must be 0.10.11");
+check(packageJson.version === "0.10.12", "package version must be 0.10.12");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.11" && lock.packages?.[""]?.version === "0.10.11", "package-lock version must be 0.10.11");
+check(lock.version === "0.10.12" && lock.packages?.[""]?.version === "0.10.12", "package-lock version must be 0.10.12");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -440,7 +440,8 @@ hasAll(extension, [
   "contextUsageNeedsCheckpoint(",
   "NotificationDeliveryPauseGate", "setNotificationDeliveryPaused(paused)", "loops.setDeliveryPaused(paused)",
   "monitors?.setDeliveryPaused(paused)", "notificationGate.releaseDeferred", "notificationGate.clearWithoutDelivery",
-  "registerAskRuntime(pi)", "new AskTuiDriver(ctx.ui)", "bindAskDriver(ctx)", "bindAskDriver()",
+  "registerAskRuntime(pi)", "new AskTuiDriver(ctx.ui, { beforeOpen: () => subagentViewer.closeAsync() })",
+  "bindAskDriver(ctx)", "bindAskDriver()",
   "registerGoalRuntime(pi", "asks.setGoalActiveResolver", "subagents.subscribeRunCreated", "goal?.onAgentSettled(ctx)",
   "registerLoopRuntime(pi)", "registerMonitorRuntime(pi)",
   "treeNotificationHold", "releaseTreeNotificationHoldDeferred", "subagents.restore(ctx, notificationGate.isPaused())",
@@ -2302,17 +2303,28 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "## Highlights", "## Six specialists", "## Requirements and package management", "### Requirements", "### Install",
         "### Migrate from external Ask and Process packages", "### Update", "### Remove", "## Tool availability", "## Main tools",
         "### `subagent`", "### `todo`", "### `loop`", "### `monitor`", "### `ask_user_question`", "### `goal`",
-        "## `/loop` and `/goal`", "## Presets and configuration", "## Runtime, UI, and persistence", "## Deliberate scope",
+        "## `/loop` and `/goal`", "## Presets and configuration", "## Runtime, UI, and persistence",
+        "### Subagent viewer", "## Deliberate scope",
         "## Development", "## License",
       ]
     : [
         "## 核心特性", "## 六个 specialist", "## 要求与包管理", "### 要求", "### 安装",
         "### 从外部 Ask 与 Process package 迁移", "### 更新", "### 移除", "## 工具可用性", "## Main 工具",
         "### `subagent`", "### `todo`", "### `loop`", "### `monitor`", "### `ask_user_question`", "### `goal`",
-        "## `/loop` 与 `/goal`", "## Preset 与配置", "## Runtime、UI 与持久化", "## 有意限制",
+        "## `/loop` 与 `/goal`", "## Preset 与配置", "## Runtime、UI 与持久化",
+        "### Subagent viewer", "## 有意限制",
         "## 开发", "## License",
       ];
   check(JSON.stringify(headings) === JSON.stringify(expectedHeadings), `${file} heading structure must stay aligned`);
+  // The Send Text field takes a real ESC byte, so the table must never show a literal `\033` value.
+  check(
+    !/\|\s*`\\033\[1;9[DC]`\s*\|/.test(read(file)),
+    `${file} must not tell the reader to type a literal \\033 escape into Send Text`,
+  );
+  check(
+    !/(iTerm2|Ghostty|WezTerm|Kitty)[^.\n]*already send these sequences/.test(read(file)),
+    `${file} must not promise that other terminals already send the exact sequences`,
+  );
 
   hasAll(text, [
     "pi install git:github.com/YanzuoLu/oh-my-pi-slim",
@@ -2323,6 +2335,8 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
     "ask_user_question", "goal", "loop", "monitor", "subagent", "todo", "contact_supervisor",
     "need_decision", "interview_request", "progress_update",
     "10s", "7d", "nohup", "setsid", "disown", "blockedBy", "Ctrl+O",
+    "super+left", "super+right", "\\033", "[1;9D", "[1;9C", "^[[1;9D", "^[[1;9C", "cat -v", "Read-Only",
+    "Terminal.app", "Send Text", "Escape", "kitty",
     "~/.pi/agent/oh-my-pi-slim.json", "provider", "model", "thinking",
     "npm test", "npm run validate", "git diff --check", "MIT",
   ], `${file} public README contract`);
@@ -2539,6 +2553,185 @@ hasAll(runtime, [
 check(!runtime.includes('renderShell: "self"'), "subagent transcript tools must use the default tool shell");
 check(existsSync(join(ROOT, "THIRD_PARTY_NOTICES.md")), "third-party notice must exist for the adapted widget");
 
+// Read-only Subagent viewer: one full-screen overlay owned by the package, Main as item 0 of the
+// cycle, and no host-layout inspection, no editor replacement, and no write of any kind.
+const viewer = read("extensions/oh-my-pi-slim/subagent-viewer.ts");
+const viewerData = read("extensions/oh-my-pi-slim/subagent-viewer-data.ts");
+check(existsSync(join(ROOT, "tests/subagent-viewer.test.mjs")), "read-only viewer contract tests must exist");
+const viewerTests = read("tests/subagent-viewer.test.mjs");
+
+hasAll(viewer, [
+  "overlay: true",
+  'overlayOptions: { width: "100%", maxHeight: "100%", row: 0, col: 0, margin: 0 }',
+  'VIEWER_READ_ONLY_LABEL = "Read-Only"',
+  "VIEWER_REFRESH_MS = 250",
+  'VIEWER_EMPTY_MESSAGE = "No running or waiting subagents."',
+  "this.tui.terminal?.rows",
+], "viewer owns one full-screen overlay through public geometry only");
+
+// The viewer removes exactly its own overlay entry through the public OverlayHandle, so a close
+// can never pop a foreign capturing, non-capturing, or temporarily hidden overlay.
+hasAll(viewer, [
+  "type OverlayHandle,",
+  "private handle: OverlayHandle | undefined;",
+  "onHandle: (handle: OverlayHandle) => {",
+  "try { handle.hide(); } catch",
+  "private completeClose(): void",
+  "private hostDroppedOverlay(): boolean",
+  "VIEWER_GONE_TICKS",
+  "async closeAsync(): Promise<void>",
+  "ui.notify(`Subagent viewer could not open:",
+  "private bodyCache:", "this.pendingForce = this.pendingForce || force;",
+], "viewer closes by hiding its own overlay handle and self-heals a host-dropped entry");
+hasNone(viewer, [
+  "tui.hideOverlay", "overlayStack", "prototype.", "Object.defineProperty", "[\"__", "as any",
+  "VIEWER_CLOSE_RETRY_TICKS", "closeRequested", "tryComplete", "abandonOverlay", "overlayState(",
+  "getFocusedComponent",
+], "viewer must not patch the host, retry a blocked close, or guess ownership from focus");
+check(
+  (viewer.match(/try \{ handle\.hide\(\); \} catch/g) ?? []).length === 2,
+  "the viewer must hide its own overlay entry on the close path and on the stale-mount path",
+);
+check(
+  (viewer.match(/\bdone\(\)/g) ?? []).length === 2,
+  "done may only be used on the two pre-mount paths, never once an overlay handle exists",
+);
+for (const guard of [
+  'const resolvable = done !== undefined && !(typeof this.tui?.hasOverlay === "function" && this.tui.hasOverlay());',
+  'if (typeof tui.hasOverlay !== "function" || !tui.hasOverlay()) queueMicrotask(() => done());',
+]) {
+  check(viewer.includes(guard), "a pre-mount close may only resolve done when the host has nothing to pop");
+}
+hasNone(viewer, [
+  "tui.children", "getMountedRoots", "setEditorComponent", "getEditorComponent", "setEditorText",
+  "pasteToEditor", "setWidget", "setFooter", "setHeader", "setStatus", "switchSession", "newSession",
+  "navigateTree", "sessionManager", "appendEntry", "sendMessage", "sendUserMessage", "nonCapturing",
+], "viewer must not measure host layout, replace the editor, or touch host state");
+for (const [name, source] of [["viewer", viewer], ["viewer data", viewerData]]) {
+  hasNone(source, [
+    "writeFileSync", "atomicWriteJson", "mkdirSync", "unlinkSync", "rmSync", "renameSync", "chmodSync",
+    "writeControl", "SessionManager", "registerCommand", "registerTool", "registerShortcut",
+  ], `${name} must stay read-only`);
+}
+
+// Main is item 0 and a vacated position resolves to its neighbor before falling back to Main.
+hasAll(viewerData, [
+  "export function cycleViewerSelection",
+  "const items: (string | undefined)[] = [undefined, ...runIds];",
+  "export function neighborAfterViewerRemoval",
+  "nextIds[Math.min(index, nextIds.length - 1)]",
+  'const VIEWER_STATUSES = new Set<RunStatus>(["running", "waiting"]);',
+], "viewer cycle keeps Main at item 0 and only running or waiting runs in the ring");
+
+// Untrusted JSONL is shape-filtered and proven acyclic before any Pi branch helper touches it.
+hasAll(viewerData, [
+  "function viewerEntryOf(value: unknown): SessionEntry | undefined",
+  "function checkViewerBranches(",
+  "function selectViewerEntries(",
+  'if (index.has(entry.id)) return { ok: false, reason: "duplicate entry id" };',
+  'if (walking.has(current.id)) return { ok: false, reason: "parent cycle" };',
+  "if (parentId === row.id) return undefined;",
+  "const branches = checkViewerBranches(accepted);",
+  "return { entries: buildContextEntries(accepted.slice()), warnings };",
+  "showing file order",
+  "} catch (error) {",
+], "viewer proves the branch graph is safe before it calls a Pi helper");
+check(
+  viewerData.indexOf("function checkViewerBranches(") < viewerData.indexOf("buildContextEntries(accepted.slice())"),
+  "the cycle check must be defined before the only buildContextEntries call site",
+);
+check(
+  (viewerData.match(/buildContextEntries\(/g) ?? []).length === 1,
+  "buildContextEntries may be called exactly once, behind the branch check",
+);
+
+// Child JSONL access is read-only, containment-checked, bounded, and terminal-sequence safe.
+hasAll(viewerData, [
+  "parseSessionEntries(", "buildContextEntries(",
+  "realpathSync(resolve(childSessionDir))",
+  'inside === ".." || inside.startsWith(`..${sep}`)',
+  "stat.isSymbolicLink()", "!stat.isFile()",
+  "VIEWER_MAX_FILE_BYTES", "VIEWER_MAX_ENTRIES", "VIEWER_MAX_BLOCK_LINES", "VIEWER_MAX_TRANSCRIPT_LINES",
+  "VIEWER_MAX_ARGS_CHARS", "VIEWER_MAX_LIVE_CHARS",
+  "stripTerminalSequences", "truncateToWidth", "previousFingerprint",
+  "[image ", "liveTextIsRedundant",
+], "viewer reads child sessions read-only, inside containment, and within bounds");
+check(
+  !viewerData.includes('inside.startsWith("..") ||'),
+  "containment must reject only a real `..` path segment, not every name starting with dots",
+);
+check(
+  (viewerData.match(/openSync\(/g) ?? []).length === 1 && viewerData.includes('openSync(path, "r")'),
+  "the viewer may only open a child session file for reading",
+);
+check(!viewerData.includes("part.data"), "the viewer must never render image bytes");
+
+// One cloned snapshot API on the runtime, filtered to the viewer statuses.
+hasAll(runtime, [
+  "viewerSnapshot(): ViewerSnapshot",
+  "if (!isViewerStatus(run.status)) continue;",
+  "cloneViewerValue(run.request)",
+  "cloneViewerActivity(this.activity.get(run.id))",
+], "runtime exposes exactly one cloned read-only viewer snapshot");
+
+// The package entry owns exactly two shortcuts, no command, and the full viewer lifecycle.
+hasAll(extension, [
+  "createSubagentViewer({ snapshot: () => subagents.viewerSnapshot() })",
+  '[["super+left", -1], ["super+right", 1]] as const',
+  "pi.registerShortcut(shortcut, {",
+  "subagentViewer.reset();",
+  "subagentViewer.dispose();",
+  'enabled: ctx.hasUI && ctx.mode === "tui"',
+], "main extension registers the two viewer shortcuts and drives the viewer lifecycle");
+check((extension.match(/registerShortcut\(/g) ?? []).length === 1, "the package must register shortcuts in exactly one place");
+check((extension.match(/subagentViewer\.close\(\)/g) ?? []).length === 3, "switch, fork, and tree must each close the viewer");
+check(!/registerCommand\("(?:viewer|subagent-viewer|agents?|subagents?)"/.test(extension), "the viewer must not add a slash command");
+
+hasAll(viewerTests, [
+  "the overlay opens full screen at the viewport origin",
+  "a read that completes after close cannot render or revive the viewer",
+  "a timer tick after close never reopens the viewer",
+  "session file resolution refuses escapes, links, and directories",
+  "a full viewer session writes nothing inside the session directory",
+  "the reader follows the active compaction-aware branch",
+  "a close under a foreign capturing overlay removes only the viewer entry, with no zombie",
+  "a foreign non-capturing or temporarily hidden overlay is never popped by a viewer close",
+  "a host that hides the viewer entry without resolving is healed by the refresh timer",
+  "a close that lands before the overlay is mounted leaves no entry behind",
+  "a close before mount under a foreign overlay hides the late entry instead of popping theirs",
+  "a deferred factory whose close already ran never resolves done over a foreign overlay",
+  "createOverlayHost",
+  "a synchronous ui.custom throw notifies once and leaves the viewer reopenable",
+  "the raw rendered screen carries no untrusted ESC, OSC, C0, or C1 byte",
+  "null, scalar, array, and shapeless rows never reach the branch helpers",
+  "a self-referencing entry is dropped before any parent walk starts",
+  "a two-entry parent cycle degrades to file order instead of hanging",
+  "a duplicate entry id degrades to file order instead of rewiring the parent chain",
+  "a dangling parent reference reads cleanly and keeps the whole chain",
+  "a truncated tail shows the file-order tail rather than collapsing to the last entry",
+  "every session lifecycle handler aborts Ask before it touches the viewer",
+  "r pressed during an in-flight read still forces the follow-up read",
+  "BRANCH_READ_BUDGET_MS",
+], "viewer tests cover ownership, self-healing, hostile branch data, and zero writes");
+hasAll(read("tests/ask-ui.test.mjs"), [
+  "Ask closes the read-only viewer before it opens its own overlay",
+  "Ask still opens when the viewer sits under a foreign overlay, and pops neither",
+  'assert.deepEqual(events, ["custom:0", "custom:0"]);',
+  "createOverlayHost",
+], "Ask must close the viewer before it opens its own overlay");
+// One shared host fixture keeps every overlay-ownership assertion on identical real semantics.
+check(existsSync(join(ROOT, "tests/fixtures/overlay-host.mjs")), "the real-semantics overlay host fixture must exist");
+hasAll(read("tests/fixtures/overlay-host.mjs"), [
+  "showOverlay(component, options)", "hide: () => { removeEntry(entry); }",
+  "hideOverlay()", "nonCapturing", "isHidden: () => entry.hidden",
+  "other.preFocus = entry.preFocus", "void Promise.resolve().then(() => {",
+], "the overlay host fixture must reproduce TuiBase handle, stack, focus, and mount timing");
+hasAll(askTui, [
+  "export interface AskTuiDriverOptions", "beforeOpen?: () => void | Promise<void>", "await this.beforeOpen()",
+], "Ask exposes one public coordination hook instead of a patched viewer");
+hasAll(subagentRuntimeTests, ["viewerSnapshot"], "runtime tests must cover the cloned viewer snapshot");
+hasAll(read("tests/loop-load.test.mjs"), ['event.method === "custom"'], "load tests must assert the viewer never opens outside a TUI session");
+
 const preset = json("config/oh-my-pi-slim.example.json");
 check(Boolean(preset.presets?.[preset.defaultPreset]), "default preset must exist");
 for (const [presetName, value] of Object.entries(preset.presets ?? {})) {
@@ -2601,6 +2794,10 @@ if (packCheck.status === 0) {
     check(files.includes("extensions/todo/core.ts"), "npm pack must include the Todo state core");
     check(files.includes("extensions/todo/widget.ts"), "npm pack must include the Todo widget");
     check(files.includes("extensions/oh-my-pi-slim/widget-expansion.ts"), "npm pack must include the shared widget expansion module");
+    check(files.includes("extensions/oh-my-pi-slim/subagent-viewer.ts"), "npm pack must include the read-only Subagent viewer");
+    check(files.includes("extensions/oh-my-pi-slim/subagent-viewer-data.ts"), "npm pack must include the viewer read-only data layer");
+    check(files.includes("tests/subagent-viewer.test.mjs"), "npm pack must include the viewer contract tests");
+    check(files.includes("tests/fixtures/overlay-host.mjs"), "npm pack must include the real-semantics overlay host fixture");
     check(files.includes("tests/todo.test.mjs"), "npm pack must include the Todo contract tests");
     check(files.includes("tests/fixtures/todo-load-probe.ts"), "npm pack must include the Todo real-Pi load probe");
     check(files.includes("agents/observer.md"), "npm pack must include the Observer role");
