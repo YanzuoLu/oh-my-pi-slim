@@ -79,8 +79,8 @@ const theme = {
 const KEY = {
   left: "\x1b[D",
   right: "\x1b[C",
-  superLeft: "\x1b[1;9D",
-  superRight: "\x1b[1;9C",
+  ctrlShiftLeft: "\x1b[1;6D",
+  ctrlShiftRight: "\x1b[1;6C",
   up: "\x1b[A",
   down: "\x1b[B",
   pageUp: "\x1b[5~",
@@ -310,7 +310,7 @@ test("the overlay opens full screen at the viewport origin", async () => {
   assert.equal(harness.host.entries().length, 0);
 });
 
-test("super+right starts at the first run and super+left starts at the last run", async () => {
+test("ctrl+shift+right starts at the first run and ctrl+shift+left starts at the last run", async () => {
   const runs = [runSnapshot({ id: "a" }), runSnapshot({ id: "b" }), runSnapshot({ id: "c" })];
   const forward = createHarness({ runs });
   const { opened: forwardOpen } = await openViewer(forward, 1);
@@ -325,9 +325,9 @@ test("super+right starts at the first run and super+left starts at the last run"
   await backwardOpen;
 });
 
-test("plain and super arrows cycle identically and leaving the ring returns to Main", async () => {
+test("plain and ctrl+shift arrows cycle identically and leaving the ring returns to Main", async () => {
   const runs = [runSnapshot({ id: "a" }), runSnapshot({ id: "b" })];
-  for (const [next, previous] of [[KEY.right, KEY.left], [KEY.superRight, KEY.superLeft]]) {
+  for (const [next, previous] of [[KEY.right, KEY.left], [KEY.ctrlShiftRight, KEY.ctrlShiftLeft]]) {
     const harness = createHarness({ runs });
     const { opened } = await openViewer(harness, 1);
     assert.equal(harness.viewer.currentRun(), "a");
@@ -903,8 +903,12 @@ test("the overlay renders a complete screen with header, Read-Only bar, and foot
   assert.match(lines[0], /^Subagent 1\/1 · fixer \[run-a\] · running · fix the parser/);
   assert.match(lines[1], /live · \(provider\) model • high/);
   assert.ok(lines.some((line) => line.trim() === VIEWER_READ_ONLY_LABEL));
-  assert.ok(lines.some((line) => line.includes("Esc/q Main")));
-  assert.ok(lines.some((line) => line.includes("f follow on")));
+  // The hint row wraps across as many footer rows as the width needs, so the assertion reads the
+  // unwrapped hint text rather than a single rendered row.
+  const hintText = lines.map((line) => line.trimEnd()).join(" ");
+  assert.ok(hintText.includes("←/→ or Ctrl+Shift+←/→ run"));
+  assert.ok(hintText.includes("Esc/q Main"));
+  assert.ok(hintText.includes("f follow on"));
   assert.ok(lines.at(-1).includes(`updated ${VIEWER_NOW_CLOCK}`));
   assert.ok(lines.at(-1).includes("0/0"));
   harness.viewer.close();
@@ -1596,11 +1600,36 @@ test("the main extension registers exactly the two viewer shortcuts and no viewe
   const source = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/index.ts"), "utf8");
   const shortcuts = [...source.matchAll(/registerShortcut\(/g)];
   assert.equal(shortcuts.length, 1);
-  assert.match(source, /\[\["super\+left", -1\], \["super\+right", 1\]\]/);
+  assert.match(source, /\[\["ctrl\+shift\+left", -1\], \["ctrl\+shift\+right", 1\]\]/);
+  assert.doesNotMatch(source, /super\+(?:left|right)/);
   assert.equal(/registerCommand\("(?:viewer|subagent-viewer|agents?)"/.test(source), false);
   assert.match(source, /subagentViewer\.reset\(\)/);
   assert.match(source, /subagentViewer\.dispose\(\)/);
   assert.equal([...source.matchAll(/subagentViewer\.close\(\)/g)].length, 3);
+});
+
+test("no production source keeps a super arrow key or a Terminal ESC mapping", () => {
+  const files = [
+    "extensions/oh-my-pi-slim/index.ts",
+    "extensions/oh-my-pi-slim/subagent-viewer.ts",
+    "extensions/oh-my-pi-slim/subagent-viewer-data.ts",
+    "README.md",
+    "README.zh-CN.md",
+  ];
+  for (const file of files) {
+    const source = readFileSync(join(ROOT, file), "utf8");
+    assert.doesNotMatch(source, /super\+(?:left|right)/, `${file} must not name a super arrow shortcut`);
+    assert.doesNotMatch(source, /Key\.super/, `${file} must not match a super key`);
+    assert.doesNotMatch(source, /\[1;9[DC]/, `${file} must not carry the Command arrow ESC sequence`);
+    assert.doesNotMatch(source, /Terminal\.app|Send Text|cat -v|\u2318/, `${file} must not document a Terminal key mapping`);
+  }
+});
+
+test("the viewer overlay matches ctrl+shift arrows and no super arrow", () => {
+  const source = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent-viewer.ts"), "utf8");
+  assert.ok(source.includes('matchesKey(data, Key.ctrlShift("right")) || matchesKey(data, Key.right)'));
+  assert.ok(source.includes('matchesKey(data, Key.ctrlShift("left")) || matchesKey(data, Key.left)'));
+  assert.ok(source.includes('"←/→ or Ctrl+Shift+←/→ run"'));
 });
 
 test("every session lifecycle handler aborts Ask before it touches the viewer", () => {

@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.12", "package version must be 0.10.12");
+check(packageJson.version === "0.10.13", "package version must be 0.10.13");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.12" && lock.packages?.[""]?.version === "0.10.12", "package-lock version must be 0.10.12");
+check(lock.version === "0.10.13" && lock.packages?.[""]?.version === "0.10.13", "package-lock version must be 0.10.13");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -2316,14 +2316,15 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "## 开发", "## License",
       ];
   check(JSON.stringify(headings) === JSON.stringify(expectedHeadings), `${file} heading structure must stay aligned`);
-  // The Send Text field takes a real ESC byte, so the table must never show a literal `\033` value.
+  // The viewer shortcut is a plain modified arrow key, so the README documents no terminal key
+  // mapping, no raw ESC sequence, and no per-emulator promise at all.
+  hasNone(text, [
+    "super+left", "super+right", "Terminal.app", "Send Text", "cat -v",
+    "\\033", "[1;9D", "[1;9C", "^[[1;9D", "^[[1;9C", "kitty", "Kitty", "Ghostty", "WezTerm",
+  ], `${file} viewer shortcut documentation`);
   check(
-    !/\|\s*`\\033\[1;9[DC]`\s*\|/.test(read(file)),
-    `${file} must not tell the reader to type a literal \\033 escape into Send Text`,
-  );
-  check(
-    !/(iTerm2|Ghostty|WezTerm|Kitty)[^.\n]*already send these sequences/.test(read(file)),
-    `${file} must not promise that other terminals already send the exact sequences`,
+    !/(all|every)[^.\n]*terminals?[^.\n]*(work|support)/i.test(text),
+    `${file} must not promise that the viewer shortcut works in every terminal`,
   );
 
   hasAll(text, [
@@ -2335,8 +2336,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
     "ask_user_question", "goal", "loop", "monitor", "subagent", "todo", "contact_supervisor",
     "need_decision", "interview_request", "progress_update",
     "10s", "7d", "nohup", "setsid", "disown", "blockedBy", "Ctrl+O",
-    "super+left", "super+right", "\\033", "[1;9D", "[1;9C", "^[[1;9D", "^[[1;9C", "cat -v", "Read-Only",
-    "Terminal.app", "Send Text", "Escape", "kitty",
+    "ctrl+shift+left", "ctrl+shift+right", "Read-Only",
     "~/.pi/agent/oh-my-pi-slim.json", "provider", "model", "thinking",
     "npm test", "npm run validate", "git diff --check", "MIT",
   ], `${file} public README contract`);
@@ -2607,6 +2607,19 @@ hasNone(viewer, [
   "pasteToEditor", "setWidget", "setFooter", "setHeader", "setStatus", "switchSession", "newSession",
   "navigateTree", "sessionManager", "appendEntry", "sendMessage", "sendUserMessage", "nonCapturing",
 ], "viewer must not measure host layout, replace the editor, or touch host state");
+
+// Inside the overlay a plain arrow and the global combination cycle the same ring, and the footer
+// names the combination the package actually registers.
+hasAll(viewer, [
+  'if (matchesKey(data, Key.ctrlShift("right")) || matchesKey(data, Key.right)) {',
+  'if (matchesKey(data, Key.ctrlShift("left")) || matchesKey(data, Key.left)) {',
+  '"←/→ or Ctrl+Shift+←/→ run",',
+], "viewer cycles on plain arrows and on ctrl+shift arrows only");
+for (const [name, source] of [["viewer", viewer], ["viewer data", viewerData], ["main extension", extension]]) {
+  hasNone(source, [
+    "Key.super", "super+left", "super+right", "\u2318", "[1;9D", "[1;9C",
+  ], `${name} must carry no super or Command viewer key`);
+}
 for (const [name, source] of [["viewer", viewer], ["viewer data", viewerData]]) {
   hasNone(source, [
     "writeFileSync", "atomicWriteJson", "mkdirSync", "unlinkSync", "rmSync", "renameSync", "chmodSync",
@@ -2677,7 +2690,7 @@ hasAll(runtime, [
 // The package entry owns exactly two shortcuts, no command, and the full viewer lifecycle.
 hasAll(extension, [
   "createSubagentViewer({ snapshot: () => subagents.viewerSnapshot() })",
-  '[["super+left", -1], ["super+right", 1]] as const',
+  '[["ctrl+shift+left", -1], ["ctrl+shift+right", 1]] as const',
   "pi.registerShortcut(shortcut, {",
   "subagentViewer.reset();",
   "subagentViewer.dispose();",
@@ -2686,6 +2699,10 @@ hasAll(extension, [
 check((extension.match(/registerShortcut\(/g) ?? []).length === 1, "the package must register shortcuts in exactly one place");
 check((extension.match(/subagentViewer\.close\(\)/g) ?? []).length === 3, "switch, fork, and tree must each close the viewer");
 check(!/registerCommand\("(?:viewer|subagent-viewer|agents?|subagents?)"/.test(extension), "the viewer must not add a slash command");
+hasAll(read("tests/loop.test.mjs"), [
+  'assert.deepEqual(main.shortcuts, ["ctrl+shift+left", "ctrl+shift+right"], "main sessions register exactly the two viewer shortcuts");',
+  'assert.deepEqual(child.shortcuts, [], "child sessions register no viewer shortcut");',
+], "registration tests must pin two main shortcuts and none in a child");
 
 hasAll(viewerTests, [
   "the overlay opens full screen at the viewport origin",
@@ -2711,6 +2728,10 @@ hasAll(viewerTests, [
   "a truncated tail shows the file-order tail rather than collapsing to the last entry",
   "every session lifecycle handler aborts Ask before it touches the viewer",
   "r pressed during an in-flight read still forces the follow-up read",
+  "ctrl+shift+right starts at the first run and ctrl+shift+left starts at the last run",
+  "plain and ctrl+shift arrows cycle identically and leaving the ring returns to Main",
+  "no production source keeps a super arrow key or a Terminal ESC mapping",
+  "the viewer overlay matches ctrl+shift arrows and no super arrow",
   "BRANCH_READ_BUDGET_MS",
 ], "viewer tests cover ownership, self-healing, hostile branch data, and zero writes");
 hasAll(read("tests/ask-ui.test.mjs"), [

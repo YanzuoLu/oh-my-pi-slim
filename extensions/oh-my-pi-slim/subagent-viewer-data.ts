@@ -128,7 +128,7 @@ export function wrapViewerText(text: string, width: number, prefix = ""): string
 
 /**
  * Cycles Main and the active run IDs in one ring.
- * Returns undefined for Main, so `super+right` walks Main → first → … → last → Main.
+ * Returns undefined for Main, so `ctrl+shift+right` walks Main → first → … → last → Main.
  */
 export function cycleViewerSelection(
   runIds: readonly string[],

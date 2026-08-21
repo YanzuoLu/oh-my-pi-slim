@@ -173,7 +173,7 @@ export class SubagentViewerComponent implements Component, Focusable {
       ? "0/0"
       : `${Math.min(total, scroll + 1)}-${Math.min(total, scroll + rows)}/${total}`;
     const hints = [
-      "←/→ or ⌘←/⌘→ run",
+      "←/→ or Ctrl+Shift+←/→ run",
       "↑/↓ line",
       "PgUp/PgDn page",
       "Home/End edge",
@@ -297,11 +297,11 @@ export class SubagentViewerComponent implements Component, Focusable {
   }
 
   handleInput(data: string): void {
-    if (matchesKey(data, Key.super("right")) || matchesKey(data, Key.right)) {
+    if (matchesKey(data, Key.ctrlShift("right")) || matchesKey(data, Key.right)) {
       this.controller.step(1);
       return;
     }
-    if (matchesKey(data, Key.super("left")) || matchesKey(data, Key.left)) {
+    if (matchesKey(data, Key.ctrlShift("left")) || matchesKey(data, Key.left)) {
       this.controller.step(-1);
       return;
     }

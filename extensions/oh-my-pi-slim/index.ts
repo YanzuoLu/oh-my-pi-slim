@@ -354,7 +354,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   } | undefined;
   let treeNotificationHold: TreeNotificationHold | undefined;
 
-  for (const [shortcut, direction] of [["super+left", -1], ["super+right", 1]] as const) {
+  for (const [shortcut, direction] of [["ctrl+shift+left", -1], ["ctrl+shift+right", 1]] as const) {
     pi.registerShortcut(shortcut, {
       description: direction === 1
         ? "Open the read-only Subagent viewer and cycle forward through running or waiting runs"

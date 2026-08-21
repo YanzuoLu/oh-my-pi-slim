@@ -860,7 +860,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.ok(main.commands.includes("goal"));
     assert.ok(main.commands.includes("loop"));
     assert.equal(main.commands.includes("monitor"), false);
-    assert.deepEqual(main.shortcuts, ["super+left", "super+right"], "main sessions register exactly the two viewer shortcuts");
+    assert.deepEqual(main.shortcuts, ["ctrl+shift+left", "ctrl+shift+right"], "main sessions register exactly the two viewer shortcuts");
     assert.ok(main.handlers.has("session_before_fork"));
     assert.ok(main.handlers.has("session_before_tree"));
     assert.ok(main.handlers.has("session_tree"));

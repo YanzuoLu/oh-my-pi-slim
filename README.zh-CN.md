@@ -247,10 +247,10 @@ Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree res
 
 ### Subagent viewer
 
-`super+left` 与 `super+right` 打开只读全屏 viewer，查看任意 `running` 或 `waiting` subagent 的 child transcript。viewer 只展示：没有 reply、steer 或 interrupt，也不会写入 session entry、control 文件或 run 文件。
+`ctrl+shift+left` 与 `ctrl+shift+right` 打开只读全屏 viewer，查看任意 `running` 或 `waiting` subagent 的 child transcript。viewer 只展示：没有 reply、steer 或 interrupt，也不会写入 session entry、control 文件或 run 文件。
 
-- Main 是循环中的第 0 项。`super+right` 从 Main 进入第一个 active run，逐个前进，最后回到 Main；`super+left` 沿同一个环反向移动。`starting` 与 terminal run 不在循环内。
-- 在 viewer 内，普通 `Left`/`Right` 与 `super+left`/`super+right` 的循环方向一致；`Escape` 或 `q` 回到 Main。
+- Main 是循环中的第 0 项。`ctrl+shift+right` 从 Main 进入第一个 active run，逐个前进，最后回到 Main；`ctrl+shift+left` 沿同一个环反向移动。`starting` 与 terminal run 不在循环内。
+- 在 viewer 内，普通 `Left`/`Right` 与 `ctrl+shift+left`/`ctrl+shift+right` 的循环方向一致；`Escape` 或 `q` 回到 Main。
 - `Up`/`Down` 滚动一行，`PageUp`/`PageDown` 翻页，`Home` 跳到顶部，`End` 跳到底部并开启 follow，`f` 切换 follow，`r` 立即重新读取 transcript。
 - viewer 每秒刷新约四次，每个 run 各自保留自己的滚动位置与 follow 状态。
 - 正在查看的 run 离开 active 集合时，视图交给相邻的 active run；没有 active run 时自动回到 Main。新 run 加入循环不会移动当前选择。
@@ -259,19 +259,7 @@ Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree res
 - 问卷总是优先占屏：`ask_user_question` 会先关闭 viewer 并等它真正消失，然后才打开自己的 overlay。
 - 关闭时按 handle 精确移除 viewer 自己的 overlay，而不是按栈顶位置弹出。压在 viewer 之上的其他 package overlay 绝不会被误关，viewer 也不会以隐藏全屏层的形式残留、在那个 overlay 关闭后重新冒出来。关闭在任何情况下都是立即生效的，也不依赖键盘焦点归属。
 - 已知限制：宿主已经绘制的 inline terminal image 是由宿主合成的原始转义序列，可能仍会从 overlay 行穿透。viewer 自身渲染的内容不会造成这种情况。
-
-**Terminal.app 需要一次性键位映射。** macOS Terminal.app 会在 Pi 之前吞掉 Command+方向键。打开 `Terminal → 设置 → 描述文件 → 键盘`，添加两条记录，动作选择 `发送文本`（`Send Text`）。
-
-`Send Text` 字段需要的是真正的 ESC 控制字节，而不是 `\033` 这六个字符。先点入输入框，按一次 `Escape` 键（Terminal 会显示一个小标记），再输入剩下的字符：
-
-| 键 | 修饰键 | 在 `Send Text` 中输入 |
-| --- | --- | --- |
-| `Left` | `Command` | 按 `Escape` 键，再输入 `[1;9D` |
-| `Right` | `Command` | 按 `Escape` 键，再输入 `[1;9C` |
-
-用 `cat -v` 验证：Command+Left 必须打印 `^[[1;9D`，Command+Right 必须打印 `^[[1;9C`。如果 `cat -v` 什么都不打印，说明终端仍在吞掉该键；如果打印出别的内容，说明该终端发送的是另一种序列。
-
-其他终端情况不一。iTerm2、Ghostty、WezTerm 与 Kitty 通常无需额外配置就能发出带 Command 或 Super 修饰的方向键，但具体字节取决于版本以及是否启用了 kitty keyboard protocol，kitty 协议序列并不等同于 `^[[1;9D`。以 `cat -v` 的实际输出、或 Pi 确实响应了快捷键为准。package 只注册 `super+left` 与 `super+right`，不提供任何 fallback 快捷键，也不提供 slash command。
+- 该快捷键是普通的带修饰方向键，因此 SSH 会原样透明转发。只要终端模拟器自身能报告方向键上 Ctrl 与 Shift 的组合修饰，它就能生效。若某个终端吞掉或重绑了这个组合，按键就到不了 Pi，所以这并不是“所有终端通用”的断言。package 只注册 `ctrl+shift+left` 与 `ctrl+shift+right`，不提供任何 fallback 快捷键，也不提供 slash command。
 
 ## 有意限制
 
