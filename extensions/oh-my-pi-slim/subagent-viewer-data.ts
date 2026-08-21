@@ -32,7 +32,6 @@ export const VIEWER_MAX_ARGS_CHARS = 160;
 export const VIEWER_MAX_LIVE_CHARS = 2 * 1024;
 
 const CONTROL_PATTERN = /[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
-const VIEWER_STATUSES = new Set<RunStatus>(["running", "waiting"]);
 
 export interface ViewerActiveTool {
   readonly name: string;
@@ -49,12 +48,15 @@ export interface ViewerRunActivity {
   readonly compactionCount: number;
 }
 
-/** One deep-cloned running or waiting run. The viewer never receives a live registry object. */
+/**
+ * One deep-cloned retained run, in every lifecycle status the registry keeps.
+ * The viewer never receives a live registry object, and its membership is exactly the retained set.
+ */
 export interface ViewerRunSnapshot {
   readonly id: string;
   readonly agent: SpecialistName;
   readonly abstract: string;
-  readonly status: "running" | "waiting";
+  readonly status: RunStatus;
   readonly live: boolean;
   readonly model: string;
   /** The run's own working directory, used to resolve Pi's built-in tool renderers. */
@@ -62,8 +64,20 @@ export interface ViewerRunSnapshot {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly sessionFile?: string;
+  /** Set when this run continued another run's saved child session. */
+  readonly sourceRunId?: string;
+  /** Retained terminal result, shown in the outcome block. */
+  readonly output?: string;
+  readonly error?: string;
   readonly request?: SupervisorRequest;
   readonly activity: ViewerRunActivity;
+  /**
+   * Last entry timestamp this run is allowed to show, set only for a terminal run.
+   *
+   * A resumed run appends to the same child session file, so without this bound a finished source
+   * run would start showing its successor's turns. Terminal runs are frozen at their own end.
+   */
+  readonly transcriptCutoff?: string;
 }
 
 export interface ViewerSnapshot {
@@ -74,10 +88,6 @@ export interface ViewerSnapshot {
 export interface ViewerTheme {
   fg(color: string, text: string): string;
   bold(text: string): string;
-}
-
-export function isViewerStatus(status: RunStatus): status is "running" | "waiting" {
-  return VIEWER_STATUSES.has(status);
 }
 
 export function sanitizeViewerText(value: string): string {
@@ -149,7 +159,7 @@ export function wrapViewerText(text: string, width: number, prefix = ""): string
  * ---------------------------------------------------------------------------------------------- */
 
 /**
- * Cycles Main and the active run IDs in one ring.
+ * Cycles Main and the retained run IDs in one ring.
  * Returns undefined for Main, so `ctrl+shift+right` walks Main → first → … → last → Main.
  */
 export function cycleViewerSelection(
@@ -165,7 +175,8 @@ export function cycleViewerSelection(
 }
 
 /**
- * Picks the replacement selection after the current run leaves the active set.
+ * Picks the replacement selection after the current run leaves the retained set, which only
+ * `subagent clear` can do.
  * The run that took over the removed position wins, otherwise the closest earlier run, otherwise Main.
  */
 export function neighborAfterViewerRemoval(
@@ -249,12 +260,30 @@ export interface ViewerTranscript {
   readonly hiddenEntries: number;
   readonly warning?: string;
   readonly fingerprint?: string;
+  /**
+   * Stable digest of the selected entries, independent of the file's size and mtime.
+   *
+   * A resumed run appends to the same file, so a finished source run keeps seeing a new fingerprint
+   * for content its cutoff already excludes. Comparing this key instead keeps that read from
+   * rebuilding an unchanged body.
+   */
+  readonly contentKey?: string;
 }
 
 export interface ViewerTranscriptLoad {
   readonly status: "ok" | "waiting" | "rejected" | "unchanged";
   readonly transcript?: ViewerTranscript;
   readonly fingerprint?: string;
+  readonly contentKey?: string;
+}
+
+export interface ViewerTranscriptLoadOptions {
+  /** File identity from the previous read; an identical one skips the read entirely. */
+  readonly previousFingerprint?: string;
+  /** Selected-entry digest from the previous read; an identical one skips the rebuild. */
+  readonly previousContentKey?: string;
+  /** Terminal runs never show an entry newer than this ISO timestamp. */
+  readonly cutoff?: string;
 }
 
 /** True for the one `session` header row, which is metadata rather than a branch node. */
@@ -330,17 +359,70 @@ interface ViewerEntrySelection {
 }
 
 /**
+ * Keeps only the entries a terminal run is allowed to show.
+ *
+ * Fail-closed by construction: with a cutoff in force, an entry whose outer timestamp is missing or
+ * unparsable is dropped rather than trusted, so appended continuation turns can never reappear in a
+ * finished run's transcript by omitting or corrupting their timestamp.
+ */
+function applyViewerCutoff(
+  entries: readonly SessionEntry[],
+  cutoff: string | undefined,
+): { entries: SessionEntry[]; skipped: number } {
+  if (cutoff === undefined) return { entries: [...entries], skipped: 0 };
+  const limit = Date.parse(cutoff);
+  if (!Number.isFinite(limit)) return { entries: [...entries], skipped: 0 };
+  const kept: SessionEntry[] = [];
+  let skipped = 0;
+  for (const entry of entries) {
+    const stamp = (entry as { timestamp?: unknown }).timestamp;
+    const parsed = typeof stamp === "string" ? Date.parse(stamp) : Number.NaN;
+    if (!Number.isFinite(parsed)) {
+      skipped += 1;
+      continue;
+    }
+    if (parsed <= limit) kept.push(entry);
+    else skipped += 1;
+  }
+  return { entries: kept, skipped };
+}
+
+/**
+ * Stable digest of the selected entries.
+ *
+ * Covers the id and timestamp of every selected entry plus the count, which is exactly what decides
+ * whether the rendered body can change. It is a display cache key, never a security check, so a
+ * cheap non-cryptographic rolling hash is the right tool.
+ */
+export function viewerContentKey(entries: readonly SessionEntry[]): string {
+  let hash = 0x811c9dc5;
+  const mix = (text: string): void => {
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+  };
+  for (const entry of entries) {
+    mix(String((entry as { id?: unknown }).id ?? ""));
+    mix("\u0000");
+    mix(String((entry as { timestamp?: unknown }).timestamp ?? ""));
+    mix("\u0001");
+  }
+  return `${entries.length}:${hash.toString(36)}`;
+}
+
+/**
  * Turns raw JSONL text into the entries the viewer will render.
  *
  * Never throws and never hands a possibly cyclic graph to a Pi helper. Invalid branch metadata and
  * a truncated head both degrade to bounded file order with a footer warning, because file order
  * still shows the tail a follower needs while branch resolution would collapse to one entry.
  */
-function selectViewerEntries(text: string, truncated: boolean): ViewerEntrySelection {
+function selectViewerEntries(text: string, truncated: boolean, cutoff?: string): ViewerEntrySelection {
   const warnings: string[] = [];
   try {
     const parsed = parseSessionEntries(text) as unknown as unknown[];
-    const accepted: SessionEntry[] = [];
+    const shaped: SessionEntry[] = [];
     let dropped = 0;
     for (const row of Array.isArray(parsed) ? parsed : []) {
       if (isSessionHeaderRow(row)) continue;
@@ -349,9 +431,16 @@ function selectViewerEntries(text: string, truncated: boolean): ViewerEntrySelec
         dropped += 1;
         continue;
       }
-      accepted.push(entry);
+      shaped.push(entry);
     }
     if (dropped > 0) warnings.push(`${dropped} unusable entr${dropped === 1 ? "y" : "ies"} skipped.`);
+    // The cutoff runs after the shape gate and before any cycle or branch work, so a resumed run's
+    // later entries never take part in this run's branch resolution either.
+    const bounded = applyViewerCutoff(shaped, cutoff);
+    const accepted = bounded.entries;
+    if (bounded.skipped > 0) {
+      warnings.push(`${bounded.skipped} entr${bounded.skipped === 1 ? "y" : "ies"} after this run finished ${bounded.skipped === 1 ? "was" : "were"} excluded.`);
+    }
     if (truncated) {
       // The head is gone, so every ancestor chain is incomplete and branch resolution would keep
       // only the last entry. The already-warned file-order tail is the useful, safe answer.
@@ -379,50 +468,69 @@ function fingerprintOf(path: string): { fingerprint: string; size: number } | un
 }
 
 /**
+ * True when two loads describe the same visible transcript.
+ *
+ * The content key decides it whenever both sides have one. Loads without a key are the empty
+ * waiting and rejected results, where the status and the reason are the whole content, so an
+ * identical pair must not be treated as new content and rebuilt.
+ */
+export function sameViewerTranscript(
+  left: ViewerTranscript | undefined,
+  right: ViewerTranscript | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  if (left.status !== right.status || left.warning !== right.warning) return false;
+  if (left.hiddenEntries !== right.hiddenEntries || left.entries.length !== right.entries.length) return false;
+  if (left.contentKey !== undefined || right.contentKey !== undefined) return left.contentKey === right.contentKey;
+  return left.entries.length === 0;
+}
+
+/**
  * Loads one child transcript.
- * `previousFingerprint` short-circuits an unchanged file, so an idle run never re-reads its JSONL.
+ *
+ * Two independent short circuits keep an idle or finished run cheap: an unchanged file identity
+ * skips the read, and an unchanged selected-entry digest skips the rebuild even when a resumed run
+ * appended to the same file.
  */
 export function loadViewerTranscript(
   childSessionDir: string | undefined,
   sessionFile: string | undefined,
-  previousFingerprint?: string,
+  options: ViewerTranscriptLoadOptions = {},
 ): ViewerTranscriptLoad {
+  const { previousFingerprint, previousContentKey, cutoff } = options;
+  // A run with no readable file must answer the same way on every poll, so these results carry a
+  // content key too: an unchanged reason returns `unchanged` instead of a fresh transcript object
+  // the caller would treat as new content and rebuild for.
+  const pending = (
+    status: "waiting" | "rejected",
+    reason: string,
+    fingerprint?: string,
+  ): ViewerTranscriptLoad => {
+    const key = `${status}:${reason}`;
+    if (previousContentKey === key) return { status: "unchanged", contentKey: key, fingerprint };
+    return {
+      status,
+      contentKey: key,
+      fingerprint,
+      transcript: { status, entries: [], hiddenEntries: 0, warning: reason, fingerprint, contentKey: key },
+    };
+  };
   const resolved = resolveViewerSessionFile(childSessionDir, sessionFile);
-  if (resolved.status !== "ok") {
-    return {
-      status: resolved.status,
-      transcript: { status: resolved.status, entries: [], hiddenEntries: 0, warning: resolved.reason },
-    };
-  }
+  if (resolved.status !== "ok") return pending(resolved.status, resolved.reason);
   const stat = fingerprintOf(resolved.path);
-  if (!stat) {
-    return {
-      status: "waiting",
-      transcript: {
-        status: "waiting",
-        entries: [],
-        hiddenEntries: 0,
-        warning: "The child session file has not been created yet.",
-      },
-    };
-  }
+  if (!stat) return pending("waiting", "The child session file has not been created yet.");
   if (previousFingerprint !== undefined && previousFingerprint === stat.fingerprint) {
     return { status: "unchanged", fingerprint: stat.fingerprint };
   }
   let read: { text: string; truncated: boolean };
   try { read = readBoundedText(resolved.path, stat.size, VIEWER_MAX_FILE_BYTES); }
   catch (error) {
-    return {
-      status: "waiting",
-      fingerprint: stat.fingerprint,
-      transcript: {
-        status: "waiting",
-        entries: [],
-        hiddenEntries: 0,
-        warning: `Child session file is not readable: ${error instanceof Error ? error.message : String(error)}`,
-        fingerprint: stat.fingerprint,
-      },
-    };
+    return pending(
+      "waiting",
+      `Child session file is not readable: ${error instanceof Error ? error.message : String(error)}`,
+      stat.fingerprint,
+    );
   }
   // parseSessionEntries drops malformed lines, which is exactly the tolerance a concurrently
   // appended tail line needs. A truncated head is dropped by readBoundedText the same way.
@@ -432,19 +540,28 @@ export function loadViewerTranscript(
   if (read.truncated) {
     warnings.push(`Large session file: showing only the last ${Math.round(VIEWER_MAX_FILE_BYTES / 1024)} KB in file order.`);
   }
-  const selected = selectViewerEntries(read.text, read.truncated);
+  const selected = selectViewerEntries(read.text, read.truncated, cutoff);
   warnings.push(...selected.warnings);
   const active = selected.entries;
   const hiddenEntries = Math.max(0, active.length - VIEWER_MAX_ENTRIES);
+  const entries = hiddenEntries > 0 ? active.slice(active.length - VIEWER_MAX_ENTRIES) : active;
+  const contentKey = viewerContentKey(entries);
+  if (previousContentKey !== undefined && previousContentKey === contentKey) {
+    // The file grew, but nothing this run may show changed. The caller records the new file
+    // identity and keeps the body it already built.
+    return { status: "unchanged", fingerprint: stat.fingerprint, contentKey };
+  }
   return {
     status: "ok",
     fingerprint: stat.fingerprint,
+    contentKey,
     transcript: {
       status: "ok",
-      entries: hiddenEntries > 0 ? active.slice(active.length - VIEWER_MAX_ENTRIES) : active,
+      entries,
       hiddenEntries,
       warning: warnings.length > 0 ? warnings.join(" ") : undefined,
       fingerprint: stat.fingerprint,
+      contentKey,
     },
   };
 }

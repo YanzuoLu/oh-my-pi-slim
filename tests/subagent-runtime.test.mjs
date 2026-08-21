@@ -111,6 +111,10 @@ const {
   writeGoalStatsSidecar,
 } = await import("../extensions/oh-my-pi-slim/subagent-run-files.ts");
 const { resetWidgetStackHost } = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
+const {
+  MAX_SUBAGENT_WIDGET_LINES,
+  renderSubagentWidgetLines,
+} = await import("../extensions/oh-my-pi-slim/subagent-widget-renderer.ts");
 
 // The aggregate widget host is a process-wide singleton, so every test starts from an empty one.
 beforeEach(() => resetWidgetStackHost());
@@ -3826,7 +3830,7 @@ test("guarded child session removal rejects unsafe paths directly", () => {
   } finally { rmSync(tempDir, { recursive: true, force: true }); }
 });
 
-test("viewerSnapshot hands the read-only viewer a deep copy of running and waiting runs only", async () => {
+test("viewerSnapshot hands the read-only viewer a deep copy of every retained run", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
@@ -3860,9 +3864,13 @@ test("viewerSnapshot hands the read-only viewer a deep copy of running and waiti
     const journalWritesBefore = harness.journalWrites.length;
     const snapshot = harness.runtime.viewerSnapshot();
     assert.equal(harness.journalWrites.length, journalWritesBefore, "viewerSnapshot must not write a journal entry");
-    assert.deepEqual(snapshot.runs.map((run) => run.id).sort(), [running.id, waiting.id].sort());
-    assert.equal(snapshot.runs.some((run) => run.id === starting.details.run.id), false);
-    assert.equal(snapshot.runs.some((run) => run.id === terminal.id), false);
+    assert.deepEqual(
+      snapshot.runs.map((run) => run.id),
+      harness.runtime.registry.list().map((run) => run.id),
+      "membership is the retained set in registry order",
+    );
+    assert.ok(snapshot.runs.some((run) => run.id === starting.details.run.id), "a starting run is retained too");
+    assert.ok(snapshot.runs.some((run) => run.id === terminal.id), "a terminal run stays in the cycle");
     assert.equal(snapshot.childSessionDir, childDir);
 
     const runningSnapshot = snapshot.runs.find((run) => run.id === running.id);
@@ -3911,5 +3919,90 @@ test("viewerSnapshot stays empty and safe without an attached session", () => {
     const snapshot = harness.runtime.viewerSnapshot();
     assert.deepEqual(snapshot.runs, []);
     assert.equal(snapshot.childSessionDir, undefined);
+  } finally { harness.cleanup(); }
+});
+
+test("viewerSnapshot membership is the retained set itself, in widget order", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const childDir = resolve(harness.sessionDir, "omps-subagents");
+    const running = await startRunningRun(harness, (runId) => ({
+      status: "running",
+      sessionFile: join(childDir, `${runId}.jsonl`),
+    }));
+    const waiting = await startRunningRun(harness, (runId) => ({
+      status: "waiting",
+      waitingSeq: 1,
+      sessionFile: join(childDir, `${runId}.jsonl`),
+      request: { runId, reason: "need_decision", message: "Choose.", createdAt: "2026-04-17T00:00:02.000Z" },
+    }));
+    const starting = await createRun(harness);
+    const startingId = starting.details.run.id;
+    const completed = seedTerminalRun(harness, { id: "done-run", status: "completed", output: "final output" });
+    const failed = seedTerminalRun(harness, { id: "fail-run", status: "failed", error: "provider error" });
+    const interrupted = seedTerminalRun(harness, {
+      id: "stop-run",
+      status: "interrupted",
+      error: "Interrupted by the parent session.",
+    });
+
+    const snapshot = harness.runtime.viewerSnapshot();
+    const retained = harness.runtime.registry.list();
+    assert.deepEqual(
+      snapshot.runs.map((run) => run.id),
+      retained.map((run) => run.id),
+      "the viewer sees exactly the retained runs, in registry order",
+    );
+    assert.equal(snapshot.runs.length, 6);
+    assert.deepEqual(
+      [...new Set(snapshot.runs.map((run) => run.status))].sort(),
+      ["completed", "failed", "interrupted", "running", "starting", "waiting"],
+    );
+    for (const id of [running.id, waiting.id, startingId, completed.id, failed.id, interrupted.id]) {
+      assert.ok(snapshot.runs.some((run) => run.id === id), `${id} must be part of the viewer cycle`);
+    }
+
+    // The widget renders the same retained set; its heading total is the viewer's N.
+    const widgetLines = renderSubagentWidgetLines({
+      runs: retained,
+      spinnerFrame: 0,
+      terminalWidth: 200,
+      theme: transcriptTheme,
+      nowMs: NOW_MS,
+      expanded: true,
+    });
+    const heading = stripVTControlCharacters(widgetLines[0]);
+    assert.ok(heading.includes(`Agents (3/${snapshot.runs.length})`), heading);
+    assert.ok(widgetLines.length <= MAX_SUBAGENT_WIDGET_LINES, "the widget still budgets its own rows");
+
+    const terminalSnapshot = snapshot.runs.find((run) => run.id === completed.id);
+    assert.equal(terminalSnapshot.transcriptCutoff, terminalSnapshot.updatedAt, "a terminal run freezes at its own end");
+    assert.equal(terminalSnapshot.output, "final output");
+    assert.equal(snapshot.runs.find((run) => run.id === failed.id).error, "provider error");
+    assert.equal(snapshot.runs.find((run) => run.id === running.id).transcriptCutoff, undefined);
+    assert.equal(snapshot.runs.find((run) => run.id === startingId).transcriptCutoff, undefined);
+  } finally { harness.cleanup(); }
+});
+
+test("viewerSnapshot copies the resume link and never shares a retained object", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const source = seedTerminalRun(harness, { id: "src-run", status: "completed", output: "source output" });
+    harness.runtime.registry.add(persistedRun({
+      id: "resumed",
+      status: "running",
+      sourceRunId: source.id,
+      sessionFile: "/child/shared.jsonl",
+    }), true);
+
+    const snapshot = harness.runtime.viewerSnapshot();
+    const resumed = snapshot.runs.find((run) => run.id === "resumed");
+    assert.equal(resumed.sourceRunId, "src-run");
+    resumed.sourceRunId = "mutated";
+    resumed.output = "mutated";
+    assert.equal(harness.runtime.registry.require("resumed").sourceRunId, "src-run");
+    assert.equal(harness.runtime.viewerSnapshot().runs.find((run) => run.id === "resumed").sourceRunId, "src-run");
   } finally { harness.cleanup(); }
 });

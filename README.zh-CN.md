@@ -247,9 +247,10 @@ Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree res
 
 ### Subagent viewer
 
-`ctrl+shift+left` 与 `ctrl+shift+right` 打开只读全屏 viewer，查看任意 `running` 或 `waiting` subagent 的 child transcript。viewer 只展示：没有 reply、steer 或 interrupt，也不会写入 session entry、control 文件或 run 文件。
+`ctrl+shift+left` 与 `ctrl+shift+right` 打开只读全屏 viewer，查看任意 retained subagent run 的 child transcript。viewer 只展示：没有 reply、steer 或 interrupt，也不会写入 session entry、control 文件或 run 文件。
 
-- Main 是循环中的第 0 项。`ctrl+shift+right` 从 Main 进入第一个 active run，逐个前进，最后回到 Main；`ctrl+shift+left` 沿同一个环反向移动。`starting` 与 terminal run 不在循环内。
+- Main 是循环中的第 0 项。`ctrl+shift+right` 从 Main 进入第一个 retained run，逐个前进，最后回到 Main；`ctrl+shift+left` 沿同一个环反向移动。
+- 循环范围就是 Agents widget 展示的 retained 集合，顺序与总数完全一致：`starting`、`running`、`waiting`、`completed`、`failed`、`interrupted` 六种状态全部可达，包括 widget 折叠或超出行预算时隐藏的那些。状态变化只会重排，正在查看的 run 结束后仍留在屏幕上。只有 `subagent clear` 才会移除 run；全部清空后自动回到 Main。
 - 在 viewer 内，普通 `Left`/`Right` 与 `ctrl+shift+left`/`ctrl+shift+right` 的循环方向一致；`Escape` 或 `q` 回到 Main。
 - transcript 从屏幕第一行开始；其余信息全部位于底部，顺序与 Main 自己的底部区域一致：live/waiting 区、`Read-Only` 输入占位栏、run 状态行、导航提示。
 - transcript 由 Pi 自己的 transcript 组件渲染，因此 user 消息、assistant Markdown、thinking 块、tool call、tool result、compaction summary 与 branch summary 都保持 Main 的配色、间距与框架。
@@ -260,7 +261,10 @@ Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree res
 - viewer 每秒刷新约四次：activity 计数按该频率更新，elapsed 时钟只在其显示值真正变化的那一次刷新时重绘，两者都不会重建 transcript。
 - 展示相关设置（thinking 块、输出内边距、Markdown 代码块缩进）直接从全局 settings 文件读取；项目受信任时再叠加项目 settings 文件。viewer 只读取它们，绝不创建、加锁或写入 settings 文件。
 - 每个 run 各自保留自己的滚动位置、follow 状态与 suppression。
-- 正在查看的 run 离开 active 集合时，视图交给相邻的 active run；没有 active run 时自动回到 Main。新 run 加入循环不会移动当前选择。
+- 正在查看的 run 被 clear 时，视图交给相邻的 retained run；retained 集合为空时自动回到 Main。新 run 加入循环不会移动当前选择。
+- 已结束的 run 是冻结的：transcript 停在它自己的最后一条 entry，elapsed 固定为它真实运行的时长，也不再声称 live。`subagent resume` 会继续写同一个 child session 文件，因此 source run 与每一代 resumed run 即使共用一个磁盘文件，也各自只显示属于自己的轮次。
+- 已结束的 run 还会在 transcript 下方显示 `[completed]`、`[failed]` 或 `[interrupted]` 块。失败或中断原因始终可见；与最后一条 assistant 消息重复的最终答案不会重复打印。即使没有可读的 session 文件，retained 结果仍会显示。
+- `starting` run 在 child session 文件出现前显示为等待状态，等待期间不会反复重绘。
 - transcript 取自 child session 文件中 compaction-aware 的当前分支。非法条目行会被跳过；分支元数据不可用（父链成环或 entry id 重复）时，降级为有界的文件顺序 tail 并在 footer 给出 warning，而不是继续信任它。符号链接、目录以及本 session child session 目录之外的路径一律拒绝；文件尚未创建时显示为 waiting；超大文件降级为有界只读文件顺序 tail 并给出 warning。图片只渲染占位符，绝不渲染原始数据，也绝不执行 child extension 自己的消息 renderer。
 - viewer 打开期间占据整个屏幕，并自带 `Read-Only` 输入占位栏，退出后原样交还 Main UI。viewer 从不替换 editor，因此你的草稿、光标与 undo 历史都不会被修改。
 - 问卷始终优先占屏：`ask_user_question` 会先关闭 viewer 并等待其真正消失，再打开自己的 overlay。

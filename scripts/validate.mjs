@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.14", "package version must be 0.10.14");
+check(packageJson.version === "0.10.15", "package version must be 0.10.15");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.14" && lock.packages?.[""]?.version === "0.10.14", "package-lock version must be 0.10.14");
+check(lock.version === "0.10.15" && lock.packages?.[""]?.version === "0.10.15", "package-lock version must be 0.10.15");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -2565,7 +2565,7 @@ hasAll(viewer, [
   'overlayOptions: { width: "100%", maxHeight: "100%", row: 0, col: 0, margin: 0 }',
   'VIEWER_READ_ONLY_LABEL = "Read-Only"',
   "VIEWER_REFRESH_MS = 250",
-  'VIEWER_EMPTY_MESSAGE = "No running or waiting subagents."',
+  'VIEWER_EMPTY_MESSAGE = "No retained subagent runs."',
   "this.tui.terminal?.rows",
 ], "viewer owns one full-screen overlay through public geometry only");
 
@@ -2633,8 +2633,22 @@ hasAll(viewerData, [
   "const items: (string | undefined)[] = [undefined, ...runIds];",
   "export function neighborAfterViewerRemoval",
   "nextIds[Math.min(index, nextIds.length - 1)]",
-  'const VIEWER_STATUSES = new Set<RunStatus>(["running", "waiting"]);',
-], "viewer cycle keeps Main at item 0 and only running or waiting runs in the ring");
+  "readonly status: RunStatus;",
+  "readonly transcriptCutoff?: string;",
+  "export function viewerContentKey",
+  "function applyViewerCutoff(",
+], "viewer membership is the retained set and terminal runs carry a transcript cutoff");
+// A status filter would break parity with the Agents widget's retained total.
+hasNone(viewerData, ["isViewerStatus", "VIEWER_STATUSES"], "viewer data must not re-introduce a membership filter");
+check(
+  viewerData.indexOf("const bounded = applyViewerCutoff(shaped, cutoff);") <
+    viewerData.indexOf("const branches = checkViewerBranches(accepted);"),
+  "the terminal cutoff must run before any branch or cycle work",
+);
+check(
+  viewerData.includes("if (!Number.isFinite(parsed)) {\n      skipped += 1;\n      continue;\n    }"),
+  "an entry with an unusable timestamp must fail closed under a cutoff",
+);
 
 // Untrusted JSONL is shape-filtered and proven acyclic before any Pi branch helper touches it.
 hasAll(viewerData, [
@@ -2787,6 +2801,47 @@ hasAll(viewer, [
 ], "the viewer shares Pi's one tool-output expansion state and never hardcodes its key");
 check(!/"ctrl\+o"/i.test(viewer), "the viewer must not hardcode the expansion key");
 
+// Every retained status has its own bottom-status presentation, and only live runs claim liveness.
+hasAll(viewer, [
+  "export const VIEWER_STATUS_STYLE",
+  'starting: { color: "dim", label: "starting" }',
+  'running: { color: "accent", label: "running" }',
+  'waiting: { color: "warning", label: "waiting" }',
+  'completed: { color: "success", label: "completed" }',
+  'failed: { color: "error", label: "failed" }',
+  'interrupted: { color: "warning", label: "interrupted" }',
+  "export function isViewerTerminalStatus",
+  "!VIEWER_LIVE_STATUSES.has(model.run.status)",
+  "if (isViewerTerminalStatus(run.status)) {",
+  "export function viewerOutcomeOf",
+  "export function viewerPlaceholderOf",
+  "viewerOutcomeKey(outcome)",
+], "the viewer presents all six retained statuses and freezes a finished run");
+check(
+  viewer.includes("previousContentKey,") && viewer.includes("cutoff,") && viewer.includes("run.transcriptCutoff"),
+  "reads must carry the terminal cutoff and the previous content key",
+);
+check(
+  viewer.includes("if (!this.retainedIds.includes(runId)) return;"),
+  "a read completion must prove its run is still retained before it touches the cache",
+);
+check(
+  viewer.includes("if (sameViewerTranscript(this.transcripts.get(runId), load.transcript)) {"),
+  "a repeated waiting or rejected answer must not count as new transcript content",
+);
+hasAll(viewerData, ["export function sameViewerTranscript"], "the data layer owns the transcript sameness test");
+
+// The outcome block is part of the transcript body, sanitized and bounded like everything else.
+hasAll(viewerTranscript, [
+  "export interface ViewerOutcome",
+  "TERMINAL_OUTCOME_STATUSES",
+  "if (error !== \"\") lines.push(theme.fg(color, error));",
+  "liveTextIsRedundant(output, persisted)",
+  "input.placeholder ?? emptyBodyNote(transcript)",
+  "boundViewerText(sanitizeViewerText(outcome.error ?? \"\"), VIEWER_MAX_BLOCK_CHARS)",
+  "boundViewerText(sanitizeViewerText(outcome.output ?? \"\"), VIEWER_MAX_BLOCK_CHARS)",
+], "the outcome block always shows a failure reason and never repeats the final answer");
+
 // Bottom-anchored layout and the split body/status caches.
 hasAll(viewer, [
   "private statusLines(", "private hintLines(", "private metaLine(", "private readOnlyLines(",
@@ -2833,11 +2888,19 @@ check(
 // One cloned snapshot API on the runtime, filtered to the viewer statuses.
 hasAll(runtime, [
   "viewerSnapshot(): ViewerSnapshot",
-  "if (!isViewerStatus(run.status)) continue;",
+  "for (const run of this.registry.list()) {",
   "cloneViewerValue(run.request)",
   "cloneViewerActivity(this.activity.get(run.id))",
   "cwd: run.cwd,",
-], "runtime exposes exactly one cloned read-only viewer snapshot");
+  "sourceRunId: run.sourceRunId,",
+  "output: run.output,",
+  "error: run.error,",
+  "transcriptCutoff: isTerminalStatus(run.status) ? run.updatedAt : undefined,",
+], "runtime exposes exactly one cloned read-only viewer snapshot of the whole retained set");
+check(
+  !runtime.includes("isViewerStatus"),
+  "the runtime must not filter viewer membership by status",
+);
 
 // The package entry owns exactly two shortcuts, no command, and the full viewer lifecycle.
 hasAll(extension, [
@@ -2857,6 +2920,19 @@ hasAll(read("tests/loop.test.mjs"), [
 ], "registration tests must pin two main shortcuts and none in a child");
 
 hasAll(viewerTests, [
+  "every retained status stays in the cycle and i/N counts the whole retained set",
+  "a retained set larger than the widget's visible budget keeps every run in the cycle",
+  "a running run that completes keeps the selection and only reorders",
+  "a starting run shows a stable pending body and keeps polling",
+  "a terminal run without a readable session file falls back to its retained result",
+  "a terminal error stays visible even when the transcript is present",
+  "terminal elapsed freezes at the run's own end and stops the status clock",
+  "a resumed run and its source each see exactly their own turns",
+  "the cutoff excludes every entry type, not only messages",
+  "with a cutoff in force an entry with a missing or invalid timestamp is dropped",
+  "appending to a shared file never rebuilds a frozen run's body",
+  "a read that lands after clear never writes a cache entry or repaints",
+  "a waiting file that never appears is read every tick but rebuilt once",
   "a mounted regular-mode overlay enables wheel reporting exactly once and restores it on close",
   "a stale handle from an already closed open never enables wheel reporting",
   "a host that throws on open leaves no wheel reporting behind",
@@ -2926,7 +3002,11 @@ hasAll(read("tests/fixtures/overlay-host.mjs"), [
 hasAll(askTui, [
   "export interface AskTuiDriverOptions", "beforeOpen?: () => void | Promise<void>", "await this.beforeOpen()",
 ], "Ask exposes one public coordination hook instead of a patched viewer");
-hasAll(subagentRuntimeTests, ["viewerSnapshot"], "runtime tests must cover the cloned viewer snapshot");
+hasAll(subagentRuntimeTests, [
+  "viewerSnapshot",
+  "viewerSnapshot membership is the retained set itself, in widget order",
+  "renderSubagentWidgetLines",
+], "runtime tests must cover the cloned viewer snapshot and its widget parity");
 hasAll(read("tests/loop-load.test.mjs"), ['event.method === "custom"'], "load tests must assert the viewer never opens outside a TUI session");
 
 const preset = json("config/oh-my-pi-slim.example.json");

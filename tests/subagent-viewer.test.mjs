@@ -54,7 +54,6 @@ const {
   VIEWER_MAX_FILE_BYTES,
   VIEWER_MAX_TRANSCRIPT_LINES,
   cycleViewerSelection,
-  isViewerStatus,
   lastAssistantText,
   liveTextIsRedundant,
   boundViewerText,
@@ -63,6 +62,8 @@ const {
   neighborAfterViewerRemoval,
   renderViewerLive,
   resolveViewerSessionFile,
+  sameViewerTranscript,
+  viewerContentKey,
   sanitizeViewerInline,
   sanitizeViewerText,
   wrapViewerText,
@@ -85,8 +86,10 @@ const {
   VIEWER_MOUSE_ENABLE,
   VIEWER_READ_ONLY_LABEL,
   VIEWER_REFRESH_MS,
+  VIEWER_STATUS_STYLE,
   createSubagentViewer,
   fitViewerSegments,
+  isViewerTerminalStatus,
   isViewerMouseSequence,
   parseViewerWheel,
 } = await import("../extensions/oh-my-pi-slim/subagent-viewer.ts");
@@ -240,12 +243,17 @@ function createHarness({
   const tui = host.tui;
   const viewer = new SubagentViewer({
     snapshot: () => ({ runs: state.runs, childSessionDir: state.childSessionDir }),
-    loadTranscript: loadTranscript ?? ((dir, sessionFile, fingerprint) => {
-      state.loads.push({ dir, sessionFile, fingerprint });
+    loadTranscript: loadTranscript ?? ((dir, sessionFile, options = {}) => {
+      state.loads.push({ dir, sessionFile, ...options });
       const current = `fp-${sessionFile}`;
       // Same contract as the real loader: an unchanged file is reported, never re-parsed.
-      if (fingerprint === current) return { status: "unchanged", fingerprint: current };
-      return { status: "ok", fingerprint: current, transcript: transcriptOf([], { fingerprint: current }) };
+      if (options.previousFingerprint === current) return { status: "unchanged", fingerprint: current };
+      return {
+        status: "ok",
+        fingerprint: current,
+        contentKey: `ck-${sessionFile}`,
+        transcript: transcriptOf([], { fingerprint: current, contentKey: `ck-${sessionFile}` }),
+      };
     }),
     buildBody: buildBody ?? (realBody
       ? (input) => { const body = buildViewerTranscriptBody(input); state.builds.push(body); return body; }
@@ -345,21 +353,25 @@ test("removal picks the run that took the vacated position, then the closest ear
   assert.equal(neighborAfterViewerRemoval([], ["x"], "a"), "x");
 });
 
-test("only running and waiting runs belong to the viewer cycle", () => {
-  assert.equal(isViewerStatus("running"), true);
-  assert.equal(isViewerStatus("waiting"), true);
-  for (const status of ["starting", "completed", "failed", "interrupted"]) {
-    assert.equal(isViewerStatus(status), false);
+test("terminal statuses are the ones that freeze the transcript and the clock", () => {
+  for (const status of ["completed", "failed", "interrupted"]) {
+    assert.equal(isViewerTerminalStatus(status), true);
   }
+  for (const status of ["starting", "running", "waiting"]) {
+    assert.equal(isViewerTerminalStatus(status), false);
+  }
+  assert.deepEqual(Object.keys(VIEWER_STATUS_STYLE).sort(), [
+    "completed", "failed", "interrupted", "running", "starting", "waiting",
+  ]);
 });
 
-test("an empty active set notifies exactly once and never opens the overlay", async () => {
+test("an empty retained set notifies exactly once and never opens the overlay", async () => {
   const harness = createHarness({ runs: [] });
   await harness.viewer.handleShortcut(harness.ui, 1, { enabled: true });
   assert.deepEqual(harness.notifications, [{ message: VIEWER_EMPTY_MESSAGE, type: "info" }]);
   assert.equal(harness.customCalls.length, 0);
   assert.equal(harness.viewer.isOpen(), false);
-  assert.equal(VIEWER_EMPTY_MESSAGE, "No running or waiting subagents.");
+  assert.equal(VIEWER_EMPTY_MESSAGE, "No retained subagent runs.");
 });
 
 test("a disabled host never opens the viewer and never notifies", async () => {
@@ -589,7 +601,7 @@ test("r forces an immediate re-read even when the fingerprint is unchanged", asy
   harness.key("r");
   await flush();
   assert.equal(harness.loads.length, before + 1);
-  assert.equal(harness.loads.at(-1).fingerprint, undefined);
+  assert.equal(harness.loads.at(-1).previousFingerprint, undefined);
   harness.viewer.close();
   await opened;
 });
@@ -597,8 +609,8 @@ test("r forces an immediate re-read even when the fingerprint is unchanged", asy
 test("r pressed during an in-flight read still forces the follow-up read", async () => {
   const pending = [];
   const harness = createHarness({
-    loadTranscript: (_dir, _sessionFile, fingerprint) => new Promise((resolve) => {
-      pending.push({ fingerprint, resolve });
+    loadTranscript: (_dir, _sessionFile, options = {}) => new Promise((resolve) => {
+      pending.push({ previousFingerprint: options.previousFingerprint, resolve });
     }),
   });
   const { opened } = await openViewer(harness);
@@ -611,7 +623,7 @@ test("r pressed during an in-flight read still forces the follow-up read", async
   pending[0].resolve({ status: "ok", fingerprint: "fp-1", transcript: transcriptOf([]) });
   await flush();
   assert.equal(pending.length, 2);
-  assert.equal(pending[1].fingerprint, undefined, "the queued read must keep the force intent");
+  assert.equal(pending[1].previousFingerprint, undefined, "the queued read must keep the force intent");
 
   pending[1].resolve({ status: "unchanged", fingerprint: "fp-1" });
   await flush();
@@ -1732,11 +1744,11 @@ test("an unchanged file is not re-read and a changed file is", () => {
     writeFileSync(fixture.file, `${JSON.stringify(assistantText("m1", null, "one"))}\n`);
     const first = loadViewerTranscript(fixture.childDir, fixture.file);
     assert.equal(first.status, "ok");
-    const unchanged = loadViewerTranscript(fixture.childDir, fixture.file, first.fingerprint);
+    const unchanged = loadViewerTranscript(fixture.childDir, fixture.file, { previousFingerprint: first.fingerprint });
     assert.equal(unchanged.status, "unchanged");
     assert.equal(unchanged.transcript, undefined);
     writeFileSync(fixture.file, `${JSON.stringify(assistantText("m1", null, "one"))}\n${JSON.stringify(assistantText("m2", "m1", "two"))}\n`);
-    const changed = loadViewerTranscript(fixture.childDir, fixture.file, first.fingerprint);
+    const changed = loadViewerTranscript(fixture.childDir, fixture.file, { previousFingerprint: first.fingerprint });
     assert.equal(changed.status, "ok");
     assert.equal(changed.transcript.entries.length, 2);
   } finally {
@@ -2599,14 +2611,14 @@ test("the expansion state is part of the body key and reaches the built body", a
   await flush();
   harness.lines();
   const firstKey = harness.viewer.model().bodyKey;
-  assert.match(firstKey, /:1$/);
+  assert.match(firstKey, /:1:running:$/, firstKey);
   const buildsBefore = harness.builds.length;
 
   harness.setExpandedState(false);
   harness.tick();
   await flush();
   harness.lines();
-  assert.match(harness.viewer.model().bodyKey, /:0$/);
+  assert.match(harness.viewer.model().bodyKey, /:0:running:$/);
   assert.notEqual(harness.viewer.model().bodyKey, firstKey);
   assert.equal(harness.builds.length, buildsBefore + 1, "an expansion change rebuilds exactly once");
   assert.equal(harness.builds.at(-1).input.expanded, false);
@@ -2872,4 +2884,473 @@ test("segment fitting keeps the ends and drops in the declared order", () => {
   assert.equal(fitViewerSegments(segments, dropOrder, 200), segments.join(" · "));
   assert.equal(fitViewerSegments(segments, dropOrder, 40), "live · model-name · turns · tools · 42s");
   assert.equal(fitViewerSegments(segments, dropOrder, 10), "live · 42s");
+});
+
+/* ------------------------------------------------------------------------------------------------
+ * Retained membership, terminal cutoffs, and lifecycle presentation.
+ * ---------------------------------------------------------------------------------------------- */
+
+function retainedRun(id, status, overrides = {}) {
+  return runSnapshot({
+    id,
+    status,
+    live: status === "running" || status === "waiting",
+    createdAt: `2026-04-17T00:0${Math.min(9, id.length)}:00.000Z`,
+    updatedAt: "2026-04-17T00:30:00.000Z",
+    ...(status === "completed" || status === "failed" || status === "interrupted"
+      ? { transcriptCutoff: overrides.updatedAt ?? "2026-04-17T00:30:00.000Z" }
+      : {}),
+    ...overrides,
+  });
+}
+
+test("every retained status stays in the cycle and i/N counts the whole retained set", async () => {
+  const statuses = ["starting", "running", "waiting", "completed", "failed", "interrupted"];
+  const runs = statuses.map((status, index) => retainedRun(`run-${index}`, status));
+  const harness = createHarness({ runs });
+  const { opened } = await openViewer(harness);
+  await flush();
+  assert.equal(harness.viewer.model().total, runs.length);
+  const seen = [harness.viewer.currentRun()];
+  for (let step = 1; step < runs.length; step += 1) {
+    harness.key(KEY.right);
+    await flush();
+    seen.push(harness.viewer.currentRun());
+  }
+  assert.deepEqual(seen, runs.map((run) => run.id), "the cycle visits every retained run in order");
+  const statusRow = () => harness.lines(200).find((line) => line.includes("Subagent ")) ?? "";
+  assert.match(statusRow(), /Subagent 6\/6 · fixer \[run-5\] · interrupted/);
+  harness.key(KEY.right);
+  await opened;
+  assert.equal(harness.viewer.isOpen(), false, "one more step past the last run returns to Main");
+});
+
+test("a retained set larger than the widget's visible budget keeps every run in the cycle", async () => {
+  const runs = Array.from({ length: 17 }, (_, index) => retainedRun(`r${index}`, index % 2 === 0 ? "completed" : "running"));
+  const harness = createHarness({ runs });
+  const { opened } = await openViewer(harness, -1);
+  await flush();
+  assert.equal(harness.viewer.model().total, 17);
+  assert.equal(harness.viewer.currentRun(), "r16", "opening backwards starts at the last retained run");
+  harness.key(KEY.right);
+  await flush();
+  assert.equal(harness.viewer.currentRun(), undefined, "one step past the last run is Main");
+  await opened;
+  assert.equal(harness.viewer.isOpen(), false);
+});
+
+test("a running run that completes keeps the selection and only reorders", async () => {
+  const runs = [retainedRun("a", "running"), retainedRun("b", "running"), retainedRun("c", "running")];
+  const harness = createHarness({ runs });
+  const { opened } = await openViewer(harness);
+  await flush();
+  harness.key(KEY.right);
+  await flush();
+  assert.equal(harness.viewer.currentRun(), "b");
+  const before = harness.viewer.model().index;
+
+  // A terminal run sorts after the live ones, so the same id moves to the end of the ring.
+  harness.setRuns([runs[0], runs[2], retainedRun("b", "completed", { output: "done" })]);
+  harness.tick();
+  await flush();
+  assert.equal(harness.viewer.currentRun(), "b", "a status change never drops the selection");
+  assert.equal(harness.viewer.model().total, 3);
+  assert.notEqual(harness.viewer.model().index, before, "the run took its new place in the order");
+  assert.equal(harness.viewer.isOpen(), true);
+  harness.viewer.close();
+  await opened;
+});
+
+test("clear empties the retained set and returns to Main", async () => {
+  const harness = createHarness({ runs: [retainedRun("a", "completed")] });
+  const { opened } = await openViewer(harness);
+  await flush();
+  harness.setRuns([]);
+  harness.tick();
+  await opened;
+  assert.equal(harness.viewer.isOpen(), false);
+});
+
+test("a read that lands after clear never writes a cache entry or repaints", async () => {
+  let resolveRead;
+  const harness = createHarness({
+    runs: [retainedRun("a", "running")],
+    loadTranscript: () => new Promise((resolve) => { resolveRead = resolve; }),
+  });
+  const { opened } = await openViewer(harness);
+  await flush();
+  const rendersBefore = harness.renders;
+  // The run is cleared while its read is still in flight, but the overlay is still open.
+  harness.setRuns([retainedRun("b", "running")]);
+  harness.tick();
+  await flush();
+  resolveRead({ status: "ok", fingerprint: "late", contentKey: "late", transcript: transcriptOf([assistantText("m1", null, "late")]) });
+  await flush();
+  assert.equal(harness.viewer.currentRun(), "b");
+  assert.equal(harness.lines(80).join(" ").includes("late"), false, "a cleared run's read must not reach the screen");
+  void rendersBefore;
+  harness.viewer.close();
+  await opened;
+});
+
+test("a starting run shows a stable pending body and keeps polling", async () => {
+  let reads = 0;
+  const harness = createHarness({
+    realBody: true,
+    runs: [retainedRun("a", "starting", { sessionFile: undefined })],
+    loadTranscript: () => {
+      reads += 1;
+      return {
+        status: "waiting",
+        transcript: { status: "waiting", entries: [], hiddenEntries: 0, warning: "The run has not published a session file yet." },
+      };
+    },
+  });
+  const { opened } = await openViewer(harness);
+  await flush();
+  const first = harness.lines(80);
+  assert.match(first[0].trim(), /has not published a child session file yet/);
+  const builds = harness.builds.length;
+  for (let tick = 0; tick < 8; tick += 1) {
+    harness.tick();
+    await flush();
+    // Rendering inside the loop is what would expose a per-tick rebuild.
+    harness.lines(80);
+  }
+  assert.equal(harness.builds.length, builds, "polling a run with no session file must not rebuild the body");
+  assert.ok(reads > 1, "the viewer keeps polling for the file to appear");
+  const statusRow = harness.lines(200).find((line) => line.includes("Subagent ")) ?? "";
+  assert.match(statusRow, /starting/);
+  assert.equal(harness.lines(200).some((line) => line.includes("live response")), false);
+  harness.viewer.close();
+  await opened;
+});
+
+test("a terminal run without a readable session file falls back to its retained result", async () => {
+  for (const [status, field, text] of [
+    ["completed", "output", "the final answer"],
+    ["failed", "error", "provider exploded"],
+    ["interrupted", "error", "Interrupted by the parent session."],
+  ]) {
+    const harness = createHarness({
+      realBody: true,
+      runs: [retainedRun("a", status, { [field]: text, sessionFile: undefined })],
+      loadTranscript: () => ({
+        status: "waiting",
+        transcript: { status: "waiting", entries: [], hiddenEntries: 0, warning: "no file" },
+      }),
+    });
+    const { opened } = await openViewer(harness);
+    await flush();
+    const body = harness.lines(120).join("\n");
+    assert.ok(body.includes(`[${status}]`), `${status} must label its outcome: ${body}`);
+    assert.ok(body.includes(text), `${status} must show its retained ${field}`);
+    const builds = harness.builds.length;
+    for (let tick = 0; tick < 4; tick += 1) {
+      harness.tick();
+      await flush();
+      harness.lines(120);
+    }
+    assert.equal(harness.builds.length, builds, `${status} must not rebuild its fallback body on every tick`);
+    harness.viewer.close();
+    await opened;
+  }
+});
+
+test("a terminal error stays visible even when the transcript is present", async () => {
+  const harness = createHarness({
+    realBody: true,
+    runs: [retainedRun("a", "failed", { error: "tool budget exhausted" })],
+    loadTranscript: () => ({
+      status: "ok",
+      fingerprint: "fp",
+      contentKey: "ck",
+      transcript: transcriptOf([assistantText("m1", null, "partial work")], { contentKey: "ck" }),
+    }),
+  });
+  const { opened } = await openViewer(harness);
+  await flush();
+  const body = harness.lines(120).join("\n");
+  assert.match(body, /partial work/);
+  assert.match(body, /\[failed\]/);
+  assert.match(body, /tool budget exhausted/);
+  harness.viewer.close();
+  await opened;
+});
+
+test("a completed output that repeats the last assistant message is not shown twice", async () => {
+  const answer = "the migration is complete";
+  const harness = createHarness({
+    realBody: true,
+    runs: [retainedRun("a", "completed", { output: answer })],
+    loadTranscript: () => ({
+      status: "ok",
+      fingerprint: "fp",
+      contentKey: "ck",
+      transcript: transcriptOf([assistantText("m1", null, answer)], { contentKey: "ck" }),
+    }),
+  });
+  const { opened } = await openViewer(harness);
+  await flush();
+  const body = harness.lines(120).join("\n");
+  const occurrences = body.split(answer).length - 1;
+  assert.equal(occurrences, 1, body);
+  harness.viewer.close();
+  await opened;
+});
+
+test("terminal elapsed freezes at the run's own end and stops the status clock", async () => {
+  const harness = createHarness({
+    runs: [retainedRun("a", "completed", {
+      createdAt: "2026-04-17T00:00:00.000Z",
+      updatedAt: "2026-04-17T00:00:42.000Z",
+      transcriptCutoff: "2026-04-17T00:00:42.000Z",
+    })],
+  });
+  const { opened } = await openViewer(harness);
+  await flush();
+  const statusRow = () => harness.lines(200).find((line) => line.includes("live ·") || line.includes("(provider)")) ?? "";
+  assert.match(statusRow(), /42s/);
+  const rendersBefore = harness.renders;
+  for (let second = 0; second < 5; second += 1) {
+    harness.advance(1000);
+    harness.tick();
+  }
+  await flush();
+  assert.equal(harness.renders, rendersBefore, "a finished run has no clock to repaint");
+  assert.match(statusRow(), /42s/);
+  assert.equal(statusRow().includes("live"), false, "a finished run claims no liveness");
+  harness.viewer.close();
+  await opened;
+});
+
+/* ---------------------------------------------------------------------------------------------- */
+
+function resumeFixture() {
+  const fixture = sessionFixture();
+  const rows = [
+    JSON.stringify({ type: "session", id: "s", timestamp: "2026-04-17T00:00:00.000Z", cwd: "/tmp" }),
+    JSON.stringify({ ...messageEntry("m1", null, { role: "user", content: "source task", timestamp: 0 }), timestamp: "2026-04-17T00:00:01.000Z" }),
+    JSON.stringify({ ...assistantText("m2", "m1", "source answer"), timestamp: "2026-04-17T00:00:02.000Z" }),
+  ];
+  writeFileSync(fixture.file, `${rows.join("\n")}\n`);
+  return fixture;
+}
+
+function appendRows(fixture, rows) {
+  const existing = readFileSync(fixture.file, "utf8");
+  writeFileSync(fixture.file, `${existing}${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+}
+
+test("a resumed run and its source each see exactly their own turns", () => {
+  const fixture = resumeFixture();
+  try {
+    const sourceCutoff = "2026-04-17T00:00:02.000Z";
+    const source = loadViewerTranscript(fixture.childDir, fixture.file, { cutoff: sourceCutoff });
+    assert.equal(source.status, "ok");
+    assert.equal(source.transcript.entries.length, 2);
+
+    // First resume appends its own turns to the same file.
+    appendRows(fixture, [
+      { ...messageEntry("m3", "m2", { role: "user", content: "continue please", timestamp: 0 }), timestamp: "2026-04-17T00:05:00.000Z" },
+      { ...assistantText("m4", "m3", "first continuation"), timestamp: "2026-04-17T00:05:01.000Z" },
+    ]);
+    const sourceAgain = loadViewerTranscript(fixture.childDir, fixture.file, { cutoff: sourceCutoff });
+    assert.equal(sourceAgain.transcript.entries.length, 2, "the finished source never sees its successor");
+    const sourceText = transcriptText(sourceAgain.transcript, 60);
+    assert.equal(sourceText.includes("first continuation"), false);
+    assert.match(sourceText, /source answer/);
+    assert.match(sourceAgain.transcript.warning, /after this run finished/);
+
+    const active = loadViewerTranscript(fixture.childDir, fixture.file, {});
+    assert.equal(active.transcript.entries.length, 4, "the active resumed run sees the whole file");
+
+    // Second resume: the first resumed run is terminal now and freezes at its own end.
+    const firstResumeCutoff = "2026-04-17T00:05:01.000Z";
+    appendRows(fixture, [
+      { ...messageEntry("m5", "m4", { role: "user", content: "one more", timestamp: 0 }), timestamp: "2026-04-17T00:09:00.000Z" },
+      { ...assistantText("m6", "m5", "second continuation"), timestamp: "2026-04-17T00:09:01.000Z" },
+    ]);
+    const firstResume = loadViewerTranscript(fixture.childDir, fixture.file, { cutoff: firstResumeCutoff });
+    assert.equal(firstResume.transcript.entries.length, 4);
+    const firstResumeText = transcriptText(firstResume.transcript, 60);
+    assert.match(firstResumeText, /first continuation/);
+    assert.equal(firstResumeText.includes("second continuation"), false);
+
+    const secondResume = loadViewerTranscript(fixture.childDir, fixture.file, { cutoff: "2026-04-17T00:09:01.000Z" });
+    assert.equal(secondResume.transcript.entries.length, 6);
+    const stillSource = loadViewerTranscript(fixture.childDir, fixture.file, { cutoff: sourceCutoff });
+    assert.equal(stillSource.transcript.entries.length, 2, "three generations later the source is still frozen");
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("the cutoff excludes every entry type, not only messages", () => {
+  const fixture = resumeFixture();
+  try {
+    appendRows(fixture, [
+      { type: "compaction", id: "c1", parentId: "m2", timestamp: "2026-04-17T00:06:00.000Z", summary: "later compaction", firstKeptEntryId: "m2", tokensBefore: 10 },
+      { type: "branch_summary", id: "b1", parentId: "c1", timestamp: "2026-04-17T00:06:01.000Z", fromId: "m1", summary: "later branch" },
+      { type: "custom_message", id: "x1", parentId: "b1", timestamp: "2026-04-17T00:06:02.000Z", customType: "note", content: "later note", display: true },
+      { ...messageEntry("t1", "x1", { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "read", arguments: { path: "/later" } }], timestamp: 0 }), timestamp: "2026-04-17T00:06:03.000Z" },
+      { ...messageEntry("t2", "t1", { role: "toolResult", toolCallId: "tc1", toolName: "read", content: [{ type: "text", text: "later tool output" }], isError: false, timestamp: 0 }), timestamp: "2026-04-17T00:06:04.000Z" },
+    ]);
+    const load = loadViewerTranscript(fixture.childDir, fixture.file, { cutoff: "2026-04-17T00:00:02.000Z" });
+    const text = transcriptText(load.transcript, 70);
+    for (const term of ["later compaction", "later branch", "later note", "/later", "later tool output"]) {
+      assert.equal(text.includes(term), false, `${term} must be excluded by the cutoff`);
+    }
+    assert.match(text, /source answer/);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("with a cutoff in force an entry with a missing or invalid timestamp is dropped", () => {
+  const fixture = resumeFixture();
+  try {
+    appendRows(fixture, [
+      { ...assistantText("m3", "m2", "no timestamp at all"), timestamp: undefined },
+      { ...assistantText("m4", "m3", "broken timestamp"), timestamp: "not-a-date" },
+      { ...assistantText("m5", "m4", "numeric timestamp"), timestamp: 12345 },
+    ]);
+    const bounded = loadViewerTranscript(fixture.childDir, fixture.file, { cutoff: "2026-04-17T00:00:02.000Z" });
+    const boundedText = transcriptText(bounded.transcript, 60);
+    for (const term of ["no timestamp at all", "broken timestamp", "numeric timestamp"]) {
+      assert.equal(boundedText.includes(term), false, `${term} must fail closed under a cutoff`);
+    }
+    assert.match(bounded.transcript.warning, /after this run finished/);
+
+    // Without a cutoff nothing is time filtered, so an active run still sees those entries.
+    const unbounded = loadViewerTranscript(fixture.childDir, fixture.file, {});
+    assert.match(transcriptText(unbounded.transcript, 60), /no timestamp at all/);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("appending to a shared file never rebuilds a frozen run's body", async () => {
+  const fixture = resumeFixture();
+  try {
+    const cutoff = "2026-04-17T00:00:02.000Z";
+    const harness = createHarness({
+      runs: [retainedRun("a", "completed", {
+        sessionFile: fixture.file,
+        transcriptCutoff: cutoff,
+        updatedAt: cutoff,
+      })],
+      childSessionDir: fixture.childDir,
+      loadTranscript: (dir, file, options) => loadViewerTranscript(dir, file, options),
+    });
+    const { opened } = await openViewer(harness);
+    await flush();
+    harness.lines();
+    const builds = harness.builds.length;
+    assert.equal(builds, 1);
+
+    for (let round = 0; round < 100; round += 1) {
+      appendRows(fixture, [{
+        ...assistantText(`later-${round}`, round === 0 ? "m2" : `later-${round - 1}`, `continuation ${round}`),
+        timestamp: `2026-04-17T01:${String(Math.floor(round / 60)).padStart(2, "0")}:${String(round % 60).padStart(2, "0")}.000Z`,
+      }]);
+      harness.tick();
+      await flush();
+    }
+    assert.equal(harness.builds.length, builds, "100 appended entries must not rebuild a frozen body");
+    harness.lines();
+    assert.equal(harness.lines(80).join(" ").includes("continuation"), false);
+
+    // A forced re-read re-parses the file but still finds the same visible content.
+    harness.key("r");
+    await flush();
+    assert.equal(harness.builds.length, builds, "a forced read of unchanged content rebuilds nothing");
+    harness.viewer.close();
+    await opened;
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("the content key covers the selected entries and ignores file identity", () => {
+  const a = [{ type: "message", id: "m1", parentId: null, timestamp: "t1" }];
+  const b = [{ type: "message", id: "m1", parentId: null, timestamp: "t1" }];
+  const c = [{ type: "message", id: "m2", parentId: null, timestamp: "t1" }];
+  const d = [{ type: "message", id: "m1", parentId: null, timestamp: "t2" }];
+  assert.equal(viewerContentKey(a), viewerContentKey(b));
+  assert.notEqual(viewerContentKey(a), viewerContentKey(c));
+  assert.notEqual(viewerContentKey(a), viewerContentKey(d));
+  assert.notEqual(viewerContentKey(a), viewerContentKey([...a, ...c]));
+  assert.equal(viewerContentKey([]), viewerContentKey([]));
+  assert.match(viewerContentKey([]), /^0:[0-9a-z]+$/);
+  assert.match(viewerContentKey(a), /^1:[0-9a-z]+$/);
+});
+
+test("an unchanged content key updates the fingerprint without a new transcript", () => {
+  const fixture = resumeFixture();
+  try {
+    const cutoff = "2026-04-17T00:00:02.000Z";
+    const first = loadViewerTranscript(fixture.childDir, fixture.file, { cutoff });
+    assert.equal(first.status, "ok");
+    appendRows(fixture, [{ ...assistantText("m9", "m2", "later"), timestamp: "2026-04-17T02:00:00.000Z" }]);
+    const second = loadViewerTranscript(fixture.childDir, fixture.file, {
+      cutoff,
+      previousFingerprint: first.fingerprint,
+      previousContentKey: first.contentKey,
+    });
+    assert.equal(second.status, "unchanged");
+    assert.equal(second.transcript, undefined);
+    assert.equal(second.contentKey, first.contentKey);
+    assert.notEqual(second.fingerprint, first.fingerprint, "the caller still records the new file identity");
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("an identical waiting answer is not treated as new transcript content", () => {
+  const waiting = (warning) => ({ status: "waiting", entries: [], hiddenEntries: 0, warning });
+  assert.equal(sameViewerTranscript(waiting("not yet"), waiting("not yet")), true);
+  assert.equal(sameViewerTranscript(waiting("not yet"), waiting("refused")), false);
+  assert.equal(sameViewerTranscript(undefined, waiting("not yet")), false);
+  const ok = (key, count) => ({
+    status: "ok",
+    entries: Array.from({ length: count }, (_, index) => ({ type: "message", id: `m${index}`, parentId: null, timestamp: "t" })),
+    hiddenEntries: 0,
+    contentKey: key,
+  });
+  assert.equal(sameViewerTranscript(ok("ck", 2), ok("ck", 2)), true);
+  assert.equal(sameViewerTranscript(ok("ck", 2), ok("other", 2)), false);
+  assert.equal(sameViewerTranscript(ok("ck", 2), ok("ck", 3)), false);
+});
+
+test("a waiting file that never appears is read every tick but rebuilt once", async () => {
+  const fixture = sessionFixture();
+  try {
+    const missing = join(fixture.childDir, "never.jsonl");
+    let reads = 0;
+    const harness = createHarness({
+      realBody: true,
+      runs: [retainedRun("a", "running", { sessionFile: missing })],
+      childSessionDir: fixture.childDir,
+      loadTranscript: (dir, file, options) => {
+        reads += 1;
+        return loadViewerTranscript(dir, file, options);
+      },
+    });
+    const { opened } = await openViewer(harness);
+    await flush();
+    harness.lines(80);
+    const builds = harness.builds.length;
+    for (let tick = 0; tick < 6; tick += 1) {
+      harness.tick();
+      await flush();
+      harness.lines(80);
+    }
+    assert.ok(reads > 3, "the viewer keeps polling");
+    assert.equal(harness.builds.length, builds, "an unchanged waiting answer never rebuilds the body");
+    harness.viewer.close();
+    await opened;
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
 });

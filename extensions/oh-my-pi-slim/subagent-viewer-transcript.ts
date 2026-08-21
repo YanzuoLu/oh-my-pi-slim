@@ -32,11 +32,14 @@ import {
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { Spacer, Text, type Component, type MarkdownTheme, type TUI } from "@earendil-works/pi-tui";
+import type { RunStatus } from "./subagent-core.js";
 import {
   VIEWER_MAX_ARGS_CHARS,
   VIEWER_MAX_BLOCK_CHARS,
   VIEWER_MAX_TRANSCRIPT_LINES,
   boundViewerText,
+  lastAssistantText,
+  liveTextIsRedundant,
   sanitizeViewerInline,
   sanitizeViewerText,
   viewerLine,
@@ -242,6 +245,14 @@ export type ViewerBashComponentFactory = (
   excludeFromContext: boolean,
 ) => BashExecutionComponent;
 
+/** Retained lifecycle result shown under the transcript for a run that already finished. */
+export interface ViewerOutcome {
+  readonly status: RunStatus;
+  readonly output?: string;
+  readonly error?: string;
+  readonly sourceRunId?: string;
+}
+
 export interface ViewerTranscriptBodyInput {
   readonly transcript: ViewerTranscript | undefined;
   readonly tui: TUI;
@@ -250,6 +261,10 @@ export interface ViewerTranscriptBodyInput {
   readonly expanded: boolean;
   readonly settings: ViewerTranscriptSettings;
   readonly bashComponent?: ViewerBashComponentFactory;
+  /** Terminal result for this run, always rendered when it carries an error. */
+  readonly outcome?: ViewerOutcome;
+  /** Replaces the generic empty note, so a starting run reads as pending rather than broken. */
+  readonly placeholder?: string;
 }
 
 function expandable(component: Component): component is Component & { setExpanded(expanded: boolean): void } {
@@ -363,6 +378,14 @@ export class ViewerTranscriptBody {
     this.blocks.length = 0;
     this.lineCache = undefined;
   }
+}
+
+const TERMINAL_OUTCOME_STATUSES = new Set<RunStatus>(["completed", "failed", "interrupted"]);
+
+function outcomeLabel(status: RunStatus): string {
+  if (status === "completed") return "completed";
+  if (status === "failed") return "failed";
+  return "interrupted";
 }
 
 function emptyBodyNote(transcript: ViewerTranscript | undefined): string {
@@ -546,10 +569,43 @@ export function buildViewerTranscriptBody(input: ViewerTranscriptBodyInput): Vie
     }
   }
 
+  const outcome = input.outcome;
+  if (outcome && TERMINAL_OUTCOME_STATUSES.has(outcome.status)) {
+    const hadTranscript = blocks.length > 0;
+    const lines: string[] = [];
+    const label = outcomeLabel(outcome.status);
+    const color = outcome.status === "completed" ? "success" : outcome.status === "failed" ? "error" : "warning";
+    lines.push(theme.bold(theme.fg(color, `[${label}]`)));
+    const error = boundViewerText(sanitizeViewerText(outcome.error ?? ""), VIEWER_MAX_BLOCK_CHARS).trim();
+    // A failure or interruption reason is the whole point of the run's ending, so it is shown even
+    // when the transcript already scrolled past it.
+    if (error !== "") lines.push(theme.fg(color, error));
+    const output = boundViewerText(sanitizeViewerText(outcome.output ?? ""), VIEWER_MAX_BLOCK_CHARS).trim();
+    if (output !== "") {
+      // The final answer usually is the last assistant message; repeating it would only push the
+      // real ending off screen.
+      const persisted = transcript ? lastAssistantText(transcript) : "";
+      if (!hadTranscript || !liveTextIsRedundant(output, persisted)) lines.push(theme.fg("text", output));
+    }
+    if (lines.length > 1 || error !== "" || !hadTranscript) {
+      blocks.push({
+        label: "outcome",
+        components: [
+          ...(hadTranscript ? [new Spacer(1)] : []),
+          new Text(lines.join("\n"), settings.outputPad, 0),
+        ],
+      });
+    }
+  }
+
   if (blocks.length === 0) {
     blocks.push({
       label: "empty transcript",
-      components: [new Text(theme.fg("dim", emptyBodyNote(transcript)), settings.outputPad, 0)],
+      components: [new Text(
+        theme.fg("dim", input.placeholder ?? emptyBodyNote(transcript)),
+        settings.outputPad,
+        0,
+      )],
     });
   }
   if (transcript?.warning && transcript.status === "ok") notes.push(sanitizeViewerInline(transcript.warning));

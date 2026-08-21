@@ -22,6 +22,7 @@ import {
   type TUI,
 } from "@earendil-works/pi-tui";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { RunStatus } from "./subagent-core.js";
 import { formatSubagentModel } from "./subagent-model-display.js";
 import { formatWidgetTokens, formatWidgetTurns } from "./subagent-widget-display.js";
 import { readWidgetExpanded, widgetExpandHint, widgetExpandKey } from "./widget-expansion.js";
@@ -31,6 +32,7 @@ import {
   loadViewerTranscript,
   neighborAfterViewerRemoval,
   renderViewerLive,
+  sameViewerTranscript,
   sanitizeViewerInline,
   sanitizeViewerText,
   viewerLine,
@@ -43,13 +45,29 @@ import {
 import {
   buildViewerTranscriptBody,
   readViewerTranscriptSettings,
+  type ViewerOutcome,
   viewerSettingsKey,
   VIEWER_DEFAULT_SETTINGS,
   type ViewerTranscriptBody,
   type ViewerTranscriptSettings,
 } from "./subagent-viewer-transcript.js";
 
-export const VIEWER_EMPTY_MESSAGE = "No running or waiting subagents.";
+export const VIEWER_EMPTY_MESSAGE = "No retained subagent runs.";
+/** Bottom-status colour and word for every retained lifecycle status. */
+export const VIEWER_STATUS_STYLE: Readonly<Record<RunStatus, { color: string; label: string }>> = {
+  starting: { color: "dim", label: "starting" },
+  running: { color: "accent", label: "running" },
+  waiting: { color: "warning", label: "waiting" },
+  completed: { color: "success", label: "completed" },
+  failed: { color: "error", label: "failed" },
+  interrupted: { color: "warning", label: "interrupted" },
+};
+const VIEWER_TERMINAL_STATUSES = new Set<RunStatus>(["completed", "failed", "interrupted"]);
+const VIEWER_LIVE_STATUSES = new Set<RunStatus>(["running", "waiting"]);
+
+export function isViewerTerminalStatus(status: RunStatus): boolean {
+  return VIEWER_TERMINAL_STATUSES.has(status);
+}
 export const VIEWER_READ_ONLY_LABEL = "Read-Only";
 export const VIEWER_REFRESH_MS = 250;
 /** Rows the live/waiting block may occupy before it is trimmed, so the transcript keeps the screen. */
@@ -89,6 +107,8 @@ export interface ViewerViewState {
 
 interface ViewerModel {
   readonly run: ViewerRunSnapshot | undefined;
+  readonly outcome: ViewerOutcome | undefined;
+  readonly placeholder: string | undefined;
   readonly index: number;
   readonly total: number;
   readonly transcript: ViewerTranscript | undefined;
@@ -156,6 +176,44 @@ export function fitViewerSegments(
     kept.delete(index);
   }
   return compose();
+}
+
+/** Terminal result for the body's outcome block, or undefined while the run can still change. */
+export function viewerOutcomeOf(run: ViewerRunSnapshot | undefined): ViewerOutcome | undefined {
+  if (!run || !isViewerTerminalStatus(run.status)) return undefined;
+  return {
+    status: run.status,
+    output: run.output,
+    error: run.error,
+    sourceRunId: run.sourceRunId,
+  };
+}
+
+/** Stable digest of the outcome block's own content. */
+export function viewerOutcomeKey(outcome: ViewerOutcome | undefined): string {
+  if (!outcome) return "";
+  return `${outcome.status}:${(outcome.error ?? "").length}:${(outcome.output ?? "").length}`;
+}
+
+/**
+ * Body note for a run with no readable transcript.
+ *
+ * A starting run has not published a session file yet, which is normal and must read as pending
+ * rather than as a failure, and it must stay the same string on every poll so the body is built
+ * once instead of every 250 ms.
+ */
+export function viewerPlaceholderOf(
+  run: ViewerRunSnapshot | undefined,
+  transcript: ViewerTranscript | undefined,
+): string | undefined {
+  if (!run) return undefined;
+  if (transcript && transcript.status === "ok" && transcript.entries.length > 0) return undefined;
+  if (run.status === "starting") return "This run has not published a child session file yet.";
+  if (isViewerTerminalStatus(run.status)) {
+    if (!transcript || transcript.status !== "ok") return "This run kept no readable child session file.";
+    return undefined;
+  }
+  return undefined;
 }
 
 /** Wheel notch direction, or undefined when the sequence is any other mouse report. */
@@ -241,29 +299,30 @@ export class SubagentViewerComponent implements Component, Focusable {
   private statusLines(model: ViewerModel, width: number): string[] {
     const theme = this.theme;
     const run = model.run;
-    if (!run) return [padToWidth(theme.fg("dim", "No running or waiting subagent."), width)];
-    const status = run.status === "waiting"
-      ? theme.fg("warning", "waiting")
-      : theme.fg("accent", "running");
+    if (!run) return [padToWidth(theme.fg("dim", "No retained subagent run."), width)];
+    const style = VIEWER_STATUS_STYLE[run.status] ?? VIEWER_STATUS_STYLE.starting;
     const title = [
       theme.bold(theme.fg("accent", `Subagent ${model.index + 1}/${model.total}`)),
       `${theme.bold(sanitizeViewerInline(run.agent))} ${theme.fg("dim", `[${sanitizeViewerInline(run.id)}]`)}`,
-      status,
+      theme.fg(style.color, style.label),
       theme.fg("muted", sanitizeViewerInline(run.abstract)),
     ].join(theme.fg("dim", " · "));
     const activity = run.activity;
+    const terminal = isViewerTerminalStatus(run.status);
     const segments = [
-      run.live ? theme.fg("success", "live") : theme.fg("warning", "not live"),
+      // Liveness is a statement about a process that is still there, so a finished run omits it.
+      terminal ? "" : run.live ? theme.fg("success", "live") : theme.fg("warning", "not live"),
       // The model string comes from a child run file, so it is untrusted text like everything else.
       sanitizeViewerInline(formatSubagentModel(sanitizeViewerText(run.model))),
+      run.sourceRunId ? theme.fg("dim", `from ${sanitizeViewerInline(run.sourceRunId)}`) : "",
       formatWidgetTurns(activity.turnCount),
       `${activity.toolUses} tool use${activity.toolUses === 1 ? "" : "s"}`,
       formatWidgetTokens(activity.tokens),
       activity.compactionCount > 0 ? `${activity.compactionCount} compaction${activity.compactionCount === 1 ? "" : "s"}` : "",
-      formatViewerElapsed(run.createdAt, this.controller.now()),
+      this.controller.elapsed(),
     ].filter((segment) => segment !== "");
-    // Liveness and the elapsed clock are never dropped; everything between them can go.
-    const dropOrder = segments.length === 7 ? [5, 4, 3, 2, 1] : [4, 3, 2, 1];
+    // The leading status word and the trailing elapsed value are never dropped; the middle can go.
+    const dropOrder = segments.map((_, index) => index).slice(1, -1).reverse();
     const stats = fitViewerSegments(segments, dropOrder, width);
     return [padToWidth(title, width), padToWidth(theme.fg("dim", stats), width)];
   }
@@ -309,7 +368,9 @@ export class SubagentViewerComponent implements Component, Focusable {
   }
 
   private liveLines(model: ViewerModel, width: number): string[] {
-    if (!model.run || !model.transcript) return [];
+    // A starting run has nothing live yet and a terminal run has nothing live any more; neither may
+    // borrow the running presentation.
+    if (!model.run || !model.transcript || !VIEWER_LIVE_STATUSES.has(model.run.status)) return [];
     const lines = renderViewerLive(model.run, model.transcript, width, this.theme, {
       expanded: model.expanded,
       expandHint: this.controller.expandHint(),
@@ -366,6 +427,8 @@ export class SubagentViewerComponent implements Component, Focusable {
       cwd: model.cwd,
       expanded: model.expanded,
       settings: model.settings,
+      outcome: model.outcome,
+      placeholder: model.placeholder,
     });
     this.body = { key: model.bodyKey, body };
     if (previous) {
@@ -492,6 +555,7 @@ export class SubagentViewerComponent implements Component, Focusable {
 export interface SubagentViewerKeyTarget {
   model(): ViewerModel;
   now(): number;
+  elapsed(): string;
   buildBody: typeof buildViewerTranscriptBody;
   noteViewport(contentLines: number, transcriptRows: number): void;
   expandKey(): string;
@@ -519,9 +583,10 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
   private readonly transcripts = new Map<string, ViewerTranscript>();
   private readonly transcriptSeqs = new Map<string, number>();
   private readonly fingerprints = new Map<string, string>();
+  private readonly contentKeys = new Map<string, string>();
   private readonly readAt = new Map<string, number>();
   private runs: ViewerRunSnapshot[] = [];
-  private activeIds: string[] = [];
+  private retainedIds: string[] = [];
   private childSessionDir: string | undefined;
   private currentRunId: string | undefined;
   private component: SubagentViewerComponent | undefined;
@@ -605,9 +670,25 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
    * hours most seconds change nothing at all.
    */
   private elapsedDisplay(): string {
+    const run = this.currentSnapshot();
+    if (run === undefined) return "—";
+    // A finished run's duration is a fact about the past, so it is frozen at its own end and the
+    // one-second status clock stops repainting for it.
+    if (isViewerTerminalStatus(run.status)) {
+      const ended = Date.parse(run.updatedAt);
+      return Number.isFinite(ended) ? formatViewerElapsed(run.createdAt, ended) : "—";
+    }
+    return formatViewerElapsed(run.createdAt, this.nowMs());
+  }
+
+  /** The elapsed string exactly as the status row shows it. */
+  elapsed(): string {
+    return this.elapsedDisplay();
+  }
+
+  private currentSnapshot(): ViewerRunSnapshot | undefined {
     const runId = this.currentRunId;
-    const run = runId === undefined ? undefined : this.runs.find((candidate) => candidate.id === runId);
-    return run === undefined ? "—" : formatViewerElapsed(run.createdAt, this.nowMs());
+    return runId === undefined ? undefined : this.runs.find((candidate) => candidate.id === runId);
   }
 
   model(): ViewerModel {
@@ -615,16 +696,29 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
     const run = runId === undefined ? undefined : this.runs.find((candidate) => candidate.id === runId);
     const transcript = runId === undefined ? undefined : this.transcripts.get(runId);
     const seq = runId === undefined ? 0 : this.transcriptSeqs.get(runId) ?? 0;
+    const outcome = viewerOutcomeOf(run);
     return {
       run,
-      index: runId === undefined ? -1 : this.activeIds.indexOf(runId),
-      total: this.activeIds.length,
+      outcome,
+      placeholder: viewerPlaceholderOf(run, transcript),
+      index: runId === undefined ? -1 : this.retainedIds.indexOf(runId),
+      total: this.retainedIds.length,
       transcript,
       state: this.viewState(runId),
       updatedAtMs: runId === undefined ? undefined : this.readAt.get(runId),
       bodyRevision: this.bodyRevision,
       statusRevision: this.statusRevision,
-      bodyKey: `${runId ?? "main"}:${seq}:${run?.cwd ?? ""}:${this.settingsKey}:${this.expanded ? 1 : 0}`,
+      // The outcome digest is part of the key: a run that reaches a terminal status gains an
+      // outcome block, and that is a body change even when the transcript file never moved.
+      bodyKey: [
+        runId ?? "main",
+        seq,
+        run?.cwd ?? "",
+        this.settingsKey,
+        this.expanded ? 1 : 0,
+        run?.status ?? "",
+        viewerOutcomeKey(outcome),
+      ].join(":"),
       expanded: this.expanded,
       settings: this.settings,
       cwd: run?.cwd,
@@ -687,13 +781,14 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
 
   private adoptSnapshot(snapshot: ViewerSnapshot): void {
     this.runs = snapshot.runs.map((run) => run);
-    this.activeIds = this.runs.map((run) => run.id);
+    this.retainedIds = this.runs.map((run) => run.id);
     this.childSessionDir = snapshot.childSessionDir;
-    const known = new Set(this.activeIds);
+    const known = new Set(this.retainedIds);
     for (const id of [...this.viewStates.keys()]) if (!known.has(id)) this.viewStates.delete(id);
     for (const id of [...this.transcripts.keys()]) if (!known.has(id)) this.transcripts.delete(id);
     for (const id of [...this.transcriptSeqs.keys()]) if (!known.has(id)) this.transcriptSeqs.delete(id);
     for (const id of [...this.fingerprints.keys()]) if (!known.has(id)) this.fingerprints.delete(id);
+    for (const id of [...this.contentKeys.keys()]) if (!known.has(id)) this.contentKeys.delete(id);
     for (const id of [...this.readAt.keys()]) if (!known.has(id)) this.readAt.delete(id);
   }
 
@@ -876,12 +971,14 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
    */
   private refresh(generation: number): void {
     if (generation !== this.generation || !this.opened) return;
-    const previousIds = this.activeIds;
+    const previousIds = this.retainedIds;
     const snapshot = this.options.snapshot();
     const runId = this.currentRunId;
     const nextIds = snapshot.runs.map((run) => run.id);
     const signature = this.signature();
     this.adoptSnapshot(snapshot);
+    // Membership is the retained set, so a lifecycle change only reorders. The only way an id
+    // leaves is `subagent clear`, which is exactly when the neighbour rule has to run.
     if (runId !== undefined && !nextIds.includes(runId)) {
       const replacement = neighborAfterViewerRemoval(previousIds, nextIds, runId);
       if (replacement === undefined) {
@@ -922,7 +1019,7 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
     const transcript = runId === undefined ? undefined : this.transcripts.get(runId);
     return JSON.stringify([
       runId,
-      this.activeIds,
+      this.retainedIds,
       run?.status,
       run?.live,
       run?.activity.turnCount,
@@ -933,6 +1030,10 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
       Object.keys(run?.activity.activeTools ?? {}),
       run?.request?.createdAt,
       run?.request?.message,
+      run?.sourceRunId,
+      run?.output?.length,
+      run?.error?.length,
+      run?.transcriptCutoff,
       transcript?.fingerprint,
       transcript?.status,
       transcript?.warning,
@@ -967,17 +1068,33 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
     }
     const run = this.runs.find((candidate) => candidate.id === runId);
     if (!run) return;
-    const fingerprint = force ? undefined : this.fingerprints.get(runId);
+    // A forced read re-reads the file, but the content key still decides whether anything changed,
+    // so `r` on an unchanged transcript never rebuilds the body either.
+    const previousFingerprint = force ? undefined : this.fingerprints.get(runId);
+    const previousContentKey = this.contentKeys.get(runId);
+    const cutoff = run.transcriptCutoff;
     const childSessionDir = this.childSessionDir;
     this.readSequence += 1;
     const token = this.readSequence;
     this.readToken = token;
     void Promise.resolve()
-      .then(() => this.loadTranscript(childSessionDir, run.sessionFile, fingerprint))
+      .then(() => this.loadTranscript(childSessionDir, run.sessionFile, {
+        previousFingerprint,
+        previousContentKey,
+        cutoff,
+      }))
       .then((load) => {
         if (generation !== this.generation || !this.opened) return;
+        // A run cleared while this read was in flight must never write a cache entry or repaint.
+        if (!this.retainedIds.includes(runId)) return;
         if (load.fingerprint !== undefined) this.fingerprints.set(runId, load.fingerprint);
+        if (load.contentKey !== undefined) this.contentKeys.set(runId, load.contentKey);
         if (load.status === "unchanged" || !load.transcript) return;
+        // A repeated waiting or rejected answer is the same screen; only real change rebuilds.
+        if (sameViewerTranscript(this.transcripts.get(runId), load.transcript)) {
+          this.readAt.set(runId, this.nowMs());
+          return;
+        }
         this.transcripts.set(runId, load.transcript);
         this.transcriptSeq += 1;
         this.transcriptSeqs.set(runId, this.transcriptSeq);
@@ -999,7 +1116,7 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
 
   step(direction: 1 | -1): void {
     if (!this.opened) return;
-    const next = cycleViewerSelection(this.activeIds, this.currentRunId, direction);
+    const next = cycleViewerSelection(this.retainedIds, this.currentRunId, direction);
     if (next === undefined) {
       this.requestClose();
       return;
@@ -1131,9 +1248,10 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
     this.transcripts.clear();
     this.transcriptSeqs.clear();
     this.fingerprints.clear();
+    this.contentKeys.clear();
     this.readAt.clear();
     this.runs = [];
-    this.activeIds = [];
+    this.retainedIds = [];
     this.childSessionDir = undefined;
     this.currentRunId = undefined;
   }

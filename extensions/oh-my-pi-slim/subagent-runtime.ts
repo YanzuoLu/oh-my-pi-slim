@@ -60,7 +60,6 @@ import {
   renderSubagentResult,
 } from "./subagent-transcript-renderer.js";
 import {
-  isViewerStatus,
   type ViewerRunActivity,
   type ViewerRunSnapshot,
   type ViewerSnapshot,
@@ -493,13 +492,15 @@ export class OmpsSubagentRuntime {
 
   /**
    * Read-only snapshot for the Subagent viewer.
-   * Every field is copied, so the viewer can never reach the registry, the activity map, or a
-   * retained run object. Only running and waiting runs are included, matching the viewer cycle.
+   *
+   * Membership is the retained set itself, in `registry.list()` order, which is the same ordering
+   * the Agents widget renders. Every retained run is included in every lifecycle status, so the
+   * viewer's `i/N` and the widget's retained total can never disagree. Every field is copied, so
+   * the viewer can never reach the registry, the activity map, or a retained run object.
    */
   viewerSnapshot(): ViewerSnapshot {
     const runs: ViewerRunSnapshot[] = [];
     for (const run of this.registry.list()) {
-      if (!isViewerStatus(run.status)) continue;
       runs.push({
         id: run.id,
         agent: run.agent,
@@ -511,8 +512,14 @@ export class OmpsSubagentRuntime {
         createdAt: run.createdAt,
         updatedAt: run.updatedAt,
         sessionFile: run.sessionFile,
+        sourceRunId: run.sourceRunId,
+        output: run.output,
+        error: run.error,
         request: cloneViewerValue(run.request),
         activity: cloneViewerActivity(this.activity.get(run.id)),
+        // A terminal run is frozen at its own end: a later resume appends to the same child session
+        // file, and this bound is what keeps those turns out of this run's transcript.
+        transcriptCutoff: isTerminalStatus(run.status) ? run.updatedAt : undefined,
       });
     }
     let childSessionDir: string | undefined;
