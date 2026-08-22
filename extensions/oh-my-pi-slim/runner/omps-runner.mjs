@@ -24,6 +24,12 @@ const REPLY_PROMPT_TIMEOUT_MS = 10_000;
 const ACTIVITY_FLUSH_MS = 100;
 const RESPONSE_TEXT_MAX_BYTES = 2 * 1024;
 const TERMINAL = new Set(["completed", "failed", "interrupted"]);
+const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+/** Child compaction refusals that mean the reused session already needs no migration compaction. */
+const BENIGN_MIGRATION_COMPACTION_ERRORS = new Set(["Nothing to compact (session too small)", "Already compacted"]);
+/** Turn-level events that belong to real work, so a migration compaction never fakes completion or activity. */
+const PREFLIGHT_IGNORED_EVENT_TYPES = new Set(["agent_settled", "turn_start", "message_update", "message_end"]);
+const MIGRATION_COMPACTION_ERROR_PREFIX = "Model migration compaction failed: ";
 const configPath = process.argv[2];
 
 function isRecord(value) {
@@ -43,6 +49,31 @@ function legacyAbstract(task) {
   return `${Array.from(task).slice(0, 100).join("")}...`;
 }
 
+// Execution-boundary mirror; keep this exactly aligned with subagent-model-display.ts parseModelSpec().
+function modelSpecBase(spec) {
+  const value = String(spec).trim();
+  let provider;
+  let model = value;
+  const slash = value.indexOf("/");
+  if (slash > 0 && slash < value.length - 1) {
+    const candidateProvider = value.slice(0, slash);
+    const candidateModel = value.slice(slash + 1);
+    if (candidateProvider.trim() && candidateModel.trim()) {
+      provider = candidateProvider;
+      model = candidateModel;
+    }
+  }
+  const colon = model.lastIndexOf(":");
+  if (colon > 0 && THINKING_LEVELS.has(model.slice(colon + 1)) && model.slice(0, colon).trim()) {
+    model = model.slice(0, colon);
+  }
+  return provider ? `${provider}/${model}` : model;
+}
+
+function sameModelSpecBase(left, right) {
+  return modelSpecBase(left) === modelSpecBase(right);
+}
+
 function normalizeConfig(value) {
   if (!(isRecord(value) && value.v === 1 &&
     nonEmpty(value.runId) && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.runId) &&
@@ -53,6 +84,7 @@ function normalizeConfig(value) {
     typeof value.systemPrompt === "string" &&
     typeof value.approve === "boolean" && nonEmpty(value.childSessionDir) &&
     (value.resumeSessionFile === undefined || nonEmpty(value.resumeSessionFile)) &&
+    (value.resumeCompactFrom === undefined || nonEmpty(value.resumeCompactFrom)) &&
     isRecord(value.piInvocation) && nonEmpty(value.piInvocation.command) &&
     Array.isArray(value.piInvocation.args) && value.piInvocation.args.every((arg) => typeof arg === "string") &&
     isRecord(value.env) && Object.values(value.env).every((entry) => typeof entry === "string") &&
@@ -162,6 +194,8 @@ let controlTimer;
 let activityFlushTimer;
 let controlWatcher;
 let client;
+/** True only while the pre-prompt model-migration compaction owns the child. */
+let preflighting = false;
 let lastAssistantOutput = "";
 let tokenResetPending = false;
 let providerTokenBaseline = 0;
@@ -300,6 +334,8 @@ async function settleRun() {
 
 function handleEvent(event) {
   if (ending || !isRecord(event)) return;
+  // A migration compaction is not a turn: its turn-level events would fake completion and pollute activity.
+  if (preflighting && PREFLIGHT_IGNORED_EVENT_TYPES.has(event.type)) return;
   if (event.type === "turn_start") {
     patchActivity({ turnCount: state.turnCount + 1 });
     return;
@@ -436,6 +472,28 @@ async function processControls() {
   }
 }
 
+/**
+ * Cross-model resume preflight barrier.
+ *
+ * A resumed child session whose provider/model base actually changes is compacted exactly once, while the
+ * run stays `starting` and before its first prompt. A benign refusal is a successful no-op and the run
+ * continues. Any other failure fails the run closed, so a migrated session is never prompted uncompacted.
+ */
+async function runModelMigrationCompaction() {
+  if (!nonEmpty(config.resumeCompactFrom) || sameModelSpecBase(config.resumeCompactFrom, config.model)) return;
+  preflighting = true;
+  try {
+    await client.compact();
+  } catch (error) {
+    const message = errorText(error);
+    if (!BENIGN_MIGRATION_COMPACTION_ERRORS.has(message)) {
+      throw new Error(`${MIGRATION_COMPACTION_ERROR_PREFIX}${message}`);
+    }
+  } finally {
+    preflighting = false;
+  }
+}
+
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
   process.on(signal, () => {
     void finish("interrupted", { error: `Runner received ${signal}.` });
@@ -479,6 +537,7 @@ try {
   if (isRecord(initialStats?.tokens) && typeof initialStats.tokens.total === "number" && Number.isFinite(initialStats.tokens.total) && initialStats.tokens.total >= 0) {
     providerTokenBaseline = initialStats.tokens.total;
   }
+  await runModelMigrationCompaction();
   transition("running", {
     sessionFile: isRecord(childState) && typeof childState.sessionFile === "string" ? childState.sessionFile : undefined,
   });

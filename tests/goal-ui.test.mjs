@@ -201,13 +201,94 @@ test("Goal prefix marks pursuing versus idle across all five statuses and never 
   assert.match(completed, /\u001b\[37mShip the frozen Goal UI\u001b\[0m$/, "the abstract keeps its existing text role");
 
   for (const status of ["active", "retry_wait", "paused", "completed", "cancelled"]) {
-    assert.doesNotMatch(
-      renderGoalWidgetLines(view(goal({ status })), theme, 180, NOW_MS).join("\n"),
-      /to expand|ctrl\+o/i,
-      `${status} must never append an expand hint`,
-    );
+    for (const expanded of [true, false]) {
+      assert.doesNotMatch(
+        renderGoalWidgetLines(view(goal({ status })), theme, 180, NOW_MS, expanded).join("\n"),
+        /to expand|ctrl\+o/i,
+        `${status} must never append an expand hint`,
+      );
+    }
   }
-  assert.equal(renderGoalWidgetLines.length, 3, "the Goal renderer takes no expansion parameters");
+  assert.equal(renderGoalWidgetLines.length, 3, "expansion stays an optional trailing argument, never a required one");
+});
+
+test("Collapsed tool output takes back only the completed Goal's detail row and never rewrites the view", () => {
+  for (const status of ["active", "retry_wait", "paused", "completed", "cancelled"]) {
+    const terminal = status === "completed" || status === "cancelled";
+    const value = view(goal({
+      status,
+      pauseReason: status === "paused" ? "waiting for release approval" : null,
+      retryAttempt: status === "retry_wait" ? 2 : 0,
+      nextRetryAt: status === "retry_wait" ? "2026-06-01T00:12:30.000Z" : null,
+      endedAt: terminal ? "2026-06-01T00:12:00.000Z" : null,
+      evidence: status === "completed" ? ["one", "two"] : null,
+      cancelReason: status === "cancelled" ? "user requested" : null,
+    }));
+    const before = structuredClone(value);
+    const expanded = renderGoalWidgetLines(value, theme, 180, NOW_MS, true);
+    const collapsed = renderGoalWidgetLines(value, theme, 180, NOW_MS, false);
+    assert.deepEqual(renderGoalWidgetLines(value, theme, 180, NOW_MS), expanded, `${status} defaults to the full body`);
+    assert.equal(expanded.length, 2, `${status} still renders two lines when expanded`);
+    if (status === "completed") {
+      assert.deepEqual(collapsed, [expanded[0]], "a finished Goal collapses to its heading alone");
+      assert.match(collapsed[0], /^○  Goal · ✓  completed · Ship the frozen Goal UI$/);
+    } else {
+      assert.deepEqual(collapsed, expanded, `${status} is unfinished and keeps both rows while collapsed`);
+    }
+    assert.deepEqual(value, before, `${status} rendering writes nothing back into the view`);
+  }
+
+  for (const width of [1, 8, 24, 48, 180]) {
+    const lines = renderGoalWidgetLines(
+      view(goal({ status: "completed", abstract: "Long\u001b[31m unsafe\u001b[0m finished abstract\u0000 that must truncate" })),
+      vtTheme,
+      width,
+      NOW_MS,
+      false,
+    );
+    assert.equal(lines.length, 1);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width));
+    assert.ok(lines.every((line) => !stripVTControlCharacters(line).includes("\u0000")));
+  }
+  assert.deepEqual(renderGoalWidgetLines(view(null, { elapsedMs: null }), theme, 80, NOW_MS, false), []);
+});
+
+test("The Goal section reads Pi's live expansion state on every aggregate render and never re-registers for it", () => {
+  let toolsExpanded = true;
+  let current = view(goal({ status: "completed", endedAt: "2026-06-01T00:12:00.000Z", evidence: ["one", "two"] }));
+  const calls = [];
+  let component;
+  const tui = { requestRender() {} };
+  const ui = {
+    theme,
+    getToolsExpanded: () => toolsExpanded,
+    setWidget(key, content, options) {
+      calls.push({ key, content, options });
+      if (typeof content === "function") component = content(tui, theme);
+    },
+  };
+  const widget = new GoalWidget(() => current, {
+    nowMs: () => NOW_MS,
+    setInterval: (callback, milliseconds) => ({ callback, milliseconds, unref() {} }),
+    clearInterval() {},
+  });
+
+  widget.setContext(ui);
+  assert.equal(calls.length, 1);
+  const registrations = calls.length;
+  const body = () => renderLines(component, 180).filter((line) => line !== "");
+
+  assert.equal(body().length, 2, "an expanded finished Goal keeps its detail row");
+  toolsExpanded = false;
+  assert.deepEqual(body(), ["○  Goal · ✓  completed · Ship the frozen Goal UI"]);
+  toolsExpanded = true;
+  assert.equal(body().length, 2, "expanding again restores the detail row from the live state, with no local copy");
+
+  toolsExpanded = false;
+  current = view();
+  assert.equal(body().length, 2, "a Goal that is still being pursued is never hidden by the collapsed state");
+  assert.equal(calls.length, registrations, "an expansion change redraws the aggregate instead of re-registering it");
+  widget.dispose();
 });
 
 test("Goal detail row hangs off the heading with the shared dim last-child branch", () => {
@@ -412,7 +493,7 @@ test("GoalRuntime registers package-isomorphic renderers, caches branch stats ac
   assert.equal(harness.cleared.length, 2);
 });
 
-test("Goal tool renders all seven calls with uniform collapsed hints, action-specific expansion, and data invariance", () => {
+test("Goal tool renders all eight calls with uniform collapsed hints, action-specific expansion, and data invariance", () => {
   const cases = [
     {
       args: { action: "create", abstract: "Create\u001b[31m goal\u001b[0m", objective: "Full objective\nsecond", criteria: ["One", "Two"] },
@@ -429,7 +510,13 @@ test("Goal tool renders all seven calls with uniform collapsed hints, action-spe
     { args: { action: "resume" }, collapsed: [], hidden: [], expanded: [] },
     { args: { action: "complete", evidence: ["Proof one", "Proof two"] }, collapsed: ["Evidence: 2 items"], hidden: ["Proof one", "Proof two"], expanded: ["Evidence:", "1. Proof one", "2. Proof two"] },
     { args: { action: "cancel", reason: "No longer needed" }, collapsed: ["Reason: No longer needed"], hidden: [], expanded: ["Reason:", "No longer needed"] },
+    { args: { action: "clear" }, collapsed: [], hidden: [], expanded: [] },
   ];
+  assert.deepEqual(
+    cases.map((value) => value.args.action),
+    ["create", "modify", "status", "pause", "resume", "complete", "cancel", "clear"],
+    "every Goal action has a call rendering, including the branch-emptying clear",
+  );
   for (const value of cases) {
     const before = structuredClone(value.args);
     const collapsed = render(renderGoalCall(value.args, theme, { expanded: false }));
@@ -444,6 +531,87 @@ test("Goal tool renders all seven calls with uniform collapsed hints, action-spe
     assert.doesNotMatch(expanded, /\(ctrl\+o to expand\)|Action:|\u001b/);
     assert.deepEqual(value.args, before);
   }
+
+  const clearArgs = { action: "clear" };
+  const clearBefore = structuredClone(clearArgs);
+  assert.deepEqual(
+    renderLines(renderGoalCall(clearArgs, theme, { expanded: false })).filter((line) => line !== ""),
+    ["goal · clear (ctrl+o to expand)"],
+    "a collapsed clear call is the title and nothing else",
+  );
+  assert.deepEqual(
+    renderLines(renderGoalCall(clearArgs, theme, { expanded: true })).filter((line) => line !== ""),
+    ["goal · clear"],
+    "an expanded clear call invents no fields it was never given",
+  );
+  assert.deepEqual(clearArgs, clearBefore);
+});
+
+test("Goal clear receipts separate a real clear from an already empty branch, keep status none intact, and freeze model data", () => {
+  const cleared = {
+    content: [{ type: "text", text: "Goal cleared.\nThe branch has no Goal." }],
+    details: { goal: null, changed: true },
+  };
+  const clearedBefore = structuredClone(cleared);
+  const clearedCollapsed = renderGoalResult(cleared, { expanded: false }, theme, { args: { action: "clear" } });
+  assertLeadingBlank(clearedCollapsed);
+  assert.equal(render(clearedCollapsed), "✓  Goal · cleared");
+  const clearedExpanded = render(renderGoalResult(cleared, { expanded: true }, theme, { args: { action: "clear" } }));
+  assert.equal(clearedExpanded, "✓  Goal · cleared\nModel result:\n  Goal cleared.\n  The branch has no Goal.");
+  assert.doesNotMatch(clearedExpanded, /Status:|Abstract:|Objective:|Criteria:|Cancel reason:|Criterion evidence:/);
+  assert.match(
+    renderGoalResult(cleared, { expanded: false }, roleAnsiTheme, { args: { action: "clear" } }).render(240).join("\n"),
+    /\u001b\[32m✓\u001b\[0m {2}/,
+    "a clear that removed a Goal reads as a completed change",
+  );
+  assert.deepEqual(cleared, clearedBefore);
+
+  const unchanged = {
+    content: [{ type: "text", text: "No Goal exists on the current branch. No change." }],
+    details: { goal: null, changed: false },
+  };
+  const unchangedBefore = structuredClone(unchanged);
+  assert.equal(render(renderGoalResult(unchanged, { expanded: false }, theme, { args: { action: "clear" } })), "○  Goal · none · no change");
+  assert.match(
+    render(renderGoalResult(unchanged, { expanded: true }, theme, { args: { action: "clear" } })),
+    /^○  Goal · none · no change\nModel result:\n  No Goal exists on the current branch\. No change\.$/,
+  );
+  assert.match(
+    renderGoalResult(unchanged, { expanded: false }, roleAnsiTheme, { args: { action: "clear" } }).render(240).join("\n"),
+    /\u001b\[2m○\u001b\[0m {2}/,
+    "a clear on an empty branch stays hollow and dim",
+  );
+  assert.deepEqual(unchanged, unchangedBefore);
+
+  for (const changed of [false, true]) {
+    const none = { content: [{ type: "text", text: "No Goal." }], details: { goal: null, changed } };
+    assert.equal(
+      render(renderGoalResult(none, { expanded: false }, theme, { args: { action: "status" } })),
+      "○  Goal · none",
+      "an ordinary empty status is untouched by the clear receipt",
+    );
+  }
+});
+
+test("A refused clear falls back to the tool's own error, stays width safe, and keeps the whole ask-the-user instruction", () => {
+  const message = "clear requires a terminal Goal; the current Goal is active. Ask the user whether to complete or cancel it first.";
+  const refused = { content: [{ type: "text", text: message }], details: { code: "invalid_action" } };
+  const before = structuredClone(refused);
+  for (const width of [24, 40, 80, 240]) {
+    for (const expanded of [false, true]) {
+      const lines = renderGoalResult(refused, { expanded, isError: true }, vtTheme, { args: { action: "clear" } }).render(width);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width), `width ${width} must not overflow`);
+      const flat = lines.map((line) => stripVTControlCharacters(line).trim()).filter(Boolean).join(" ").replace(/\s+/g, " ");
+      assert.equal(flat, message, `width ${width} wraps the refusal instead of cutting it`);
+      assert.doesNotMatch(flat, /…/, "a refusal is never ellipsised away");
+    }
+  }
+  assert.match(
+    renderGoalResult(refused, { expanded: false, isError: true }, roleAnsiTheme, { args: { action: "clear" } }).render(240).join("\n"),
+    /\u001b\[31m/,
+    "a refused call reads as an error",
+  );
+  assert.deepEqual(refused, before);
 });
 
 test("Goal results cover active summaries, status none/goal, pause/resume no-change, evidence, cancel, retry fields, errors, fallback, and frozen model content", () => {

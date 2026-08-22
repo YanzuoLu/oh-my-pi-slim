@@ -129,14 +129,24 @@ function detailLine(view: GoalView, theme: Theme, width: number, nowMs: number):
   return truncateToWidth(`${tree} ${theme.fg("dim", parts.join(" · "))}`, Math.max(1, width), "…");
 }
 
+/**
+ * A completed Goal is a receipt rather than live work, so it is the only status that gives a row
+ * back when Pi's tool output is collapsed: the heading always stays, and the detail row is dropped.
+ * Every other status keeps both rows in either state, because a Goal that is still being pursued,
+ * parked, or cancelled must never hide its elapsed time, continuations, runs, or token cost.
+ * The expansion flag is read from the aggregate host on every render and never stored here.
+ */
 export function renderGoalWidgetLines(
   view: GoalView,
   theme: Theme,
   width: number,
   nowMs = Date.now(),
+  expanded = true,
 ): string[] {
   if (!view.goal) return [];
-  return [headingLine(view, theme, width), detailLine(view, theme, width, nowMs)];
+  const heading = headingLine(view, theme, width);
+  if (!expanded && view.goal.status === "completed") return [heading];
+  return [heading, detailLine(view, theme, width, nowMs)];
 }
 
 export class GoalWidget {
@@ -157,7 +167,7 @@ export class GoalWidget {
     this.section = {
       id: GOAL_SECTION_ID,
       isActive: () => isGoalViewPursuing(this.getView()),
-      render: (input) => renderGoalWidgetLines(this.getView(), input.theme, input.width, this.nowMs()),
+      render: (input) => renderGoalWidgetLines(this.getView(), input.theme, input.width, this.nowMs(), input.expanded),
     };
   }
 

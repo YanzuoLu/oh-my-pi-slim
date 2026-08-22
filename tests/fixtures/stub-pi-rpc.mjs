@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createInterface } from "node:readline";
-import { writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const scenario = process.env.OMPS_STUB_SCENARIO || "normal";
@@ -28,6 +28,15 @@ function respond(command, data) {
   send({ type: "response", id: command.id, command: command.type, success: true, data });
 }
 
+function respondError(command, error) {
+  send({ type: "response", id: command.id, command: command.type, success: false, error });
+}
+
+function recordCommand(type) {
+  if (!process.env.OMPS_STUB_COMMAND_LOG) return;
+  appendFileSync(process.env.OMPS_STUB_COMMAND_LOG, `${type}\n`);
+}
+
 function assistant(text, stopReason = "stop", totalTokens = 42) {
   lastAssistantText = text;
   send({
@@ -52,12 +61,47 @@ function complete(text) {
   send({ type: "agent_settled" });
 }
 
+/** Completion without a compaction event, so migration-compaction accounting stays observable. */
+function completeWithoutCompaction(text) {
+  send({ type: "turn_start", turnIndex: promptCount, timestamp: Date.now() });
+  assistant(text);
+  settled = true;
+  send({ type: "agent_settled" });
+}
+
+function handleCompact(command) {
+  if (scenario === "resume-compact-hang") return;
+  if (scenario === "resume-compact-nothing") return respondError(command, "Nothing to compact (session too small)");
+  if (scenario === "resume-compact-already") return respondError(command, "Already compacted");
+  if (scenario === "resume-compact-fail") return respondError(command, "summarization exploded");
+  // Phantom turn-level events precede the response, so the runner must filter them during preflight.
+  send({ type: "turn_start", turnIndex: 99, timestamp: Date.now() });
+  send({
+    type: "message_update",
+    assistantMessageEvent: { type: "text_delta", delta: "PHANTOM-COMPACTION-TEXT" },
+    usage: { totalTokens: 5000 },
+  });
+  send({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "PHANTOM-COMPACTION-SUMMARY" }],
+      stopReason: "stop",
+      usage: { totalTokens: 5000 },
+    },
+  });
+  send({ type: "compaction_end", result: { summary: "migration compaction" }, aborted: false });
+  send({ type: "agent_settled" });
+  respond(command, { summary: "migration compaction" });
+}
+
 function handlePrompt(command) {
   promptCount += 1;
   if (scenario === "contact-reply-hang" && promptCount === 2) return;
   respond(command, {});
   setTimeout(() => {
-    if (scenario === "normal" || scenario === "terminal-order") complete(`${scenario} completion`);
+    if (scenario.startsWith("resume-compact")) completeWithoutCompaction(`${scenario} completion`);
+    else if (scenario === "normal" || scenario === "terminal-order") complete(`${scenario} completion`);
     else if (scenario === "long-stream") {
       const text = "0123456789abcdef".repeat(4096);
       send({ type: "turn_start", turnIndex: promptCount, timestamp: Date.now() });
@@ -258,6 +302,7 @@ input.on("line", (line) => {
   let command;
   try { command = JSON.parse(line); } catch { return; }
   if (!command || typeof command.id !== "string") return;
+  recordCommand(command.type);
   if (command.type === "get_state") {
     respond(command, { sessionFile, isStreaming: !settled });
   } else if (command.type === "get_session_stats") {
@@ -291,6 +336,8 @@ input.on("line", (line) => {
     respond(command, { text: lastAssistantText });
   } else if (command.type === "prompt") {
     handlePrompt(command);
+  } else if (command.type === "compact") {
+    handleCompact(command);
   } else if (command.type === "steer") {
     respond(command, {});
     if (scenario === "steer") setTimeout(() => complete(`steered: ${command.message}`), 20);

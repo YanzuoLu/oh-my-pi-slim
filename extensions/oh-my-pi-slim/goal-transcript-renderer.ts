@@ -11,6 +11,9 @@ import type {
 import { goalStatusGlyph, sanitizeGoalBody, sanitizeGoalText } from "./goal-widget.js";
 import { formatSemanticGlyphPrefix } from "./semantic-glyph.js";
 
+/** The tool's own action set, plus the branch-emptying `clear` receipt this renderer must describe. */
+type GoalResultAction = GoalAction | "clear";
+
 type UnknownRecord = Record<string, unknown>;
 type ToolResultLike = { content?: unknown; details?: unknown };
 type ToolRenderContextLike = { args?: unknown; expanded?: boolean };
@@ -163,8 +166,25 @@ function spacedResult(component: Component): Container {
   return container;
 }
 
-function resultSummary(action: GoalAction, goal: PublicGoalState | null, changed: boolean, theme: Theme): Text {
-  if (!goal) return new Text(`${formatSemanticGlyphPrefix(theme.fg("dim", "○"))}${theme.fg("toolOutput", "Goal · none")}`, 0, 0);
+/**
+ * With no Goal in the details there is nothing to describe, so the summary line is the whole
+ * receipt. A `clear` that removed a Goal is a real change and reads as one; a `clear` on a branch
+ * that already had none, and every ordinary empty `status`, stay hollow and dim.
+ */
+function emptyResultSummary(action: GoalResultAction, changed: boolean, theme: Theme): Text {
+  if (action === "clear" && changed) {
+    return new Text(
+      `${formatSemanticGlyphPrefix(theme.fg("success", "✓"))}${theme.fg("toolTitle", theme.bold("Goal"))} ${theme.fg("muted", "· cleared")}`,
+      0,
+      0,
+    );
+  }
+  const label = action === "clear" ? "Goal · none · no change" : "Goal · none";
+  return new Text(`${formatSemanticGlyphPrefix(theme.fg("dim", "○"))}${theme.fg("toolOutput", label)}`, 0, 0);
+}
+
+function resultSummary(action: GoalResultAction, goal: PublicGoalState | null, changed: boolean, theme: Theme): Text {
+  if (!goal) return emptyResultSummary(action, changed, theme);
   const evidenceCount = goal.evidence?.length ?? 0;
   let suffix = goal.status;
   if (action === "pause") suffix = changed ? `paused · ${goal.pauseReason ?? "—"}` : "already paused · no change";
@@ -179,9 +199,15 @@ function resultSummary(action: GoalAction, goal: PublicGoalState | null, changed
   );
 }
 
+/**
+ * The last line of defence for a refused call: a rejected action carries no Goal details, so the
+ * tool's own message is the receipt. It is wrapped, never ellipsised, so a one-line instruction
+ * that asks the user what to do next survives whole at any terminal width.
+ */
 function fallbackResult(result: ToolResultLike, options: ToolResultRenderOptionsLike, theme: Theme): Component {
   const text = contentText(result.content);
-  if (text) return new Text(theme.fg("toolOutput", options.expanded === true ? sanitizeGoalBody(text) : safeFirstLine(text)), 0, 0);
+  const role = options.isError === true ? "error" : "toolOutput";
+  if (text) return new Text(theme.fg(role, options.expanded === true ? sanitizeGoalBody(text) : safeFirstLine(text)), 0, 0);
   return new Text(
     theme.fg(options.isPartial ? "warning" : "dim", options.isPartial ? "Result pending…" : "No result content."),
     0,
@@ -219,7 +245,7 @@ export function renderGoalResult(
   context: ToolRenderContextLike = {},
 ): Component {
   const args = asRecord(context.args) ?? {};
-  const action = (asString(args.action) ?? "status") as GoalAction;
+  const action = (asString(args.action) ?? "status") as GoalResultAction;
   const details = goalDetails(result.details);
   if (!details) return spacedResult(fallbackResult(result, options, theme));
   const container = new Container();

@@ -57,6 +57,11 @@ export interface DetachedLaunchConfig {
   approve: boolean;
   childSessionDir: string;
   resumeSessionFile?: string;
+  /**
+   * Internal resume-only preflight marker: the source run's model spec when a resume crosses model bases.
+   * The runner compacts the reused child session once before its first prompt; nothing outside the runner reads it.
+   */
+  resumeCompactFrom?: string;
   piInvocation: PiInvocation;
   env: Record<string, string>;
   createdAt: string;
@@ -430,6 +435,7 @@ function normalizeDetachedLaunchConfig(value: unknown): DetachedLaunchConfig | u
     typeof value.approve !== "boolean" ||
     !isNonEmptyString(value.childSessionDir) ||
     (value.resumeSessionFile !== undefined && !isNonEmptyString(value.resumeSessionFile)) ||
+    (value.resumeCompactFrom !== undefined && !isNonEmptyString(value.resumeCompactFrom)) ||
     !isRecord(value.piInvocation) ||
     !isNonEmptyString(value.piInvocation.command) ||
     !Array.isArray(value.piInvocation.args) || value.piInvocation.args.some((arg) => typeof arg !== "string") ||

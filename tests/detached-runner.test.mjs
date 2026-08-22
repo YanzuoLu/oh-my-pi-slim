@@ -51,7 +51,7 @@ function mode(path) {
   return statSync(path).mode & 0o777;
 }
 
-function makeRun(scenario, { start = true, extraEnv = {}, legacyMissingAbstract = false, abstract } = {}) {
+function makeRun(scenario, { start = true, extraEnv = {}, legacyMissingAbstract = false, abstract, configPatch } = {}) {
   const tempDir = mkdtempSync(join(CACHE, "test-detached-runner-"));
   chmodSync(tempDir, 0o700);
   const runId = `run-${++sequence}`;
@@ -76,6 +76,7 @@ function makeRun(scenario, { start = true, extraEnv = {}, legacyMissingAbstract 
     env: { OMPS_STUB_SCENARIO: scenario, OMPS_RUN_ID: runId, ...extraEnv },
     createdAt: new Date().toISOString(),
   };
+  if (configPatch) Object.assign(config, configPatch);
   if (legacyMissingAbstract) delete config.abstract;
   else if (abstract !== undefined) config.abstract = abstract;
   atomicWriteJson(paths.configFile, config);
@@ -97,6 +98,27 @@ function makeRun(scenario, { start = true, extraEnv = {}, legacyMissingAbstract 
 
 function readState(run) {
   return safeReadJson(run.paths.stateFile, isDetachedRunState);
+}
+
+/** Ordered child RPC command types, so preflight ordering and skipping stay observable. */
+function commandLog(path) {
+  try { return readFileSync(path, "utf8").split("\n").filter(Boolean); } catch { return []; }
+}
+
+let migrationSequence = 0;
+
+/** A cross-model resume run: a reused session file plus the internal preflight marker the runtime writes. */
+function makeMigrationRun(scenario, { resumeCompactFrom = "legacy/other-model:low", model } = {}) {
+  const logFile = join(CACHE, `stub-commands-${++migrationSequence}-${Date.now()}.log`);
+  const run = makeRun(scenario, {
+    extraEnv: { OMPS_STUB_COMMAND_LOG: logFile },
+    configPatch: {
+      resumeSessionFile: join(ROOT, `tests/fixtures/stub-${scenario}-session.jsonl`),
+      ...(resumeCompactFrom === null ? {} : { resumeCompactFrom }),
+      ...(model === undefined ? {} : { model }),
+    },
+  });
+  return { ...run, logFile, commands: () => commandLog(logFile), cleanupLog: () => rmSync(logFile, { force: true }) };
 }
 
 async function waitFor(predicate, timeoutMs = 4000) {
@@ -467,6 +489,105 @@ test("successful compaction with null final context usage preserves the last vis
     assert.equal(await waitForExit(run), 0);
   } finally {
     await cleanup(run);
+  }
+});
+
+test("cross-model resume compacts the reused session before its first prompt and filters preflight turn events", async () => {
+  const run = makeMigrationRun("resume-compact");
+  try {
+    const completed = await waitForStatus(run, "completed");
+    const commands = run.commands();
+    assert.deepEqual(commands.filter((type) => type === "compact" || type === "prompt"), ["compact", "prompt"],
+      "the migration compaction completes before the first prompt");
+    assert.equal(completed.output, "resume-compact completion");
+    assert.equal(completed.compactionCount, 1, "one preflight compaction is counted exactly once");
+    assert.equal(completed.turnCount, 1, "a phantom preflight turn_start never counts as a turn");
+    assert.doesNotMatch(completed.responseText, /PHANTOM/, "preflight message events never pollute activity");
+    assert.equal(completed.tokens, 42, "the compaction token epoch restarts from real post-compaction usage");
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    run.cleanupLog();
+    await cleanup(run);
+  }
+});
+
+test("benign migration compaction refusals are successful no-ops that still prompt", async () => {
+  for (const scenario of ["resume-compact-nothing", "resume-compact-already"]) {
+    const run = makeMigrationRun(scenario);
+    try {
+      const completed = await waitForStatus(run, "completed");
+      assert.deepEqual(run.commands().filter((type) => type === "compact" || type === "prompt"), ["compact", "prompt"]);
+      assert.equal(completed.output, `${scenario} completion`);
+      assert.equal(completed.compactionCount, 0);
+      assert.equal(completed.error, undefined);
+      assert.equal(await waitForExit(run), 0);
+    } finally {
+      run.cleanupLog();
+      await cleanup(run);
+    }
+  }
+});
+
+test("a failed migration compaction fails the run closed and never prompts", async () => {
+  const run = makeMigrationRun("resume-compact-fail");
+  try {
+    const failed = await waitForStatus(run, "failed");
+    assert.equal(failed.error, "Model migration compaction failed: summarization exploded");
+    assert.equal(run.commands().includes("prompt"), false, "a failed migration compaction never reaches a prompt");
+    assert.equal(await waitForExit(run), 1);
+  } finally {
+    run.cleanupLog();
+    await cleanup(run);
+  }
+});
+
+test("a hanging migration compaction keeps starting alive and stays interruptible", async () => {
+  const run = makeMigrationRun("resume-compact-hang");
+  try {
+    const starting = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "starting" && run.commands().includes("compact") ? state : undefined;
+    });
+    const beating = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "starting" && state.heartbeatAt !== starting.heartbeatAt ? state : undefined;
+    }, 4000);
+    assert.equal(beating.status, "starting", "the run stays starting for the whole compaction barrier");
+
+    sendControl(run, { token: run.config.token, type: "interrupt" });
+    const interrupted = await waitForStatus(run, "interrupted", 3000);
+    assert.match(interrupted.error, /Interrupted/);
+    assert.equal(run.commands().includes("prompt"), false);
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    run.cleanupLog();
+    await cleanup(run);
+  }
+});
+
+test("a missing marker or an unchanged model base skips the migration compaction entirely", async () => {
+  const unflagged = makeMigrationRun("resume-compact", { resumeCompactFrom: null });
+  try {
+    const completed = await waitForStatus(unflagged, "completed");
+    assert.equal(unflagged.commands().includes("compact"), false, "an ordinary resume never compacts");
+    assert.equal(completed.output, "resume-compact completion");
+    assert.equal(completed.compactionCount, 0);
+    assert.equal(await waitForExit(unflagged), 0);
+  } finally {
+    unflagged.cleanupLog();
+    await cleanup(unflagged);
+  }
+
+  const thinkingOnly = makeMigrationRun("resume-compact", { resumeCompactFrom: "stub/model:low", model: "stub/model:high" });
+  try {
+    const completed = await waitForStatus(thinkingOnly, "completed");
+    assert.equal(thinkingOnly.commands().includes("compact"), false, "a thinking-only change shares one model base");
+    assert.equal(completed.output, "resume-compact completion");
+    assert.equal(completed.compactionCount, 0);
+    assert.equal(await waitForExit(thinkingOnly), 0);
+  } finally {
+    thinkingOnly.cleanupLog();
+    await cleanup(thinkingOnly);
   }
 });
 

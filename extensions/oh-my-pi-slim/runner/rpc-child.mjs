@@ -82,6 +82,8 @@ export class RpcChild {
   prompt(message) { return this.#data("prompt", { message }); }
   steer(message) { return this.#data("steer", { message }); }
   abort() { return this.#data("abort"); }
+  /** Awaits the child's own compaction response, so a caller can use it as a completion barrier. */
+  compact() { return this.#data("compact"); }
   getState() { return this.#data("get_state"); }
   getSessionStats() { return this.#data("get_session_stats"); }
   async getLastAssistantText() {

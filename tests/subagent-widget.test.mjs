@@ -52,6 +52,12 @@ const {
   renderSubagentWidgetLines,
 } = await import("../extensions/oh-my-pi-slim/subagent-widget-renderer.ts");
 
+const {
+  modelSpecBase,
+  parseModelSpec,
+  sameModelSpecBase,
+} = await import("../extensions/oh-my-pi-slim/subagent-model-display.ts");
+
 const NOW_MS = Date.parse("2026-04-17T00:00:00.000Z");
 const theme = {
   fg: (_color, text) => text,
@@ -120,6 +126,35 @@ test("model formatter parses provider and known thinking suffixes with safe fall
   assert.equal(formatWidgetModel("custom/model:experimental"), "(custom) model:experimental");
   assert.equal(formatWidgetModel("model-without-provider:high"), "model-without-provider:high");
   assert.equal(formatWidgetModel("/missing-provider:high"), "/missing-provider:high");
+});
+
+test("shared model spec parsing splits only known thinking suffixes and compares provider/model bases", () => {
+  for (const thinking of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+    assert.deepEqual(parseModelSpec(`openai/gpt-5.6-sol:${thinking}`), {
+      provider: "openai", model: "gpt-5.6-sol", thinking, base: "openai/gpt-5.6-sol",
+    });
+  }
+  assert.deepEqual(parseModelSpec("provider/model:variant:max"), {
+    provider: "provider", model: "model:variant", thinking: "max", base: "provider/model:variant",
+  });
+  assert.deepEqual(parseModelSpec("custom/model:experimental"), {
+    provider: "custom", model: "model:experimental", thinking: undefined, base: "custom/model:experimental",
+  });
+  assert.deepEqual(parseModelSpec("model-without-provider:high"), {
+    provider: undefined, model: "model-without-provider", thinking: "high", base: "model-without-provider",
+  });
+  assert.deepEqual(parseModelSpec("/missing-provider:high"), {
+    provider: undefined, model: "/missing-provider", thinking: "high", base: "/missing-provider",
+  });
+
+  assert.equal(modelSpecBase("  anthropic/claude-opus-4-6:xhigh  "), "anthropic/claude-opus-4-6");
+  assert.equal(sameModelSpecBase("provider/model:low", "provider/model:high"), true);
+  assert.equal(sameModelSpecBase("provider/model", "provider/model:high"), true);
+  assert.equal(sameModelSpecBase("provider/model:2025-01-01", "provider/model"), false,
+    "a colon that is not a known thinking level belongs to the model ID");
+  assert.equal(sameModelSpecBase("provider-a/model", "provider-b/model"), false);
+  assert.equal(sameModelSpecBase("provider/model-a", "provider/model-b"), false);
+  assert.equal(sameModelSpecBase("provider/model:max", "  provider/model:off "), true);
 });
 
 test("shared retained sorting keeps list, restored state, and widget IDs in active, starting, terminal-newest parity", () => {

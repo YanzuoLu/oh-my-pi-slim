@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.16", "package version must be 0.10.16");
+check(packageJson.version === "0.10.17", "package version must be 0.10.17");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.16" && lock.packages?.[""]?.version === "0.10.16", "package-lock version must be 0.10.16");
+check(lock.version === "0.10.17" && lock.packages?.[""]?.version === "0.10.17", "package-lock version must be 0.10.17");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -366,11 +366,18 @@ for (const [name, source] of [
     "registerShortcut", "setToolsExpanded", "setEditorComponent",
   ], `${name} must not register or hijack the expansion keybinding`);
 }
-for (const [name, source] of [["Goal widget", goalWidget], ["Loop widget", loopWidget]]) {
-  hasNone(source, [
-    "widget-expansion", "readWidgetExpanded", "widgetExpandHint", "getToolsExpanded", "input.expanded", "input.hint", "to expand",
-  ], `${name} must stay out of Ctrl+O expansion with a permanently full body`);
-}
+hasNone(loopWidget, [
+  "widget-expansion", "readWidgetExpanded", "widgetExpandHint", "getToolsExpanded", "input.expanded", "input.hint", "to expand",
+], "Loop widget must stay out of Ctrl+O expansion with a permanently full body");
+// The Goal widget joins the shared collapse as a pure consumer. The aggregate host resolves Pi's
+// expansion state once and hands it down, so the section itself must never read that state, cache
+// it, or advertise an expand hint of its own.
+hasNone(goalWidget, [
+  "widget-expansion", "readWidgetExpanded", "widgetExpandHint", "getToolsExpanded", "input.hint", "to expand",
+], "Goal widget must consume the shared expansion flag without resolving or hinting it");
+hasAll(goalWidget, [
+  "render: (input) => renderGoalWidgetLines(this.getView(), input.theme, input.width, this.nowMs(), input.expanded)",
+], "Goal section must read the host expansion flag on every aggregate render");
 // Persistent widgets are presentation only: no tool schema, prompt text, or model-facing payload lives here.
 for (const [name, source] of [
   ["Monitor widget", monitorWidget],
@@ -541,7 +548,7 @@ hasNone(monitorRuntime, ["process.stdin", "node-pty", "forkpty", "openpty", "std
 check(!/\b(?:notes?|collapse|config|i18n)\b/i.test(`${askRuntime}\n${askTui}`), "Ask production must not add notes, collapse, config, or i18n surfaces");
 
 hasAll(goalRuntime, [
-  'export const GOAL_ACTIONS = ["create", "modify", "status", "pause", "resume", "complete", "cancel"] as const',
+  'export const GOAL_ACTIONS = ["create", "modify", "status", "pause", "resume", "complete", "cancel", "clear"] as const',
   'GOAL_STATE_ENTRY_TYPE = "oh-my-pi-slim:goal-state"', 'GOAL_CONTINUATION_MESSAGE_TYPE', 'GOAL_STATE_MESSAGE_TYPE',
   "export const goalParameters = Type.Object({", "}, { additionalProperties: false });", 'executionMode: "sequential"', 'name: "goal"',
   'this.pi.registerCommand("goal"', 'expandPromptTemplates: false', 'deliverAs: "steer" as const',
@@ -556,13 +563,27 @@ hasAll(goalRuntime, [
   "Call `goal complete` only with one evidence entry for every criterion.",
 ], "Goal durable core, cached UI, renderer registration, and continuation numbering contract");
 hasNone(goalRuntime, ["\"Rules:\"", '"- Pursue this Goal now."', '"- Make concrete progress in this run."'], "Goal frozen model text rewrite boundary");
-hasNone(goalRuntime, ["registerEntryRenderer", "registerShortcut", "goalId", "revision", "action: \"list\"", "action: \"clear\""], "Goal public-ID and action boundary");
+hasNone(goalRuntime, ["registerEntryRenderer", "registerShortcut", "goalId", "revision", "action: \"list\""], "Goal public-ID and action boundary");
 hasAll(goalWidget, [
   'GOAL_SECTION_ID = "goal"', "renderGoalWidgetLines", 'theme.bold("●")', 'theme.fg("accent", "↻")', '"Ⅱ"', '"◷"', '"✓"', '"×"',
+  "  expanded = true,", "const heading = headingLine(view, theme, width);",
+  'if (!expanded && view.goal.status === "completed") return [heading];',
+  "return [heading, detailLine(view, theme, width, nowMs)];",
   '`${view.continuationCount} cont`', 'countLabel(view.ownedChildRunCount, "run")', 'statsLabel("main"', 'statsLabel("child"',
   'setIntervalFn(() => {', "1_000", "unref?.()", "requestRender()", "truncateToWidth", "visibleWidth",
   "sanitizeGoalText", "sanitizeGoalBody", "dispose()",
 ], "Goal fixed two-line width-safe cached widget contract");
+// Collapsing gives back exactly one row, and only for the one status that is already a receipt.
+// Expansion must stay an optional trailing argument so every existing full-body caller is unchanged.
+check(
+  /export function renderGoalWidgetLines\(\n  view: GoalView,\n  theme: Theme,\n  width: number,\n  nowMs = Date\.now\(\),\n  expanded = true,\n\): string\[\] \{/.test(goalWidget),
+  "Goal widget expansion must be the last defaulted parameter of renderGoalWidgetLines",
+);
+check(
+  !/if \(!expanded && view\.goal\.status !== "completed"\)/.test(goalWidget) &&
+  (goalWidget.match(/!expanded/g) ?? []).length === 1,
+  "only a completed Goal may lose a row while collapsed, through a single expansion branch",
+);
 hasNone(goalWidget, ["\\u001b[", "registerShortcut", "setStatus("], "Goal widget theme-only contract");
 const goalPrefixBlock = goalWidget.slice(
   goalWidget.indexOf("export function isGoalPursuing"),
@@ -596,6 +617,46 @@ hasNone(goalPauseNoOp, ["this.store(", "generation +="], "Goal repeated pause no
 const goalResumeNoOp = goalRuntime.slice(goalRuntime.indexOf('if (snapshot.goal.status === "active")', goalRuntime.indexOf("private resume")), goalRuntime.indexOf("const next = cloneSnapshot(snapshot)", goalRuntime.indexOf("private resume")));
 hasNone(goalResumeNoOp, ["this.store(", "generation +="], "Goal repeated resume no-op contract");
 hasAll(goalRuntime.slice(goalRuntime.indexOf("private clearRetryAfterSuccess"), goalRuntime.indexOf("private hasRetryMetadata")), ['status !== "active"', 'status !== "retry_wait"'], "Goal retry-success internal status guard");
+// Clearing erases the branch-local Goal instead of ending it. It is the only action that removes a
+// Goal, it never ends a live one on the user's behalf, and it leaves nothing behind for replay.
+const goalExecuteBlock = goalRuntime.slice(goalRuntime.indexOf("async execute(inputValue: GoalInput)"), goalRuntime.indexOf("private validateActionFields"));
+hasAll(goalExecuteBlock, [
+  'if (action === "clear" && !this.snapshot) return toolText("No Goal to clear.", { goal: null, changed: false });',
+  "return this.clear();",
+], "Goal clear on an empty branch is a receipt-only no-op");
+check(
+  goalExecuteBlock.indexOf('action === "clear" && !this.snapshot') <
+  goalExecuteBlock.indexOf('if (!this.snapshot) throw new Error("No Goal exists on the current branch.")'),
+  "clear must answer an empty branch before the shared missing-Goal error can reject it",
+);
+const goalClearBlock = goalRuntime.slice(goalRuntime.indexOf("private clear(): ReturnType<typeof toolText>"), goalRuntime.indexOf("private requireMutable"));
+hasAll(goalClearBlock, [
+  'if (status !== "completed" && status !== "cancelled") {',
+  "clear requires a terminal Goal. The current Goal is ${status}. Ask the user whether to cancel this Goal, then retry clear only if they agree.",
+  "this.clearRuntime(true);",
+  "this.snapshot = undefined;",
+  "this.pi.appendEntry<null>(GOAL_STATE_ENTRY_TYPE, null);",
+  "this.emit();",
+  'return toolText("Goal cleared.", { goal: null, changed: true });',
+], "Goal clear terminal guard, null tombstone, runtime reset, and null emission");
+hasNone(goalClearBlock, [
+  "this.store(", "generation +=", 'status: "cancelled"', "this.cancel(", "queueStateMessage", "statusReceipt(",
+], "Goal clear must erase the Goal instead of cancelling it or writing another snapshot");
+check(
+  goalClearBlock.indexOf("this.clearRuntime(true);") < goalClearBlock.indexOf("this.pi.appendEntry<null>(GOAL_STATE_ENTRY_TYPE, null);") &&
+  goalClearBlock.indexOf("this.pi.appendEntry<null>(GOAL_STATE_ENTRY_TYPE, null);") < goalClearBlock.indexOf("this.emit();"),
+  "a successful clear must drop live runtime state, then append the tombstone, then emit the empty view",
+);
+check(
+  goalRuntime.includes("export function isGoalTombstoneData(value: unknown): boolean {\n  return value === null;\n}"),
+  "a Goal tombstone must be recognised as exactly the null payload and nothing else",
+);
+for (const [name, block] of [
+  ["Goal branch replay", goalRuntime.slice(goalRuntime.indexOf("export function replayGoalBranch"), goalRuntime.indexOf("function goalContractFields"))],
+  ["Goal main stats", goalRuntime.slice(goalRuntime.indexOf("export function deriveMainGoalStats"), goalRuntime.indexOf("export function retryDelayMs"))],
+]) {
+  hasAll(block, ["if (isGoalTombstoneData(entry.data)) {"], `${name} must recognise a cleared Goal through the shared tombstone predicate`);
+}
 const goalSchemaStart = goalRuntime.indexOf("export const goalParameters");
 const goalSchemaEnd = goalRuntime.indexOf("function toolText", goalSchemaStart);
 const goalSchema = goalRuntime.slice(goalSchemaStart, goalSchemaEnd);
@@ -603,7 +664,7 @@ hasNone(goalSchema, ["id:", "goalId", "revision", "generation", "instanceKey", "
 check(!goalSchema.includes("anyOf:") && !goalSchema.includes("oneOf:"), "Goal schema root must not declare anyOf or oneOf");
 const goalSchemaDescriptions = [...goalSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
 const expectedGoalSchemaDescriptions = [
-  "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status and resume accept no other fields.",
+  "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. clear removes a completed or cancelled Goal from the branch. status, resume, and clear accept no other fields.",
   "Short Goal summary for create or modify.",
   "Complete Goal objective for create or modify.",
   "One to eight completion criteria for create or modify.",
@@ -615,7 +676,7 @@ for (const description of goalSchemaDescriptions) checkSchemaHow(description, "G
 hasAll(goalSchema, [
   'action: Type.Union(GOAL_ACTIONS.map((action) => Type.Literal(action))',
   "minItems: 1", "maxItems: 8",
-  'description: "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status and resume accept no other fields."',
+  'description: "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. clear removes a completed or cancelled Goal from the branch. status, resume, and clear accept no other fields."',
   'description: "One to eight completion criteria for create or modify."',
   'description: "For complete, provide exactly one concrete evidence item per criterion."',
 ], "Goal schema actions, fields, and limits");
@@ -625,7 +686,7 @@ const goalGuidelinesEnd = goalRuntime.indexOf("      ],", goalGuidelinesStart);
 const goalToolMetadata = goalRuntime.slice(goalToolStart, goalGuidelinesEnd);
 const goalDescription = propertyString(goalToolMetadata, "description", "Goal tool metadata");
 const goalPromptSnippet = propertyString(goalToolMetadata, "promptSnippet", "Goal tool metadata");
-check(goalDescription === "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. Actions return the current Goal state and whether it changed.", "Goal description must match the reviewed contract");
+check(goalDescription === "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a terminal Goal from the branch and rejects any nonterminal Goal. Actions return the current Goal state and whether it changed.", "Goal description must match the reviewed contract");
 check(goalPromptSnippet === "Manage the branch-local Goal.", "Goal promptSnippet must match the reviewed contract");
 checkSteBlock(goalDescription, "Goal description");
 checkSteBlock(goalPromptSnippet, "Goal promptSnippet");
@@ -652,7 +713,7 @@ hasAll(goalRuntime.slice(goalRuntime.indexOf("const ACTION_FIELDS"), goalRuntime
   'create: ["action", "abstract", "objective", "criteria"]',
   'modify: ["action", "abstract", "objective", "criteria"]',
   'status: ["action"]', 'pause: ["action", "reason"]', 'resume: ["action"]',
-  'complete: ["action", "evidence"]', 'cancel: ["action", "reason"]',
+  'complete: ["action", "evidence"]', 'cancel: ["action", "reason"]', 'clear: ["action"]',
 ], "Goal exact action-field boundary");
 const activationTail = /\.\.\.goalContractFields\(goal\),([\s\S]*?)\]\.join\("\\n"\);/.exec(goalRuntime.slice(goalRuntime.indexOf("export function goalActivationContent"), goalRuntime.indexOf("export function goalContinuationContent")));
 const continuationTail = /\.\.\.goalContractFields\(goal\),([\s\S]*?)\]\.join\("\\n"\);/.exec(goalRuntime.slice(goalRuntime.indexOf("export function goalContinuationContent"), goalRuntime.indexOf("export function goalPhaseReminder")));
@@ -795,6 +856,20 @@ hasAll(runtime, [
   "OMPS_SUBAGENT_CHILD: \"1\"",
 ], "built-in detached runtime");
 hasNone(runtime, ["RpcClient", "getPackageDir", "promptLive", "watchClientLiveness", "closingSessions", 'deliverAs: "followUp"', 'name: "subagent_supervisor"', "supervisorParameters", "executeSupervisor", "replyTo"], "built-in detached runtime");
+const launchConfigStart = runtime.indexOf("private buildLaunchConfig(");
+const launchRunStart = runtime.indexOf("private async launchRun(", launchConfigStart);
+const launchConfigBuilder = runtime.slice(launchConfigStart, launchRunStart);
+hasAll(launchConfigBuilder, [
+  "resumeSessionFile?: string,", "resumeCompactFrom?: string,",
+  "...(resumeSessionFile && resumeCompactFrom ? { resumeCompactFrom } : {}),",
+  "v: 1,",
+], "the resume preflight marker is an optional internal launch-config field written only for a resume");
+hasAll(runtime.slice(launchRunStart, runtime.indexOf("private async executeSubagent(", launchRunStart)), [
+  "private async launchRun(run: PersistedRun, resumeSessionFile?: string, resumeCompactFrom?: string)",
+  "this.buildLaunchConfig(run, agent, resumeSessionFile, resumeCompactFrom)",
+], "launchRun must forward the resume preflight marker unchanged");
+hasNone(core, ["resumeCompactFrom"], "the resume preflight marker must never reach a persisted run or the run journal");
+hasAll(runtime, ['import { sameModelSpecBase } from "./subagent-model-display.js"'], "runtime model-base comparison must use the shared helper");
 const sendNotificationStart = runtime.indexOf("private sendNotification(run: PersistedRun");
 const deliverNotificationStart = runtime.indexOf("private deliverPendingNotification", sendNotificationStart);
 const deliverNotificationEnd = runtime.indexOf("private failRun", deliverNotificationStart);
@@ -1435,6 +1510,7 @@ const clearImplementation = runtime.slice(clearStart, clearEnd);
 hasAll(clearImplementation, [
   "await this.reconcileAll()", "ACTIVE_STATUSES.has(run.status)",
   "clear requires every retained run to reach a terminal status",
+  "Ask the user whether to interrupt these active runs, then retry clear only if they agree.",
   "clearedCount: 0, warnings: [], changed: false", "No retained subagent runs to clear.",
   "this.clearing = true", "this.purgeRetainedRuns(runs)", "runJournalClearEntry()",
   "this.clearedRunIds.add(run.id)", "this.queuedNotifications.clear()", "this.registry.clear()",
@@ -1472,11 +1548,25 @@ const resumeImplementation = runtime.slice(resumeStart, resumeEnd);
 hasAll(resumeImplementation, [
   "private async resume(sourceId: string, abstract: string, message: string, cwd?: string)",
   "cwd: cwd === undefined ? source.cwd : resolve(this.ctx?.cwd ?? process.cwd(), cwd),",
-  "const result = await this.launchRun(run, source.sessionFile)",
+  "const result = await this.launchRun(run, source.sessionFile, resumeCompactFrom)",
 ], "resume must inherit the source directory and resolve a relative override against the parent session");
 hasNone(resumeImplementation, [
   "existsSync(cwd", "statSync", "readLaunchConfig", "shouldApproveChildProject", "isProjectTrusted",
 ], "resume cwd override must reuse the shared launch and approval chain without extra preconditions");
+hasAll(resumeImplementation, [
+  "if (!this.modelResolver || !this.denyResolver) {",
+  "oh-my-pi-slim is inactive; enable a preset before resuming a subagent.",
+  "const model = requireString(this.modelResolver(source.agent), `preset model for ${source.agent}`)",
+  "const resumeCompactFrom = sameModelSpecBase(source.model, model) ? undefined : source.model",
+  "      model,\n",
+], "resume must launch the currently resolved preset model and mark only a real model-base migration");
+hasNone(resumeImplementation, [
+  "model: source.model", "set_model", "set_thinking_level", "thinking",
+], "a resumed run must never reuse the source model or migrate the child through a live model switch");
+check(
+  resumeImplementation.indexOf("const model = requireString(") < resumeImplementation.indexOf("const run: PersistedRun"),
+  "resume must resolve its preset model before it creates or launches anything",
+);
 const publicSchema = runtime.slice(runtime.indexOf("export const subagentParameters"), runtime.indexOf("export class OmpsSubagentRuntime"));
 hasNone(publicSchema, REMOVED_CAPABILITIES, "public tool schemas");
 hasAll(publicSchema, [
@@ -1610,20 +1700,60 @@ hasAll(runFiles, [
   'GOAL_STATS_DIR_NAME = "omps-goal-stats"', "getGoalStatsRoot", "getGoalStatsSidecarPaths", "writeGoalStatsSidecar", "readGoalStatsSidecar",
   "ensurePrivateDirectory", "0o700", "0o600", "isSymbolicLink", "GoalRunStatsSidecar",
   "normalizeDetachedLaunchConfig", "legacyRunAbstract(value.task)", "value.abstract.trim()",
+  "resumeCompactFrom?: string;",
+  "(value.resumeCompactFrom !== undefined && !isNonEmptyString(value.resumeCompactFrom)) ||",
   "Canonical predicate for newly written launch.json files", "normalized only by readLaunchConfig()",
 ], "detached run files");
 hasNone(runFiles, ["export function removeGoalStatsSidecar"], "Goal stats sidecars must not expose a clear-time deletion API");
 hasAll(rpcChild, [
   "export class RpcChild", 'stdio: ["pipe", "pipe", "pipe"]', "pending", "getLastAssistantText", "getSessionStats",
   'child.kill("SIGTERM")', 'child.kill("SIGKILL")',
+  'compact() { return this.#data("compact"); }',
 ], "detached RPC child");
+hasNone(`${rpcChild}\n${detachedRunner}`, [
+  "set_model", "set_thinking_level", "cycle_model", "cycle_thinking_level",
+], "a child session must only ever run the model its own CLI invocation selected");
 hasAll(detachedRunner, [
   'status: "starting"', 'transition("running"', 'transition("waiting"', "heartbeatAt", "updatedAt",
   "tool_execution_start", "tool_execution_end", "compaction_end", "processControls", "watch(controlDir",
   'finish("failed"', 'client.prompt(config.task)', 'process.on(signal', 'REPLY_PROMPT_TIMEOUT_MS',
   "updateContextTokens", "let tokenResetPending = false", "normalizeConfig", "legacyAbstract(value.task)",
   "keep this exactly aligned with subagent-core.ts legacyRunAbstract()",
+  "(value.resumeCompactFrom === undefined || nonEmpty(value.resumeCompactFrom)) &&",
+  "keep this exactly aligned with subagent-model-display.ts parseModelSpec()",
+  "function sameModelSpecBase(left, right)",
 ], "detached runner");
+const migrationStart = detachedRunner.indexOf("async function runModelMigrationCompaction()");
+const migrationEnd = detachedRunner.indexOf("for (const signal of", migrationStart);
+const migrationCompaction = detachedRunner.slice(migrationStart, migrationEnd);
+check(migrationStart >= 0 && migrationEnd > migrationStart, "the runner must own one cross-model resume compaction barrier");
+hasAll(migrationCompaction, [
+  "if (!nonEmpty(config.resumeCompactFrom) || sameModelSpecBase(config.resumeCompactFrom, config.model)) return",
+  "preflighting = true", "await client.compact()",
+  "BENIGN_MIGRATION_COMPACTION_ERRORS.has(message)",
+  "throw new Error(`${MIGRATION_COMPACTION_ERROR_PREFIX}${message}`)",
+  "preflighting = false",
+], "the migration compaction is an awaited barrier that fails closed on a real error");
+hasNone(migrationCompaction, [
+  "withTimeout", "setTimeout", "30_000", "30000", 'transition("running"', "client.prompt",
+], "the migration compaction must never carry its own deadline or move the run before it finishes");
+hasAll(detachedRunner, [
+  'const BENIGN_MIGRATION_COMPACTION_ERRORS = new Set(["Nothing to compact (session too small)", "Already compacted"])',
+  'const PREFLIGHT_IGNORED_EVENT_TYPES = new Set(["agent_settled", "turn_start", "message_update", "message_end"])',
+  'const MIGRATION_COMPACTION_ERROR_PREFIX = "Model migration compaction failed: "',
+  "if (preflighting && PREFLIGHT_IGNORED_EVENT_TYPES.has(event.type)) return",
+], "benign compaction no-ops, the preflight event filter, and the failure prefix must stay exact");
+check(
+  !detachedRunner.slice(detachedRunner.indexOf('const PREFLIGHT_IGNORED_EVENT_TYPES'), detachedRunner.indexOf("]", detachedRunner.indexOf('const PREFLIGHT_IGNORED_EVENT_TYPES'))).includes("compaction_end"),
+  "a preflight compaction_end must still update the compaction count and the token epoch",
+);
+const startupSequence = detachedRunner.slice(detachedRunner.indexOf("await client.start();"));
+check(
+  startupSequence.indexOf("RPC child startup probe") < startupSequence.indexOf("await runModelMigrationCompaction()") &&
+  startupSequence.indexOf("await runModelMigrationCompaction()") < startupSequence.indexOf('transition("running"') &&
+  startupSequence.indexOf('transition("running"') < startupSequence.indexOf("await client.prompt(config.task)"),
+  "the migration compaction must run after the startup probe and before the first running transition and prompt",
+);
 hasNone(detachedRunner, ['event.type === "session_compact"'], "detached runner RPC compaction semantics");
 const contextTokensStart = detachedRunner.indexOf("function updateContextTokens(candidate)");
 const updateStatsStart = detachedRunner.indexOf("function updateStats(stats)", contextTokensStart);
@@ -1663,6 +1793,20 @@ check(existsSync(join(ROOT, "tests/fixtures/stub-pi-rpc.mjs")), "detached RPC te
 check(existsSync(join(ROOT, "tests/detached-runner.test.mjs")), "detached runner integration tests must exist");
 const detachedRunnerTests = read("tests/detached-runner.test.mjs");
 hasAll(detachedRunnerTests, ["provider token reconciliation preserves a higher message-event total", "completed.providerTokens, 100"], "runner provider-token high-water reconciliation test");
+hasAll(detachedRunnerTests, [
+  "cross-model resume compacts the reused session before its first prompt and filters preflight turn events",
+  "benign migration compaction refusals are successful no-ops that still prompt",
+  "a failed migration compaction fails the run closed and never prompts",
+  "a hanging migration compaction keeps starting alive and stays interruptible",
+  "a missing marker or an unchanged model base skips the migration compaction entirely",
+  'Model migration compaction failed: summarization exploded',
+  'assert.equal(completed.compactionCount, 1, "one preflight compaction is counted exactly once")',
+], "cross-model resume preflight runner tests");
+hasAll(read("tests/fixtures/stub-pi-rpc.mjs"), [
+  "handleCompact", "resume-compact-hang", "resume-compact-nothing", "resume-compact-already", "resume-compact-fail",
+  '"Nothing to compact (session too small)"', '"Already compacted"',
+  "PHANTOM-COMPACTION-TEXT", "recordCommand", "OMPS_STUB_COMMAND_LOG",
+], "RPC fixture compaction scenarios, event injection, and command ordering");
 const subagentRuntimeTests = read("tests/subagent-runtime.test.mjs");
 hasAll(subagentRuntimeTests, [
   "Goal stats sidecars enforce private paths", "Goal stats capture writes only actual changes", "Goal stats sidecars preserve completed owned-run aggregates across branch restore",
@@ -1708,6 +1852,14 @@ hasAll(subagentRuntimeTests, [
   "resume inherits the source run working directory and resolves cwd overrides like create",
   "resume rejects a blank cwd and still refuses agent and task",
 ], "resume optional cwd override tests");
+hasAll(subagentRuntimeTests, [
+  "resume launches the current preset model and marks only a real model-base migration",
+  "resume without a preset model resolver fails atomically like an inactive create",
+  "launch configs stay compatible across the optional resume preflight marker",
+  'assert.equal(migrated.config.resumeCompactFrom, "old-provider/old-model:low"',
+  'assert.equal("resumeCompactFrom" in thinkingOnly.config, false, "a thinking-only change never compacts")',
+  'assert.equal("resumeCompactFrom" in data.run, false, "the internal marker never reaches a persisted run")',
+], "transparent cross-model resume runtime tests");
 hasAll(read("tests/subagent-transcript-renderer.test.mjs"), [
   "synchronous interrupt outcomes collapse to the final result and expand its complete output and error",
   "expanded resume calls show a cwd override and fall back to the source run cwd",
@@ -2261,18 +2413,37 @@ hasAll(goalTests, [
   "phase and model-facing continuation text", "continuation waits for the full safe gate", "provider failures use unbounded frozen backoff",
   "user abort pauses, host abort does not", "no-progress counts only automatic continuation runs", "ownership and Goal view stats",
   "slash command resends a real user message", "continuationNumber", "refreshUI()",
-], "Goal focused durable state, lifecycle, gate, retry, abort, ownership, stats, numbering, and registration tests");
+  "clear is a no-op with no Goal and never appends a tombstone",
+  "clear erases a completed or a cancelled Goal through a null tombstone",
+  "clear refuses every nonterminal Goal and tells the model to ask the user before cancelling",
+  "replay and stats treat only an exact null payload as an erasure",
+  "restoring a cleared branch yields no Goal and writes nothing new",
+  "clear notifies subscribers and the widget with a null Goal without an automatic state message",
+  "clear drops the retry timer, deferred continuation work, and queued state notifications",
+  "a Goal created after a clear is a fresh instance whose stats exclude the cleared Goal",
+], "Goal focused durable state, lifecycle, gate, retry, abort, ownership, stats, numbering, clear, and registration tests");
 hasAll(goalUiTests, [
   "five statuses, exact two-line order, stats, elapsed, retry, paused reason, width, and empty state",
   "one shared 1s timer", "Component.invalidate is a no-op", "caches branch stats across timer ticks", "RPC or print widget",
-  "all seven calls", "uniform collapsed hints", "status none/goal", "pause/resume no-change", "evidence, cancel, retry fields",
+  "all eight calls", "uniform collapsed hints", "status none/goal", "pause/resume no-change", "evidence, cancel, retry fields",
   "continuation and state notifications", "fallback hints", "data invariance", "continuation 7 (ctrl+o to expand)",
   "no_progress: no_progress (ctrl+o to expand)", "●  Goal · ↻  active", "[↻Ⅱ◷✓×●○] [^ ]|[↻Ⅱ◷✓×●○] {3}", "continuationWide",
   "pursuing versus idle across all five statuses and never joins Ctrl+O expansion",
   "the Goal heading carries no ratio", "must render a hollow dim prefix", "must not bold the Goal prefix",
   "the status glyph and text keep their own status colour", "the abstract keeps its existing text role",
-  "must never append an expand hint", "the Goal renderer takes no expansion parameters", "roleAnsiTheme",
-], "Goal focused widget, five-status prefix, no-expansion, and RPC visual tests");
+  "must never append an expand hint", "expansion stays an optional trailing argument, never a required one", "roleAnsiTheme",
+  "Collapsed tool output takes back only the completed Goal's detail row and never rewrites the view",
+  "a finished Goal collapses to its heading alone",
+  "is unfinished and keeps both rows while collapsed",
+  "rendering writes nothing back into the view",
+  "The Goal section reads Pi's live expansion state on every aggregate render and never re-registers for it",
+  "expanding again restores the detail row from the live state, with no local copy",
+  "a Goal that is still being pursued is never hidden by the collapsed state",
+  "an expansion change redraws the aggregate instead of re-registering it",
+  "every Goal action has a call rendering, including the branch-emptying clear",
+  "Goal clear receipts separate a real clear from an already empty branch, keep status none intact, and freeze model data",
+  "A refused clear falls back to the tool's own error, stays width safe, and keeps the whole ask-the-user instruction",
+], "Goal focused widget, five-status prefix, shared collapse, clear receipt, and RPC visual tests");
 for (const file of ["tests/loop.test.mjs", "tests/provider-schema.test.mjs", "tests/subagent-runtime.test.mjs"]) {
   hasAll(read(file), ["./goal-runtime.js", "./goal-transcript-renderer.js", "./goal-widget.js"], `${file} Goal TypeScript load mappings`);
 }
@@ -2349,6 +2520,10 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "every retained run", "compact public state", "never includes terminal `output` or `error`", "`status` with one retained run ID", "same retained set and ordering",
         "refused while any run is `starting`, `running`, or `waiting`", "without rolling back file changes", "never changes Goal statistics",
         "saved child session as a new run with a new ID and optionally override its cwd. Omitted cwd inherits the source run's working directory", "continue that same run",
+        "always runs on the model your current preset resolves for that agent",
+        "the reused child session is compacted once before the resumed run is prompted",
+        "A change of thinking level alone reuses the session unchanged",
+        "any other compaction failure fails the run instead of prompting it",
         "matched exactly", "atomic", "still names the target in `blockedBy`", "Multiple items may be `in_progress`", "acyclic graph", "`clear` requires an empty or fully completed current group",
         "runtime-only fixed-delay", "Creation and resume wait one full interval", "reload, new session, session resume, fork, or quit",
         "case-sensitive literal matching", "remain available until `delete`", "Use `status`",
@@ -2356,6 +2531,12 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "one to four questions", "single-select", "multi-select", "custom responses", "previews", "unavailable while a Goal is active",
         "branch-local durable Goal", "restore unfinished work as paused", "Provider failures retry automatically", "user aborts pause instead of cancelling", "one non-empty evidence item for each criterion",
         "active or waiting subagents", "Monitor work", "waiting Ask dialog",
+        "A completed Goal's detail row joins the shared Ctrl+O collapse",
+        "every other status keeps both rows in either state",
+        "removes only a completed or cancelled Goal from the branch",
+        "the model must ask you whether to cancel it first, then retry only if you agree",
+        "A cleared branch reports no Goal at all",
+        "leaving the retained subagent runs behind them untouched",
         "safely queued during compaction and tree operations", "collapsed and expanded views", "compact widgets",
         "successful subagent `clear` remains clear after reload",
       ]
@@ -2366,6 +2547,10 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "全部 retained run", "精简公开状态", "绝不包含 terminal `output` 或 `error`", "单个 retained run ID 调用 `status`", "相同的 retained 集合与排序",
         "存在 `starting`、`running` 或 `waiting` run，`clear` 就会被拒绝", "不回滚文件修改", "不会改变 Goal statistics",
         "保存的 child session 创建新 run，并生成新 ID。可选覆盖 cwd，省略时继承 source run 的工作目录", "继续同一个 run",
+        "始终使用当前 preset 为该 agent 解析出的 model",
+        "会在 resumed run 收到第一个 prompt 之前先被 compact 一次",
+        "仅 thinking level 变化时，session 会被原样复用",
+        "其他任何 compaction 失败都会让该 run 失败",
         "使用 exact match", "原子的", "仍在 `blockedBy` 中引用目标", "多个 item 可以同时处于 `in_progress`", "无环图", "`clear` 要求当前组为空或全部 completed",
         "runtime-only fixed-delay", "创建和恢复后都会先等待一个完整 interval", "reload、new session、session resume、fork 或 quit",
         "区分大小写的 literal match", "一直保留到 `delete`", "用 `status`",
@@ -2373,6 +2558,12 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "一到四个 question", "single-select", "multi-select", "custom response", "preview", "Goal active 时不可用",
         "branch-local durable Goal", "恢复为 paused", "provider failure 会自动重试", "用户 abort 也会暂停而不是取消", "每条 criterion 必须精确对应一条非空 evidence",
         "active 或 waiting subagent", "Monitor 工作", "waiting Ask dialog",
+        "completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠",
+        "其他状态在折叠与展开下都保留两行",
+        "只会从 branch 上移除 completed 或 cancelled 的 Goal",
+        "模型必须先询问你是否要取消它，只有在你同意后才可以重试",
+        "清理后的 branch 报告没有任何 Goal",
+        "产生这些统计的 retained subagent run 保持不变",
         "compaction 与 tree operation 期间", "collapsed/expanded", "紧凑 widget",
         "subagent `clear` 在 reload 后仍保持清空",
       ], `${file} visible behavior contract`);
@@ -2386,7 +2577,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
   expectTableItems("Todo", todo, ["list", "update", "append", "modify", "delete", "clear"]);
   expectTableItems("Loop", loop, ["create", "delete", "modify", "list", "pause", "resume"]);
   expectTableItems("Monitor", monitor, ["create", "delete", "list", "status"]);
-  expectTableItems("Goal", goal, ["create", "modify", "status", "pause", "resume", "complete", "cancel"]);
+  expectTableItems("Goal", goal, ["create", "modify", "status", "pause", "resume", "complete", "cancel", "clear"]);
 
   hasNone(text, [
     "RpcClient", "launch.json", "state.json", "control/", "setImmediate", "compaction_end", "triggerTurn: true", 'deliverAs: "steer"',
@@ -2451,7 +2642,19 @@ hasNone(subagentHeadingBlock, [
 ], "Subagent idle heading must stay dim without bold and count runs before any layout budget");
 hasNone(widgetRenderer, ["headingColor", "headingIcon"], "Subagent heading must render through the active-idle heading helper");
 hasNone(widgetRenderer, ["run.task", "shortTask"], "abstract-only widget labels");
-hasAll(modelDisplay, ["THINKING_LEVELS", "formatSubagentModel", '"xhigh"', '"max"'], "subagent model display formatter");
+hasAll(modelDisplay, [
+  "THINKING_LEVELS", "formatSubagentModel", '"xhigh"', '"max"',
+  "export function parseModelSpec(spec: string): ParsedModelSpec",
+  "export function modelSpecBase(spec: string): string",
+  "export function sameModelSpecBase(left: string, right: string): boolean",
+  "THINKING_LEVELS.has(candidate)", "model.lastIndexOf(\":\")",
+  "base: provider ? `${provider}/${model}` : model",
+  "return modelSpecBase(left) === modelSpecBase(right)",
+], "shared subagent model spec parsing and display formatter");
+hasAll(read("tests/subagent-widget.test.mjs"), [
+  "shared model spec parsing splits only known thinking suffixes and compares provider/model bases",
+  "a colon that is not a known thinking level belongs to the model ID",
+], "shared model spec helper tests");
 hasAll(transcriptRenderer, [
   "Container", "Box", "Text", "Markdown", "Spacer", "getMarkdownTheme", "RAW_HTML_TAG",
   "renderSubagentCall", "renderSubagentResult", "styledTitle(", '"subagent"',

@@ -26,6 +26,7 @@ import {
   type SubagentRunSummary,
   type SupervisorRequest,
 } from "./subagent-core.js";
+import { sameModelSpecBase } from "./subagent-model-display.js";
 import {
   atomicWriteJson,
   ensureRunPaths,
@@ -1303,7 +1304,12 @@ export class OmpsSubagentRuntime {
     }).filter(([, value]) => value !== undefined));
   }
 
-  private buildLaunchConfig(run: PersistedRun, agent: AgentDefinition, resumeSessionFile?: string): DetachedLaunchConfig {
+  private buildLaunchConfig(
+    run: PersistedRun,
+    agent: AgentDefinition,
+    resumeSessionFile?: string,
+    resumeCompactFrom?: string,
+  ): DetachedLaunchConfig {
     if (!this.ctx || !this.ownerSessionId) throw new Error("Subagent runtime is not attached to a parent session.");
     const approve = shouldApproveChildProject(this.ctx.isProjectTrusted(), this.ctx.cwd, run.cwd);
     const args = [
@@ -1331,6 +1337,7 @@ export class OmpsSubagentRuntime {
       approve,
       childSessionDir: this.childSessionDir(),
       resumeSessionFile,
+      ...(resumeSessionFile && resumeCompactFrom ? { resumeCompactFrom } : {}),
       piInvocation: getPiInvocation(args, this.invocationSeams),
       env: {
         PI_SUBAGENT_CHILD: "1",
@@ -1342,12 +1349,12 @@ export class OmpsSubagentRuntime {
     };
   }
 
-  private async launchRun(run: PersistedRun, resumeSessionFile?: string) {
+  private async launchRun(run: PersistedRun, resumeSessionFile?: string, resumeCompactFrom?: string) {
     const agent = this.agents.get(run.agent);
     if (!agent) throw new Error(`Package agent disappeared: ${run.agent}`);
     const paths = this.pathsFor(run.id);
     ensureRunPaths(paths);
-    const config = this.buildLaunchConfig(run, agent, resumeSessionFile);
+    const config = this.buildLaunchConfig(run, agent, resumeSessionFile, resumeCompactFrom);
     atomicWriteJson(paths.configFile, config);
     this.registry.add(run, false);
     this.persistRun(run);
@@ -1523,7 +1530,7 @@ export class OmpsSubagentRuntime {
     const runs = this.registry.list();
     const active = runs.filter((run) => ACTIVE_STATUSES.has(run.status));
     if (active.length > 0) {
-      throw new Error(`clear requires every retained run to reach a terminal status. Still active: ${active.map((run) => `${run.id} (${run.status})`).join(", ")}.`);
+      throw new Error(`clear requires every retained run to reach a terminal status. Still active: ${active.map((run) => `${run.id} (${run.status})`).join(", ")}. Ask the user whether to interrupt these active runs, then retry clear only if they agree.`);
     }
     const receipt: SubagentClearReceipt = { clearedCount: 0, warnings: [], changed: false };
     if (runs.length === 0) return toolText("No retained subagent runs to clear.", receipt);
@@ -1556,7 +1563,12 @@ export class OmpsSubagentRuntime {
     );
   }
 
-  /** An omitted cwd inherits the source run's working directory, while a relative override resolves like create against the parent session. */
+  /**
+   * An omitted cwd inherits the source run's working directory, while a relative override resolves like create against the parent session.
+   *
+   * A resumed run always uses the preset model the agent resolves to now, never the source run's model.
+   * When that crosses a provider/model base, the runner compacts the reused session once before its first prompt.
+   */
   private async resume(sourceId: string, abstract: string, message: string, cwd?: string) {
     const source = this.requireRun(sourceId);
     if (!isTerminalStatus(source.status)) throw new Error(`resume requires a terminal source run; ${sourceId} is ${source.status}.`);
@@ -1565,7 +1577,11 @@ export class OmpsSubagentRuntime {
     const conflicting = this.registry.list().find((run) =>
       run.sessionFile !== undefined && canonicalSessionFile(run.sessionFile) === sessionFile && ACTIVE_STATUSES.has(run.status));
     if (conflicting) throw new Error(`Session ${source.sessionFile} is already active in run ${conflicting.id}.`);
-    if (!this.denyResolver) throw new Error("oh-my-pi-slim is inactive; enable a preset before resuming a subagent.");
+    if (!this.modelResolver || !this.denyResolver) {
+      throw new Error("oh-my-pi-slim is inactive; enable a preset before resuming a subagent.");
+    }
+    const model = requireString(this.modelResolver(source.agent), `preset model for ${source.agent}`);
+    const resumeCompactFrom = sameModelSpecBase(source.model, model) ? undefined : source.model;
     const now = this.now();
     const run: PersistedRun = {
       id: this.newRunId(),
@@ -1573,7 +1589,7 @@ export class OmpsSubagentRuntime {
       abstract,
       task: message,
       cwd: cwd === undefined ? source.cwd : resolve(this.ctx?.cwd ?? process.cwd(), cwd),
-      model: source.model,
+      model,
       deniedTools: normalizeDeniedTools(this.denyResolver(source.agent)),
       status: "starting",
       sourceRunId: sourceId,
@@ -1581,7 +1597,7 @@ export class OmpsSubagentRuntime {
       createdAt: now,
       updatedAt: now,
     };
-    const result = await this.launchRun(run, source.sessionFile);
+    const result = await this.launchRun(run, source.sessionFile, resumeCompactFrom);
     const retained = this.registry.require(run.id);
     result.content[0].text = `Resumed ${sourceId} as new detached run ${run.id} with status ${retained.status}.`;
     return result;

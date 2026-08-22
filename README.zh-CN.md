@@ -111,6 +111,8 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 
 `interrupt` 是同步的：它会等待目标 run 进入 terminal 状态，并直接返回完整最终结果，包括已保存的 `output` 或 `error`。当显式 `interrupt` 调用取得某个 live run 的结果交接权时，该 terminal event 不会再单独发送，reload 后也不会重放；而由 shutdown、reload、tree navigation 或 session 替换导致的中断，仍然按普通 terminal notification 送达。若 run 在调用前就已是 terminal，它保留自己的 terminal notification，不会收到 interrupt control，并且只返回精简回执。若无法确认 detached runner 已停止，结果会显式说明，并保留该 run 目录。
 
+`resume` 始终使用当前 preset 为该 agent 解析出的 model，而不是 source run 当时使用的 model。当这次变化跨越了 provider 或 model ID，被复用的 child session 会在 resumed run 收到第一个 prompt 之前先被 compact 一次，因此新 model 绝不会继承为另一个 model 写下的原始上下文。仅 thinking level 变化时，session 会被原样复用。整个 preflight 期间 run 保持 `starting`，已经 compact 过或过小的 session 会直接继续，其他任何 compaction 失败都会让该 run 失败，而不会再发出 prompt。
+
 只要存在 `starting`、`running` 或 `waiting` run，`clear` 就会被拒绝。全部 retained run 都进入 terminal 后才可清理完整历史；清理结果在 reload 和 restore 后仍保持为空。清理 Subagent history 不会改变 Goal statistics。
 
 child 可用 `contact_supervisor` 发送 `need_decision`、`interview_request` 或 `progress_update`。每次请求都会让 child 进入 `waiting`；main 用 `reply` 继续同一个 run。
@@ -196,10 +198,15 @@ Ask 仅 main 可用，并要求交互式 UI；JSON 与 print mode 不提供该�
 | `resume` | 显式重新激活 paused Goal |
 | `complete` | 提交与 criteria 对应的 evidence 并完成 |
 | `cancel` | 带 reason 取消 |
+| `clear` | 从 branch 上移除已结束的 Goal |
 
 Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree restore 会把未完成 Goal 恢复为 paused，绝不会静默继续。provider failure 会自动重试，重复无进展会暂停 Goal，用户 abort 也会暂停而不是取消。完成时，每条 criterion 必须精确对应一条非空 evidence。
 
 自主 continuation 会等待阻塞工作消失，包括 active 或 waiting subagent、Monitor 工作与 pending terminal delivery，以及 waiting Ask dialog。你可以随时用 `status`、`pause`、`resume` 或 `cancel` 控制推进。
+
+completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠。tool output 折叠时，widget 只保留 Goal heading；其他状态在折叠与展开下都保留两行。
+
+`goal clear` 只会从 branch 上移除 completed 或 cancelled 的 Goal。Goal 仍在推进或处于 paused 时，`clear` 会被拒绝，模型必须先询问你是否要取消它，只有在你同意后才可以重试。清理后的 branch 报告没有任何 Goal；清理会一并带走该 Goal 自己的统计，而产生这些统计的 retained subagent run 保持不变。
 
 ## `/loop` 与 `/goal`
 

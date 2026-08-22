@@ -9,7 +9,7 @@ import { Type } from "typebox";
 import { renderGoalCall, renderGoalContinuation, renderGoalResult, renderGoalState } from "./goal-transcript-renderer.js";
 import { GoalWidget } from "./goal-widget.js";
 
-export const GOAL_ACTIONS = ["create", "modify", "status", "pause", "resume", "complete", "cancel"] as const;
+export const GOAL_ACTIONS = ["create", "modify", "status", "pause", "resume", "complete", "cancel", "clear"] as const;
 export const GOAL_PUBLIC_FIELDS = ["action", "abstract", "objective", "criteria", "reason", "evidence"] as const;
 export const GOAL_STATE_ENTRY_TYPE = "oh-my-pi-slim:goal-state";
 export const GOAL_CONTINUATION_MESSAGE_TYPE = "oh-my-pi-slim:goal-continuation";
@@ -141,11 +141,12 @@ const ACTION_FIELDS: Record<GoalAction, readonly string[]> = {
   resume: ["action"],
   complete: ["action", "evidence"],
   cancel: ["action", "reason"],
+  clear: ["action"],
 };
 
 export const goalParameters = Type.Object({
   action: Type.Union(GOAL_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status and resume accept no other fields.",
+    description: "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. clear removes a completed or cancelled Goal from the branch. status, resume, and clear accept no other fields.",
   }),
   abstract: Type.Optional(Type.String({
     description: "Short Goal summary for create or modify.",
@@ -286,6 +287,12 @@ export function parseGoalSnapshot(value: unknown): GoalSnapshot | undefined {
   };
 }
 
+// A cleared Goal persists as an explicit null payload on the same entry type, so replay must treat
+// exactly `null` as an erasure and keep every other malformed payload an ignorable entry.
+export function isGoalTombstoneData(value: unknown): boolean {
+  return value === null;
+}
+
 export function parseGoalContinuationMessageDetails(value: unknown): GoalContinuationMessageDetails | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const details = value as Record<string, unknown>;
@@ -314,6 +321,10 @@ export function replayGoalBranch(entries: readonly unknown[]): GoalSnapshot | un
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     const entry = value as Record<string, unknown>;
     if (entry.type !== "custom" || entry.customType !== GOAL_STATE_ENTRY_TYPE) continue;
+    if (isGoalTombstoneData(entry.data)) {
+      latest = undefined;
+      continue;
+    }
     const snapshot = parseGoalSnapshot(entry.data);
     if (snapshot) latest = snapshot;
   }
@@ -392,6 +403,10 @@ export function deriveMainGoalStats(entries: readonly unknown[], instanceKey: st
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     const entry = value as Record<string, unknown>;
     if (entry.type === "custom" && entry.customType === GOAL_STATE_ENTRY_TYPE) {
+      if (isGoalTombstoneData(entry.data)) {
+        snapshot = undefined;
+        continue;
+      }
       const parsed = parseGoalSnapshot(entry.data);
       if (parsed) snapshot = parsed;
       continue;
@@ -489,7 +504,7 @@ export class GoalRuntime {
       name: "goal",
       label: "Goal",
       executionMode: "sequential",
-      description: "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. Actions return the current Goal state and whether it changed.",
+      description: "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a terminal Goal from the branch and rejects any nonterminal Goal. Actions return the current Goal state and whether it changed.",
       promptSnippet: "Manage the branch-local Goal.",
       promptGuidelines: [
         "Call `goal create` only for a user message beginning with `/goal`.",
@@ -795,13 +810,15 @@ export class GoalRuntime {
       const goal = cloneGoal(this.snapshot.goal);
       return toolText(JSON.stringify(goal, null, 2), { goal, changed: false });
     }
+    if (action === "clear" && !this.snapshot) return toolText("No Goal to clear.", { goal: null, changed: false });
     if (action === "create") return this.create(input);
     if (!this.snapshot) throw new Error("No Goal exists on the current branch.");
     if (action === "modify") return this.modify(input);
     if (action === "pause") return this.pause(input);
     if (action === "resume") return this.resume();
     if (action === "complete") return this.complete(input);
-    return this.cancel(input);
+    if (action === "cancel") return this.cancel(input);
+    return this.clear();
   }
 
   private validateActionFields(input: Record<string, unknown>, action: GoalAction): void {
@@ -957,6 +974,22 @@ export class GoalRuntime {
     this.clearRetryTimer();
     this.store(next);
     return statusReceipt("Goal cancelled.", next.goal, true);
+  }
+
+  // Clearing erases the branch-local Goal instead of ending it, so it is valid only after the Goal
+  // already reached a terminal status and it never cancels a live Goal on the model's behalf.
+  private clear(): ReturnType<typeof toolText> {
+    const snapshot = this.snapshot as GoalSnapshot;
+    const status = snapshot.goal.status;
+    if (status !== "completed" && status !== "cancelled") {
+      throw new Error(`clear requires a terminal Goal. The current Goal is ${status}. Ask the user whether to cancel this Goal, then retry clear only if they agree.`);
+    }
+    this.clearRuntime(true);
+    this.snapshot = undefined;
+    this.pi.appendEntry<null>(GOAL_STATE_ENTRY_TYPE, null);
+    this.activitySerial += 1;
+    this.emit();
+    return toolText("Goal cleared.", { goal: null, changed: true });
   }
 
   private requireMutable(action: string): GoalSnapshot {

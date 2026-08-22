@@ -3268,6 +3268,7 @@ test("resume creates a new run ID and a complete --session invocation", async ()
     const sessionFile = join(harness.tempDir, "source.jsonl");
     writeFileSync(sessionFile, "session");
     harness.runtime.registry.add(persistedRun({ id: "source", status: "interrupted", sessionFile }));
+    harness.runtime.setModelResolver(() => "provider/model:high");
     harness.runtime.setDenyResolver(() => ["ask_user_question"]);
     const result = await harness.tools.get("subagent").execute("resume", {
       action: "resume", id: "source", abstract: "  new resume summary  ", message: "continue",
@@ -3294,6 +3295,7 @@ test("resume creates a new run ID and a complete --session invocation", async ()
     assert.equal(config.abstract, "new resume summary");
     assert.notEqual(config.abstract, harness.runtime.registry.get("source").abstract);
     assert.equal(config.resumeSessionFile, sessionFile);
+    assert.equal("resumeCompactFrom" in config, false, "an unchanged model base writes no preflight marker");
     const sessionIndex = config.piInvocation.args.indexOf("--session");
     assert.equal(config.piInvocation.args[sessionIndex + 1], sessionFile);
     assert.equal(config.runId, id);
@@ -3309,6 +3311,7 @@ test("resume inherits the source run working directory and resolves cwd override
   const sourceCwd = join(ROOT, "extensions");
   try {
     await harness.restore();
+    harness.runtime.setModelResolver(() => "provider/model:high");
     harness.runtime.setDenyResolver(() => []);
     const launchFor = (id) => harness.launches.find((launch) => launch.configFile.includes(id));
     const resumeWith = async (suffix, args) => {
@@ -3401,6 +3404,123 @@ test("resume rejects a blank cwd and still refuses agent and task", async () => 
   } finally { harness.cleanup(); }
 });
 
+test("resume launches the current preset model and marks only a real model-base migration", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    harness.runtime.setDenyResolver(() => []);
+    const resumeWith = async (suffix, sourceModel, targetModel) => {
+      const sessionFile = join(harness.tempDir, `${suffix}.jsonl`);
+      writeFileSync(sessionFile, "session");
+      harness.runtime.registry.add(persistedRun({
+        id: `source-${suffix}`, status: "completed", sessionFile, model: sourceModel,
+      }));
+      harness.runtime.setModelResolver((agent) => {
+        assert.equal(agent, "fixer", "the resumed run resolves the source run's own agent");
+        return targetModel;
+      });
+      const result = await harness.tools.get("subagent").execute(`resume-${suffix}`, {
+        action: "resume", id: `source-${suffix}`, abstract: `abstract ${suffix}`, message: "continue",
+      });
+      const id = result.details.run.id;
+      return { id, result, config: readConfig(harness, id) };
+    };
+
+    const migrated = await resumeWith("migrated", "old-provider/old-model:low", "new-provider/new-model:high");
+    assert.equal(migrated.result.details.run.model, "new-provider/new-model:high", "a resumed run uses the current preset model");
+    assert.equal(harness.runtime.registry.get(migrated.id).model, "new-provider/new-model:high");
+    assert.equal(migrated.config.model, "new-provider/new-model:high");
+    const modelIndex = migrated.config.piInvocation.args.indexOf("--model");
+    assert.equal(migrated.config.piInvocation.args[modelIndex + 1], "new-provider/new-model:high");
+    assert.equal(migrated.config.resumeCompactFrom, "old-provider/old-model:low", "a crossed model base marks the preflight");
+    assert.equal(migrated.config.piInvocation.args.includes("--thinking-level"), false);
+    assert.equal(readLaunchConfig(harness.paths(migrated.id)).resumeCompactFrom, "old-provider/old-model:low");
+    const journaled = harness.journalWrites.filter(({ data }) => data.run?.id === migrated.id);
+    assert.equal(journaled.length > 0, true);
+    for (const { data } of journaled) {
+      assert.equal("resumeCompactFrom" in data.run, false, "the internal marker never reaches a persisted run");
+      assert.equal(data.run.model, "new-provider/new-model:high");
+    }
+
+    const thinkingOnly = await resumeWith("thinking", "provider/model:low", "provider/model:high");
+    assert.equal(thinkingOnly.result.details.run.model, "provider/model:high", "a thinking-only change still uses the new spec");
+    assert.equal(thinkingOnly.config.model, "provider/model:high");
+    assert.equal("resumeCompactFrom" in thinkingOnly.config, false, "a thinking-only change never compacts");
+
+    const idColon = await resumeWith("id-colon", "provider/model:2025-01-01", "provider/model");
+    assert.equal(idColon.config.resumeCompactFrom, "provider/model:2025-01-01",
+      "a colon that is not a known thinking level belongs to the model ID");
+
+    const unchanged = await resumeWith("unchanged", "provider/model:high", "provider/model:high");
+    assert.equal("resumeCompactFrom" in unchanged.config, false);
+  } finally { harness.cleanup(); }
+});
+
+test("resume without a preset model resolver fails atomically like an inactive create", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const sessionFile = join(harness.tempDir, "source.jsonl");
+    writeFileSync(sessionFile, "session");
+    harness.runtime.registry.add(persistedRun({ id: "source", status: "completed", sessionFile }));
+    const journalsBefore = harness.journalWrites.length;
+    const subagent = harness.tools.get("subagent");
+    const request = { action: "resume", id: "source", abstract: "new summary", message: "continue" };
+
+    harness.runtime.setDenyResolver(() => []);
+    await assert.rejects(
+      subagent.execute("resume-no-model", request),
+      /oh-my-pi-slim is inactive; enable a preset before resuming a subagent\./,
+    );
+
+    harness.runtime.setModelResolver(() => "provider/model:high");
+    harness.runtime.setDenyResolver(undefined);
+    await assert.rejects(
+      subagent.execute("resume-no-deny", request),
+      /oh-my-pi-slim is inactive; enable a preset before resuming a subagent\./,
+    );
+
+    harness.runtime.setDenyResolver(() => []);
+    harness.runtime.setModelResolver(() => "   ");
+    await assert.rejects(
+      subagent.execute("resume-blank-model", request),
+      /preset model for fixer must be a non-empty string\./,
+    );
+
+    assert.equal(harness.launches.length, 0, "an unresolved model never launches a runner");
+    assert.equal(harness.journalWrites.length, journalsBefore, "an unresolved model never journals a run");
+    assert.deepEqual(harness.runtime.registry.list().map((run) => run.id), ["source"]);
+    assert.equal(existsSync(getRunRoot(harness.sessionDir)), false, "an unresolved model never creates a run directory");
+  } finally { harness.cleanup(); }
+});
+
+test("launch configs stay compatible across the optional resume preflight marker", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    harness.runtime.setModelResolver(() => "provider/model:high");
+    harness.runtime.setDenyResolver(() => []);
+    const started = await createRun(harness);
+    const legacy = readConfig(harness, started.details.run.id);
+    assert.equal("resumeCompactFrom" in legacy, false, "create never writes the resume preflight marker");
+    assert.equal(isDetachedLaunchConfig(legacy), true, "an old config without the marker stays valid");
+    assert.equal(isDetachedLaunchConfig({ ...legacy, resumeCompactFrom: "old/model:low" }), true);
+    assert.equal(isDetachedLaunchConfig({ ...legacy, resumeCompactFrom: "" }), false);
+    assert.equal(isDetachedLaunchConfig({ ...legacy, resumeCompactFrom: 5 }), false);
+    assert.equal(isDetachedLaunchConfig({ ...legacy, resumeCompactFrom: null }), false);
+
+    const runnerCheck = execFileSync(process.execPath, ["--input-type=module", "--eval", [
+      'import { readFileSync, writeFileSync } from "node:fs";',
+      `const source = readFileSync(${JSON.stringify(join(ROOT, "extensions/oh-my-pi-slim/runner/omps-runner.mjs"))}, "utf8");`,
+      'const start = source.indexOf("function normalizeConfig(value)");',
+      'const end = source.indexOf("function atomicWriteJson", start);',
+      "process.stdout.write(source.slice(start, end));",
+    ].join("\n")], { encoding: "utf8" });
+    assert.match(runnerCheck, /value\.resumeCompactFrom === undefined \|\| nonEmpty\(value\.resumeCompactFrom\)/,
+      "the runner mirrors the same optional marker rule");
+  } finally { harness.cleanup(); }
+});
+
 test("reload and restore retain terminal results for status until clear removes the run", async () => {
   const restored = createHarness({
     branch: [branchEntry({ version: 1, runs: [persistedRun({
@@ -3442,6 +3562,7 @@ test("clear rejects while any run stays active and changes nothing", async () =>
     await assert.rejects(clear(harness), (error) => {
       assert.match(error.message, /clear requires every retained run to reach a terminal status/);
       assert.match(error.message, new RegExp(`${id} \\(running\\)`));
+      assert.match(error.message, /Ask the user whether to interrupt these active runs, then retry clear only if they agree\./);
       return true;
     });
     assert.deepEqual(harness.runtime.registry.list().map((run) => run.id).sort(), ["already-done", id].sort());

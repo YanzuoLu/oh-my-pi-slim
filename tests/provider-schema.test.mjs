@@ -151,7 +151,7 @@ test("all production model-tool schemas survive the Kimi strict-provider portabi
     multiSelect: "True enables multiple authored selections. Omit or use false for single-select. Multi-select options cannot include previews.",
   });
 
-  assert.equal(schemas.goal.properties.action.description, "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status and resume accept no other fields.");
+  assert.equal(schemas.goal.properties.action.description, "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. clear removes a completed or cancelled Goal from the branch. status, resume, and clear accept no other fields.");
   assert.equal(schemas.loop.properties.action.description, "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. list accepts no other fields.");
   assert.equal(schemas.loop.properties.interval.description, "Fixed delay for create or modify, from 10s through 7d. Format: one positive integer plus s, m, h, or d.");
   assert.equal(schemas.monitor.properties.action.description, "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.");

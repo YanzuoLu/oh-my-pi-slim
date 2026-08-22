@@ -111,6 +111,8 @@ Runs specialists in isolated background child sessions and returns control immed
 
 `interrupt` is synchronous. It waits for the targeted run to reach a terminal status and returns that complete final result, including any stored `output` or `error`. When an explicit `interrupt` call takes over delivery for a live run, that terminal event is not sent separately and is not replayed after reload. Interruptions caused by shutdown, reload, tree navigation, or session replacement still arrive as ordinary terminal notifications. A run that already reached a terminal status before the call keeps its own terminal notification, receives no interrupt control, and returns only a compact status line. When the detached runner cannot be verified as stopped, the result says so explicitly and the run directory is retained.
 
+`resume` always runs on the model your current preset resolves for that agent, not on the model the source run used. When that crosses a provider or a model ID, the reused child session is compacted once before the resumed run is prompted, so a new model never inherits raw context written for another one. A change of thinking level alone reuses the session unchanged. The run stays `starting` for the whole preflight, an already compacted or too small session simply continues, and any other compaction failure fails the run instead of prompting it.
+
 `clear` is refused while any run is `starting`, `running`, or `waiting`. Once every retained run is terminal, it can clear the complete history; the cleared state remains empty after reload and restoration. Clearing Subagent history never changes Goal statistics.
 
 A child uses `contact_supervisor` with `need_decision`, `interview_request`, or `progress_update`. Every request moves the child to `waiting`; the main session uses `reply` to continue the same run.
@@ -196,10 +198,15 @@ Manages one branch-local durable Goal with explicit criteria and evidence.
 | `resume` | Explicitly reactivate a paused Goal |
 | `complete` | Complete with evidence aligned to the criteria |
 | `cancel` | Cancel with a reason |
+| `clear` | Remove a finished Goal from the branch |
 
 A Goal is durable on its branch. Reload, session resume, fork, and tree restoration restore unfinished work as paused; it never silently resumes. Provider failures retry automatically, repeated no-progress runs pause the Goal, and user aborts pause instead of cancelling. Completion requires exactly one non-empty evidence item for each criterion.
 
 Autonomous continuation waits until blocking work is gone, including active or waiting subagents, Monitor work and pending terminal delivery, and a waiting Ask dialog. Use `status`, `pause`, `resume`, or `cancel` to stay in control.
+
+A completed Goal's detail row joins the shared Ctrl+O collapse. With tool output collapsed the widget keeps only the Goal heading, and every other status keeps both rows in either state.
+
+`goal clear` removes only a completed or cancelled Goal from the branch. While a Goal is still being pursued or is paused, `clear` is refused and the model must ask you whether to cancel it first, then retry only if you agree. A cleared branch reports no Goal at all, and clearing takes that Goal's own statistics with it while leaving the retained subagent runs behind them untouched.
 
 ## `/loop` and `/goal`
 

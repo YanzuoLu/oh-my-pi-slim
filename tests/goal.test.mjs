@@ -33,12 +33,14 @@ const {
   GOAL_PUBLIC_FIELDS,
   GOAL_RETRY_BACKOFF_MS,
   GOAL_STATE_ENTRY_TYPE,
+  GOAL_STATE_MESSAGE_TYPE,
   GoalRuntime,
   deriveMainGoalStats,
   goalActivationContent,
   goalContinuationContent,
   goalParameters,
   goalPhaseReminder,
+  isGoalTombstoneData,
   parseGoalContinuationMessageDetails,
   parseGoalSnapshot,
   replayGoalBranch,
@@ -101,7 +103,7 @@ function createHarness(options = {}) {
   };
   const runtime = new GoalRuntime(pi, {
     nowMs: () => now,
-    randomKey: () => options.randomKey ?? "instance-1",
+    randomKey: () => (typeof options.randomKey === "function" ? options.randomKey() : options.randomKey ?? "instance-1"),
     defer: (callback) => deferred.push(callback),
     setTimeout(callback, milliseconds) {
       const timer = { callback, milliseconds, cleared: false, unref() {} };
@@ -175,7 +177,7 @@ test("Goal schema is a strict portable object with isolated public actions", asy
   const harness = createHarness();
   const tool = harness.tools.get("goal");
   assert.equal(tool.executionMode, "sequential");
-  assert.equal(tool.description, "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. Actions return the current Goal state and whether it changed.");
+  assert.equal(tool.description, "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a terminal Goal from the branch and rejects any nonterminal Goal. Actions return the current Goal state and whether it changed.");
   assert.equal(tool.promptSnippet, "Manage the branch-local Goal.");
   assert.deepEqual(tool.promptGuidelines, [
     "Call `goal create` only for a user message beginning with `/goal`.",
@@ -185,14 +187,19 @@ test("Goal schema is a strict portable object with isolated public actions", asy
     "Call `goal cancel` only when the user explicitly abandons the Goal.",
     "Call `goal complete` only with concrete evidence for every criterion.",
   ]);
-  assert.equal(schema.properties.action.description, "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status and resume accept no other fields.");
+  assert.equal(schema.properties.action.description, "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. clear removes a completed or cancelled Goal from the branch. status, resume, and clear accept no other fields.");
+  assert.deepEqual([...GOAL_ACTIONS], ["create", "modify", "status", "pause", "resume", "complete", "cancel", "clear"]);
   for (const invalid of [
     { ...createInput, reason: "extra" },
     { action: "status", evidence: [] },
     { action: "pause" },
     { action: "complete" },
     { action: "resume", reason: "extra" },
+    { action: "clear", reason: "extra" },
+    { action: "clear", abstract: "extra" },
+    { action: "clear", evidence: ["extra"] },
   ]) await assert.rejects(harness.execute(invalid));
+  await assert.rejects(harness.execute({ action: "clear", reason: "extra" }), /clear does not accept field\(s\): reason\./);
   await assert.rejects(harness.execute({ ...createInput, criteria: [] }), /from 1 through 8/);
   await assert.rejects(harness.execute({ ...createInput, criteria: ["ok", "   "] }), /non-empty/);
 });
@@ -478,4 +485,279 @@ test("slash command resends a real user message with idle and busy steer semanti
     { user: "/goal", options: { expandPromptTemplates: false } },
     { user: "/goal   ship it", options: { deliverAs: "steer", expandPromptTemplates: false } },
   ]);
+});
+
+function goalStateEntries(branch) {
+  return branch.filter((entry) => entry.type === "custom" && entry.customType === GOAL_STATE_ENTRY_TYPE);
+}
+
+function tombstone() {
+  return { type: "custom", customType: GOAL_STATE_ENTRY_TYPE, data: null };
+}
+
+test("clear is a no-op with no Goal and never appends a tombstone", async () => {
+  const harness = createHarness();
+  const entries = harness.branch.length;
+  const cleared = await harness.execute({ action: "clear" });
+  assert.equal(cleared.content[0].text, "No Goal to clear.");
+  assert.deepEqual(cleared.details, { goal: null, changed: false });
+  assert.equal(harness.branch.length, entries);
+  assert.equal(harness.runtime.status(), null);
+
+  const again = await harness.execute({ action: "clear" });
+  assert.deepEqual(again.details, { goal: null, changed: false });
+  assert.equal(harness.branch.length, entries);
+});
+
+test("clear erases a completed or a cancelled Goal through a null tombstone", async () => {
+  for (const terminal of [
+    { action: "complete", evidence: ["proof one", "proof two"], status: "completed" },
+    { action: "cancel", reason: "user abandoned it", status: "cancelled" },
+  ]) {
+    const harness = createHarness();
+    await harness.execute(createInput);
+    const ended = await harness.execute({ action: terminal.action, ...(terminal.evidence ? { evidence: terminal.evidence } : {}), ...(terminal.reason ? { reason: terminal.reason } : {}) });
+    assert.equal(ended.details.goal.status, terminal.status);
+    const before = goalStateEntries(harness.branch).length;
+
+    const cleared = await harness.execute({ action: "clear" });
+    assert.equal(cleared.content[0].text, "Goal cleared.");
+    assert.deepEqual(cleared.details, { goal: null, changed: true });
+    const stateEntries = goalStateEntries(harness.branch);
+    assert.equal(stateEntries.length, before + 1);
+    const last = stateEntries.at(-1);
+    assert.equal(last.customType, GOAL_STATE_ENTRY_TYPE);
+    assert.equal(last.data, null);
+    assert.equal(harness.runtime.status(), null);
+    assert.equal(harness.runtime.isActive(), false);
+    assert.equal(harness.runtime.phaseReminder(), undefined);
+    const view = harness.runtime.goalView();
+    assert.equal(view.goal, null);
+    assert.equal(view.elapsedMs, null);
+    assert.equal(view.continuationCount, 0);
+    assert.equal(view.ownedChildRunCount, 0);
+    assert.deepEqual(view.main, { tokens: 0, tools: 0, turns: 0, compactions: 0 });
+    assert.deepEqual(view.children, { runCount: 0, tokens: 0, tools: 0, turns: 0, compactions: 0 });
+
+    const repeat = await harness.execute({ action: "clear" });
+    assert.deepEqual(repeat.details, { goal: null, changed: false });
+    assert.equal(goalStateEntries(harness.branch).length, before + 1);
+  }
+});
+
+test("clear refuses every nonterminal Goal and tells the model to ask the user before cancelling", async () => {
+  const expectAsk = /Ask the user whether to cancel this Goal, then retry clear only if they agree\./;
+
+  const active = createHarness();
+  await active.execute(createInput);
+  const activeEntries = active.branch.length;
+  await assert.rejects(active.execute({ action: "clear" }), (error) => {
+    assert.match(error.message, /clear requires a terminal Goal\./);
+    assert.match(error.message, /The current Goal is active\./);
+    assert.match(error.message, expectAsk);
+    return true;
+  });
+  assert.equal(active.branch.length, activeEntries);
+  assert.equal(active.runtime.status().status, "active");
+
+  const retrying = createHarness();
+  await retrying.execute(createInput);
+  retrying.runtime.onAgentStart();
+  retrying.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "error", errorMessage: "rate limited" }] });
+  retrying.setIdle(false);
+  retrying.runtime.onAgentSettled(retrying.ctx);
+  assert.equal(retrying.runtime.status().status, "retry_wait");
+  const retryEntries = retrying.branch.length;
+  await assert.rejects(retrying.execute({ action: "clear" }), (error) => {
+    assert.match(error.message, /The current Goal is retry_wait\./);
+    assert.match(error.message, expectAsk);
+    return true;
+  });
+  assert.equal(retrying.branch.length, retryEntries);
+  assert.equal(retrying.runtime.status().status, "retry_wait");
+  assert.equal(retrying.timers.at(-1).cleared, false);
+
+  const paused = createHarness();
+  await paused.execute(createInput);
+  await paused.execute({ action: "pause", reason: "blocked" });
+  const pausedEntries = paused.branch.length;
+  await assert.rejects(paused.execute({ action: "clear" }), (error) => {
+    assert.match(error.message, /The current Goal is paused\./);
+    assert.match(error.message, expectAsk);
+    return true;
+  });
+  assert.equal(paused.branch.length, pausedEntries);
+  assert.equal(paused.runtime.status().status, "paused");
+});
+
+test("replay and stats treat only an exact null payload as an erasure", async () => {
+  const harness = createHarness();
+  await harness.execute(createInput);
+  const first = structuredClone(goalStateEntries(harness.branch).at(-1).data);
+  await harness.execute({ action: "complete", evidence: ["proof one", "proof two"] });
+  const completed = structuredClone(goalStateEntries(harness.branch).at(-1).data);
+  const second = { ...structuredClone(first), instanceKey: "instance-2" };
+
+  assert.equal(isGoalTombstoneData(null), true);
+  for (const notTombstone of [undefined, {}, [], 0, false, "", "null", "undefined", { data: null }]) {
+    assert.equal(isGoalTombstoneData(notTombstone), false);
+  }
+
+  assert.equal(replayGoalBranch([{ type: "custom", customType: GOAL_STATE_ENTRY_TYPE, data: completed }, tombstone()]), undefined);
+  assert.equal(replayGoalBranch([
+    { type: "custom", customType: GOAL_STATE_ENTRY_TYPE, data: completed },
+    tombstone(),
+    { type: "custom", customType: GOAL_STATE_ENTRY_TYPE, data: second },
+  ]).instanceKey, "instance-2");
+  assert.equal(replayGoalBranch([
+    { type: "custom", customType: GOAL_STATE_ENTRY_TYPE, data: second },
+    tombstone(),
+    { type: "custom", customType: GOAL_STATE_ENTRY_TYPE, data: { bad: true } },
+  ]), undefined);
+
+  // Malformed null-like payloads stay ordinary ignorable entries and never erase the live Goal.
+  for (const malformed of [undefined, {}, [], 0, false, "", "null", { version: 1, goal: null }]) {
+    const replayed = replayGoalBranch([
+      { type: "custom", customType: GOAL_STATE_ENTRY_TYPE, data: first },
+      { type: "custom", customType: GOAL_STATE_ENTRY_TYPE, data: malformed },
+    ]);
+    assert.equal(replayed?.instanceKey, first.instanceKey);
+  }
+  assert.equal(replayGoalBranch([
+    { type: "custom", customType: GOAL_STATE_ENTRY_TYPE, data: first },
+    { type: "custom_message", customType: GOAL_STATE_ENTRY_TYPE, data: null },
+  ])?.instanceKey, first.instanceKey);
+
+  const usage = { input: 10, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const leaked = [
+    { type: "custom", customType: GOAL_STATE_ENTRY_TYPE, data: first },
+    { type: "message", message: { role: "assistant", content: [], usage, stopReason: "stop" } },
+    tombstone(),
+    { type: "message", message: { role: "assistant", content: [], usage: { ...usage, input: 99 }, stopReason: "stop" } },
+    { type: "compaction", usage: { ...usage, input: 7 } },
+  ];
+  assert.deepEqual(deriveMainGoalStats(leaked, first.instanceKey), { tokens: 10, tools: 0, turns: 1, compactions: 0 });
+});
+
+test("restoring a cleared branch yields no Goal and writes nothing new", async () => {
+  const source = createHarness();
+  await source.execute(createInput);
+  const snapshot = structuredClone(goalStateEntries(source.branch).at(-1).data);
+
+  const restored = createHarness();
+  restored.branch.push({ type: "custom", customType: GOAL_STATE_ENTRY_TYPE, data: snapshot }, tombstone());
+  const entries = restored.branch.length;
+  const sent = restored.sent.length;
+  restored.runtime.restore(restored.ctx, true);
+  assert.equal(restored.runtime.status(), null);
+  assert.equal(restored.branch.length, entries);
+  assert.equal(restored.sent.length, sent);
+  assert.equal(restored.timers.length, 0);
+
+  restored.runtime.refreshFromBranch(restored.ctx);
+  assert.equal(restored.runtime.status(), null);
+  assert.equal(restored.branch.length, entries);
+});
+
+test("clear notifies subscribers and the widget with a null Goal without an automatic state message", async () => {
+  let notificationPaused = true;
+  const harness = createHarness({ notificationPaused: () => notificationPaused });
+  const observed = [];
+  const unsubscribe = harness.runtime.subscribe((goal) => observed.push(goal === null ? null : goal.status));
+  assert.deepEqual(observed, [null]);
+
+  await harness.execute(createInput);
+  assert.equal(observed.at(-1), "active");
+  await harness.execute({ action: "cancel", reason: "user abandoned it" });
+  assert.equal(observed.at(-1), "cancelled");
+
+  const stateMessages = harness.sent.filter((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE).length;
+  await harness.execute({ action: "clear" });
+  assert.equal(observed.at(-1), null);
+  assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE).length, stateMessages);
+
+  notificationPaused = false;
+  harness.runtime.setDeliveryPaused(false);
+  assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE).length, stateMessages);
+  assert.equal(harness.runtime.status(), null);
+  unsubscribe();
+});
+
+test("clear drops the retry timer, deferred continuation work, and queued state notifications", async () => {
+  let notificationPaused = true;
+  const harness = createHarness({ notificationPaused: () => notificationPaused });
+  await harness.execute(createInput);
+  harness.setIdle(true);
+  harness.runtime.onAgentSettled(harness.ctx);
+  assert.equal(harness.deferred.length, 1);
+
+  harness.runtime.onAgentStart();
+  harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "error", errorMessage: "rate limited" }] });
+  harness.runtime.onAgentSettled(harness.ctx);
+  assert.equal(harness.runtime.status().status, "retry_wait");
+  assert.equal(harness.timers.length, 1);
+
+  await harness.execute({ action: "cancel", reason: "user abandoned it" });
+  const timersBefore = harness.timers.length;
+  await harness.execute({ action: "clear" });
+  assert.equal(harness.timers.length, timersBefore);
+  assert.equal(harness.timers.every((timer) => timer.cleared), true);
+
+  // The deferred continuation captured before the clear must expire instead of steering a dead Goal.
+  const sentBefore = harness.sent.length;
+  while (harness.deferred.length > 0) harness.flush();
+  assert.equal(harness.sent.length, sentBefore);
+  assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE), false);
+
+  notificationPaused = false;
+  harness.runtime.setDeliveryPaused(false);
+  assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE), false);
+  assert.equal(harness.runtime.status(), null);
+
+  harness.runtime.onAgentStart();
+  harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop" }] });
+  harness.runtime.onAgentSettled(harness.ctx);
+  assert.equal(harness.runtime.status(), null);
+  assert.equal(harness.deferred.length, 0);
+});
+
+test("a Goal created after a clear is a fresh instance whose stats exclude the cleared Goal", async () => {
+  const keys = ["instance-1", "instance-2"];
+  let created = 0;
+  const harness = createHarness({ randomKey: () => keys[Math.min(created++, keys.length - 1)] });
+  await harness.execute(createInput);
+  harness.runtime.ownRun("child-1");
+  harness.appendMessage({
+    role: "assistant",
+    content: [{ type: "toolCall", id: "t1", name: "read", arguments: {} }],
+    usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0 },
+    stopReason: "toolUse",
+  });
+  harness.runtime.refreshUI();
+  assert.deepEqual(harness.runtime.goalView().main, { tokens: 100, tools: 1, turns: 1, compactions: 0 });
+
+  await harness.execute({ action: "complete", evidence: ["proof one", "proof two"] });
+  await harness.execute({ action: "clear" });
+
+  const replacement = await harness.execute({ ...createInput, abstract: "Second Goal" });
+  assert.equal(replacement.details.goal.status, "active");
+  assert.equal(replacement.details.goal.abstract, "Second Goal");
+  assert.equal(replacement.details.changed, true);
+  const snapshots = goalStateEntries(harness.branch).filter((entry) => entry.data !== null);
+  assert.equal(snapshots.at(-1).data.instanceKey, "instance-2");
+  assert.equal(snapshots.at(-1).data.generation, 1);
+  assert.deepEqual(snapshots.at(-1).data.ownedRunIds, []);
+
+  harness.appendMessage({
+    role: "assistant",
+    content: [],
+    usage: { input: 5, output: 0, cacheRead: 0, cacheWrite: 0 },
+    stopReason: "stop",
+  });
+  harness.runtime.refreshUI();
+  assert.deepEqual(harness.runtime.goalView().main, { tokens: 5, tools: 0, turns: 1, compactions: 0 });
+  assert.equal(harness.runtime.goalView().ownedChildRunCount, 0);
+  assert.equal(harness.runtime.goalView().continuationCount, 0);
+  assert.deepEqual(deriveMainGoalStats(harness.branch, "instance-2"), { tokens: 5, tools: 0, turns: 1, compactions: 0 });
+  assert.deepEqual(deriveMainGoalStats(harness.branch, "instance-1"), { tokens: 100, tools: 1, turns: 1, compactions: 0 });
 });
