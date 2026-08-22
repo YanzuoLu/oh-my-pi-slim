@@ -115,14 +115,14 @@ test("monitor schema and registration expose the exact portable main-only contra
   const tool = harness.tools.get("monitor");
   assert.equal(tool.executionMode, "sequential");
   assert.equal(harness.tools.size, 1);
-  assert.equal(tool.description, "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.");
+  assert.equal(tool.description, "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor stop` terminates a running group and returns its complete terminal state. `monitor delete` removes one terminal record, while `monitor clear` removes all terminal records. Running records must be stopped only after user agreement. Terminal records remain available until deletion or clearing. Runtime shutdown terminates active groups and clears retained monitor data.");
   assert.equal(tool.promptSnippet, "Supervise long-running foreground commands.");
   assert.deepEqual(tool.promptGuidelines, [
     "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
     "Do not poll a running monitor with repeated `monitor status` calls.",
     "Matcher updates carry matching lines, terminal updates add pending matches and bounded failure tails, and `monitor status` returns everything retained.",
   ]);
-  assert.equal(schema.properties.action.description, "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.");
+  assert.equal(schema.properties.action.description, "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. stop, delete, and status require id. clear and list accept no other fields. status optionally accepts start and end.");
   assert.equal(schema.properties.command.description, "Foreground Bash command for create. Do not use nohup, setsid, disown, trailing &, or another detach escape.");
   assert.equal(schema.properties.checkAfter.type, "string");
   assert.equal(schema.required?.includes("checkAfter") ?? false, false, "the shared action schema keeps checkAfter optional at the root");
@@ -144,6 +144,8 @@ test("actions isolate fields and validate trimmed values, notify literals, windo
 
   await assert.rejects(harness.execute({ action: "create", checkAfter: "10m", abstract: "x", command: "x", id: "12345678" }), /does not accept field/);
   await assert.rejects(harness.execute({ action: "list", id: "12345678" }), /does not accept field/);
+  await assert.rejects(harness.execute({ action: "clear", id: "12345678" }), /does not accept field/);
+  await assert.rejects(harness.execute({ action: "stop", id: "12345678", command: "x" }), /does not accept field/);
   await assert.rejects(harness.execute({ action: "status", id: "12345678", command: "x" }), /does not accept field/);
   await assert.rejects(harness.execute({ action: "create", checkAfter: "10m", abstract: " ", command: "x" }), /abstract must be a non-empty/);
   await assert.rejects(harness.execute({ action: "create", checkAfter: "10m", abstract: "x", command: " " }), /command must be a non-empty/);
@@ -349,7 +351,7 @@ test("delete cancels terminal and matcher notifications that are still gated", a
   assert.equal(harness.runtime.hasBlockingWork(), false);
 });
 
-test("active delete sends TERM then KILL to the process group, confirms close, removes logs, and sends no terminal notification", async (t) => {
+test("stop owns terminal delivery, sends TERM then KILL, preserves the real killed state, and retains logs", async (t) => {
   let child;
   const signals = [];
   const harness = createHarness({
@@ -364,20 +366,128 @@ test("active delete sends TERM then KILL to the process group, confirms close, r
     },
   });
   t.after(async () => harness.runtime.shutdown());
-  const created = await harness.execute({ action: "create", checkAfter: "10m", abstract: "delete", command: "unused" });
-  const deleted = await harness.execute({ action: "delete", id: "44444444" });
+  const created = await harness.execute({ action: "create", checkAfter: "10m", abstract: "stop", command: "unused" });
+  const stopped = await harness.execute({ action: "stop", id: "44444444" });
   assert.deepEqual(signals, [[44444, "SIGTERM"], [44444, 0], [44444, "SIGKILL"]]);
-  assert.equal(deleted.details.deleted, true);
-  assert.equal(harness.messages.length, 0);
-  assert.equal(existsSync(created.details.monitor.logPath), false);
+  assert.equal(stopped.details.changed, true);
+  assert.equal(stopped.details.outcome, "stopped");
+  assert.equal(stopped.details.warning, null);
+  assert.equal(stopped.details.monitor.status, "killed");
+  assert.equal(stopped.details.monitor.signal, "SIGKILL");
+  assert.equal(harness.messages.length, 0, "stop suppresses its independently queued terminal notification");
+  assert.equal(harness.runtime.hasBlockingWork(), false);
+  assert.equal(existsSync(created.details.monitor.logPath), true, "stop retains the record and log");
+  await harness.execute({ action: "delete", id: "44444444" });
 });
 
-test("delete bounds the post-KILL wait, resolves once, destroys held pipes, and returns a detached-descendant warning", async (t) => {
+test("stop reports raced and already-terminal outcomes and folds pending matches into its complete state once", async (t) => {
   let child;
   const signals = [];
   const harness = createHarness({
     randomHex: () => "45454545",
     spawn() { child = fakeChild(45454); return child; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 5_000,
+    killGroup(pid, signal) {
+      signals.push([pid, signal]);
+      if (signal === "SIGTERM") closeChild(child, 0, null);
+    },
+  });
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "race", command: "unused", notifyOn: ["hit"] });
+  child.stdout.write("hit before stop\n");
+  await wait();
+  const stopped = await harness.execute({ action: "stop", id: "45454545" });
+  assert.deepEqual(signals, [[45454, "SIGTERM"]]);
+  assert.equal(stopped.details.changed, true);
+  assert.equal(stopped.details.outcome, "raced");
+  assert.equal(stopped.details.monitor.status, "completed");
+  assert.deepEqual(stopped.details.monitor.combined.map((line) => line.text), ["hit before stop"]);
+  assert.equal(harness.messages.length, 0);
+  const again = await harness.execute({ action: "stop", id: "45454545" });
+  assert.equal(again.details.changed, false);
+  assert.equal(again.details.outcome, "already-terminal");
+  assert.equal(again.details.monitor.status, "completed");
+});
+
+test("stop uses a fixed latest-100 scan window even when retained logLines is very large", async (t) => {
+  const children = [];
+  const ids = ["45111145", "45222245"];
+  const harness = createHarness({
+    randomHex: () => ids.shift(),
+    spawn() { const child = fakeChild(45100 + children.length); children.push(child); return child; },
+    resolveShell: () => "/bin/bash",
+    killGroup(pid, signal) {
+      if (signal !== "SIGTERM") return;
+      const child = children.find((candidate) => candidate.pid === pid);
+      closeChild(child, null, "SIGTERM");
+    },
+  });
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "already terminal bounded", command: "unused" });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "running bounded", command: "unused" });
+  for (let index = 0; index < 300; index += 1) {
+    children[0].stdout.write(`terminal-${index}\n`);
+    children[1].stdout.write(`running-${index}\n`);
+  }
+  harness.runtime.records.get("45111145").logLines = 500_000;
+  harness.runtime.records.get("45222245").logLines = 750_000;
+  const scanWindows = [];
+  const scanLogTail = harness.runtime.scanLogTail.bind(harness.runtime);
+  harness.runtime.scanLogTail = (record, start, end) => {
+    scanWindows.push({ id: record.id, start, end });
+    return scanLogTail(record, start, end);
+  };
+
+  closeChild(children[0], 0, null);
+  await wait();
+  const already = await harness.execute({ action: "stop", id: "45111145" });
+  const running = await harness.execute({ action: "stop", id: "45222245" });
+
+  assert.deepEqual(scanWindows, [
+    { id: "45111145", start: 0, end: 100 },
+    { id: "45222245", start: 0, end: 100 },
+  ]);
+  assert.equal(already.details.outcome, "already-terminal");
+  assert.equal(running.details.outcome, "stopped");
+  assert.equal(already.details.monitor.returned, 100);
+  assert.equal(running.details.monitor.returned, 100);
+  assert.equal(already.details.monitor.end, 100);
+  assert.equal(running.details.monitor.end, 100);
+  assert.deepEqual(already.details.monitor.combined.map((line) => line.text), Array.from({ length: 100 }, (_, index) => `terminal-${index + 200}`));
+  assert.deepEqual(running.details.monitor.combined.map((line) => line.text), Array.from({ length: 100 }, (_, index) => `running-${index + 200}`));
+});
+
+test("stop preserves an already queued matcher update while suppressing only its terminal update", async (t) => {
+  let child;
+  const harness = createHarness({
+    randomHex: () => "45555545",
+    spawn() { child = fakeChild(45554); return child; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 1,
+    killGroup(_pid, signal) { if (signal === "SIGTERM") closeChild(child, null, "SIGTERM"); },
+  });
+  t.after(async () => harness.runtime.shutdown());
+  harness.runtime.setDeliveryPaused(true);
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "queued", command: "unused", notifyOn: ["hit"] });
+  child.stdout.write("hit queued\n");
+  await wait(5);
+  const stopped = await harness.execute({ action: "stop", id: "45555545" });
+  assert.equal(stopped.details.outcome, "stopped");
+  assert.equal(harness.messages.length, 0);
+  harness.runtime.setDeliveryPaused(false);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].message.details.status, "running", "the queued matcher keeps its original notification state");
+  assert.deepEqual(harness.messages[0].message.details.lines.map((line) => line.text), ["hit queued"]);
+  assert.equal(harness.messages.some((sent) => sent.message.details.status === "killed"), false);
+});
+
+test("an unconfirmed stop force-fails and quiesces every resource without deleting retained state", async (t) => {
+  let child;
+  const signals = [];
+  const harness = createHarness({
+    randomHex: () => "46464646",
+    spawn() { child = fakeChild(46464); return child; },
     resolveShell: () => "/bin/bash",
     deleteGraceMs: 1,
     finalKillWaitMs: 1,
@@ -386,53 +496,91 @@ test("delete bounds the post-KILL wait, resolves once, destroys held pipes, and 
   });
   t.after(async () => harness.runtime.shutdown());
   const created = await harness.execute({ action: "create", checkAfter: "10m", abstract: "held pipe", command: "unused" });
-  const deleted = await harness.execute({ action: "delete", id: "45454545" });
-  assert.deepEqual(signals, [[45454, "SIGTERM"], [45454, 0], [45454, "SIGKILL"]]);
-  assert.equal(deleted.details.forced, true);
-  assert.match(deleted.details.warning, /detached descendant may remain/i);
+  const stopped = await harness.execute({ action: "stop", id: "46464646" });
+  assert.deepEqual(signals, [[46464, "SIGTERM"], [46464, 0], [46464, "SIGKILL"]]);
+  assert.equal(stopped.details.changed, true);
+  assert.equal(stopped.details.outcome, "unconfirmed");
+  assert.match(stopped.details.warning, /detached descendant may remain/i);
+  assert.equal(stopped.details.monitor.status, "failed");
+  assert.match(stopped.details.monitor.error, /unconfirmed/i);
   assert.equal(child.stdout.destroyed, true);
   assert.equal(child.stderr.destroyed, true);
-  assert.deepEqual(harness.runtime.list(), []);
-  assert.equal(existsSync(created.details.monitor.logPath), false);
+  assert.deepEqual(harness.runtime.list().map((item) => item.id), ["46464646"]);
+  assert.equal(existsSync(created.details.monitor.logPath), true);
+  assert.equal(harness.messages.length, 0);
+  assert.equal(harness.runtime.hasBlockingWork(), false);
 });
 
-test("delete and shutdown isolate EPERM or unknown process-group errors and always clear runtime state", async () => {
-  const deleteHarness = createHarness({
-    randomHex: () => "46464646",
-    spawn() { return fakeChild(46464); },
-    resolveShell: () => "/bin/bash",
-    deleteGraceMs: 1,
-    finalKillWaitMs: 1,
-    sleep: async () => {},
-    killGroup() { const error = new Error("operation denied"); error.code = "EPERM"; throw error; },
-  });
-  await deleteHarness.execute({ action: "create", checkAfter: "10m", abstract: "eperm delete", command: "unused" });
-  const deleted = await deleteHarness.execute({ action: "delete", id: "46464646" });
-  assert.equal(deleted.details.forced, true);
-  assert.deepEqual(deleteHarness.runtime.list(), []);
-  await deleteHarness.runtime.shutdown();
-
+test("running delete and clear reject with zero mutation, then terminal clear removes every record", async (t) => {
   const children = [];
-  const shutdownHarness = createHarness({
-    randomHex: (() => { let id = 47; return () => String(id++).padStart(8, "0"); })(),
+  const harness = createHarness({
+    randomHex: (() => { const ids = ["47474747", "48474747"]; return () => ids.shift(); })(),
     spawn() { const child = fakeChild(47000 + children.length); children.push(child); return child; },
     resolveShell: () => "/bin/bash",
-    shutdownGraceMs: 1,
-    sleep: async () => {},
-    killGroup(pid) {
-      const error = new Error(pid === 47000 ? "not permitted" : "unknown signal failure");
-      if (pid === 47000) error.code = "EPERM";
-      throw error;
-    },
   });
-  const first = await shutdownHarness.execute({ action: "create", checkAfter: "10m", abstract: "one", command: "unused" });
-  await shutdownHarness.execute({ action: "create", checkAfter: "10m", abstract: "two", command: "unused" });
-  const root = dirname(first.details.monitor.logPath);
-  await shutdownHarness.runtime.shutdown();
-  assert.deepEqual(shutdownHarness.runtime.list(), []);
-  assert.equal(shutdownHarness.runtime.hasBlockingWork(), false);
-  assert.equal(existsSync(root), false);
-  await shutdownHarness.runtime.shutdown();
+  t.after(async () => harness.runtime.shutdown());
+  const first = await harness.execute({ action: "create", checkAfter: "10m", abstract: "first running", command: "unused" });
+  const second = await harness.execute({ action: "create", checkAfter: "10m", abstract: "second running", command: "unused" });
+  await assert.rejects(
+    harness.execute({ action: "delete", id: "47474747" }),
+    /Ask the user whether to stop it, then call monitor stop and retry delete only if they agree\./,
+  );
+  await assert.rejects(
+    harness.execute({ action: "clear" }),
+    /47474747 \(first running\).*48474747 \(second running\).*Ask the user whether to stop them/,
+  );
+  assert.deepEqual(harness.runtime.list().map((item) => item.id), ["47474747", "48474747"]);
+  assert.equal(existsSync(first.details.monitor.logPath), true);
+  assert.equal(existsSync(second.details.monitor.logPath), true);
+  closeChild(children[0]);
+  closeChild(children[1]);
+  await wait();
+  const cleared = await harness.execute({ action: "clear" });
+  assert.equal(cleared.details.cleared, true);
+  assert.equal(cleared.details.changed, true);
+  assert.equal(cleared.details.clearedCount, 2);
+  assert.deepEqual(new Set(cleared.details.ids), new Set(["47474747", "48474747"]));
+  assert.deepEqual(cleared.details.warnings, []);
+  assert.deepEqual(harness.runtime.list(), []);
+  assert.equal(existsSync(first.details.monitor.logPath), false);
+  assert.equal(existsSync(second.details.monitor.logPath), false);
+  assert.deepEqual((await harness.execute({ action: "clear" })).details, {
+    cleared: true,
+    changed: false,
+    clearedCount: 0,
+    ids: [],
+    warnings: [],
+  });
+});
+
+test("terminal delete and clear report log removal failures but still remove records", async (t) => {
+  const children = [];
+  const harness = createHarness({
+    randomHex: (() => { const ids = ["49474747", "50474747"]; return () => ids.shift(); })(),
+    spawn() { const child = fakeChild(49000 + children.length); children.push(child); return child; },
+    resolveShell: () => "/bin/bash",
+    fs: { rmSync() { throw new Error("rm denied"); } },
+  });
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "delete terminal", command: "unused" });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "clear terminal", command: "unused" });
+  closeChild(children[0], 2, null);
+  closeChild(children[1], 0, null);
+  await wait();
+  const deleted = await harness.execute({ action: "delete", id: "49474747" });
+  assert.deepEqual({ ...deleted.details, warning: null }, {
+    id: "49474747", deleted: true, changed: true, status: "failed", warning: null,
+  });
+  assert.match(deleted.details.warning, /rm denied/);
+  const cleared = await harness.execute({ action: "clear" });
+  assert.equal(cleared.details.changed, true);
+  assert.deepEqual(cleared.details.ids, ["50474747"]);
+  assert.equal(cleared.details.warnings.length, 1);
+  assert.match(cleared.details.warnings[0], /50474747.*rm denied/);
+  assert.deepEqual(harness.runtime.list(), []);
+  assert.equal(harness.runtime.hasBlockingWork(), true, "in-flight terminal notifications survive delete and clear");
+  for (const sent of harness.messages) assert.equal(ack(harness.runtime, sent), true);
+  assert.equal(harness.runtime.hasBlockingWork(), false);
 });
 
 test("matcher delivery uses the bounded recent-line ring without reading the JSONL file", async (t) => {
@@ -998,6 +1146,35 @@ test("deleting one monitor rebuilds a gated global rate summary for the remainin
   closeChild(children[1]);
 });
 
+test("shutdown waits for an owned stop before scanning and never sends duplicate TERM or KILL", async () => {
+  let child;
+  const signals = [];
+  const sleepers = [];
+  const harness = createHarness({
+    randomHex: () => "59595959",
+    spawn() { child = fakeChild(59000); return child; },
+    resolveShell: () => "/bin/bash",
+    sleep() { return new Promise((resolve) => sleepers.push(resolve)); },
+    killGroup(pid, signal) {
+      signals.push([pid, signal]);
+      if (signal === "SIGKILL") closeChild(child, null, "SIGKILL");
+    },
+  });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "concurrent", command: "unused" });
+  const stopping = harness.execute({ action: "stop", id: "59595959" });
+  await wait();
+  assert.deepEqual(signals, [[59000, "SIGTERM"]]);
+  const shutdown = harness.runtime.shutdown();
+  await wait();
+  assert.deepEqual(signals, [[59000, "SIGTERM"]], "shutdown waits instead of signaling a stop-owned process");
+  sleepers.shift()();
+  const stopped = await stopping;
+  await shutdown;
+  assert.equal(stopped.details.outcome, "stopped");
+  assert.deepEqual(signals, [[59000, "SIGTERM"], [59000, 0], [59000, "SIGKILL"]]);
+  assert.deepEqual(harness.runtime.list(), []);
+});
+
 test("shutdown invalidates first, signals all groups in parallel, kills survivors, clears blockers and log root, and is idempotent", async () => {
   const children = [];
   const signals = [];
@@ -1048,7 +1225,7 @@ test("partial-line truncation reports dropped UTF-8 bytes", async (t) => {
   assert.equal(status.combined[0].text, "☃☃ … [truncated 3 bytes]");
 });
 
-test("real detached descendant holding a pipe cannot block sequential delete", async (t) => {
+test("real detached descendant holding a pipe cannot block sequential stop", async (t) => {
   const harness = createHarness({
     randomHex: () => "57575757",
     deleteGraceMs: 40,
@@ -1076,10 +1253,11 @@ test("real detached descendant holding a pipe cannot block sequential delete", a
   }
   assert.ok(Number.isInteger(descendantPid));
   const started = Date.now();
-  const deleted = await harness.execute({ action: "delete", id: "57575757" });
+  const stopped = await harness.execute({ action: "stop", id: "57575757" });
   assert.ok(Date.now() - started < 1000);
-  assert.equal(deleted.details.forced, true);
-  assert.match(deleted.content[0].text, /detached descendant may remain/i);
+  assert.equal(stopped.details.outcome, "unconfirmed");
+  assert.match(stopped.details.warning, /detached descendant may remain/i);
+  await harness.execute({ action: "delete", id: "57575757" });
   try { process.kill(descendantPid, "SIGKILL"); } catch { /* already gone */ }
   descendantPid = undefined;
 });
@@ -1199,6 +1377,8 @@ test("create requires checkAfter, other actions reject it, and the committed rec
   await assert.rejects(harness.execute({ action: "create", abstract: "a", command: "unused", checkAfter: "5s" }), /between 10s and 7d inclusive/);
   await assert.rejects(harness.execute({ action: "create", abstract: "a", command: "unused", checkAfter: "10 minutes" }), /positive integer and one unit/);
   await assert.rejects(harness.execute({ action: "list", checkAfter: "10m" }), /list does not accept field\(s\): checkAfter/);
+  await assert.rejects(harness.execute({ action: "clear", checkAfter: "10m" }), /clear does not accept field\(s\): checkAfter/);
+  await assert.rejects(harness.execute({ action: "stop", id: "00000001", checkAfter: "10m" }), /stop does not accept field\(s\): checkAfter/);
   await assert.rejects(harness.execute({ action: "delete", id: "00000001", checkAfter: "10m" }), /delete does not accept field\(s\): checkAfter/);
   await assert.rejects(harness.execute({ action: "status", id: "00000001", checkAfter: "10m" }), /status does not accept field\(s\): checkAfter/);
   assert.deepEqual(harness.runtime.list(), [], "rejected creates leave no retained record");
@@ -1459,6 +1639,7 @@ test("terminal, delete, and shutdown clear the silence timer, drop the reminder,
   removed.runtime.setDeliveryPaused(true);
   await removed.execute({ action: "create", abstract: "deletes", command: "unused", checkAfter: "10s" });
   removed.advance(10_000);
+  await removed.execute({ action: "stop", id: "00000001" });
   await removed.execute({ action: "delete", id: "00000001" });
   removed.runtime.setDeliveryPaused(false);
   assert.equal(removed.messages.length, 0);
@@ -1477,6 +1658,7 @@ test("terminal, delete, and shutdown clear the silence timer, drop the reminder,
   t.after(async () => reused.runtime.shutdown());
   await reused.execute({ action: "create", abstract: "first owner", command: "unused", checkAfter: "10s" });
   reused.fireOnly(10_000);
+  await reused.execute({ action: "stop", id: "0000beef" });
   await reused.execute({ action: "delete", id: "0000beef" });
   await reused.execute({ action: "create", abstract: "second owner", command: "unused", checkAfter: "10s" });
   reused.flush();

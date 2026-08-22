@@ -23,6 +23,7 @@ export const SUBAGENT_ACTIONS = [
   "steer",
   "resume",
   "reply",
+  "delete",
   "clear",
 ] as const;
 
@@ -77,7 +78,7 @@ export interface RunJournalUpsert {
   run: PersistedRun;
 }
 
-/** Versioned full-registry replacement written by `subagent clear`; the latest one wins during replay. */
+/** Versioned full-registry replacement written by `subagent delete` or `subagent clear`; the latest one wins during replay. */
 export interface RunJournalReplacement {
   version: 3;
   runs: PersistedRun[];
@@ -361,6 +362,14 @@ export class SubagentRegistry {
     this.runs = new Map();
     this.liveIds.clear();
     this.emit();
+  }
+
+  delete(id: string): boolean {
+    const deleted = this.runs.delete(id);
+    if (!deleted) return false;
+    this.liveIds.delete(id);
+    this.emit();
+    return true;
   }
 
   add(run: PersistedRun, live = false): void {

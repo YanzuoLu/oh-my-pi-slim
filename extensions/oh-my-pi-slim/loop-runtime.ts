@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { renderLoopCall, renderLoopFire, renderLoopResult } from "./loop-transcript-renderer.js";
 import { LoopWidget } from "./loop-widget.js";
 
-export const LOOP_ACTIONS = ["create", "delete", "modify", "list", "pause", "resume"] as const;
+export const LOOP_ACTIONS = ["create", "delete", "clear", "modify", "list", "pause", "resume"] as const;
 export const LOOP_PUBLIC_FIELDS = ["action", "id", "interval", "abstract", "prompt"] as const;
 export const LOOP_MESSAGE_TYPE = "oh-my-pi-slim:loop-fire";
 export const LOOP_MIN_INTERVAL_MS = 10_000;
@@ -96,6 +96,7 @@ export interface LoopRuntimeOptions {
 const ACTION_FIELDS: Record<LoopAction, readonly string[]> = {
   create: ["action", "interval", "abstract", "prompt"],
   delete: ["action", "id"],
+  clear: ["action"],
   modify: ["action", "id", "interval", "abstract", "prompt"],
   list: ["action"],
   pause: ["action", "id"],
@@ -167,7 +168,7 @@ export function parseLoopInterval(value: unknown): ParsedLoopInterval {
 
 export const loopParameters = Type.Object({
   action: Type.Union(LOOP_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. list accepts no other fields.",
+    description: "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. clear and list accept no other fields.",
   }),
   id: Type.Optional(Type.String({
     description: "Exact eight-character lowercase hexadecimal loop ID for delete, modify, pause, or resume.",
@@ -219,7 +220,7 @@ export class LoopRuntime {
       name: "loop",
       label: "Loop",
       executionMode: "sequential",
-      description: "Create and manage runtime-only fixed-delay loops from 10s through 7d. Creation and resume wait one full interval before firing. Each later delay starts only after the previous tick finishes. Each fire delivers the stored prompt for a future turn. Loop state survives compaction and tree navigation within the current runtime. Reload, session replacement, and shutdown clear every loop. Actions return current loop state, change receipts, or the retained loop list.",
+      description: "Create and manage runtime-only fixed-delay loops from 10s through 7d. Creation and resume wait one full interval before firing. Each later delay starts only after the previous tick finishes. Each fire delivers the stored prompt for a future turn. Active loops must be paused before deletion or clearing. Loop state survives compaction and tree navigation within the current runtime. Reload, session replacement, and shutdown clear every loop. Actions return current loop state, change receipts, clear receipts, or the retained loop list.",
       promptSnippet: "Manage fixed-delay prompt loops.",
       promptGuidelines: [
         "Call `loop create` only for a user message beginning with `/loop`.",
@@ -278,6 +279,7 @@ export class LoopRuntime {
     }
     if (this.shuttingDown) throw new Error("Loop runtime is shutting down.");
     if (action === "create") return this.create(input);
+    if (action === "clear") return this.clear();
 
     const id = loopId(input.id);
     const current = this.loops.get(id);
@@ -294,7 +296,7 @@ export class LoopRuntime {
     if (unknown.length > 0) throw new Error(`${action} does not accept field(s): ${unknown.join(", ")}.`);
     for (const required of action === "create"
       ? ["interval", "abstract", "prompt"]
-      : action === "list" ? [] : ["id"]) {
+      : action === "list" || action === "clear" ? [] : ["id"]) {
       if (input[required] === undefined) throw new Error(`${action} requires ${required}.`);
     }
     if (action === "modify" && input.interval === undefined && input.abstract === undefined && input.prompt === undefined) {
@@ -334,11 +336,37 @@ export class LoopRuntime {
   }
 
   private delete(loop: LoopRecord): ReturnType<typeof toolText> {
+    if (loop.status === "active") {
+      throw new Error(`Loop ${loop.id} has status ${loop.status} and cannot be deleted. Ask the user whether to pause this loop, then retry delete only if they agree.`);
+    }
     this.cancelTimer(loop);
     this.cancelGatedFires(loop.id);
     this.loops.delete(loop.id);
     this.widget.update();
     return toolText(`Deleted loop ${loop.id}.`, { id: loop.id, deleted: true });
+  }
+
+  private clear(): ReturnType<typeof toolText> {
+    const active = [...this.loops.values()].filter((loop) => loop.status === "active");
+    if (active.length > 0) {
+      const listed = active.map((loop) => `${loop.id} (${loop.abstract})`).join("\n");
+      throw new Error(`Cannot clear loops while active loops remain:\n${listed}\nAsk the user whether to pause these loops, then retry clear only if they agree.`);
+    }
+
+    const ids = [...this.loops.keys()];
+    if (ids.length === 0) {
+      return toolText("No loops to clear.", { cleared: true, changed: false, clearedCount: 0, ids });
+    }
+    for (const loop of this.loops.values()) this.cancelTimer(loop);
+    this.loops.clear();
+    this.gatedFires = [];
+    this.widget.update();
+    return toolText(`Cleared ${ids.length} loops.`, {
+      cleared: true,
+      changed: true,
+      clearedCount: ids.length,
+      ids,
+    });
   }
 
   private pause(loop: LoopRecord): ReturnType<typeof toolText> {

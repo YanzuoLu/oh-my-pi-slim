@@ -92,6 +92,8 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 
 ## Main 工具
 
+以下五个 lifecycle 工具都没有 `confirmed` 或 `force` 字段。删除动作被受保护工作拒绝时，main model 会先按需检查 status 并询问用户。获得同意后，它会按场景执行 `pause`、`stop`、`interrupt`、Todo `modify` 或 Goal `cancel`，再重试原动作。
+
 ### `subagent`
 
 在隔离的后台 child session 中运行 specialist，并立即把控制权交还 main。
@@ -105,15 +107,16 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 | `steer` | 向 running run 发送补充指导 |
 | `resume` | 从 terminal run 保存的 child session 创建新 run，并生成新 ID。可选覆盖 cwd，省略时继承 source run 的工作目录 |
 | `reply` | 回复 waiting child，并继续同一个 run |
-| `clear` | 删除全部 retained terminal history |
+| `delete` | 删除一个 retained terminal run |
+| `clear` | 所有 run 都 terminal 时删除全部 retained history |
 
-`list` 包含 `starting`、`running`、`waiting`、`completed`、`failed` 与 `interrupted` run，但绝不包含 terminal `output` 或 `error`。使用单个 retained run ID 调用 `status`，可查看相同公开字段，并在结果存在时取回 terminal 结果。subagent widget 使用相同的 retained 集合与排序，因此 terminal run 会一直显示到 `clear`。
+`list` 包含 `starting`、`running`、`waiting`、`completed`、`failed` 与 `interrupted` run，但绝不包含 terminal `output` 或 `error`。使用单个 retained run ID 调用 `status`，可查看相同公开字段，并在结果存在时取回 terminal 结果。subagent widget 使用相同的 retained 集合与排序，因此 terminal run 会一直显示到 `delete` 或 `clear` 将其移除。
 
 `interrupt` 是同步的：它会等待目标 run 进入 terminal 状态，并直接返回完整最终结果，包括已保存的 `output` 或 `error`。当显式 `interrupt` 调用取得某个 live run 的结果交接权时，该 terminal event 不会再单独发送，reload 后也不会重放；而由 shutdown、reload、tree navigation 或 session 替换导致的中断，仍然按普通 terminal notification 送达。若 run 在调用前就已是 terminal，它保留自己的 terminal notification，不会收到 interrupt control，并且只返回精简回执。若无法确认 detached runner 已停止，结果会显式说明，并保留该 run 目录。
 
 `resume` 始终使用当前 preset 为该 agent 解析出的 model，而不是 source run 当时使用的 model。当这次变化跨越了 provider 或 model ID，被复用的 child session 会在 resumed run 收到第一个 prompt 之前先被 compact 一次，因此新 model 绝不会继承为另一个 model 写下的原始上下文。仅 thinking level 变化时，session 会被原样复用。整个 preflight 期间 run 保持 `starting`，已经 compact 过或过小的 session 会直接继续，其他任何 compaction 失败都会让该 run 失败，而不会再发出 prompt。
 
-只要存在 `starting`、`running` 或 `waiting` run，`clear` 就会被拒绝。全部 retained run 都进入 terminal 后才可清理完整历史；清理结果在 reload 和 restore 后仍保持为空。清理 Subagent history 不会改变 Goal statistics。
+`starting`、`running` 或 `waiting` run 不能被 `delete`，存在任何此类 run 时也不能 `clear`。main model 必须先询问是否执行 `interrupt`，等 run 进入 terminal 后再重试。单删或全清都会跨 reload 与 restore 保持结果，且都不改变 Goal statistics。
 
 child 可用 `contact_supervisor` 发送 `need_decision`、`interview_request` 或 `progress_update`。每次请求都会让 child 进入 `waiting`；main 用 `reply` 继续同一个 run。
 
@@ -130,10 +133,10 @@ child 可用 `contact_supervisor` 发送 `need_decision`、`interview_request` �
 | --- | --- |
 | `append` | 添加唯一 subject、abstract 与可选依赖 |
 | `modify` | 重命名，或修改 abstract、status、依赖 |
-| `delete` | 按 exact subject 删除任务 |
-| `clear` | 在 batch 内清空空任务集或已完成任务集 |
+| `delete` | 删除 exact pending 或 completed subject |
+| `clear` | 没有 in_progress item 时删除全部 pending 与 completed item |
 
-subject 区分大小写并使用 exact match。多个 item 可以同时处于 `in_progress`。依赖必须构成无环图。如果其他任务仍在 `blockedBy` 中引用目标，`delete` 会被拒绝。`clear` 要求当前组为空或全部 completed。`update` batch 是原子的：任一 operation 或最终依赖图非法，都不会提交任何修改。
+subject 区分大小写并使用 exact match。多个 item 可以同时处于 `in_progress`。依赖必须构成无环图。`delete` 会按 batch draft 中目标的当前状态拒绝 `in_progress` item，其他任务仍在 `blockedBy` 中引用目标时也会拒绝。`clear` 检查同一 batch 中较早 operation 形成的 draft，只要其中还有 `in_progress` item 就拒绝。model 会先询问是否用 `modify` 将受保护 item 改为 `pending` 或 `completed`，得到同意后再重试。整个 `update` batch 保持原子性。
 
 ### `loop`
 
@@ -142,13 +145,16 @@ subject 区分大小写并使用 exact match。多个 item 可以同时处于 `i
 | Action | 作用 |
 | --- | --- |
 | `create` | 用 interval、abstract 与 prompt 创建 loop |
-| `delete` | 删除 loop |
+| `delete` | 删除一个 paused loop |
+| `clear` | 所有 loop 都 paused 时删除全部 loop |
 | `modify` | 修改 interval、abstract 或 prompt |
 | `list` | 列出 loop 及其当前状态 |
 | `pause` | 暂停 loop |
 | `resume` | 恢复后等待一个完整 interval |
 
 interval 闭区间为 `10s` 到 `7d`。创建和恢复后都会先等待一个完整 interval。此后每次 tick 完成才开始下一段 delay，因此慢任务不会形成重叠调度。
+
+active loop 不能被 `delete`，存在任何 active loop 时也不能 `clear`。main model 会先询问是否暂停相关 loop，得到同意并执行 `pause` 后再重试。
 
 Loop 会跨 compaction 与 tree navigation 保留，但 reload、new session、session resume、fork 或 quit 都会清空全部 loop。
 
@@ -159,7 +165,9 @@ Loop 会跨 compaction 与 tree navigation 保留，但 reload、new session、s
 | Action | 作用 |
 | --- | --- |
 | `create` | 用 abstract、必填 `checkAfter` 静默阈值、可选 cwd 与可选 `notifyOn` literal 启动命令 |
-| `delete` | 必要时停止进程，再删除 monitor 与 retained record |
+| `stop` | 同步停止一个 running monitor，并返回完整 terminal state |
+| `delete` | 删除一个 terminal monitor 及其 retained record |
+| `clear` | 没有 running monitor 时删除全部 terminal record |
 | `list` | 列出精简的 monitor 状态 |
 | `status` | 查看当前状态与保留的合并输出 |
 
@@ -169,7 +177,7 @@ Loop 会跨 compaction 与 tree navigation 保留，但 reload、new session、s
 
 matcher 与 terminal notification 共用同一种形式，每条都说明 monitor 当前状态。matcher notification 只携带命中 `notifyOn` literal 的新增行，同一行即使命中多个 literal 也只出现一次，而已交付位置仍会越过全部普通行，因此未命中的输出不会在之后被重放。terminal notification 始终报告最终状态、exit code、signal 与 error。completed 的命令只追加此前没有交付过的命中行，因此一次只有普通输出的正常退出不携带任何行。failed 或 killed 的命令还会追加最近二十条新增行作为有界诊断尾部，并按 seq 与尚未交付的命中行合并去重。所有 payload 都遵守同一套字节上限，`omitted` 会说明被留下的部分。要看一个 record 的完整 retained state 与合并输出，`status` 是唯一入口。
 
-terminal record 与相关输出会一直保留到 `delete`。先用 `status` 检查结果，不再需要时再 `delete`。
+`stop` 会保留 terminal record 与 retained log。该 tool result 独占 terminal state 的交付，因此同一次 stop 不会再发送另一条 terminal notification。running monitor 会阻止 `delete` 与 `clear`；main model 必须先询问是否停止，并在 stop 完成后重试。terminal record 与输出会一直保留到 `delete` 或 `clear`。
 
 ### `ask_user_question`
 
@@ -203,7 +211,7 @@ Ask 仅 main 可用，并要求交互式 UI。JSON 与 print mode 不提供该�
 | `resume` | 显式重新激活 paused Goal |
 | `complete` | 提交与 criteria 对应的 evidence 并完成 |
 | `cancel` | 带 reason 取消 |
-| `clear` | 从 branch 上移除已结束的 Goal |
+| `clear` | 从 branch 上移除 paused、completed 或 cancelled Goal |
 
 Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree restore 会把未完成 Goal 恢复为 paused，绝不会静默继续。provider failure 会自动重试，重复无进展会暂停 Goal，用户 abort 也会暂停而不是取消。完成时，每条 criterion 必须精确对应一条非空 evidence。
 
@@ -211,7 +219,7 @@ Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree res
 
 completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠。tool output 折叠时，widget 只保留 Goal heading；其他状态在折叠与展开下都保留两行。
 
-`goal clear` 只会从 branch 上移除 completed 或 cancelled 的 Goal。Goal 仍在推进或处于 paused 时，`clear` 会被拒绝，模型必须先询问你是否要取消它，只有在你同意后才可以重试。清理后的 branch 报告没有任何 Goal；清理会一并带走该 Goal 自己的统计，而产生这些统计的 retained subagent run 保持不变。
+`goal clear` 可从 branch 上移除 paused、completed 或 cancelled Goal。`active` 或 `retry_wait` Goal 会阻止 `clear`；main model 必须先询问是否暂停或取消，得到同意并执行后才重试。清理后的 branch 报告没有任何 Goal；清理会一并带走该 Goal 自己的统计，而 retained subagent run 保持不变。
 
 ## `/loop` 与 `/goal`
 
@@ -262,7 +270,7 @@ completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠。tool output 折�
 `ctrl+shift+left` 与 `ctrl+shift+right` 打开只读全屏 viewer，查看任意 retained subagent run 的 child transcript。viewer 只展示：没有 reply、steer 或 interrupt，也不会写入 session entry、control 文件或 run 文件。
 
 - Main 是循环中的第 0 项。`ctrl+shift+right` 从 Main 进入第一个 retained run，逐个前进，最后回到 Main；`ctrl+shift+left` 沿同一个环反向移动。
-- 循环范围就是 Agents widget 展示的 retained 集合，顺序与总数完全一致：`starting`、`running`、`waiting`、`completed`、`failed`、`interrupted` 六种状态全部可达，包括 widget 折叠或超出行预算时隐藏的那些。状态变化只会重排，正在查看的 run 结束后仍留在屏幕上。只有 `subagent clear` 才会移除 run；全部清空后自动回到 Main。
+- 循环范围就是 Agents widget 展示的 retained 集合，顺序与总数完全一致：`starting`、`running`、`waiting`、`completed`、`failed`、`interrupted` 六种状态全部可达，包括 widget 折叠或超出行预算时隐藏的那些。状态变化只会重排，正在查看的 run 结束后仍留在屏幕上。`subagent delete` 删除一个 terminal run，`subagent clear` 删除全部 terminal history；最后一个 retained run 消失时自动回到 Main。
 - 在 viewer 内，普通 `Left`/`Right` 与 `ctrl+shift+left`/`ctrl+shift+right` 的循环方向一致；`Escape` 或 `q` 回到 Main。
 - transcript 从屏幕第一行开始；其余信息全部位于底部，顺序与 Main 自己的底部区域一致：live/waiting 区、`Read-Only` 输入占位栏、run 状态行、导航提示。
 - transcript 由 Pi 自己的 transcript 组件渲染，因此 user 消息、assistant Markdown、thinking 块、tool call、tool result、compaction summary 与 branch summary 都保持 Main 的配色、间距与框架。

@@ -385,7 +385,7 @@ test("persistent widget heading counts terminal over retained runs with Todo-par
   assert.deepEqual(renderSubagentWidgetLines({ runs: [], spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS }), []);
 });
 
-test("persistent widget heading refreshes on every live-to-terminal flip and clears with the last retained run", () => {
+test("a single retained ID disappearing updates widget counts and the last removal retracts the section", () => {
   let runs = [run({ id: "live", status: "running" }), run({ id: "done", status: "completed" })];
   const widgetCalls = [];
   let component;
@@ -414,9 +414,18 @@ test("persistent widget heading refreshes on every live-to-terminal flip and cle
   widget.onTurnStart();
   assert.equal(component.render()[0], "**●**  **Agents (2/3)**", "a restored or created run flips the heading back to active");
 
+  runs = runs.filter((item) => item.id !== "done");
+  widget.update();
+  assert.equal(component.render()[0], "**●**  **Agents (1/2)**", "removing one retained ID updates both counts immediately");
+  assert.doesNotMatch(component.render().join("\n"), /\[done\]/, "the removed retained ID leaves the widget body");
+
+  runs = runs.filter((item) => item.id !== "live");
+  widget.update();
+  assert.equal(component.render()[0], "**●**  **Agents (0/1)**");
+
   runs = [];
   widget.update();
-  assert.equal(widgetCalls.at(-1).content, undefined, "clearing every retained run unregisters the widget");
+  assert.equal(widgetCalls.at(-1).content, undefined, "removing the last retained ID retracts the widget");
 });
 
 test("collapsed Agents body keeps starting, running, and waiting rows and hides every terminal run", () => {

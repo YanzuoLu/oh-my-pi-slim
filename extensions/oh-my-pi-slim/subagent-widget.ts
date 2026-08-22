@@ -24,7 +24,7 @@ export interface SubagentWidgetState {
   readonly hasActive: boolean;
 }
 
-/** Every retained run stays visible; terminal runs disappear only when `subagent clear` removes them. */
+/** Every retained run stays visible until `subagent delete` or `subagent clear` removes it. */
 export function assembleSubagentWidgetState(runs: readonly RunSummary[]): SubagentWidgetState {
   let runningCount = 0;
   let waitingCount = 0;

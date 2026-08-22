@@ -541,7 +541,7 @@ test("MonitorRuntime registers renderers, binds one foreground subscription, sur
   await runtime.shutdown();
 });
 
-test("Monitor tool calls render all four actions with uniform hints, complete expansion, and no duplicate Action row", () => {
+test("Monitor tool calls render all six actions with uniform hints, complete expansion, and no duplicate Action row", () => {
   const cases = [
     {
       args: { action: "create", checkAfter: "10m", abstract: "Build\nrelease\u0000", command: "npm run build\necho done", cwd: "/workspace", notifyOn: ["ready", "failed"] },
@@ -549,10 +549,13 @@ test("Monitor tool calls render all four actions with uniform hints, complete ex
       hidden: ["npm run build", "Cwd:", "Check after:", "Notify on:"],
       expanded: ["Abstract:", "Build", "release", "Command:", "npm run build", "echo done", "Cwd: /workspace", "Check after: 10m", "Notify on:", "ready", "failed"],
     },
+    { args: { action: "stop", id: "00000001" }, collapsed: ["ID: 00000001"], hidden: [], expanded: ["ID: 00000001"] },
     { args: { action: "delete", id: "00000001" }, collapsed: ["ID: 00000001"], hidden: [], expanded: ["ID: 00000001"] },
+    { args: { action: "clear" }, collapsed: [], hidden: ["ID:"], expanded: [] },
     { args: { action: "list" }, collapsed: [], hidden: [], expanded: [] },
     { args: { action: "status", id: "00000001", start: 5, end: 25 }, collapsed: ["ID: 00000001", "Window: [5,25)"], hidden: ["Start:", "End:"], expanded: ["ID: 00000001", "Start: 5", "End: 25", "Window: [5,25)"] },
   ];
+  assert.equal(cases.length, 6);
   for (const value of cases) {
     const before = structuredClone(value.args);
     const collapsed = render(renderMonitorCall(value.args, theme, { expanded: false, cwd: "/context" }));
@@ -569,7 +572,7 @@ test("Monitor tool calls render all four actions with uniform hints, complete ex
   }
 });
 
-test("Monitor create/status/list/delete results render compact receipts, full operational state, forced warnings, separators, and preserve data", () => {
+test("Monitor create/status/list/delete results render compact receipts, full operational state, terminal warnings, separators, and preserve data", () => {
   const state = monitor();
   for (const action of ["create", "status"]) {
     const result = { content: [{ type: "text", text: "model content" }], details: { monitor: state } };
@@ -615,15 +618,106 @@ test("Monitor create/status/list/delete results render compact receipts, full op
     assert.doesNotMatch(text, /[↻✓!×●] [^ ]|[↻✓!×●] {3}/);
   }
 
-  const normal = renderMonitorResult({ details: { id: "00000001", deleted: true, forced: false, warning: null } }, { expanded: false }, theme, { args: { action: "delete" } });
+  const normalResult = { details: { id: "00000001", deleted: true, changed: true, status: "completed", warning: null } };
+  const normalBefore = structuredClone(normalResult);
+  const normal = renderMonitorResult(normalResult, { expanded: false }, theme, { args: { action: "delete" } });
   assertBlankSeparator(normal);
-  assert.equal(render(normal), "✓  Deleted monitor [00000001]");
-  const forcedResult = { details: { id: "00000002", deleted: true, forced: true, warning: "Detached descendant may remain.\nInspect the process group." } };
-  const forcedBefore = structuredClone(forcedResult);
-  const forced = render(renderMonitorResult(forcedResult, { expanded: false }, theme, { args: { action: "delete" } }));
-  assert.match(forced, /^!  Forced deletion · monitor \[00000002\]/);
-  assert.match(forced, /Detached descendant may remain\.\n  Inspect the process group\./);
-  assert.deepEqual(forcedResult, forcedBefore);
+  assert.equal(render(normal), "✓  Deleted monitor [00000001] · completed");
+  const normalExpanded = render(renderMonitorResult(normalResult, { expanded: true }, theme, { args: { action: "delete" } }));
+  assert.match(normalExpanded, /ID: 00000001/);
+  assert.match(normalExpanded, /Status: completed/);
+  assert.match(normalExpanded, /Warning:\n    —|Warning:\n  —/);
+  assert.doesNotMatch(normalExpanded, /Deleted:|Changed:|forced/i);
+  assert.deepEqual(normalResult, normalBefore);
+
+  const warnedResult = { details: { id: "00000002", deleted: true, changed: true, status: "failed", warning: "Retained log could not be removed.\nInspect it manually.", privateHandle: "PRIVATE_DELETE_SENTINEL" } };
+  const warnedBefore = structuredClone(warnedResult);
+  const warned = render(renderMonitorResult(warnedResult, { expanded: false }, theme, { args: { action: "delete" } }));
+  assert.equal(warned, "✓  Deleted monitor [00000002] · failed · warning");
+  assert.doesNotMatch(warned, /Retained log|PRIVATE_DELETE_SENTINEL/);
+  const warnedExpanded = render(renderMonitorResult(warnedResult, { expanded: true }, theme, { args: { action: "delete" } }));
+  assert.match(warnedExpanded, /Status: failed/);
+  assert.match(warnedExpanded, /Warning:\n    Retained log could not be removed\.\n    Inspect it manually\.|Warning:\n  Retained log could not be removed\.\n  Inspect it manually\./);
+  assert.doesNotMatch(warnedExpanded, /PRIVATE_DELETE_SENTINEL|forced/i);
+  assert.deepEqual(warnedResult, warnedBefore);
+});
+
+test("Monitor stop and clear receipts use terminal truth, expose only operational details, and never fall through to model content", () => {
+  const stopCases = [
+    { outcome: "stopped", changed: true, status: "killed", glyph: "×", warning: null },
+    { outcome: "raced", changed: true, status: "completed", glyph: "✓", warning: null },
+    { outcome: "already-terminal", changed: false, status: "failed", glyph: "○", warning: null },
+    { outcome: "unconfirmed", changed: true, status: "failed", glyph: "!", warning: "Child close was not observed.\nA detached descendant may remain." },
+  ];
+  for (const value of stopCases) {
+    const result = {
+      content: [{ type: "text", text: `RAW_STOP_${value.outcome}_MODEL_SENTINEL` }],
+      details: {
+        monitor: monitor({
+          status: value.status,
+          endedAt: "2026-05-01T00:00:03.000Z",
+          exitCode: value.status === "completed" ? 0 : null,
+          signal: value.status === "killed" ? "SIGTERM" : null,
+          error: value.status === "failed" ? "terminal error" : null,
+        }),
+        changed: value.changed,
+        outcome: value.outcome,
+        warning: value.warning,
+        privateStopToken: "PRIVATE_STOP_SENTINEL",
+      },
+    };
+    const before = structuredClone(result);
+    const context = { args: { action: "stop", id: "00000001" } };
+    const collapsedComponent = renderMonitorResult(result, { expanded: false }, theme, context);
+    assertBlankSeparator(collapsedComponent);
+    assert.equal(
+      render(collapsedComponent),
+      `${value.glyph}  Monitor [00000001] · ${value.status} · ${value.outcome}${value.warning ? " · warning" : ""}`,
+    );
+    assert.ok(collapsedComponent.render(32).every((line) => visibleWidth(line) <= 32));
+    const expanded = render(renderMonitorResult(result, { expanded: true }, theme, context));
+    assert.match(expanded, escaped(`Outcome: ${value.outcome}`));
+    assert.match(expanded, escaped(`Status: ${value.status}`));
+    assert.match(expanded, /Command:\n    npm run build\n    printf done/);
+    assert.equal((expanded.match(/Combined lines:/g) ?? []).length, 1);
+    assert.equal((expanded.match(/\[stdout\] ready now/g) ?? []).length, 1);
+    if (value.warning) assert.match(expanded, /Child close was not observed\.\n    A detached descendant may remain\./);
+    else assert.match(expanded, /Warning:\n    —/);
+    assert.doesNotMatch(expanded, new RegExp(`RAW_STOP_${value.outcome}_MODEL_SENTINEL|PRIVATE_STOP_SENTINEL|privateStopToken`));
+    assert.deepEqual(result, before);
+  }
+
+  const clear = {
+    content: [{ type: "text", text: "RAW_CLEAR_MODEL_SENTINEL" }],
+    details: {
+      cleared: true,
+      changed: true,
+      clearedCount: 2,
+      ids: ["00000001", "00000002"],
+      warnings: ["00000002: Retained log remains.", "00000001: Permission warning."],
+      privateRecords: "PRIVATE_CLEAR_SENTINEL",
+    },
+  };
+  const clearBefore = structuredClone(clear);
+  const clearContext = { args: { action: "clear" } };
+  const clearCollapsedComponent = renderMonitorResult(clear, { expanded: false }, theme, clearContext);
+  assert.equal(render(clearCollapsedComponent), "✓  Cleared 2 monitors · 2 warnings");
+  assert.ok(clearCollapsedComponent.render(28).every((line) => visibleWidth(line) <= 28));
+  const clearExpanded = render(renderMonitorResult(clear, { expanded: true }, theme, clearContext));
+  for (const expected of ["Monitor IDs:", "00000001", "00000002", "Warnings:", "Retained log remains", "Permission warning"]) {
+    assert.match(clearExpanded, escaped(expected));
+  }
+  assert.doesNotMatch(clearExpanded, /RAW_CLEAR_MODEL_SENTINEL|PRIVATE_CLEAR_SENTINEL|privateRecords|clearedCount|changed:/);
+  assert.deepEqual(clear, clearBefore);
+
+  const noop = {
+    content: [{ type: "text", text: "RAW_CLEAR_NOOP_SENTINEL" }],
+    details: { cleared: true, changed: false, clearedCount: 0, ids: [], warnings: [] },
+  };
+  const noopBefore = structuredClone(noop);
+  assert.equal(render(renderMonitorResult(noop, { expanded: false }, theme, clearContext)), "○  No monitors to clear");
+  assert.equal(render(renderMonitorResult(noop, { expanded: true }, theme, clearContext)), "○  No monitors to clear");
+  assert.deepEqual(noop, noopBefore);
 });
 
 test("Monitor unified update notifications collapse by status and expand one incremental layout without full operational state", () => {
@@ -763,14 +857,18 @@ test("Monitor legacy matcher, legacy terminal, and global summary notifications 
   assert.deepEqual(summary, summaryBefore);
 });
 
-test("Monitor renderer fallbacks and errors sanitize controls, collapse width-safely, expand complete content, and do not mutate data", () => {
-  const result = { content: [{ type: "text", text: "Failure\u001b[31m red\u001b[0m\u0000 first\nComplete second\nComplete third" }], details: { legacy: true } };
+test("Monitor renderer fallbacks and errors sanitize controls, preserve complete refusal guidance, and do not mutate data", () => {
+  const result = { content: [{ type: "text", text: "Cannot clear running monitors\u001b[31m now\u001b[0m\u0000.\nAsk the user whether to stop them, then call monitor stop and retry clear only if they agree." }], details: { legacy: true } };
   const before = structuredClone(result);
-  const collapsedComponent = renderMonitorResult(result, { expanded: false, isError: true }, theme, { args: { action: "status" } });
+  const collapsedComponent = renderMonitorResult(result, { expanded: false, isError: true }, theme, { args: { action: "clear" } });
   assertBlankSeparator(collapsedComponent);
-  assert.equal(render(collapsedComponent, 30), "Failure red  first");
-  const expanded = render(renderMonitorResult(result, { expanded: true, isError: true }, theme, { args: { action: "status" } }));
-  assert.match(expanded, /Failure red  first\nComplete second\nComplete third/);
+  const collapsed = render(collapsedComponent, 34);
+  const collapsedFlow = collapsed.replace(/\s+/g, " ");
+  assert.match(collapsedFlow, /Cannot clear running monitors now \./);
+  assert.match(collapsedFlow, /Ask the user whether to stop them, then call monitor stop and retry clear only if they agree\./);
+  assert.ok(collapsedComponent.render(34).every((line) => visibleWidth(line) <= 34));
+  const expanded = render(renderMonitorResult(result, { expanded: true, isError: true }, theme, { args: { action: "clear" } }));
+  assert.match(expanded, /Cannot clear running monitors now \.\nAsk the user whether to stop them, then call monitor stop and retry clear only if they agree\./);
   assert.doesNotMatch(expanded, /\u001b|\u0000/);
   assert.deepEqual(result, before);
 

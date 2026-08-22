@@ -65,10 +65,11 @@ registerHooks({
 });
 
 const { askUserQuestionParameters } = await import("../extensions/oh-my-pi-slim/ask-runtime.ts");
-const { goalParameters } = await import("../extensions/oh-my-pi-slim/goal-runtime.ts");
-const { loopParameters } = await import("../extensions/oh-my-pi-slim/loop-runtime.ts");
-const { monitorParameters } = await import("../extensions/oh-my-pi-slim/monitor-runtime.ts");
+const { GOAL_ACTIONS, GOAL_PUBLIC_FIELDS, goalParameters } = await import("../extensions/oh-my-pi-slim/goal-runtime.ts");
+const { LOOP_ACTIONS, LOOP_PUBLIC_FIELDS, loopParameters } = await import("../extensions/oh-my-pi-slim/loop-runtime.ts");
+const { MONITOR_ACTIONS, MONITOR_PUBLIC_FIELDS, monitorParameters } = await import("../extensions/oh-my-pi-slim/monitor-runtime.ts");
 const { subagentParameters } = await import("../extensions/oh-my-pi-slim/subagent-runtime.ts");
+const { SUBAGENT_ACTIONS, SUBAGENT_PUBLIC_FIELDS } = await import("../extensions/oh-my-pi-slim/subagent-core.ts");
 const { contactSupervisorParameters } = await import("../extensions/oh-my-pi-slim/child-supervisor.ts");
 const { todoParameters } = await import("../extensions/todo/index.ts");
 const { resetWidgetStackHost } = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
@@ -118,7 +119,7 @@ test("all production model-tool schemas survive the Kimi strict-provider portabi
   assert.equal(remove.oneOf, undefined, "delete branch must not use a nested union");
   assert.equal(remove.properties.target.description, "Exact subject to delete.");
   const clear = operationBranches.find((branch) => branch.properties.op.const === "clear");
-  assert.equal(clear.description, "Use clear at most once after every current item is completed.");
+  assert.equal(clear.description, "Use clear at most once.");
   assert.deepEqual(Object.fromEntries(operationBranches.map((branch) => [
     branch.properties.op.const, branch.properties.op.description,
   ])), {
@@ -129,6 +130,9 @@ test("all production model-tool schemas survive the Kimi strict-provider portabi
   });
   assert.equal(schemas.todo.properties.action.description, "Choose list or update. list accepts no operations. update requires one or more ordered operations.");
   assert.equal(schemas.todo.properties.operations.description, "Ordered append, modify, delete, or clear operations for update. Omit for list.");
+  assert.deepEqual(schemas.todo.required, ["action"]);
+  assert.equal("confirmed" in schemas.todo.properties, false);
+  assert.equal("force" in schemas.todo.properties, false);
 
   const ask = schemas.ask_user_question.properties.questions;
   assert.deepEqual({
@@ -151,23 +155,34 @@ test("all production model-tool schemas survive the Kimi strict-provider portabi
     multiSelect: "True enables multiple authored selections. Omit or use false for single-select. Multi-select options cannot include previews.",
   });
 
-  assert.equal(schemas.goal.properties.action.description, "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. clear removes a completed or cancelled Goal from the branch. status, resume, and clear accept no other fields.");
-  assert.equal(schemas.loop.properties.action.description, "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. list accepts no other fields.");
+  const actionContracts = [
+    ["goal", GOAL_ACTIONS, GOAL_PUBLIC_FIELDS],
+    ["loop", LOOP_ACTIONS, LOOP_PUBLIC_FIELDS],
+    ["monitor", MONITOR_ACTIONS, MONITOR_PUBLIC_FIELDS],
+    ["subagent", SUBAGENT_ACTIONS, SUBAGENT_PUBLIC_FIELDS],
+  ];
+  for (const [name, actions, fields] of actionContracts) {
+    assert.deepEqual(schemas[name].properties.action.anyOf.map(({ const: action }) => action), [...actions]);
+    assert.deepEqual(Object.keys(schemas[name].properties).sort(), [...fields].sort());
+    assert.deepEqual(schemas[name].required, ["action"], `${name} root requires only action, so clear never requires id`);
+    assert.equal("confirmed" in schemas[name].properties, false);
+    assert.equal("force" in schemas[name].properties, false);
+  }
+
+  assert.equal(schemas.goal.properties.action.description, "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status, resume, and clear accept no other fields.");
+  assert.equal(schemas.loop.properties.action.description, "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. clear and list accept no other fields.");
   assert.equal(schemas.loop.properties.interval.description, "Fixed delay for create or modify, from 10s through 7d. Format: one positive integer plus s, m, h, or d.");
-  assert.equal(schemas.monitor.properties.action.description, "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.");
+  assert.equal(schemas.monitor.properties.action.description, "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. stop, delete, and status require id. clear and list accept no other fields. status optionally accepts start and end.");
   assert.equal(schemas.monitor.properties.command.description, "Foreground Bash command for create. Do not use nohup, setsid, disown, trailing &, or another detach escape.");
   assert.equal(schemas.monitor.properties.checkAfter.description, "Required silence threshold for create, from 10s through 7d. A reminder arrives whenever the command stays silent that long. Format: one positive integer plus s, m, h, or d.");
   assert.equal(schemas.monitor.properties.checkAfter.type, "string");
   assert.equal(schemas.monitor.required?.includes("checkAfter") ?? false, false, "checkAfter stays optional in the shared action schema and is enforced by the Monitor runtime");
   assert.equal(schemas.monitor.properties.end.description, "Reverse log offset ending the status window. Defaults to 100 and must exceed start by at most 2000.");
-  assert.deepEqual(schemas.subagent.properties.action.anyOf.map(({ const: action }) => action), [
-    "create", "list", "status", "interrupt", "steer", "resume", "reply", "clear",
-  ]);
-  assert.equal(schemas.subagent.properties.action.description, "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.");
+  assert.equal(schemas.subagent.properties.action.description, "Choose create, list, status, interrupt, steer, resume, reply, delete, or clear. create requires agent, abstract, and task, with optional cwd. status, interrupt, and delete require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.");
   assert.equal(schemas.subagent.properties.cwd.description, "Working directory for create or resume. Relative paths resolve against the parent working directory. Create defaults to the parent working directory. Resume defaults to the source run's working directory.");
   assert.equal(schemas.subagent.properties.cwd.type, "string");
   assert.equal(schemas.subagent.required.includes("cwd"), false, "cwd stays optional for create and resume");
-  assert.equal(schemas.subagent.properties.id.description, "Retained run ID for status, steer, interrupt, resume, or reply.");
+  assert.equal(schemas.subagent.properties.id.description, "Retained run ID for status, steer, interrupt, resume, reply, or delete.");
   assert.equal(schemas.subagent.properties.message.description, "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.");
 
   const contact = schemas.contact_supervisor.properties;

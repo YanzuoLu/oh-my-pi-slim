@@ -18,6 +18,7 @@ import {
   restoreRunJournal,
   runJournalClearEntry,
   runJournalEntry,
+  runJournalReplacementEntry,
   validateCreateInput,
   type PersistedRun,
   type RunStatus,
@@ -154,6 +155,13 @@ export interface SubagentClearReceipt {
   changed: boolean;
 }
 
+export interface SubagentDeleteReceipt {
+  id: string;
+  deleted: true;
+  changed: true;
+  warnings: string[];
+}
+
 interface NotificationDelivery {
   runId: string;
   event: RunStatus;
@@ -279,13 +287,25 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+const NOTIFICATION_DELIVERY_PREFIX = "oh-my-pi-slim:subagent-notification:";
+
 function notificationDeliveryKey(runId: string, event: RunStatus, waitingSeq?: number): string | undefined {
   if (event === "waiting") {
     if (!Number.isInteger(waitingSeq) || Number(waitingSeq) < 1) return;
-    return `oh-my-pi-slim:subagent-notification:${JSON.stringify([runId, event, waitingSeq])}`;
+    return `${NOTIFICATION_DELIVERY_PREFIX}${JSON.stringify([runId, event, waitingSeq])}`;
   }
   if (!isTerminalStatus(event)) return;
-  return `oh-my-pi-slim:subagent-notification:${JSON.stringify([runId, event])}`;
+  return `${NOTIFICATION_DELIVERY_PREFIX}${JSON.stringify([runId, event])}`;
+}
+
+function notificationRunIdFromDeliveryKey(deliveryKey: string): string | undefined {
+  if (!deliveryKey.startsWith(NOTIFICATION_DELIVERY_PREFIX)) return;
+  try {
+    const parts: unknown = JSON.parse(deliveryKey.slice(NOTIFICATION_DELIVERY_PREFIX.length));
+    return Array.isArray(parts) && typeof parts[0] === "string" ? parts[0] : undefined;
+  } catch {
+    return;
+  }
 }
 
 function notificationDeliveryFromDetails(value: unknown): NotificationDelivery | undefined {
@@ -384,9 +404,9 @@ export const subagentParameters = Type.Object({
   task: Type.Optional(Type.String({ description: "Complete bounded objective for create." })),
   cwd: Type.Optional(Type.String({ description: "Working directory for create or resume. Relative paths resolve against the parent working directory. Create defaults to the parent working directory. Resume defaults to the source run's working directory." })),
   action: Type.Union(SUBAGENT_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.",
+    description: "Choose create, list, status, interrupt, steer, resume, reply, delete, or clear. create requires agent, abstract, and task, with optional cwd. status, interrupt, and delete require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.",
   }),
-  id: Type.Optional(Type.String({ description: "Retained run ID for status, steer, interrupt, resume, or reply." })),
+  id: Type.Optional(Type.String({ description: "Retained run ID for status, steer, interrupt, resume, reply, or delete." })),
   message: Type.Optional(Type.String({
     description: "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.",
   })),
@@ -428,6 +448,8 @@ export class OmpsSubagentRuntime {
   /** In-flight reconciliation pass per run, so a later termination can wait it out instead of racing its stop. */
   private readonly reconciling = new Map<string, Promise<void>>();
   private readonly clearedRunIds = new Set<string>();
+  /** Run-scoped write and delivery suppression while one terminal retained run is being deleted. */
+  private readonly deletingRunIds = new Set<string>();
   /** One shared termination per run, so concurrent interrupts and shutdown never race two stop sequences. */
   private readonly terminating = new Map<string, Promise<PersistedRun>>();
   /** Whether the last termination of a run confirmed that its detached runner actually stopped. */
@@ -558,7 +580,7 @@ export class OmpsSubagentRuntime {
     this.pi.registerTool({
       name: "subagent",
       label: "Subagent",
-      description: "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context, optionally in another working directory. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.",
+      description: "Create and manage retained specialist runs through nine lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context, optionally in another working directory. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent delete` removes one retained run only after it reaches a terminal status. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Deleting or clearing Subagent history never changes Goal statistics.",
       promptSnippet: "Delegate and manage specialist runs.",
       promptGuidelines: [
         "Delegate bounded specialist work with `subagent create` when an independent lane improves progress.",
@@ -570,7 +592,7 @@ export class OmpsSubagentRuntime {
         "Use `subagent steer` only for a genuine new instruction, not polling or reassurance.",
         "Use `subagent interrupt` only to stop a starting, running, or waiting run and wait for its final result.",
         "`subagent interrupt` is not rollback, so inspect partial file changes before continuing.",
-        "Use `subagent clear` only when every run is terminal and all retained history should be removed.",
+        "Use `subagent delete` for one terminal run, or `subagent clear` when all terminal history should be removed.",
       ],
       parameters: subagentParameters,
       execute: async (_toolCallId, params, signal) => this.executeSubagent(params as RuntimeInput, signal),
@@ -687,7 +709,7 @@ export class OmpsSubagentRuntime {
   }
 
   private persistRun(run: PersistedRun): void {
-    if (!this.ctx || this.clearing) return;
+    if (!this.ctx || this.clearing || this.deletingRunIds.has(run.id)) return;
     const journal = runJournalEntry(run);
     const goalStats = this.goalActivity.get(run.id);
     this.pi.appendEntry(SNAPSHOT_TYPE, goalStats ? { ...journal, goalStats: { ...goalStats } } : journal);
@@ -748,6 +770,7 @@ export class OmpsSubagentRuntime {
   }
 
   private updateRun(id: string, patch: Partial<PersistedRun>): PersistedRun {
+    if (this.deletingRunIds.has(id)) return this.registry.require(id);
     const run = this.registry.update(id, patch);
     this.persistRun(run);
     return run;
@@ -759,12 +782,12 @@ export class OmpsSubagentRuntime {
     return id;
   }
 
-  /** Resolves a run for an ID-bearing action and never lets a cleared ID look like a plain unknown run. */
+  /** Resolves a run for an ID-bearing action and distinguishes removed history from an unknown ID. */
   private requireRun(id: string): PersistedRun {
     const run = this.registry.get(id);
     if (run) return run;
     if (this.clearedRunIds.has(id)) {
-      throw new Error(`Run ${id} was cleared from the subagent history and is no longer available.`);
+      throw new Error(`Run ${id} was removed from the retained subagent history and is no longer available.`);
     }
     return this.registry.require(id);
   }
@@ -890,6 +913,7 @@ export class OmpsSubagentRuntime {
   }
 
   private acknowledgeNotificationDelivery(delivery: NotificationDelivery): boolean {
+    if (this.deletingRunIds.has(delivery.runId)) return false;
     this.queuedNotifications.delete(delivery.deliveryKey);
     const run = this.registry.get(delivery.runId);
     if (!run) return false;
@@ -935,7 +959,8 @@ export class OmpsSubagentRuntime {
    * A run suppressed by an in-flight synchronous interrupt returns its final result through that tool call instead.
    */
   private deliverPendingNotification(id: string): void {
-    if (this.shuttingDown || this.clearing || this.notificationDeliveryPaused || this.notificationSuppression.has(id)) return;
+    if (this.shuttingDown || this.clearing || this.deletingRunIds.has(id) ||
+        this.notificationDeliveryPaused || this.notificationSuppression.has(id)) return;
     const run = this.registry.get(id);
     if (!run) return;
     const delivery = this.pendingNotificationDelivery(run);
@@ -960,10 +985,13 @@ export class OmpsSubagentRuntime {
     if (this.clearing) return;
     const pendingByKey = new Map<string, NotificationDelivery>();
     for (const run of this.registry.list()) {
+      if (this.deletingRunIds.has(run.id)) continue;
       const delivery = this.pendingNotificationDelivery(run);
       if (delivery) pendingByKey.set(delivery.deliveryKey, delivery);
     }
     for (const deliveryKey of [...this.queuedNotifications]) {
+      const runId = notificationRunIdFromDeliveryKey(deliveryKey);
+      if (runId && this.deletingRunIds.has(runId)) continue;
       const delivery = pendingByKey.get(deliveryKey);
       this.queuedNotifications.delete(deliveryKey);
       if (delivery) this.deliverPendingNotification(delivery.runId);
@@ -1046,7 +1074,7 @@ export class OmpsSubagentRuntime {
   }
 
   private reconcileRun(id: string): Promise<void> {
-    if (this.clearing) return Promise.resolve();
+    if (this.clearing || this.deletingRunIds.has(id)) return Promise.resolve();
     // A run already owned by a termination must never be failed, re-controlled, or re-signaled here:
     // that owner writes the single interrupt control, performs the only stop, and adopts the authoritative terminal state.
     if (this.terminating.has(id)) return Promise.resolve();
@@ -1421,7 +1449,7 @@ export class OmpsSubagentRuntime {
     if ((action === "list" || action === "clear") && (input.id !== undefined || input.message !== undefined)) {
       throw new Error(`${action} does not accept id or message.`);
     }
-    if ((action === "status" || action === "interrupt") && input.message !== undefined) {
+    if ((action === "status" || action === "interrupt" || action === "delete") && input.message !== undefined) {
       throw new Error(`${action} does not accept message.`);
     }
 
@@ -1434,6 +1462,7 @@ export class OmpsSubagentRuntime {
     if (action === "clear") return this.clearRetainedRuns();
 
     const id = requireString(input.id, "id");
+    if (action === "delete") return this.deleteRetainedRun(id);
     await this.reconcileRun(id);
     if (action === "status") {
       const run = this.formatRunStatus(this.requireRun(id));
@@ -1511,7 +1540,7 @@ export class OmpsSubagentRuntime {
    * Removes retained Subagent run directories and exclusively owned child session files.
    * Anything that cannot be removed safely stays on disk and only produces a warning.
    */
-  private purgeRetainedRuns(runs: readonly PersistedRun[]): string[] {
+  private purgeRetainedRuns(runs: readonly PersistedRun[], retained: readonly PersistedRun[]): string[] {
     const warnings: string[] = [];
     for (const run of runs) {
       try { removeRunFiles(this.pathsFor(run.id)); }
@@ -1519,8 +1548,46 @@ export class OmpsSubagentRuntime {
         warnings.push(`Retained run directory for ${run.id}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    warnings.push(...this.purgeChildSessionFiles(runs, []));
+    warnings.push(...this.purgeChildSessionFiles(runs, retained));
     return warnings;
+  }
+
+  private clearQueuedNotificationsForRun(id: string): void {
+    for (const deliveryKey of [...this.queuedNotifications]) {
+      if (notificationRunIdFromDeliveryKey(deliveryKey) === id) this.queuedNotifications.delete(deliveryKey);
+    }
+  }
+
+  private async deleteRetainedRun(id: string) {
+    if (this.shuttingDown) throw new Error("Parent session is shutting down.");
+    if (this.clearing) throw new Error("A subagent clear is already running.");
+    if (this.deletingRunIds.has(id)) throw new Error(`A subagent delete for ${id} is already running.`);
+
+    await this.reconcileRun(id);
+    const inFlight = this.reconciling.get(id);
+    if (inFlight) await inFlight.catch(() => undefined);
+    const target = this.requireRun(id);
+    if (ACTIVE_STATUSES.has(target.status)) {
+      throw new Error(`delete cannot remove run ${id} with status ${target.status}. Ask the user whether to interrupt this run, then retry delete only if they agree.`);
+    }
+
+    this.deletingRunIds.add(id);
+    try {
+      const survivors = this.registry.list().filter((run) => run.id !== id);
+      const warnings = this.purgeRetainedRuns([target], survivors);
+      this.pi.appendEntry(SNAPSHOT_TYPE, runJournalReplacementEntry(survivors));
+      this.registry.delete(id);
+      this.clearedRunIds.add(id);
+      this.activity.delete(id);
+      this.health.delete(id);
+      this.repliedSeqs.delete(id);
+      this.terminationConfirmed.delete(id);
+      this.clearQueuedNotificationsForRun(id);
+      const receipt: SubagentDeleteReceipt = { id, deleted: true, changed: true, warnings };
+      return toolText(`Deleted retained subagent run ${id}.`, receipt);
+    } finally {
+      this.deletingRunIds.delete(id);
+    }
   }
 
   private async clearRetainedRuns() {
@@ -1537,7 +1604,7 @@ export class OmpsSubagentRuntime {
 
     this.clearing = true;
     try {
-      receipt.warnings = this.purgeRetainedRuns(runs);
+      receipt.warnings = this.purgeRetainedRuns(runs, []);
       receipt.clearedCount = runs.length;
       receipt.changed = true;
       this.pi.appendEntry(SNAPSHOT_TYPE, runJournalClearEntry());

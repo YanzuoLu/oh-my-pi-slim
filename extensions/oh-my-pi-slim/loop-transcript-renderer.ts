@@ -25,6 +25,11 @@ function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) return;
+  return [...value];
+}
+
 function contentText(content: unknown): string {
   if (!Array.isArray(content)) return typeof content === "string" ? content : "";
   return content.map((item) => {
@@ -109,6 +114,17 @@ function addField(container: Container, theme: Theme, label: string, value: unkn
 function addSection(container: Container, theme: Theme, label: string, value: unknown, indent = 0): void {
   container.addChild(new Text(theme.fg("dim", `${label}:`), indent, 0));
   container.addChild(new Text(theme.fg("toolOutput", sanitizeLoopBody(value)), indent + 2, 0));
+}
+
+function addStringList(container: Container, theme: Theme, label: string, values: readonly string[], indent = 0): void {
+  container.addChild(new Text(theme.fg("dim", `${label}:`), indent, 0));
+  if (values.length === 0) {
+    container.addChild(new Text(theme.fg("dim", "—"), indent + 2, 0));
+    return;
+  }
+  for (const value of values) {
+    container.addChild(new Text(`${theme.fg("dim", "•")} ${theme.fg("toolOutput", sanitizeLoopText(value))}`, indent + 2, 0));
+  }
 }
 
 function spacedResult(component: Component): Container {
@@ -231,7 +247,7 @@ function mutationReceipt(action: LoopAction, loop: PublicLoop | undefined, chang
     container.addChild(new Text(`${formatSemanticGlyphPrefix(theme.fg("dim", "○"))}${theme.fg("toolOutput", `No change · loop [${displayId}]`)}`, 0, 0));
     return container;
   }
-  const verbs: Record<Exclude<LoopAction, "list">, string> = {
+  const verbs: Record<Exclude<LoopAction, "list" | "clear">, string> = {
     create: "Created",
     delete: "Deleted",
     modify: "Modified",
@@ -240,16 +256,36 @@ function mutationReceipt(action: LoopAction, loop: PublicLoop | undefined, chang
   };
   const suffix = loop ? ` · ${loop.status}` : "";
   container.addChild(new Text(
-    `${formatSemanticGlyphPrefix(theme.fg("success", "✓"))}${theme.fg("toolOutput", `${verbs[action as Exclude<LoopAction, "list">]} loop [${displayId}]${suffix}`)}`,
+    `${formatSemanticGlyphPrefix(theme.fg("success", "✓"))}${theme.fg("toolOutput", `${verbs[action as Exclude<LoopAction, "list" | "clear">]} loop [${displayId}]${suffix}`)}`,
     0,
     0,
   ));
   return container;
 }
 
+function clearReceipt(details: UnknownRecord, theme: Theme, expanded: boolean): Container | undefined {
+  if (details.cleared !== true || typeof details.changed !== "boolean") return;
+  const clearedCount = asNumber(details.clearedCount);
+  const ids = stringArray(details.ids);
+  if (clearedCount === undefined || !Number.isInteger(clearedCount) || clearedCount < 0 || !ids) return;
+  const changed = details.changed;
+  const glyph = changed ? theme.fg("success", "✓") : theme.fg("dim", "○");
+  const summary = changed ? `Cleared ${clearedCount} loops` : "No loops to clear";
+  const container = new Container();
+  container.addChild(new Text(`${formatSemanticGlyphPrefix(glyph)}${theme.fg("toolOutput", summary)}`, 0, 0));
+  if (expanded && ids.length > 0) {
+    container.addChild(new Spacer(1));
+    addStringList(container, theme, "Loop IDs", ids);
+  }
+  return container;
+}
+
 function fallbackResult(result: ToolResultLike, options: ToolResultRenderOptionsLike, theme: Theme): Component {
   const text = contentText(result.content);
-  if (text) return new Text(theme.fg("toolOutput", options.expanded === true ? sanitizeLoopBody(text) : safeFirstLine(text)), 0, 0);
+  if (text) {
+    const complete = options.expanded === true || options.isError === true;
+    return new Text(theme.fg(options.isError ? "error" : "toolOutput", complete ? sanitizeLoopBody(text) : safeFirstLine(text)), 0, 0);
+  }
   return new Text(
     theme.fg(options.isPartial ? "warning" : "dim", options.isPartial ? "Result pending…" : "No result content."),
     0,
@@ -301,6 +337,11 @@ export function renderLoopResult(
   }
 
   const details = asRecord(result.details);
+  if (action === "clear" && details) {
+    const receipt = clearReceipt(details, theme, options.expanded === true);
+    if (receipt) return spacedResult(receipt);
+  }
+
   const loop = loopFromValue(details?.loop);
   const deleted = details?.deleted === true && typeof details.id === "string";
   const changed = details?.changed === false ? false : loop !== undefined || deleted;

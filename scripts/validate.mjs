@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.18", "package version must be 0.10.18");
+check(packageJson.version === "0.10.19", "package version must be 0.10.19");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.18" && lock.packages?.[""]?.version === "0.10.18", "package-lock version must be 0.10.18");
+check(lock.version === "0.10.19" && lock.packages?.[""]?.version === "0.10.19", "package-lock version must be 0.10.19");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -631,8 +631,8 @@ check(
 );
 const goalClearBlock = goalRuntime.slice(goalRuntime.indexOf("private clear(): ReturnType<typeof toolText>"), goalRuntime.indexOf("private requireMutable"));
 hasAll(goalClearBlock, [
-  'if (status !== "completed" && status !== "cancelled") {',
-  "clear requires a terminal Goal. The current Goal is ${status}. Ask the user whether to cancel this Goal, then retry clear only if they agree.",
+  'if (status === "active" || status === "retry_wait") {',
+  "clear is invalid for current Goal status ${status}. Ask the user whether to pause or cancel this Goal, then retry clear only if they agree.",
   "this.clearRuntime(true);",
   "this.snapshot = undefined;",
   "this.pi.appendEntry<null>(GOAL_STATE_ENTRY_TYPE, null);",
@@ -664,7 +664,7 @@ hasNone(goalSchema, ["id:", "goalId", "revision", "generation", "instanceKey", "
 check(!goalSchema.includes("anyOf:") && !goalSchema.includes("oneOf:"), "Goal schema root must not declare anyOf or oneOf");
 const goalSchemaDescriptions = [...goalSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
 const expectedGoalSchemaDescriptions = [
-  "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. clear removes a completed or cancelled Goal from the branch. status, resume, and clear accept no other fields.",
+  "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status, resume, and clear accept no other fields.",
   "Short Goal summary for create or modify.",
   "Complete Goal objective for create or modify.",
   "One to eight completion criteria for create or modify.",
@@ -676,7 +676,7 @@ for (const description of goalSchemaDescriptions) checkSchemaHow(description, "G
 hasAll(goalSchema, [
   'action: Type.Union(GOAL_ACTIONS.map((action) => Type.Literal(action))',
   "minItems: 1", "maxItems: 8",
-  'description: "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. clear removes a completed or cancelled Goal from the branch. status, resume, and clear accept no other fields."',
+  'description: "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status, resume, and clear accept no other fields."',
   'description: "One to eight completion criteria for create or modify."',
   'description: "For complete, provide exactly one concrete evidence item per criterion."',
 ], "Goal schema actions, fields, and limits");
@@ -686,7 +686,7 @@ const goalGuidelinesEnd = goalRuntime.indexOf("      ],", goalGuidelinesStart);
 const goalToolMetadata = goalRuntime.slice(goalToolStart, goalGuidelinesEnd);
 const goalDescription = propertyString(goalToolMetadata, "description", "Goal tool metadata");
 const goalPromptSnippet = propertyString(goalToolMetadata, "promptSnippet", "Goal tool metadata");
-check(goalDescription === "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a terminal Goal from the branch and rejects any nonterminal Goal. Actions return the current Goal state and whether it changed.", "Goal description must match the reviewed contract");
+check(goalDescription === "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a paused, completed, or cancelled Goal. It rejects active and retry_wait Goals until the user agrees to pause or cancel. Actions return the current Goal state and whether it changed.", "Goal description must match the reviewed contract");
 check(goalPromptSnippet === "Manage the branch-local Goal.", "Goal promptSnippet must match the reviewed contract");
 checkSteBlock(goalDescription, "Goal description");
 checkSteBlock(goalPromptSnippet, "Goal promptSnippet");
@@ -696,7 +696,7 @@ const expectedGoalGuidelines = [
   "For bare `/goal`, call `goal status` and explain `/goal <objective>`.",
   "Use Goal for one durable outcome, not as a `todo` checklist.",
   "`goal modify` replaces the entire nonterminal contract, not individual fields.",
-  "Call `goal cancel` only when the user explicitly abandons the Goal.",
+  "Ask before pausing or cancelling a Goal when `goal clear` rejects its current status.",
   "Call `goal complete` only with concrete evidence for every criterion.",
 ];
 check(JSON.stringify(goalGuidelines) === JSON.stringify(expectedGoalGuidelines), "Goal promptGuidelines must match the reviewed array");
@@ -966,13 +966,15 @@ const reconcilePassStart = runtime.indexOf("private async runReconcilePass(id: s
 check(reconcileGuardStart >= 0 && reconcilePassStart > reconcileGuardStart, "runtime must isolate reconciliation ownership from one reconcile pass");
 const reconcileGuard = runtime.slice(reconcileGuardStart, reconcilePassStart);
 hasAll(reconcileGuard, [
-  "if (this.clearing) return Promise.resolve();",
+  "if (this.clearing || this.deletingRunIds.has(id)) return Promise.resolve();",
   "if (this.terminating.has(id)) return Promise.resolve();",
   "if (this.reconciling.has(id)) return Promise.resolve();",
   "const pass = this.runReconcilePass(id).finally(() => { this.reconciling.delete(id); })",
   "this.reconciling.set(id, pass)",
 ], "reconciliation must skip terminated ownership and retain an awaitable in-flight pass");
 check(
+  reconcileGuard.indexOf("if (this.clearing || this.deletingRunIds.has(id)) return Promise.resolve();") <
+    reconcileGuard.indexOf("if (this.terminating.has(id)) return Promise.resolve();") &&
   reconcileGuard.indexOf("if (this.terminating.has(id)) return Promise.resolve();") <
     reconcileGuard.indexOf("if (this.reconciling.has(id)) return Promise.resolve();") &&
   reconcileGuard.indexOf("this.reconciling.set(id, pass)") > reconcileGuard.indexOf("const pass = this.runReconcilePass(id)"),
@@ -998,7 +1000,7 @@ const interruptDispatch = runtime.slice(runtime.indexOf('if (action === "steer")
 hasAll(interruptDispatch, ["return this.interruptRun(id, signal);"], "interrupt must dispatch through the synchronous termination handoff");
 hasNone(interruptDispatch, ["Interrupt requested"], "interrupt must not return an enqueue-only receipt");
 hasAll(monitorRuntime, [
-  'export const MONITOR_ACTIONS = ["create", "delete", "list", "status"] as const',
+  'export const MONITOR_ACTIONS = ["create", "stop", "delete", "clear", "list", "status"] as const',
   'export const MONITOR_PUBLIC_FIELDS = ["action", "abstract", "command", "cwd", "checkAfter", "notifyOn", "id", "start", "end"] as const',
   "export const MONITOR_MIN_CHECK_AFTER_MS = 10_000", "export const MONITOR_MAX_CHECK_AFTER_MS = 7 * 24 * 60 * 60 * 1_000",
   'export type MonitorNotificationKind = "matcher" | "silence" | "summary" | "terminal"',
@@ -1024,6 +1026,41 @@ hasNone(monitorRuntime, [
   "parseLoopInterval", "canonicalizeLoopInterval", "./loop-runtime.js",
   "silenceReminderCount", "nextCheckAt",
 ], "Monitor silence threshold must stay self-contained and expose no extra public counters");
+const monitorStopDispatch = monitorRuntime.slice(monitorRuntime.indexOf("private stop(record: MonitorRecord)"), monitorRuntime.indexOf("private async stopRunning(record: MonitorRecord)"));
+const monitorStopRunning = monitorRuntime.slice(monitorRuntime.indexOf("private async stopRunning(record: MonitorRecord)"), monitorRuntime.indexOf("private delete(record: MonitorRecord)"));
+const monitorDeleteClear = monitorRuntime.slice(monitorRuntime.indexOf("private delete(record: MonitorRecord)"), monitorRuntime.indexOf("private attachProcess(record: MonitorRecord)"));
+hasAll(monitorStopDispatch, [
+  "const existing = this.stopping.get(record.id)", "if (existing) return existing", "const pending = this.stopRunning(record)",
+  "this.stopping.set(record.id, pending)", "this.stopping.delete(record.id)",
+], "Monitor stop must share one synchronous ownership promise per record");
+hasAll(monitorStopRunning, [
+  "record.stopOwned = true", "this.cancelSilence(record)", "this.cancelMatchTimer(record)",
+  'this.trySignal(record, "SIGTERM", "stop TERM")', "await this.waitForRecord(record, this.deleteGraceMs",
+  'this.trySignal(record, "SIGKILL", "stop KILL")', "await this.waitForRecord(record, this.finalKillWaitMs",
+  "this.forceTerminal(record, warning)", "return this.stopResult(record, true, \"unconfirmed\", warning)",
+  "record.stopOwned = false",
+], "Monitor stop synchronous TERM/KILL, terminal result, and quiescence contract");
+const monitorStopResult = monitorRuntime.slice(monitorRuntime.indexOf("private stopResult("), monitorRuntime.indexOf("private delete(record: MonitorRecord)"));
+hasAll(monitorStopResult, [
+  "this.operationalState(record, 0, 100, this.toolContentMaxBytes)",
+], "Monitor stop result must use the fixed bounded latest-100 operational window");
+hasNone(monitorStopResult, [
+  "record.logLines", "Math.max(100", "2_000",
+], "Monitor stop result must never expand its synchronous scan window from retained log size");
+hasNone(monitorStopRunning, [
+  'this.queueNotification(record, "terminal"', "this.records.delete(record.id)", "this.removeRecordLog(record)",
+], "Monitor stop must retain the record and log and never double-deliver a terminal notification");
+hasAll(monitorDeleteClear, [
+  'if (record.status === "running")', "Ask the user whether to stop it, then call monitor stop and retry delete only if they agree.",
+  'filter((record) => record.status === "running")', "Ask the user whether to stop them, then call monitor stop for each and retry clear only if they agree.",
+  "const warning = this.disposeRecord(record)", "warnings.push(`${record.id}: ${warning}`)", "warnings }",
+], "Monitor running refusal, atomic delete-clear precheck, and retained-log warnings");
+check(
+  monitorDeleteClear.indexOf('if (running.length > 0)') < monitorDeleteClear.indexOf("for (const record of terminal)") &&
+  monitorDeleteClear.indexOf('if (running.length > 0)') < monitorDeleteClear.lastIndexOf("this.records.delete(record.id)"),
+  "Monitor clear must preflight every running record before any terminal record is removed",
+);
+hasNone(monitorDeleteClear, ["this.stop(record)", "this.stopRunning(record)", "Promise.all"], "Monitor delete and clear must never stop running records implicitly");
 const monitorCheckAfterParser = monitorRuntime.slice(
   monitorRuntime.indexOf("export function canonicalizeMonitorCheckAfter"),
   monitorRuntime.indexOf("function formatSilenceDuration"),
@@ -1059,11 +1096,11 @@ hasAll(monitorSilenceBlock, [
   "this.defer(() => this.onSilenceTimeout(record, token, generation))",
   "const elapsed = this.nowMs() - record.lastActivityMs",
   "if (elapsed < record.checkAfterMs) {",
-  "this.prepareSilenceCheck(record, record.checkAfterMs - elapsed)",
+  "this.applySilenceCheck(record, this.prepareSilenceCheck(record, record.checkAfterMs - elapsed))",
   "this.notifySilence(record, elapsed)",
   "if (!this.silenceTimeoutStillOwns(record, token, generation)) return;",
   "if (!current || current !== record || current.silenceToken !== token || generation !== this.generation) return false;",
-  'if (record.status !== "running" || record.deleting || this.shuttingDown) return false;',
+  'if (record.status !== "running" || record.terminating || this.shuttingDown) return false;',
 ], "Monitor lazy silence deadline, timer token, defer seam, and cancellation guards");
 hasNone(monitorSilenceBlock, [
   "notificationCursor", "buildUpdateNotification", "sentMatcherAt", "rateLimitCount",
@@ -1086,9 +1123,9 @@ hasNone(monitorSilenceBuilder, [
   "buildUpdateNotification", "notificationCursor", "fitNotificationLines", "lines", "operationalState(",
 ], "Monitor silence reminder must never reuse the incremental update payload");
 for (const [label, block] of [
-  ["delete", monitorRuntime.slice(monitorRuntime.indexOf("private async delete(record: MonitorRecord"), monitorRuntime.indexOf("private attachProcess(record: MonitorRecord"))],
-  ["finalize", monitorRuntime.slice(monitorRuntime.indexOf("private finalize(record: MonitorRecord"), monitorRuntime.indexOf("private forceTerminal(record: MonitorRecord"))],
-  ["dispose", monitorRuntime.slice(monitorRuntime.indexOf("private disposeRecord(record: MonitorRecord"), monitorRuntime.indexOf("private detachListeners(record: MonitorRecord"))],
+  ["stop", monitorRuntime.slice(monitorRuntime.indexOf("private async stopRunning(record: MonitorRecord"), monitorRuntime.indexOf("private finishObservedStop(record: MonitorRecord"))],
+  ["terminal", monitorRuntime.slice(monitorRuntime.indexOf("private finishTerminal(record: MonitorRecord"), monitorRuntime.indexOf("private resolveTerminalOnce(record: MonitorRecord"))],
+  ["dispose", monitorRuntime.slice(monitorRuntime.indexOf("private quiesceRecord(record: MonitorRecord"), monitorRuntime.indexOf("private removeRecordLog(record: MonitorRecord"))],
 ]) hasAll(block, ["this.cancelSilence(record)"], `Monitor ${label} must clear the silence timer and its queued reminder`);
 const monitorCreateCommit = monitorRuntime.slice(
   monitorRuntime.indexOf("this.records.set(id, record);"),
@@ -1171,8 +1208,8 @@ hasNone(monitorMatcherFlush, [
   'kind: "matcher"', "fitNotificationLines", "operationalState(", "this.notificationLines(", "recentLines",
 ], "Monitor matcher batch must not keep a second payload template or replay unmatched lines");
 const monitorFinalize = monitorRuntime.slice(
-  monitorRuntime.indexOf("private finalize(record: MonitorRecord)"),
-  monitorRuntime.indexOf("private forceTerminal(record: MonitorRecord"),
+  monitorRuntime.indexOf("private finishTerminal(record: MonitorRecord)"),
+  monitorRuntime.indexOf("private resolveTerminalOnce(record: MonitorRecord"),
 );
 hasAll(monitorFinalize, [
   "const matched = [...record.matchKeywords]",
@@ -1181,6 +1218,7 @@ hasAll(monitorFinalize, [
   "this.clearPendingMatches(record)",
   "record.notificationCursor = record.nextSeq - 1",
   "this.buildUpdateNotification(record, matched, payload)",
+  'if (!record.stopOwned && record.generation === this.generation && !this.shuttingDown) {',
   'this.queueNotification(record, "terminal", fitted.content, fitted.details)',
 ], "Monitor terminal close reuses the unified builder and reports the literals its pending matches hit");
 hasNone(monitorFinalize, [
@@ -1239,7 +1277,7 @@ hasAll(monitorTranscriptRenderer, [
   'addField(container, theme, "Last output", state.lastOutputAt, 2)',
   'addField(container, theme, "Check after", state.checkAfter === "" ? null : state.checkAfter, 2)',
   'addField(container, theme, "Check after", args.checkAfter)',
-  'Monitors · rate limited', 'matched ${details.matched.length}', "Incremental lines", "Forced deletion",
+  'Monitors · rate limited', 'matched ${details.matched.length}', "Incremental lines", "Cleared ${clearedCount} monitors", "Deleted monitor [${sanitizeMonitorText(id)}]", "const outcome = asString(details.outcome)",
   "ExpandableNotificationLine", 'theme.fg("muted", " (ctrl+o to expand)")', "visibleWidth(this.hint)",
   "function updateNotification(value: UnknownRecord): UpdateNotification | undefined",
   "function renderUpdateNotification(details: UpdateNotification, expanded: boolean, theme: Theme): Component",
@@ -1283,13 +1321,13 @@ const monitorSchema = monitorRuntime.slice(monitorSchemaStart, monitorSchemaEnd)
 check(!monitorSchema.includes("anyOf:") && !monitorSchema.includes("oneOf:"), "Monitor schema root must not declare anyOf or oneOf");
 const monitorSchemaDescriptions = [...monitorSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
 const expectedMonitorSchemaDescriptions = [
-  "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.",
+  "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. stop, delete, and status require id. clear and list accept no other fields. status optionally accepts start and end.",
   "Short command summary for create.",
   "Foreground Bash command for create. Do not use nohup, setsid, disown, trailing &, or another detach escape.",
   "Working directory for create. Defaults to the current session directory.",
   "Required silence threshold for create, from 10s through 7d. A reminder arrives whenever the command stays silent that long. Format: one positive integer plus s, m, h, or d.",
   "Up to 20 unique case-sensitive literal matchers for create. Each matcher is at most 500 characters.",
-  "Exact eight-character lowercase hexadecimal monitor ID for delete or status.",
+  "Exact eight-character lowercase hexadecimal monitor ID for stop, delete, or status.",
   "Newest retained log lines to skip for status. Defaults to 0.",
   "Reverse log offset ending the status window. Defaults to 100 and must exceed start by at most 2000.",
 ];
@@ -1301,7 +1339,7 @@ const monitorGuidelinesEnd = monitorRuntime.indexOf("      ],", monitorGuideline
 const monitorToolMetadata = monitorRuntime.slice(monitorToolStart, monitorGuidelinesEnd);
 const monitorDescription = propertyString(monitorToolMetadata, "description", "Monitor tool metadata");
 const monitorPromptSnippet = propertyString(monitorToolMetadata, "promptSnippet", "Monitor tool metadata");
-check(monitorDescription === "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.", "Monitor description must match the reviewed contract");
+check(monitorDescription === "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor stop` terminates a running group and returns its complete terminal state. `monitor delete` removes one terminal record, while `monitor clear` removes all terminal records. Running records must be stopped only after user agreement. Terminal records remain available until deletion or clearing. Runtime shutdown terminates active groups and clears retained monitor data.", "Monitor description must match the reviewed contract");
 check(monitorPromptSnippet === "Supervise long-running foreground commands.", "Monitor promptSnippet must match the reviewed contract");
 checkSteBlock(monitorDescription, "Monitor description");
 checkSteBlock(monitorPromptSnippet, "Monitor promptSnippet");
@@ -1314,11 +1352,11 @@ const expectedMonitorGuidelines = [
 check(JSON.stringify(monitorGuidelines) === JSON.stringify(expectedMonitorGuidelines), "Monitor promptGuidelines must match the reviewed array");
 checkSteGuidelines(monitorGuidelines, "Monitor promptGuideline", "monitor");
 hasNone(`${monitorDescription}\n${monitorPromptSnippet}\n${monitorGuidelines.join("\n")}\n${monitorSchemaDescriptions.join("\n")}`, [
-  "generation", "instance", "deliveryKey", "cursor", "sidecar", "notificationCursor",
+  "generation", "instance", "deliveryKey", "cursor", "sidecar", "notificationCursor", "stopOwned", "stopping",
 ], "Monitor model metadata private boundary");
 
 hasAll(loopRuntime, [
-  'export const LOOP_ACTIONS = ["create", "delete", "modify", "list", "pause", "resume"] as const',
+  'export const LOOP_ACTIONS = ["create", "delete", "clear", "modify", "list", "pause", "resume"] as const',
   "export const loopParameters = Type.Object({", "}, { additionalProperties: false });",
   'executionMode: "sequential"', 'name: "loop"', 'pi.registerCommand("loop"',
   'expandPromptTemplates: false', 'deliverAs: "steer" as const',
@@ -1335,6 +1373,22 @@ check(
   loopCreateBlock.indexOf("const scheduled = this.prepareSchedule") < loopCreateBlock.indexOf("this.loops.set(loop.id, loop)") &&
   loopCreateBlock.indexOf("this.loops.set(loop.id, loop)") < loopCreateBlock.indexOf("this.applySchedule(loop, scheduled)"),
   "Loop create must prepare before registry commit and activate only after commit",
+);
+const loopDeleteBlock = loopRuntime.slice(loopRuntime.indexOf("private delete("), loopRuntime.indexOf("private clear("));
+const loopClearBlock = loopRuntime.slice(loopRuntime.indexOf("private clear("), loopRuntime.indexOf("private pause("));
+hasAll(loopDeleteBlock, [
+  'if (loop.status === "active")', "Ask the user whether to pause this loop, then retry delete only if they agree.",
+  "this.cancelTimer(loop)", "this.cancelGatedFires(loop.id)", "this.loops.delete(loop.id)",
+], "Loop active-delete refusal and paused-delete lifecycle");
+hasAll(loopClearBlock, [
+  'filter((loop) => loop.status === "active")', "Ask the user whether to pause these loops, then retry clear only if they agree.",
+  "for (const loop of this.loops.values()) this.cancelTimer(loop)", "this.loops.clear()", "this.gatedFires = []",
+], "Loop clear atomic active precheck and paused cleanup");
+hasNone(loopClearBlock, ["this.generation", "generation +=", "clearRuntime("], "Loop clear must not reset runtime generation or unrelated runtime state");
+check(
+  loopClearBlock.indexOf('if (active.length > 0)') < loopClearBlock.indexOf("for (const loop of this.loops.values())") &&
+  loopClearBlock.indexOf('if (active.length > 0)') < loopClearBlock.indexOf("this.loops.clear()"),
+  "Loop clear must finish its active-loop precheck before mutating timers or records",
 );
 const loopApplySchedule = loopRuntime.slice(loopRuntime.indexOf("private applySchedule("), loopRuntime.indexOf("private acceptScheduledTimeout"));
 check(
@@ -1376,7 +1430,7 @@ hasAll(loopTranscriptRenderer, [
   'theme.bold(`Loops (${active}/${sorted.length})`)', "addCompleteLoop", 'addSection(container, theme, "Prompt"',
   'addField(container, theme, "Fired at"', "LoopFireLine", '· fire ${this.details.fireCount}',
   "ExpandableNotificationLine", 'theme.fg("muted", " (ctrl+o to expand)")', "visibleWidth(this.hint)",
-  'verbs: Record<Exclude<LoopAction, "list">, string>', '"Created"', '"Deleted"', '"Modified"', '"Paused"', '"Resumed"',
+  'verbs: Record<Exclude<LoopAction, "list" | "clear">, string>', '"Created"', '"Deleted"', '"Modified"', '"Paused"', '"Resumed"',
   'No change · loop', "fallbackResult(result, options, theme)",
 ], "Loop Ctrl+O and fire renderer visual contract");
 hasNone(loopTranscriptRenderer, ["\\u001b", "registerShortcut", "notify(", "overlay", '"Action"'], "Loop renderer theme-only visual contract");
@@ -1386,7 +1440,7 @@ const loopSchema = loopRuntime.slice(loopSchemaStart, loopSchemaEnd);
 check(!loopSchema.includes("anyOf:") && !loopSchema.includes("oneOf:"), "Loop schema root must not declare anyOf or oneOf");
 const loopSchemaDescriptions = [...loopSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
 const expectedLoopSchemaDescriptions = [
-  "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. list accepts no other fields.",
+  "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. clear and list accept no other fields.",
   "Exact eight-character lowercase hexadecimal loop ID for delete, modify, pause, or resume.",
   "Fixed delay for create or modify, from 10s through 7d. Format: one positive integer plus s, m, h, or d.",
   "Short loop summary for create or modify.",
@@ -1400,7 +1454,7 @@ const loopGuidelinesEnd = loopRuntime.indexOf("      ],", loopGuidelinesStart);
 const loopToolMetadata = loopRuntime.slice(loopToolStart, loopGuidelinesEnd);
 const loopDescription = propertyString(loopToolMetadata, "description", "Loop tool metadata");
 const loopPromptSnippet = propertyString(loopToolMetadata, "promptSnippet", "Loop tool metadata");
-check(loopDescription === "Create and manage runtime-only fixed-delay loops from 10s through 7d. Creation and resume wait one full interval before firing. Each later delay starts only after the previous tick finishes. Each fire delivers the stored prompt for a future turn. Loop state survives compaction and tree navigation within the current runtime. Reload, session replacement, and shutdown clear every loop. Actions return current loop state, change receipts, or the retained loop list.", "Loop description must match the reviewed contract");
+check(loopDescription === "Create and manage runtime-only fixed-delay loops from 10s through 7d. Creation and resume wait one full interval before firing. Each later delay starts only after the previous tick finishes. Each fire delivers the stored prompt for a future turn. Active loops must be paused before deletion or clearing. Loop state survives compaction and tree navigation within the current runtime. Reload, session replacement, and shutdown clear every loop. Actions return current loop state, change receipts, clear receipts, or the retained loop list.", "Loop description must match the reviewed contract");
 check(loopPromptSnippet === "Manage fixed-delay prompt loops.", "Loop promptSnippet must match the reviewed contract");
 checkSteBlock(loopDescription, "Loop description");
 checkSteBlock(loopPromptSnippet, "Loop promptSnippet");
@@ -1508,7 +1562,7 @@ hasNone(terminalRace, [
 ], "terminal steer and interrupt race receipts");
 check(runtime.indexOf("await this.reconcileRun(id)", listActionEnd) < statusActionStart, "status must reconcile its ID before reading the latest registry value");
 hasAll(runtime, [
-  'if ((action === "status" || action === "interrupt") && input.message !== undefined)',
+  'if ((action === "status" || action === "interrupt" || action === "delete") && input.message !== undefined)',
   'throw new Error(`${action} does not accept message.`)',
   'const createFields = ["agent", "abstract", "task", "cwd"]',
 ], "status action field isolation");
@@ -1525,28 +1579,45 @@ hasAll(resumeDispatch, [
 check(!resumeDispatch.includes('["agent", "task", "cwd"]'), "resume must accept an optional cwd override");
 const clearActionStart = runtime.indexOf('if (action === "clear") return this.clearRetainedRuns();');
 check(clearActionStart > listActionStart, "clear must dispatch from the same action switch as list");
+const deleteStart = runtime.indexOf("private async deleteRetainedRun(id: string)");
 const clearStart = runtime.indexOf("private async clearRetainedRuns()");
+const deleteImplementation = runtime.slice(deleteStart, clearStart);
 const clearEnd = runtime.indexOf("private async resume(", clearStart);
 const clearImplementation = runtime.slice(clearStart, clearEnd);
+hasAll(deleteImplementation, [
+  "await this.reconcileRun(id)", "const inFlight = this.reconciling.get(id)", "if (inFlight) await inFlight.catch(() => undefined)",
+  "ACTIVE_STATUSES.has(target.status)", "Ask the user whether to interrupt this run, then retry delete only if they agree.",
+  "this.deletingRunIds.add(id)", "const survivors = this.registry.list().filter((run) => run.id !== id)",
+  "this.purgeRetainedRuns([target], survivors)", "runJournalReplacementEntry(survivors)", "this.registry.delete(id)",
+  "this.clearedRunIds.add(id)", "this.clearQueuedNotificationsForRun(id)", "this.deletingRunIds.delete(id)",
+], "Subagent terminal delete, in-flight boundary, version-3 replacement, and retained-session ownership");
+check(
+  deleteImplementation.indexOf("ACTIVE_STATUSES.has(target.status)") < deleteImplementation.indexOf("this.deletingRunIds.add(id)") &&
+  deleteImplementation.indexOf("runJournalReplacementEntry(survivors)") < deleteImplementation.indexOf("this.registry.delete(id)"),
+  "Subagent delete must preflight activity and persist its replacement before removing registry state",
+);
+hasNone(deleteImplementation, [
+  "this.goalActivity.delete", "this.loadedGoalStatsSidecars.delete", "removeGoalStatsSidecar", "goalStatsRoot",
+], "Subagent delete must not change Goal statistics or their lazy-load state");
 hasAll(clearImplementation, [
   "await this.reconcileAll()", "ACTIVE_STATUSES.has(run.status)",
   "clear requires every retained run to reach a terminal status",
   "Ask the user whether to interrupt these active runs, then retry clear only if they agree.",
   "clearedCount: 0, warnings: [], changed: false", "No retained subagent runs to clear.",
-  "this.clearing = true", "this.purgeRetainedRuns(runs)", "runJournalClearEntry()",
+  "this.clearing = true", "this.purgeRetainedRuns(runs, [])", "runJournalClearEntry()",
   "this.clearedRunIds.add(run.id)", "this.queuedNotifications.clear()", "this.registry.clear()",
   "} finally {", "this.clearing = false",
 ], "atomic subagent clear plan");
 check(
-  clearImplementation.indexOf("this.purgeRetainedRuns(runs)") < clearImplementation.indexOf("runJournalClearEntry()") &&
+  clearImplementation.indexOf("this.purgeRetainedRuns(runs, [])") < clearImplementation.indexOf("runJournalClearEntry()") &&
   clearImplementation.indexOf("runJournalClearEntry()") < clearImplementation.indexOf("this.registry.clear()"),
   "clear must purge on disk, append its replacement snapshot, and only then empty the registry",
 );
 const purgeStart = runtime.indexOf("private purgeRetainedRuns(");
-const purgeEnd = runtime.indexOf("private async clearRetainedRuns()", purgeStart);
+const purgeEnd = runtime.indexOf("private async deleteRetainedRun(id: string)", purgeStart);
 const purge = runtime.slice(purgeStart, purgeEnd);
 hasAll(purge, [
-  "removeRunFiles(this.pathsFor(run.id))", "this.purgeChildSessionFiles(runs, [])",
+  "removeRunFiles(this.pathsFor(run.id))", "this.purgeChildSessionFiles(runs, retained)",
 ], "Subagent-owned run-directory and child-session clear guards");
 const clearBoundary = runtime.slice(purgeStart, clearEnd);
 hasNone(clearBoundary, [
@@ -1557,7 +1628,7 @@ hasNone(clearImplementation, [
 ], "subagent clear must preserve Goal stats memory and lazy-read state");
 hasAll(runtime, [
   "removeChildSessionFile(childDir, run.sessionFile)", "canonicalSessionFile", "another retained run still references it",
-  "private requireRun(id: string)", "was cleared from the subagent history",
+  "private requireRun(id: string)", "was removed from the retained subagent history",
   "this.registry.get(id) || this.clearedRunIds.has(id)",
   "if (this.shuttingDown || this.clearing) return", "if (this.clearing) return",
 ], "clear safety, cleared-ID reservation, and callback race guards");
@@ -1596,7 +1667,7 @@ hasAll(publicSchema, [
   'description: "Short run summary for create or resume."',
   'description: "Complete bounded objective for create."',
   "description: \"Working directory for create or resume. Relative paths resolve against the parent working directory. Create defaults to the parent working directory. Resume defaults to the source run's working directory.\"",
-  'description: "Retained run ID for status, steer, interrupt, resume, or reply."',
+  'description: "Retained run ID for status, steer, interrupt, resume, reply, or delete."',
 ], "subagent schema descriptions");
 const publicSchemaDescriptions = [...publicSchema.matchAll(/description:\s*("(?:\\.|[^"\\])*")/g)].map((match) => JSON.parse(match[1]));
 const expectedSubagentSchemaDescriptions = [
@@ -1604,8 +1675,8 @@ const expectedSubagentSchemaDescriptions = [
   "Short run summary for create or resume.",
   "Complete bounded objective for create.",
   "Working directory for create or resume. Relative paths resolve against the parent working directory. Create defaults to the parent working directory. Resume defaults to the source run's working directory.",
-  "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.",
-  "Retained run ID for status, steer, interrupt, resume, or reply.",
+  "Choose create, list, status, interrupt, steer, resume, reply, delete, or clear. create requires agent, abstract, and task, with optional cwd. status, interrupt, and delete require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.",
+  "Retained run ID for status, steer, interrupt, resume, reply, or delete.",
   "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.",
 ];
 check(JSON.stringify(publicSchemaDescriptions) === JSON.stringify(expectedSubagentSchemaDescriptions), "subagent schema descriptions must match the HOW contract");
@@ -1618,7 +1689,7 @@ const subagentDescription = propertyString(subagentToolMetadata, "description", 
 const subagentPromptSnippet = propertyString(subagentToolMetadata, "promptSnippet", "subagent tool metadata");
 const subagentGuidelineBlock = runtime.slice(subagentGuidelinesStart, subagentGuidelinesEnd);
 const subagentGuidelines = staticStrings(subagentGuidelineBlock, "subagent promptGuidelines");
-check(subagentDescription === "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context, optionally in another working directory. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.", "subagent description must match the reviewed contract");
+check(subagentDescription === "Create and manage retained specialist runs through nine lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context, optionally in another working directory. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent delete` removes one retained run only after it reaches a terminal status. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Deleting or clearing Subagent history never changes Goal statistics.", "subagent description must match the reviewed contract");
 check(subagentPromptSnippet === "Delegate and manage specialist runs.", "subagent promptSnippet must match the reviewed contract");
 checkSteBlock(subagentDescription, "subagent description");
 checkSteBlock(subagentPromptSnippet, "subagent promptSnippet");
@@ -1632,7 +1703,7 @@ const expectedSubagentGuidelines = [
   "Use `subagent steer` only for a genuine new instruction, not polling or reassurance.",
   "Use `subagent interrupt` only to stop a starting, running, or waiting run and wait for its final result.",
   "`subagent interrupt` is not rollback, so inspect partial file changes before continuing.",
-  "Use `subagent clear` only when every run is terminal and all retained history should be removed.",
+  "Use `subagent delete` for one terminal run, or `subagent clear` when all terminal history should be removed.",
 ];
 check(JSON.stringify(subagentGuidelines) === JSON.stringify(expectedSubagentGuidelines), "subagent promptGuidelines must match the reviewed array");
 checkSteGuidelines(subagentGuidelines, "subagent promptGuideline", "subagent");
@@ -1640,7 +1711,7 @@ const subagentGuidelineText = subagentGuidelines.join("\n");
 check(!/request ID|waitingSeq|deliveryKey|legacy|saved child-session/i.test(`${subagentDescription}\n${subagentPromptSnippet}\n${subagentGuidelineText}`), "subagent model metadata must not expose internal terms");
 check(!runtime.includes(REMOVED_WAIT_TOOL), "runtime must not register or mention the removed wait tool");
 hasAll(core, [
-  '"create"', '"list"', '"status"', '"interrupt"', '"steer"', '"resume"', '"reply"', '"clear"',
+  '"create"', '"list"', '"status"', '"interrupt"', '"steer"', '"resume"', '"reply"', '"delete"', '"clear"',
   "RunJournalReplacement", "version: 3", "runJournalReplacementEntry", "runJournalClearEntry",
   "clearedRunIds", "everSeen", "clear(): void",
   '"starting"', '"running"', '"waiting"', '"completed"', '"failed"', '"interrupted"',
@@ -1650,7 +1721,7 @@ hasAll(core, [
   'status === "starting"', "right.updatedAt.localeCompare(left.updatedAt)", "right.createdAt.localeCompare(left.createdAt)",
 ], "runtime core");
 hasNone(core, [...REMOVED_CAPABILITIES, "SUPERVISOR_ACTIONS", "SUPERVISOR_PUBLIC_FIELDS", "pending(): SupervisorRequest", "replyTo"], "runtime core");
-check(/SUBAGENT_ACTIONS = \[\s*"create",\s*"list",\s*"status",\s*"interrupt",\s*"steer",\s*"resume",\s*"reply",\s*"clear",\s*\] as const/.test(core), "SUBAGENT_ACTIONS must keep the exact unified action order");
+check(/SUBAGENT_ACTIONS = \[\s*"create",\s*"list",\s*"status",\s*"interrupt",\s*"steer",\s*"resume",\s*"reply",\s*"delete",\s*"clear",\s*\] as const/.test(core), "SUBAGENT_ACTIONS must keep the exact unified action order");
 
 hasAll(checkpoint, [
   "export const CHECKPOINT_RESUME_TEXT", "export function completedToolBatch",
@@ -1834,6 +1905,14 @@ hasAll(subagentRuntimeTests, [
   "getGoalStatsSidecarPaths", "writeGoalStatsSidecar", "readGoalStatsSidecar", "run-directory GC never deletes session-owned Goal stats sidecars",
 ], "Subagent Goal stats sidecar security, bounded-write, and cross-branch tests");
 hasAll(subagentRuntimeTests, [
+  "delete rejects starting, running, and waiting runs without deleting journals or files",
+  "delete succeeds for completed, failed, and interrupted runs and reports removed status",
+  "delete purges run files and only exclusively owned child sessions while preserving warnings",
+  "delete writes a version-3 replacement and suppresses a late target upsert during the guard",
+  "delete waits for an existing reconciliation promise before removing the run",
+  "delete keeps the registry unchanged when replacement append fails and retries after missing-file cleanup",
+  "delete cancels only target notifications and leaves other queued delivery intact",
+  "delete never changes Goal statistics, sidecars, or lazy-load bookkeeping",
   "clear rejects while any run stays active and changes nothing",
   "clear on empty terminal history is a no-change without a clear journal entry",
   "clear removes terminal run directories and appends one version-3 replacement snapshot",
@@ -1844,7 +1923,7 @@ hasAll(subagentRuntimeTests, [
   "clear empties registry, list, and widget while Goal stats remain lazy-readable",
   "clear retains an unsafe run directory and still clears the registry consistently",
   "clear blocks poll and agent-settled callbacks from reviving a targeted run",
-  "every ID-bearing action reports a cleared run explicitly and never reuses its ID",
+  "every ID-bearing action reports a removed run explicitly and never reuses its ID",
   "clear rejects unknown fields and stays exactly { action: clear }",
   "guarded child session removal rejects unsafe paths directly",
   "subagent list stays compact across all six statuses while status isolates one latest retained result",
@@ -1900,7 +1979,7 @@ hasAll(subagentWidgetTests, [
   "clearing every retained run removes the widget",
   "↻  0 · 5.0s", "[●⠋↻◦✓] [^ ]|[●⠋↻◦✓] {3}", "visibleWidth(line) <= terminalWidth",
   "persistent widget heading counts terminal over retained runs with Todo-parity active and idle roles",
-  "persistent widget heading refreshes on every live-to-terminal flip and clears with the last retained run",
+  "a single retained ID disappearing updates widget counts and the last removal retracts the section",
   '"**●**  **Agents (5/8)**"', '"○  Agents (5/5)"', '"**●**  **Agents (1/2)**"', '"**●**  **Agents (2/3)**"',
   '"\\u001b[35m\\u001b[1m●\\u001b[22m\\u001b[0m  \\u001b[35m\\u001b[1mAgents (5/8)\\u001b[22m\\u001b[0m"',
   '"\\u001b[2m○\\u001b[0m  \\u001b[2mAgents (5/5)\\u001b[0m"',
@@ -1908,7 +1987,7 @@ hasAll(subagentWidgetTests, [
   "an all-terminal widget must not render any accent role",
   "the idle heading must stay dim without bold emphasis",
   "hidden rows never change the retained counts", "two hidden terminal rows still count toward the heading",
-  "clearing every retained run unregisters the widget", "roleAnsiTheme",
+  "removing the last retained ID retracts the widget", "roleAnsiTheme",
   "collapsed Agents body keeps starting, running, and waiting rows and hides every terminal run",
   "expanded keeps the previous body byte for byte",
   '"**●**  **Agents (3/6)** · ctrl+o to expand"', '["○  Agents (3/3) · ctrl+o to expand"]',
@@ -1976,7 +2055,7 @@ const todoSchemaBlock = todoExtension.slice(0, todoExtension.indexOf("export con
 hasAll(todoSchemaBlock, [
   'description: "Choose list or update. list accepts no operations. update requires one or more ordered operations."',
   'description: "Ordered append, modify, delete, or clear operations for update. Omit for list."',
-  'description: "Use clear at most once after every current item is completed."',
+  'description: "Use clear at most once."',
   'description: "Replacement status: pending, in_progress, or completed."',
   'description: "Initial dependencies for the appended item."',
   'description: "Dependencies to add to the target item."',
@@ -2011,7 +2090,7 @@ const expectedTodoSchemaDescriptions = [
   "delete requires target.",
   "Exact subject to delete.",
   "clear accepts no other fields.",
-  "Use clear at most once after every current item is completed.",
+  "Use clear at most once.",
   "Choose list or update. list accepts no operations. update requires one or more ordered operations.",
   "Ordered append, modify, delete, or clear operations for update. Omit for list.",
 ];
@@ -2019,9 +2098,9 @@ check(JSON.stringify(todoSchemaDescriptions) === JSON.stringify(expectedTodoSche
 for (const description of todoSchemaDescriptions) checkSchemaHow(description, "Todo schema description");
 hasAll(todoExtension, [
   'export const TODO_PROMPT_SNIPPET = "Track session tasks and dependencies."',
-  'description: "Read or atomically update a session-local task ledger. `todo list` returns every item in original order. `todo update` applies ordered append, modify, delete, or clear operations as one batch. Multiple items may be in progress. Dependencies must form an acyclic graph and reference exact existing subjects. Deleting a referenced item is rejected. Clear is allowed only for an empty list or a fully completed task group. Any invalid operation or final graph rolls back the entire batch."',
+  'description: "Read or atomically update a session-local task ledger. `todo list` returns every item in original order. `todo update` applies ordered append, modify, delete, or clear operations as one batch. Multiple items may be in progress. Dependencies must form an acyclic graph and reference exact existing subjects. Deleting an in_progress item is rejected before dependency checks. Deleting a referenced item is rejected. Clear rejects every current in_progress item. It removes all pending and completed items. Any invalid operation or final graph rolls back the entire batch."',
 ], "Todo tool metadata");
-const todoDescription = "Read or atomically update a session-local task ledger. `todo list` returns every item in original order. `todo update` applies ordered append, modify, delete, or clear operations as one batch. Multiple items may be in progress. Dependencies must form an acyclic graph and reference exact existing subjects. Deleting a referenced item is rejected. Clear is allowed only for an empty list or a fully completed task group. Any invalid operation or final graph rolls back the entire batch.";
+const todoDescription = "Read or atomically update a session-local task ledger. `todo list` returns every item in original order. `todo update` applies ordered append, modify, delete, or clear operations as one batch. Multiple items may be in progress. Dependencies must form an acyclic graph and reference exact existing subjects. Deleting an in_progress item is rejected before dependency checks. Deleting a referenced item is rejected. Clear rejects every current in_progress item. It removes all pending and completed items. Any invalid operation or final graph rolls back the entire batch.";
 const todoPromptSnippet = "Track session tasks and dependencies.";
 checkSteBlock(todoPromptSnippet, "Todo promptSnippet");
 checkSteBlock(todoDescription, "Todo description");
@@ -2034,12 +2113,24 @@ const expectedTodoGuidelines = [
   "Preserve existing `todo` items unless the user or current work requires a change.",
   "Finish current in-progress `todo` work before appended work unless blocked or explicitly reordered.",
   "Complete each `todo` dependency before starting or completing its dependent item.",
-  "Remove all `todo` dependency references before deleting their target.",
-  "Use `todo` clear only after the current group finishes, then append the replacement group.",
+  "Remove all `todo` dependency references before deleting a pending or completed target.",
+  "Ask whether to set each in_progress `todo` item pending or completed before deleting or clearing it.",
 ];
 check(JSON.stringify(todoGuidelines) === JSON.stringify(expectedTodoGuidelines), "Todo promptGuidelines must match the reviewed array");
 checkSteGuidelines(todoGuidelines, "Todo promptGuideline", "todo");
-const todoGuidelineText = todoGuidelines.join("\n");
+const todoChildGuidelineStart = todoExtension.indexOf("export const TODO_CHILD_PROMPT_GUIDELINES = [");
+const todoChildGuidelineEnd = todoExtension.indexOf("] as const;", todoChildGuidelineStart);
+const todoChildGuidelines = staticStrings(todoExtension.slice(todoChildGuidelineStart, todoChildGuidelineEnd), "Todo child promptGuidelines");
+const expectedTodoChildGuidelines = [
+  "Keep each child-session `todo` status accurate before contacting the orchestrator.",
+  "Use `todo` dependencies to expose blockers before requesting an orchestrator decision.",
+];
+check(JSON.stringify(todoChildGuidelines) === JSON.stringify(expectedTodoChildGuidelines), "Todo child promptGuidelines must match the reviewed array");
+checkSteGuidelines(todoChildGuidelines, "Todo child promptGuideline", "todo");
+hasAll(todoExtension, [
+  'process.env.PI_SUBAGENT_CHILD === "1" ? TODO_CHILD_PROMPT_GUIDELINES : []',
+], "Todo child-only prompt guideline registration");
+const todoGuidelineText = [...todoGuidelines, ...todoChildGuidelines].join("\n");
 check(!/\b(?:snapshot|replay|store|version|widget|ID)\b/i.test(todoGuidelineText), "Todo promptGuidelines must not expose internal terms");
 
 const modelMetadataAudit = [
@@ -2061,7 +2152,7 @@ const modelMetadataAudit = [
   {
     name: "monitor", description: monitorDescription, promptSnippet: monitorPromptSnippet,
     schemaDescriptions: monitorSchemaDescriptions, guidelines: monitorGuidelines,
-    internalTerms: ["generation", "instance", "deliveryKey", "cursor", "sidecar", "notificationCursor"],
+    internalTerms: ["generation", "instance", "deliveryKey", "cursor", "sidecar", "notificationCursor", "stopOwned", "stopping"],
   },
   {
     name: "subagent", description: subagentDescription, promptSnippet: subagentPromptSnippet,
@@ -2100,6 +2191,21 @@ for (const metadata of modelMetadataAudit) {
     check(!visibleText.includes(term.toLowerCase()), `${metadata.name} audited metadata exposes internal term: ${term}`);
   }
 }
+const mainGuidelineCount = askGuidelines.length + goalGuidelines.length + loopGuidelines.length + monitorGuidelines.length + subagentGuidelines.length + todoGuidelines.length;
+const childGuidelineCount = contactGuidelineValues.length + todoGuidelines.length + todoChildGuidelines.length;
+check(mainGuidelineCount === 30, `main tool metadata must expose exactly 30 prompt guidelines, got ${mainGuidelineCount}`);
+check(childGuidelineCount === 10, `child tool metadata must expose exactly 10 prompt guidelines, got ${childGuidelineCount}`);
+hasNone(`${goalSchema}\n${loopSchema}\n${monitorSchema}\n${publicSchema}\n${todoSchemaBlock}`, [
+  "confirmed", "force",
+], "Goal, Loop, Monitor, Subagent, and Todo public schemas must expose no confirmation or force bypass");
+hasAll(loopRuntime.slice(loopRuntime.indexOf("const ACTION_FIELDS"), loopRuntime.indexOf("const UNIT_MILLISECONDS")), [
+  'create: ["action", "interval", "abstract", "prompt"]', 'delete: ["action", "id"]', 'clear: ["action"]',
+  'modify: ["action", "id", "interval", "abstract", "prompt"]', 'list: ["action"]', 'pause: ["action", "id"]', 'resume: ["action", "id"]',
+], "Loop exact action fields with clear requiring no id");
+hasAll(monitorRuntime.slice(monitorRuntime.indexOf("const ACTION_FIELDS"), monitorRuntime.indexOf("const ANSI_PATTERN")), [
+  'create: ["action", "abstract", "command", "cwd", "checkAfter", "notifyOn"]', 'stop: ["action", "id"]',
+  'delete: ["action", "id"]', 'clear: ["action"]', 'list: ["action"]', 'status: ["action", "id", "start", "end"]',
+], "Monitor exact action fields with clear requiring no id");
 const commandMetadataAudit = [
   { name: "/goal", description: goalCommandDescription },
   { name: "/loop", description: loopCommandDescription },
@@ -2116,6 +2222,18 @@ hasAll(todoCore, [
 hasNone(`${todoCore}\n${todoGuidelineText}`, [
   "at most one task can be in_progress", "at most one item in_progress",
 ], "Todo multiple in_progress contract");
+const todoUpdateBlock = todoCore.slice(todoCore.indexOf("export function applyTodoUpdate"), todoCore.indexOf("function parseTask"));
+hasAll(todoUpdateBlock, [
+  "const draft = cloneTasks(current)", 'const inProgress = draft.filter((task) => task.status === "in_progress")',
+  "clear cannot remove in_progress items", "Ask the user whether to set them back to pending or mark them completed",
+  'const index = draft.findIndex((task) => task.subject === operation.target)',
+  'if (draft[index].status === "in_progress")', "then retry delete only if they agree.",
+], "Todo draft-relative in_progress delete and clear gates");
+check(
+  todoUpdateBlock.indexOf('const inProgress = draft.filter((task) => task.status === "in_progress")') < todoUpdateBlock.indexOf("draft.splice(0, draft.length)") &&
+  todoUpdateBlock.indexOf('if (draft[index].status === "in_progress")') < todoUpdateBlock.indexOf("const referrers = draft"),
+  "Todo must preflight draft-relative in_progress status before clear mutation or delete dependency checks",
+);
 hasAll(todoWidget, [
   "MAX_TODO_WIDGET_LINES = 12", 'theme.bold("●")', 'theme.bold(`Todos (${completed}/${tasks.length})`)', '"○"', '"◐"', '"✓"', 'theme.fg("dim", "⛓")',
   'theme.strikethrough', '"├─"', '"└─"', "hiddenSummary", 'TODO_SECTION_ID = "todos"',
@@ -2261,8 +2379,8 @@ check(existsSync(join(ROOT, "tests/loop-load.test.mjs")), "Loop real-Pi load tes
 const loopUiTests = read("tests/loop-ui.test.mjs");
 hasAll(loopUiTests, [
   "exact heading, glyph priority, counts, order", "caps at 12 lines", "one shared 1s timer",
-  "all six actions", "uniform collapsed hints", "(ctrl+o to expand)", "Action:",
-  "compact receipts", "result fallback", "fire renderer", "without mutation",
+  "all seven actions", "uniform collapsed hints", "(ctrl+o to expand)", "Action:",
+  "compact receipts", "clear receipts", "error fallback", "fire renderer", "without mutation",
   "· fire 3 (ctrl+o to expand)", "Legacy first  line (ctrl+o to expand)",
   "├─ ↻  middle", "[↻!Ⅱ●] [^ ]|[↻!Ⅱ●] {3}", "wideAnsi", "visibleWidth(line) <= 28",
   'assert.equal(lines[0], "●  Loops")', "the Loops heading carries no active/total ratio",
@@ -2361,8 +2479,8 @@ hasAll(providerSchemaTests, [
 ], "provider schema JSON audit");
 const monitorTests = read("tests/monitor.test.mjs");
 hasAll(monitorTests, [
-  "real detached descendant holding a pipe cannot block sequential delete",
-  "delete and shutdown isolate EPERM or unknown process-group errors",
+  "real detached descendant holding a pipe cannot block sequential stop",
+  "shutdown invalidates first, signals all groups in parallel, kills survivors, clears blockers and log root, and is idempotent",
   "bounded recent-line ring without reading the JSONL file",
   "status scans JSONL from the tail in chunks",
   "write, rename, and rollover reopen failures",
@@ -2383,12 +2501,19 @@ hasAll(monitorTests, [
   "zero incremental lines stay legal and never replay retained history",
   "terminal notification must not carry full state field",
   "monitor status stays the only full retained state and log entry point",
-], "Monitor focused process, logging, delivery, payload, and Goal-reservation tests");
+  "stop owns terminal delivery, sends TERM then KILL, preserves the real killed state, and retains logs",
+  "stop reports raced and already-terminal outcomes and folds pending matches into its complete state once",
+  "stop preserves an already queued matcher update while suppressing only its terminal update",
+  "an unconfirmed stop force-fails and quiesces every resource without deleting retained state",
+  "running delete and clear reject with zero mutation, then terminal clear removes every record",
+  "terminal delete and clear report log removal failures but still remove records",
+  "shutdown waits for an owned stop before scanning and never sends duplicate TERM or KILL",
+], "Monitor focused process, logging, delivery, payload, stop ownership, and Goal-reservation tests");
 const monitorUiTests = read("tests/monitor-ui.test.mjs");
 hasAll(monitorUiTests, [
   "the exact terminal/total heading ratio, glyphs, running/terminal order, overflow, width safety, and empty state",
   "throttles and coalesces output", "registers once", "invalidate a no-op", "rebinds", "disposes",
-  "all four actions", "uniform hints", "full operational state", "forced warnings", "global summary notifications",
+  "all six actions", "uniform hints", "full operational state", "never fall through to model content", "global summary notifications",
   "matched 2 (ctrl+o to expand)", "rate limited (ctrl+o to expand)", '${status} (ctrl+o to expand)',
   "Monitor unified update notifications collapse by status and expand one incremental layout without full operational state",
   "Monitor legacy matcher, legacy terminal, and global summary notifications still render complete bounded details",
@@ -2427,7 +2552,7 @@ hasAll(loopLoadTests, [
   "real Pi isolated RPC main and child sessions expose exact package tools without widgets",
   '["ask_user_question", "goal", "loop", "monitor", "subagent", "todo"]', '["contact_supervisor", "todo"]',
   'events.some((event) => event.type === "extension_ui_request" && event.method === "setWidget")',
-  '["create", "list", "status", "interrupt", "steer", "resume", "reply", "clear"]',
+  '["create", "list", "status", "interrupt", "steer", "resume", "reply", "delete", "clear"]',
   "assert.deepEqual(main.systemPromptToolLines, Object.entries(main.promptSnippets)",
   "assert.deepEqual(child.systemPromptToolLines, Object.entries(child.promptSnippets)",
   "assert.deepEqual(main.flattenedGuidelines, Object.values(main.guidelinesByTool).flat())",
@@ -2445,12 +2570,12 @@ hasAll(goalTests, [
   "user abort pauses, host abort does not", "no-progress counts only automatic continuation runs", "ownership and Goal view stats",
   "slash command resends a real user message", "continuationNumber", "refreshUI()",
   "clear is a no-op with no Goal and never appends a tombstone",
-  "clear erases a completed or a cancelled Goal through a null tombstone",
-  "clear refuses every nonterminal Goal and tells the model to ask the user before cancelling",
+  "clear erases a paused, completed, or cancelled Goal through a null tombstone",
+  "clear rejects active and retry_wait Goals without state changes or timer cancellation",
   "replay and stats treat only an exact null payload as an erasure",
   "restoring a cleared branch yields no Goal and writes nothing new",
   "clear notifies subscribers and the widget with a null Goal without an automatic state message",
-  "clear drops the retry timer, deferred continuation work, and queued state notifications",
+  "clearing a paused Goal drops deferred continuation work and queued state notifications",
   "a Goal created after a clear is a fresh instance whose stats exclude the cleared Goal",
 ], "Goal focused durable state, lifecycle, gate, retry, abort, ownership, stats, numbering, clear, and registration tests");
 hasAll(goalUiTests, [
@@ -2549,25 +2674,25 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "Exactly `contact_supervisor` and `todo`",
         "never automatically uninstalls external packages",
         "every retained run", "compact public state", "never includes terminal `output` or `error`", "`status` with one retained run ID", "same retained set and ordering",
-        "refused while any run is `starting`, `running`, or `waiting`", "without rolling back file changes", "never changes Goal statistics",
+        "Remove one retained terminal run", "The main model must ask before calling `interrupt`", "without rolling back file changes", "Neither operation changes Goal statistics",
         "saved child session as a new run with a new ID and optionally override its cwd. Omitted cwd inherits the source run's working directory", "continue that same run",
         "always runs on the model your current preset resolves for that agent",
         "the reused child session is compacted once before the resumed run is prompted",
         "A change of thinking level alone reuses the session unchanged",
         "any other compaction failure fails the run instead of prompting it",
-        "matched exactly", "atomic", "still names the target in `blockedBy`", "Multiple items may be `in_progress`", "acyclic graph", "`clear` requires an empty or fully completed current group",
-        "runtime-only fixed-delay", "Creation and resume wait one full interval", "reload, new session, session resume, fork, or quit",
-        "case-sensitive literal matching", "remain available until `delete`", "Use `status`",
+        "matched exactly", "atomic", "still names it in `blockedBy`", "Multiple items may be `in_progress`", "acyclic graph", "draft-relative `in_progress` status",
+        "runtime-only fixed-delay", "Creation and resume wait one full interval", "active loop cannot be deleted", "reload, new session, session resume, fork, or quit",
+        "case-sensitive literal matching", "`stop` preserves the terminal record and retained log", "does not send another terminal notification", "available until `delete` or `clear`",
         "`checkAfter` is required on `create`", "a silence reminder asks you to call `monitor status`", "`lastOutputAt`",
         "one to four questions", "single-select", "multi-select", "custom responses", "previews", "unavailable while a Goal is active",
         "branch-local durable Goal", "restore unfinished work as paused", "Provider failures retry automatically", "user aborts pause instead of cancelling", "one non-empty evidence item for each criterion",
         "active or waiting subagents", "Monitor work", "waiting Ask dialog",
         "A completed Goal's detail row joins the shared Ctrl+O collapse",
         "every other status keeps both rows in either state",
-        "removes only a completed or cancelled Goal from the branch",
-        "the model must ask you whether to cancel it first, then retry only if you agree",
+        "removes a paused, completed, or cancelled Goal from the branch",
+        "An `active` or `retry_wait` Goal blocks `clear`", "must ask whether to pause or cancel it",
         "A cleared branch reports no Goal at all",
-        "leaving the retained subagent runs behind them untouched",
+        "leaving retained subagent runs untouched", "no `confirmed` or `force` field",
         "safely queued during compaction and tree operations", "collapsed and expanded views", "compact widgets",
         "successful subagent `clear` remains clear after reload",
       ]
@@ -2576,25 +2701,25 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "精确为 `contact_supervisor` 与 `todo`",
         "不会自动卸载外部 package",
         "全部 retained run", "精简公开状态", "绝不包含 terminal `output` 或 `error`", "单个 retained run ID 调用 `status`", "相同的 retained 集合与排序",
-        "存在 `starting`、`running` 或 `waiting` run，`clear` 就会被拒绝", "不回滚文件修改", "不会改变 Goal statistics",
+        "删除一个 retained terminal run", "main model 必须先询问是否执行 `interrupt`", "不回滚文件修改", "都不改变 Goal statistics",
         "保存的 child session 创建新 run，并生成新 ID。可选覆盖 cwd，省略时继承 source run 的工作目录", "继续同一个 run",
         "始终使用当前 preset 为该 agent 解析出的 model",
         "会在 resumed run 收到第一个 prompt 之前先被 compact 一次",
         "仅 thinking level 变化时，session 会被原样复用",
         "其他任何 compaction 失败都会让该 run 失败",
-        "使用 exact match", "原子的", "仍在 `blockedBy` 中引用目标", "多个 item 可以同时处于 `in_progress`", "无环图", "`clear` 要求当前组为空或全部 completed",
-        "runtime-only fixed-delay", "创建和恢复后都会先等待一个完整 interval", "reload、new session、session resume、fork 或 quit",
-        "区分大小写的 literal match", "一直保留到 `delete`", "用 `status`",
+        "使用 exact match", "原子性", "仍在 `blockedBy` 中引用目标", "多个 item 可以同时处于 `in_progress`", "无环图", "batch draft 中目标的当前状态",
+        "runtime-only fixed-delay", "创建和恢复后都会先等待一个完整 interval", "active loop 不能被 `delete`", "reload、new session、session resume、fork 或 quit",
+        "区分大小写的 literal match", "`stop` 会保留 terminal record 与 retained log", "不会再发送另一条 terminal notification", "一直保留到 `delete` 或 `clear`",
         "`checkAfter` 在 `create` 时必填", "就会收到一条 silence reminder", "`lastOutputAt`",
         "一到四个 question", "single-select", "multi-select", "custom response", "preview", "Goal active 时不可用",
         "branch-local durable Goal", "恢复为 paused", "provider failure 会自动重试", "用户 abort 也会暂停而不是取消", "每条 criterion 必须精确对应一条非空 evidence",
         "active 或 waiting subagent", "Monitor 工作", "waiting Ask dialog",
         "completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠",
         "其他状态在折叠与展开下都保留两行",
-        "只会从 branch 上移除 completed 或 cancelled 的 Goal",
-        "模型必须先询问你是否要取消它，只有在你同意后才可以重试",
+        "可从 branch 上移除 paused、completed 或 cancelled Goal",
+        "`active` 或 `retry_wait` Goal 会阻止 `clear`", "必须先询问是否暂停或取消",
         "清理后的 branch 报告没有任何 Goal",
-        "产生这些统计的 retained subagent run 保持不变",
+        "retained subagent run 保持不变", "没有 `confirmed` 或 `force` 字段",
         "compaction 与 tree operation 期间", "collapsed/expanded", "紧凑 widget",
         "subagent `clear` 在 reload 后仍保持清空",
       ], `${file} visible behavior contract`);
@@ -2604,15 +2729,15 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
   const loop = section("### `loop`", "### `monitor`");
   const monitor = section("### `monitor`", "### `ask_user_question`");
   const goal = section("### `goal`", english ? "## `/loop` and `/goal`" : "## `/loop` 与 `/goal`");
-  expectTableItems("subagent", subagent, ["create", "list", "status", "interrupt", "steer", "resume", "reply", "clear"]);
+  expectTableItems("subagent", subagent, ["create", "list", "status", "interrupt", "steer", "resume", "reply", "delete", "clear"]);
   expectTableItems("Todo", todo, ["list", "update", "append", "modify", "delete", "clear"]);
-  expectTableItems("Loop", loop, ["create", "delete", "modify", "list", "pause", "resume"]);
-  expectTableItems("Monitor", monitor, ["create", "delete", "list", "status"]);
+  expectTableItems("Loop", loop, ["create", "delete", "clear", "modify", "list", "pause", "resume"]);
+  expectTableItems("Monitor", monitor, ["create", "stop", "delete", "clear", "list", "status"]);
   expectTableItems("Goal", goal, ["create", "modify", "status", "pause", "resume", "complete", "cancel", "clear"]);
 
   hasNone(text, [
     "RpcClient", "launch.json", "state.json", "control/", "setImmediate", "compaction_end", "triggerTurn: true", 'deliverAs: "steer"',
-    "64 MiB", "32 MiB", "64 KiB", "100 ms", "mode-0600", "appendEntry", "retry_wait", "10 s, 30 s",
+    "64 MiB", "32 MiB", "64 KiB", "100 ms", "mode-0600", "appendEntry", "10 s, 30 s",
     "replacement wins", "Goal-owned", "file-tool nudge", "notification ACK", "acknowledgement",
   ], `${file} excludes internal implementation detail`);
   check(!/(waitingSeq|deliveryKey|instanceKey|generation|notificationCursor|sidecar|timer[ -]?token|journal version|version[- ]?[123])/i.test(text), `${file} must not expose internal persistence or delivery terms`);
@@ -2699,7 +2824,7 @@ hasAll(transcriptRenderer, [
   'addField(container, theme, "Cwd", args.cwd, "(source run cwd)")',
   "clearReceipt", "details.clearedCount", "details.warnings", "details.changed === true",
   "expanded?: boolean", "context.expanded === true", "options.expanded === true", "terminal && expanded",
-  "fallbackResult(result, theme, options.isPartial === true, expanded)",
+  "fallbackResult(result, theme, options.isPartial === true, expanded, options.isError === true)",
 ], "subagent transcript renderer");
 hasNone(transcriptRenderer, [
   "gotgenes", "Nico", "preview", "truncated", '"Subagent result"', "renderRunSection", "addActivity",
@@ -3190,7 +3315,9 @@ hasAll(viewerTests, [
   "the cutoff excludes every entry type, not only messages",
   "with a cutoff in force an entry with a missing or invalid timestamp is dropped",
   "appending to a shared file never rebuilds a frozen run's body",
-  "a read that lands after clear never writes a cache entry or repaints",
+  "removing the selected retained ID chooses its neighbour",
+  "removing the last retained ID returns the viewer to Main",
+  "a late read for a removed retained ID never revives its selection or body",
   "a waiting file that never appears is read every tick but rebuilt once",
   "a mounted regular-mode overlay enables wheel reporting exactly once and restores it on close",
   "a stale handle from an already closed open never enables wheel reporting",

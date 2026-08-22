@@ -25,7 +25,7 @@ import {
 } from "./monitor-transcript-renderer.js";
 import { MonitorWidget, type MonitorWidgetItem } from "./monitor-widget.js";
 
-export const MONITOR_ACTIONS = ["create", "delete", "list", "status"] as const;
+export const MONITOR_ACTIONS = ["create", "stop", "delete", "clear", "list", "status"] as const;
 export const MONITOR_PUBLIC_FIELDS = ["action", "abstract", "command", "cwd", "checkAfter", "notifyOn", "id", "start", "end"] as const;
 export const MONITOR_NOTIFICATION_TYPE = "oh-my-pi-slim:monitor-notification";
 export const MONITOR_STATUSES = ["running", "completed", "failed", "killed"] as const;
@@ -34,6 +34,7 @@ export const MONITOR_MAX_CHECK_AFTER_MS = 7 * 24 * 60 * 60 * 1_000;
 
 export type MonitorAction = (typeof MONITOR_ACTIONS)[number];
 export type MonitorStatus = (typeof MONITOR_STATUSES)[number];
+export type MonitorStopOutcome = "already-terminal" | "stopped" | "raced" | "unconfirmed";
 export type MonitorStream = "stdout" | "stderr";
 export type MonitorNotificationKind = "matcher" | "silence" | "summary" | "terminal";
 export type MonitorStateChangeReason = "lifecycle" | "output" | "notification";
@@ -163,7 +164,8 @@ interface MonitorRecord {
   exitCodeSeen: number | null;
   signalSeen: string | null;
   processError: string | null;
-  deleting: boolean;
+  terminating: boolean;
+  stopOwned: boolean;
   generation: number;
   terminalPromise: Promise<void>;
   terminalResolved: boolean;
@@ -215,11 +217,6 @@ interface NotificationLines {
   truncated: boolean;
 }
 
-interface DeleteResult {
-  forced: boolean;
-  warning?: string;
-}
-
 interface PreparedSilenceCheck {
   timer: TimerHandle;
   token: number;
@@ -264,7 +261,9 @@ export interface MonitorRuntimeOptions {
 
 const ACTION_FIELDS: Record<MonitorAction, readonly string[]> = {
   create: ["action", "abstract", "command", "cwd", "checkAfter", "notifyOn"],
+  stop: ["action", "id"],
   delete: ["action", "id"],
+  clear: ["action"],
   list: ["action"],
   status: ["action", "id", "start", "end"],
 };
@@ -463,7 +462,7 @@ function parseStructuredLine(buffer: Buffer): StructuredLogLine | undefined {
 
 export const monitorParameters = Type.Object({
   action: Type.Union(MONITOR_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. delete requires id. status requires id, with optional start and end. list accepts no other fields.",
+    description: "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. stop, delete, and status require id. clear and list accept no other fields. status optionally accepts start and end.",
   }),
   abstract: Type.Optional(Type.String({ description: "Short command summary for create." })),
   command: Type.Optional(Type.String({
@@ -478,7 +477,7 @@ export const monitorParameters = Type.Object({
     uniqueItems: true,
     description: "Up to 20 unique case-sensitive literal matchers for create. Each matcher is at most 500 characters.",
   })),
-  id: Type.Optional(Type.String({ description: "Exact eight-character lowercase hexadecimal monitor ID for delete or status." })),
+  id: Type.Optional(Type.String({ description: "Exact eight-character lowercase hexadecimal monitor ID for stop, delete, or status." })),
   start: Type.Optional(Type.Integer({ minimum: 0, description: "Newest retained log lines to skip for status. Defaults to 0." })),
   end: Type.Optional(Type.Integer({
     minimum: 1,
@@ -519,6 +518,7 @@ export class MonitorRuntime {
   private readonly makeLogRoot: () => string;
   private readonly fs: MonitorFs;
   private readonly records = new Map<string, MonitorRecord>();
+  private readonly stopping = new Map<string, Promise<ReturnType<typeof toolText>>>();
   private readonly notifications = new Map<string, PendingNotification>();
   private readonly subscribers = new Set<(change: MonitorStateChange) => void>();
   private readonly widget: MonitorWidget;
@@ -578,7 +578,7 @@ export class MonitorRuntime {
       name: "monitor",
       label: "Monitor",
       executionMode: "sequential",
-      description: "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.",
+      description: "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor stop` terminates a running group and returns its complete terminal state. `monitor delete` removes one terminal record, while `monitor clear` removes all terminal records. Running records must be stopped only after user agreement. Terminal records remain available until deletion or clearing. Runtime shutdown terminates active groups and clears retained monitor data.",
       promptSnippet: "Supervise long-running foreground commands.",
       promptGuidelines: [
         "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
@@ -680,9 +680,11 @@ export class MonitorRuntime {
     }
     if (this.shuttingDown) throw new Error("Monitor runtime is shutting down.");
     if (action === "create") return this.create(input, ctx);
+    if (action === "clear") return this.clear();
     const id = exactId(input.id);
     const record = this.records.get(id);
     if (!record) throw new Error(`Monitor ${id} was not found.`);
+    if (action === "stop") return this.stop(record);
     if (action === "delete") return this.delete(record);
     const start = integer(input.start, "start", 0);
     const end = integer(input.end, "end", 100);
@@ -711,24 +713,33 @@ export class MonitorRuntime {
   }
 
   private async performShutdown(): Promise<void> {
-    this.generation += 1;
     this.shuttingDown = true;
     this.widgetUnsubscribe?.();
     this.widgetUnsubscribe = undefined;
     this.widget.dispose();
-    const records = [...this.records.values()];
     try {
+      const stopping = [...this.stopping.values()];
+      if (stopping.length > 0) await Promise.allSettled(stopping);
+      this.generation += 1;
+      const generation = this.generation;
+      const records = [...this.records.values()];
       const active = records.filter((record) => record.status === "running");
       for (const record of active) {
-        record.deleting = true;
+        record.terminating = true;
+        this.cancelSilence(record);
+        this.cancelMatchTimer(record);
         this.trySignal(record, "SIGTERM", "shutdown TERM");
       }
       await this.waitForRecords(active, this.shutdownGraceMs, "shutdown TERM wait");
-      const survivors = active.filter((record) => record.status === "running" && this.safeGroupAlive(record, "shutdown liveness"));
+      const survivors = active.filter((record) => this.recordIsCurrent(record, generation) && record.status === "running" && this.safeGroupAlive(record, "shutdown liveness"));
       for (const record of survivors) this.trySignal(record, "SIGKILL", "shutdown KILL");
       await this.waitForRecords(survivors, this.shutdownGraceMs, "shutdown KILL wait");
+      for (const record of records) {
+        if (!this.recordIsCurrent(record, generation)) continue;
+        if (record.status === "running") this.forceTerminal(record, "Monitor runtime shut down before child close was observed.");
+      }
     } catch (error) {
-      for (const record of records) this.appendRecordError(record, `shutdown: ${errorText(error)}`);
+      for (const record of this.records.values()) this.appendRecordError(record, `shutdown: ${errorText(error)}`);
     } finally {
       if (this.summaryTimer !== undefined) {
         try { this.clearTimeoutFn(this.summaryTimer); } catch { /* cleanup continues */ }
@@ -737,11 +748,9 @@ export class MonitorRuntime {
       this.notifications.clear();
       this.suppressedWindows.clear();
       this.sentMatcherAt.length = 0;
-      for (const record of records) {
-        if (record.status === "running") this.forceTerminal(record, "Monitor runtime shut down before child close was observed.");
-        this.disposeRecord(record, false);
-      }
+      for (const record of this.records.values()) this.quiesceRecord(record);
       this.records.clear();
+      this.stopping.clear();
       this.deliveryPaused = false;
       const root = this.logRoot;
       this.logRoot = undefined;
@@ -757,7 +766,7 @@ export class MonitorRuntime {
     const allowed = ACTION_FIELDS[action];
     const unknown = Object.keys(input).filter((field) => !allowed.includes(field));
     if (unknown.length > 0) throw new Error(`${action} does not accept field(s): ${unknown.join(", ")}.`);
-    const required = action === "create" ? ["abstract", "command", "checkAfter"] : action === "list" ? [] : ["id"];
+    const required = action === "create" ? ["abstract", "command", "checkAfter"] : action === "list" || action === "clear" ? [] : ["id"];
     for (const field of required) if (input[field] === undefined) throw new Error(`${action} requires ${field}.`);
   }
 
@@ -838,7 +847,8 @@ export class MonitorRuntime {
       exitCodeSeen: null,
       signalSeen: null,
       processError: null,
-      deleting: false,
+      terminating: false,
+      stopOwned: false,
       generation: this.generation,
       terminalPromise,
       terminalResolved: false,
@@ -856,7 +866,7 @@ export class MonitorRuntime {
             return;
           }
           if (record.generation !== this.generation || this.shuttingDown) {
-            record.deleting = true;
+            record.terminating = true;
             this.trySignal(record, "SIGKILL", "create rollback KILL");
             reject(new Error("Monitor runtime changed while the command was starting."));
             return;
@@ -867,7 +877,7 @@ export class MonitorRuntime {
             this.applySilenceCheck(record, this.prepareSilenceCheck(record, record.checkAfterMs));
           } catch (error) {
             this.records.delete(id);
-            record.deleting = true;
+            record.terminating = true;
             this.trySignal(record, "SIGKILL", "create silence rollback KILL");
             reject(error instanceof Error ? error : new Error(errorText(error)));
             return;
@@ -896,40 +906,93 @@ export class MonitorRuntime {
     return toolText(JSON.stringify(state, null, 2), { monitor: state });
   }
 
-  private async delete(record: MonitorRecord): Promise<ReturnType<typeof toolText>> {
-    record.deleting = true;
+  private stop(record: MonitorRecord): Promise<ReturnType<typeof toolText>> {
+    const existing = this.stopping.get(record.id);
+    if (existing) return existing;
+    if (record.status !== "running") return Promise.resolve(this.stopResult(record, false, "already-terminal", null));
+    const pending = this.stopRunning(record);
+    this.stopping.set(record.id, pending);
+    pending.then(
+      () => { if (this.stopping.get(record.id) === pending) this.stopping.delete(record.id); },
+      () => { if (this.stopping.get(record.id) === pending) this.stopping.delete(record.id); },
+    );
+    return pending;
+  }
+
+  private async stopRunning(record: MonitorRecord): Promise<ReturnType<typeof toolText>> {
+    const generation = this.generation;
+    record.stopOwned = true;
+    record.terminating = true;
     this.cancelSilence(record);
-    this.cancelNotifications(record.id);
     this.cancelMatchTimer(record);
-    const initialError = record.error;
-    let result: DeleteResult = { forced: false };
+    this.trySignal(record, "SIGTERM", "stop TERM");
     try {
-      if (record.status === "running") {
-        this.trySignal(record, "SIGTERM", "delete TERM");
-        await this.waitForRecord(record, this.deleteGraceMs, "delete TERM wait");
-        if (record.status === "running") {
-          if (this.safeGroupAlive(record, "delete liveness")) this.trySignal(record, "SIGKILL", "delete KILL");
-          await this.waitForRecord(record, this.finalKillWaitMs, "delete KILL wait");
-        }
-      }
-    } catch (error) {
-      this.appendRecordError(record, `delete: ${errorText(error)}`);
+      await this.waitForRecord(record, this.deleteGraceMs, "stop TERM wait");
+      this.requireCurrentRecord(record, generation);
+      if (record.status !== "running") return this.finishObservedStop(record);
+      if (this.safeGroupAlive(record, "stop liveness")) this.trySignal(record, "SIGKILL", "stop KILL");
+      await this.waitForRecord(record, this.finalKillWaitMs, "stop KILL wait");
+      this.requireCurrentRecord(record, generation);
+      if (record.status !== "running") return this.finishObservedStop(record);
+      const warning = "Child close was not observed after bounded TERM and KILL waits. Stop is unconfirmed and a detached descendant may remain.";
+      this.forceTerminal(record, warning);
+      return this.stopResult(record, true, "unconfirmed", warning);
     } finally {
-      if (record.status === "running") {
-        result = {
-          forced: true,
-          warning: "Child close was not observed after bounded TERM and KILL waits; forced monitor cleanup completed. A detached descendant may remain.",
-        };
-        this.forceTerminal(record, result.warning);
-      } else if (record.error && record.error !== initialError) {
-        result.warning = `Deletion completed with process-group or runtime warnings: ${boundedText(record.error, RESPONSE_TEXT_MAX).text}`;
-      }
-      this.records.delete(record.id);
-      this.disposeRecord(record, true);
-      this.emit({ type: "deleted", reason: "lifecycle", id: record.id });
+      record.stopOwned = false;
     }
-    const text = result.warning ? `Deleted monitor ${record.id}. Warning: ${result.warning}` : `Deleted monitor ${record.id}.`;
-    return toolText(text, { id: record.id, deleted: true, forced: result.forced, warning: result.warning ?? null });
+  }
+
+  private finishObservedStop(record: MonitorRecord): ReturnType<typeof toolText> {
+    const outcome: MonitorStopOutcome = record.signal === "SIGTERM" || record.signal === "SIGKILL" ? "stopped" : "raced";
+    return this.stopResult(record, true, outcome, null);
+  }
+
+  private stopResult(
+    record: MonitorRecord,
+    changed: boolean,
+    outcome: MonitorStopOutcome,
+    warning: string | null,
+  ): ReturnType<typeof toolText> {
+    const monitor = this.operationalState(record, 0, 100, this.toolContentMaxBytes);
+    return toolText(JSON.stringify(monitor, null, 2), { monitor, changed, outcome, warning });
+  }
+
+  private delete(record: MonitorRecord): ReturnType<typeof toolText> {
+    if (record.status === "running") {
+      throw new Error(`Monitor ${record.id} (${record.abstract}) is running. Ask the user whether to stop it, then call monitor stop and retry delete only if they agree.`);
+    }
+    const status = record.status;
+    const warning = this.disposeRecord(record);
+    this.cancelNotifications(record.id);
+    this.records.delete(record.id);
+    this.emit({ type: "deleted", reason: "lifecycle", id: record.id, status });
+    const text = warning ? `Deleted monitor ${record.id}. Warning: ${warning}` : `Deleted monitor ${record.id}.`;
+    return toolText(text, { id: record.id, deleted: true, changed: true, status, warning });
+  }
+
+  private clear(): ReturnType<typeof toolText> {
+    const running = this.sortedRecords().filter((record) => record.status === "running");
+    if (running.length > 0) {
+      const listed = running.map((record) => `${record.id} (${record.abstract})`).join(", ");
+      throw new Error(`Cannot clear while these monitors are running: ${listed}. Ask the user whether to stop them, then call monitor stop for each and retry clear only if they agree.`);
+    }
+    const terminal = this.sortedRecords();
+    if (terminal.length === 0) {
+      const receipt = { cleared: true, changed: false, clearedCount: 0, ids: [] as string[], warnings: [] as string[] };
+      return toolText(JSON.stringify(receipt), receipt);
+    }
+    const ids: string[] = [];
+    const warnings: string[] = [];
+    for (const record of terminal) {
+      const warning = this.disposeRecord(record);
+      if (warning) warnings.push(`${record.id}: ${warning}`);
+      this.cancelNotifications(record.id);
+      this.records.delete(record.id);
+      ids.push(record.id);
+      this.emit({ type: "deleted", reason: "lifecycle", id: record.id, status: record.status });
+    }
+    const receipt = { cleared: true, changed: true, clearedCount: ids.length, ids, warnings };
+    return toolText(JSON.stringify(receipt), receipt);
   }
 
   private attachProcess(record: MonitorRecord): void {
@@ -1053,7 +1116,7 @@ export class MonitorRuntime {
       if (record.pendingMatchLines.length > NOTIFICATION_LINE_CAP) {
         record.pendingMatchLines.splice(0, record.pendingMatchLines.length - NOTIFICATION_LINE_CAP);
       }
-      this.scheduleMatcherBatch(record);
+      if (!record.terminating) this.scheduleMatcherBatch(record);
     }
     record.updatedAt = line.timestamp;
     this.emit({ type: "updated", reason: "output", id: record.id, status: record.status });
@@ -1336,7 +1399,7 @@ export class MonitorRuntime {
    * advances past every new line so ordinary output stays behind `monitor status` instead of being replayed.
    */
   private flushMatcherBatch(record: MonitorRecord): void {
-    if (record.generation !== this.generation || record.deleting || record.matchKeywords.size === 0) return;
+    if (record.generation !== this.generation || record.terminating || record.matchKeywords.size === 0) return;
     const keywords = [...record.matchKeywords];
     record.matchKeywords.clear();
     const latest = record.nextSeq - 1;
@@ -1522,35 +1585,35 @@ export class MonitorRuntime {
     else record.status = "failed";
     record.endedAt = now;
     record.updatedAt = now;
+    this.finishTerminal(record);
+  }
+
+  private forceTerminal(record: MonitorRecord, message: string): void {
+    if (record.status !== "running") return;
+    const now = new Date(this.nowMs()).toISOString();
+    this.appendRecordError(record, message);
+    record.status = "failed";
+    record.endedAt = now;
+    record.updatedAt = now;
+    record.exitCode = record.exitCodeSeen;
+    record.signal = record.signalSeen;
+    this.finishTerminal(record);
+  }
+
+  private finishTerminal(record: MonitorRecord): void {
     this.cancelSilence(record);
     this.cancelMatchTimer(record);
     const matched = [...record.matchKeywords];
     record.matchKeywords.clear();
-    try { if (record.logFd >= 0) this.fs.closeSync(record.logFd); } catch { /* terminal state still resolves */ }
-    record.logFd = -1;
-    this.resolveTerminalOnce(record);
-    this.detachListeners(record);
-    this.emit({ type: "updated", reason: "lifecycle", id: record.id, status: record.status });
     const payload = this.terminalPayload(record);
     this.clearPendingMatches(record);
-    if (!record.deleting && record.generation === this.generation && !this.shuttingDown) {
-      record.notificationCursor = record.nextSeq - 1;
+    record.notificationCursor = record.nextSeq - 1;
+    this.quiesceRecord(record);
+    this.emit({ type: "updated", reason: "lifecycle", id: record.id, status: record.status });
+    if (!record.stopOwned && record.generation === this.generation && !this.shuttingDown) {
       const fitted = this.buildUpdateNotification(record, matched, payload);
       this.queueNotification(record, "terminal", fitted.content, fitted.details);
     }
-  }
-
-  private forceTerminal(record: MonitorRecord, message: string): void {
-    if (record.status === "running") {
-      const now = new Date(this.nowMs()).toISOString();
-      this.appendRecordError(record, message);
-      record.status = "failed";
-      record.endedAt = now;
-      record.updatedAt = now;
-      record.exitCode = record.exitCodeSeen;
-      record.signal = record.signalSeen;
-    }
-    this.resolveTerminalOnce(record);
   }
 
   private resolveTerminalOnce(record: MonitorRecord): void {
@@ -1752,7 +1815,7 @@ export class MonitorRuntime {
   private silenceTimeoutStillOwns(record: MonitorRecord, token: number, generation: number): boolean {
     const current = this.records.get(record.id);
     if (!current || current !== record || current.silenceToken !== token || generation !== this.generation) return false;
-    if (record.status !== "running" || record.deleting || this.shuttingDown) return false;
+    if (record.status !== "running" || record.terminating || this.shuttingDown) return false;
     return true;
   }
 
@@ -1809,7 +1872,7 @@ export class MonitorRuntime {
     record.processError = boundedText(combinedProcessError, 16 * 1024, " … [additional errors truncated]").text;
   }
 
-  private disposeRecord(record: MonitorRecord, removeLog: boolean): void {
+  private quiesceRecord(record: MonitorRecord): void {
     this.cancelSilence(record);
     this.cancelMatchTimer(record);
     this.detachListeners(record);
@@ -1819,11 +1882,31 @@ export class MonitorRuntime {
       try { this.fs.closeSync(record.logFd); } catch { /* cleanup continues */ }
       record.logFd = -1;
     }
-    if (removeLog) {
-      try { this.fs.rmSync(record.logPath, { force: true }); }
-      catch (error) { this.appendRecordError(record, `log remove: ${errorText(error)}`); }
-    }
     this.resolveTerminalOnce(record);
+  }
+
+  private removeRecordLog(record: MonitorRecord): string | null {
+    try {
+      this.fs.rmSync(record.logPath, { force: true });
+      return null;
+    } catch (error) {
+      return `Failed to remove retained log: ${boundedText(errorText(error), RESPONSE_TEXT_MAX).text}`;
+    }
+  }
+
+  private disposeRecord(record: MonitorRecord): string | null {
+    this.quiesceRecord(record);
+    return this.removeRecordLog(record);
+  }
+
+  private recordIsCurrent(record: MonitorRecord, generation: number): boolean {
+    return this.generation === generation && this.records.get(record.id) === record;
+  }
+
+  private requireCurrentRecord(record: MonitorRecord, generation: number): void {
+    if (!this.recordIsCurrent(record, generation)) {
+      throw new Error(`Monitor ${record.id} changed while stop was waiting for terminal state.`);
+    }
   }
 
   private detachListeners(record: MonitorRecord): void {

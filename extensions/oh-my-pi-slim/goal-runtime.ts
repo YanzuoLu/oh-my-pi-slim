@@ -146,7 +146,7 @@ const ACTION_FIELDS: Record<GoalAction, readonly string[]> = {
 
 export const goalParameters = Type.Object({
   action: Type.Union(GOAL_ACTIONS.map((action) => Type.Literal(action)), {
-    description: "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. clear removes a completed or cancelled Goal from the branch. status, resume, and clear accept no other fields.",
+    description: "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status, resume, and clear accept no other fields.",
   }),
   abstract: Type.Optional(Type.String({
     description: "Short Goal summary for create or modify.",
@@ -504,14 +504,14 @@ export class GoalRuntime {
       name: "goal",
       label: "Goal",
       executionMode: "sequential",
-      description: "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a terminal Goal from the branch and rejects any nonterminal Goal. Actions return the current Goal state and whether it changed.",
+      description: "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a paused, completed, or cancelled Goal. It rejects active and retry_wait Goals until the user agrees to pause or cancel. Actions return the current Goal state and whether it changed.",
       promptSnippet: "Manage the branch-local Goal.",
       promptGuidelines: [
         "Call `goal create` only for a user message beginning with `/goal`.",
         "For bare `/goal`, call `goal status` and explain `/goal <objective>`.",
         "Use Goal for one durable outcome, not as a `todo` checklist.",
         "`goal modify` replaces the entire nonterminal contract, not individual fields.",
-        "Call `goal cancel` only when the user explicitly abandons the Goal.",
+        "Ask before pausing or cancelling a Goal when `goal clear` rejects its current status.",
         "Call `goal complete` only with concrete evidence for every criterion.",
       ],
       parameters: goalParameters,
@@ -976,13 +976,13 @@ export class GoalRuntime {
     return statusReceipt("Goal cancelled.", next.goal, true);
   }
 
-  // Clearing erases the branch-local Goal instead of ending it, so it is valid only after the Goal
-  // already reached a terminal status and it never cancels a live Goal on the model's behalf.
+  // Clearing erases a stopped branch-local Goal without pausing or cancelling live work on the
+  // model's behalf. Active and retrying Goals therefore require explicit user consent first.
   private clear(): ReturnType<typeof toolText> {
     const snapshot = this.snapshot as GoalSnapshot;
     const status = snapshot.goal.status;
-    if (status !== "completed" && status !== "cancelled") {
-      throw new Error(`clear requires a terminal Goal. The current Goal is ${status}. Ask the user whether to cancel this Goal, then retry clear only if they agree.`);
+    if (status === "active" || status === "retry_wait") {
+      throw new Error(`clear is invalid for current Goal status ${status}. Ask the user whether to pause or cancel this Goal, then retry clear only if they agree.`);
     }
     this.clearRuntime(true);
     this.snapshot = undefined;

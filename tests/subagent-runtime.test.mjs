@@ -209,6 +209,10 @@ async function clear(harness) {
   return harness.tools.get("subagent").execute("clear", { action: "clear" });
 }
 
+async function deleteRun(harness, id) {
+  return harness.tools.get("subagent").execute("delete", { action: "delete", id });
+}
+
 function notificationBranchEntry(message) {
   return {
     type: "custom_message",
@@ -500,7 +504,7 @@ async function createChildCheckpointHarness() {
 }
 
 test("public schema and package-agent boundaries remain minimal", async () => {
-  assert.deepEqual(SUBAGENT_ACTIONS, ["create", "list", "status", "interrupt", "steer", "resume", "reply", "clear"]);
+  assert.deepEqual(SUBAGENT_ACTIONS, ["create", "list", "status", "interrupt", "steer", "resume", "reply", "delete", "clear"]);
   assert.deepEqual(SUBAGENT_PUBLIC_FIELDS, ["agent", "abstract", "task", "cwd", "action", "id", "message"]);
   assert.deepEqual(Object.keys(subagentParameters.properties).sort(), [...SUBAGENT_PUBLIC_FIELDS].sort());
   assert.equal(subagentParameters.additionalProperties, false);
@@ -512,8 +516,8 @@ test("public schema and package-agent boundaries remain minimal", async () => {
     abstract: "Short run summary for create or resume.",
     task: "Complete bounded objective for create.",
     cwd: "Working directory for create or resume. Relative paths resolve against the parent working directory. Create defaults to the parent working directory. Resume defaults to the source run's working directory.",
-    action: "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.",
-    id: "Retained run ID for status, steer, interrupt, resume, or reply.",
+    action: "Choose create, list, status, interrupt, steer, resume, reply, delete, or clear. create requires agent, abstract, and task, with optional cwd. status, interrupt, and delete require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.",
+    id: "Retained run ID for status, steer, interrupt, resume, reply, or delete.",
     message: "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.",
   });
   for (const schema of Object.values(subagentParameters.properties)) assertSteBlock(schema.description);
@@ -794,7 +798,7 @@ test("runtime requires explicit create fields and rejects unknown fields", async
       harness.tools.get("subagent").execute("list", { action: "list", async: true }),
       /unknown field.*async/i,
     );
-    for (const action of ["list", "status", "steer", "interrupt", "reply"]) {
+    for (const action of ["list", "status", "steer", "interrupt", "reply", "delete"]) {
       await assert.rejects(
         harness.tools.get("subagent").execute(action, { action, abstract: "forbidden" }),
         new RegExp(`${action} does not accept create field\\(s\\): abstract`, "i"),
@@ -811,6 +815,14 @@ test("runtime requires explicit create fields and rejects unknown fields", async
     await assert.rejects(
       harness.tools.get("subagent").execute("status-missing-id", { action: "status" }),
       /id must be a non-empty string/i,
+    );
+    await assert.rejects(
+      harness.tools.get("subagent").execute("delete-missing-id", { action: "delete" }),
+      /id must be a non-empty string/i,
+    );
+    await assert.rejects(
+      harness.tools.get("subagent").execute("delete-message", { action: "delete", id: "source", message: "forbidden" }),
+      /delete does not accept message/i,
     );
     await assert.rejects(
       harness.tools.get("subagent").execute("resume-missing-abstract", { action: "resume", id: "source", message: "continue" }),
@@ -838,7 +850,7 @@ test("registered subagent metadata describes the unified lifecycle", () => {
   const harness = createHarness();
   try {
     const subagent = harness.tools.get("subagent");
-    assert.equal(subagent.description, "Create and manage retained specialist runs through eight lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context, optionally in another working directory. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Clearing Subagent history never changes Goal statistics.");
+    assert.equal(subagent.description, "Create and manage retained specialist runs through nine lifecycle actions. `subagent create` starts an independent run and returns its run ID immediately. `subagent list` returns a compact overview of every retained run without output or errors. `subagent status` returns one run and includes terminal output or error when available. Waiting and terminal notifications deliver complete requests, results, and errors. `subagent resume` starts a new run from reusable terminal context, optionally in another working directory. `subagent reply` continues the same waiting run after an answer. `subagent steer` sends a new instruction to a running run. `subagent interrupt` stops a live run, waits for its terminal status, and returns that result without a separate notification. `subagent delete` removes one retained run only after it reaches a terminal status. `subagent clear` removes all retained history only when every run is terminal. Reload, tree navigation, and session replacement interrupt active runs but retain their history. Deleting or clearing Subagent history never changes Goal statistics.");
     assert.equal(subagent.promptSnippet, "Delegate and manage specialist runs.");
     assertSteBlock(subagent.description);
     assertSteBlock(subagent.promptSnippet);
@@ -853,11 +865,11 @@ test("registered subagent metadata describes the unified lifecycle", () => {
       "Use `subagent steer` only for a genuine new instruction, not polling or reassurance.",
       "Use `subagent interrupt` only to stop a starting, running, or waiting run and wait for its final result.",
       "`subagent interrupt` is not rollback, so inspect partial file changes before continuing.",
-      "Use `subagent clear` only when every run is terminal and all retained history should be removed.",
+      "Use `subagent delete` for one terminal run, or `subagent clear` when all terminal history should be removed.",
     ];
     assert.equal(subagent.parameters.properties.cwd.description, "Working directory for create or resume. Relative paths resolve against the parent working directory. Create defaults to the parent working directory. Resume defaults to the source run's working directory.");
-    assert.equal(subagent.parameters.properties.action.description, "Choose create, list, status, interrupt, steer, resume, reply, or clear. create requires agent, abstract, and task, with optional cwd. status and interrupt require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.");
-    assert.equal(subagent.parameters.properties.id.description, "Retained run ID for status, steer, interrupt, resume, or reply.");
+    assert.equal(subagent.parameters.properties.action.description, "Choose create, list, status, interrupt, steer, resume, reply, delete, or clear. create requires agent, abstract, and task, with optional cwd. status, interrupt, and delete require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.");
+    assert.equal(subagent.parameters.properties.id.description, "Retained run ID for status, steer, interrupt, resume, reply, or delete.");
     assert.equal(subagent.parameters.properties.message.description, "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.");
     assert.deepEqual(subagent.promptGuidelines, expectedGuidelines);
     const guidelines = subagent.promptGuidelines.join("\n");
@@ -1086,7 +1098,7 @@ test("contact_supervisor prompt metadata describes persistent reply-to-continue 
   }
 });
 
-test("SubagentRegistry markLive emits only when liveness changes", () => {
+test("SubagentRegistry markLive and delete emit only for real changes", () => {
   const registry = new SubagentRegistry();
   let emissions = 0;
   registry.subscribe(() => { emissions += 1; });
@@ -1098,6 +1110,12 @@ test("SubagentRegistry markLive emits only when liveness changes", () => {
   assert.equal(emissions, 2);
   registry.markLive("run-1", true);
   assert.equal(emissions, 2);
+  assert.equal(registry.delete("run-1"), true);
+  assert.equal(emissions, 3);
+  assert.equal(registry.get("run-1"), undefined);
+  assert.equal(registry.isLive("run-1"), false);
+  assert.equal(registry.delete("run-1"), false);
+  assert.equal(emissions, 3);
 });
 
 test("journal restore preserves folded active status and reports active IDs", () => {
@@ -3521,6 +3539,283 @@ test("launch configs stay compatible across the optional resume preflight marker
   } finally { harness.cleanup(); }
 });
 
+test("delete rejects starting, running, and waiting runs without deleting journals or files", async () => {
+  for (const status of ["starting", "running", "waiting"]) {
+    const harness = createHarness();
+    try {
+      await harness.restore();
+      const created = await createRun(harness, { abstract: `${status} delete guard` });
+      const id = created.details.run.id;
+      const config = readConfig(harness, id);
+      if (status !== "starting") {
+        harness.alive.add(999);
+        atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token, status === "waiting" ? {
+          status,
+          waitingSeq: 1,
+          request: {
+            runId: id,
+            reason: "need_decision",
+            message: "choose",
+            createdAt: "2026-04-17T00:00:00.000Z",
+          },
+        } : { status }));
+      }
+      await inspect(harness, id);
+      const beforeRun = harness.runtime.registry.require(id);
+      const beforeJournalCount = harness.journalWrites.length;
+      const beforeConfig = readFileSync(harness.paths(id).configFile, "utf8");
+      const beforeState = existsSync(harness.paths(id).stateFile)
+        ? readFileSync(harness.paths(id).stateFile, "utf8")
+        : undefined;
+
+      await assert.rejects(deleteRun(harness, id), (error) => {
+        assert.match(error.message, new RegExp(`${id}.*status ${status}`));
+        assert.match(error.message, /Ask the user whether to interrupt this run, then retry delete only if they agree\./);
+        return true;
+      });
+      assert.deepEqual(harness.runtime.registry.require(id), beforeRun);
+      assert.equal(harness.journalWrites.length, beforeJournalCount);
+      assert.equal(readFileSync(harness.paths(id).configFile, "utf8"), beforeConfig);
+      assert.equal(existsSync(harness.paths(id).stateFile), beforeState !== undefined);
+      if (beforeState !== undefined) assert.equal(readFileSync(harness.paths(id).stateFile, "utf8"), beforeState);
+      assert.equal(harness.journalWrites.some(({ data }) => data.version === 3), false);
+    } finally { harness.cleanup(); }
+  }
+});
+
+test("delete succeeds for completed, failed, and interrupted runs and reports removed status", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    for (const status of ["completed", "failed", "interrupted"]) {
+      const id = `delete-${status}`;
+      seedTerminalRun(harness, {
+        id,
+        status,
+        output: status === "completed" ? "done" : undefined,
+        error: status === "completed" ? undefined : `${status} error`,
+      });
+      harness.runtime.activity.set(id, stateFor(id, "token"));
+      harness.runtime.health.set(id, { trackedAt: NOW_MS });
+      harness.runtime.repliedSeqs.set(id, { waitingSeq: 1, sentAt: NOW_MS });
+      harness.runtime.terminationConfirmed.set(id, true);
+    }
+
+    for (const status of ["completed", "failed", "interrupted"]) {
+      const id = `delete-${status}`;
+      const result = await deleteRun(harness, id);
+      assert.equal(result.content[0].text, `Deleted retained subagent run ${id}.`);
+      assert.deepEqual(result.details, { id, deleted: true, changed: true, warnings: [] });
+      assert.equal(harness.runtime.registry.get(id), undefined);
+      assert.equal(harness.runtime.clearedRunIds.has(id), true);
+      assert.equal(harness.runtime.activity.has(id), false);
+      assert.equal(harness.runtime.health.has(id), false);
+      assert.equal(harness.runtime.repliedSeqs.has(id), false);
+      assert.equal(harness.runtime.terminationConfirmed.has(id), false);
+      await assert.rejects(
+        harness.tools.get("subagent").execute("status", { action: "status", id }),
+        new RegExp(`Run ${id} was removed from the retained subagent history`),
+      );
+    }
+    assert.equal(harness.journalWrites.filter(({ data }) => data.version === 3).length, 3);
+    assert.equal(harness.journalWrites.some(({ data }) => data.version === 4), false);
+  } finally { harness.cleanup(); }
+});
+
+test("delete purges run files and only exclusively owned child sessions while preserving warnings", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    const childDir = join(harness.sessionDir, "omps-subagents");
+    mkdirSync(childDir, { recursive: true, mode: 0o700 });
+
+    const exclusive = join(childDir, "exclusive.jsonl");
+    writeFileSync(exclusive, "{}\n");
+    seedTerminalRun(harness, { id: "exclusive-run", sessionFile: exclusive });
+    const exclusiveResult = await deleteRun(harness, "exclusive-run");
+    assert.deepEqual(exclusiveResult.details.warnings, []);
+    assert.equal(existsSync(harness.paths("exclusive-run").runDir), false);
+    assert.equal(existsSync(exclusive), false);
+
+    const shared = join(childDir, "shared.jsonl");
+    writeFileSync(shared, "{}\n");
+    seedTerminalRun(harness, { id: "shared-source", sessionFile: shared });
+    seedTerminalRun(harness, { id: "shared-resume", sessionFile: shared, sourceRunId: "shared-source" });
+    const sharedResult = await deleteRun(harness, "shared-source");
+    assert.equal(existsSync(shared), true);
+    assert.match(sharedResult.details.warnings.join("\n"), /another retained run still references it/);
+    assert.equal(harness.runtime.registry.get("shared-resume").sessionFile, shared);
+
+    const linkedId = "warning-run";
+    const linkedPaths = harness.paths(linkedId);
+    mkdirSync(dirname(linkedPaths.runDir), { recursive: true, mode: 0o700 });
+    const realRunDir = join(harness.tempDir, "real-warning-run");
+    mkdirSync(realRunDir, { recursive: true, mode: 0o700 });
+    symlinkSync(realRunDir, linkedPaths.runDir);
+    const outsideSession = join(harness.tempDir, "outside-delete.jsonl");
+    writeFileSync(outsideSession, "{}\n");
+    harness.runtime.registry.add(persistedRun({ id: linkedId, status: "failed", sessionFile: outsideSession }), false);
+
+    const warningResult = await deleteRun(harness, linkedId);
+    const warnings = warningResult.details.warnings.join("\n");
+    assert.match(warnings, /Retained run directory for warning-run/);
+    assert.match(warnings, /Retained child session file for warning-run: .*outside this session's child session directory/);
+    assert.equal(existsSync(realRunDir), true);
+    assert.equal(existsSync(outsideSession), true);
+    assert.equal(harness.runtime.registry.get(linkedId), undefined);
+  } finally { harness.cleanup(); }
+});
+
+test("delete writes a version-3 replacement and suppresses a late target upsert during the guard", async () => {
+  let harness;
+  let target;
+  harness = createHarness({
+    onJournalWrite({ data }) {
+      if (data.version !== 3) return;
+      harness.runtime.persistRun(target);
+      harness.runtime.deliverPendingNotification(target.id);
+      harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+    },
+  });
+  let branch;
+  try {
+    await harness.restore();
+    target = seedTerminalRun(harness, {
+      id: "journal-delete",
+      notificationPending: "completed",
+    });
+    harness.runtime.persistRun(target);
+    harness.runtime.queuedNotifications.add(expectedDeliveryKey(target.id, "completed"));
+    const result = await deleteRun(harness, target.id);
+    assert.equal(result.details.deleted, true);
+    const replacementIndex = harness.journalWrites.findIndex(({ data }) => data.version === 3);
+    assert.notEqual(replacementIndex, -1);
+    assert.equal(harness.journalWrites.slice(replacementIndex + 1)
+      .some(({ data }) => data.version === 2 && data.run?.id === target.id), false);
+    assert.deepEqual(harness.journalWrites[replacementIndex].data, { version: 3, runs: [] });
+    assert.equal(harness.notifications.length, 0);
+    branch = harness.journalWrites.map(({ data }) => branchEntry(data));
+  } finally { harness.cleanup(); }
+
+  const restored = createHarness({ branch });
+  try {
+    await restored.restore();
+    assert.equal(restored.runtime.registry.get(target.id), undefined);
+    await assert.rejects(
+      restored.tools.get("subagent").execute("status", { action: "status", id: target.id }),
+      /was removed from the retained subagent history/,
+    );
+  } finally { restored.cleanup(); }
+});
+
+test("delete waits for an existing reconciliation promise before removing the run", async () => {
+  const harness = createHarness();
+  let release;
+  try {
+    await harness.restore();
+    seedTerminalRun(harness, { id: "reconcile-delete" });
+    const inFlight = new Promise((resolvePromise) => { release = resolvePromise; });
+    harness.runtime.reconciling.set("reconcile-delete", inFlight);
+
+    const deleting = deleteRun(harness, "reconcile-delete");
+    await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
+    assert.notEqual(harness.runtime.registry.get("reconcile-delete"), undefined);
+    assert.equal(harness.journalWrites.some(({ data }) => data.version === 3), false);
+
+    release();
+    const result = await deleting;
+    assert.equal(result.details.deleted, true);
+    assert.equal(harness.runtime.registry.get("reconcile-delete"), undefined);
+  } finally { harness.cleanup(); }
+});
+
+test("delete keeps the registry unchanged when replacement append fails and retries after missing-file cleanup", async () => {
+  let failAppend = true;
+  const harness = createHarness({
+    onJournalWrite({ data }) {
+      if (failAppend && data.version === 3) throw new Error("simulated append failure");
+    },
+  });
+  try {
+    await harness.restore();
+    seedTerminalRun(harness, { id: "append-failure", notificationPending: "completed" });
+    const deliveryKey = expectedDeliveryKey("append-failure", "completed");
+    harness.runtime.queuedNotifications.add(deliveryKey);
+
+    await assert.rejects(deleteRun(harness, "append-failure"), /simulated append failure/);
+    assert.notEqual(harness.runtime.registry.get("append-failure"), undefined);
+    assert.equal(harness.runtime.clearedRunIds.has("append-failure"), false);
+    assert.equal(harness.runtime.deletingRunIds.has("append-failure"), false);
+    assert.equal(harness.runtime.queuedNotifications.has(deliveryKey), true);
+    assert.equal(existsSync(harness.paths("append-failure").runDir), false);
+
+    failAppend = false;
+    const result = await deleteRun(harness, "append-failure");
+    assert.deepEqual(result.details.warnings, []);
+    assert.equal(harness.runtime.registry.get("append-failure"), undefined);
+  } finally { harness.cleanup(); }
+});
+
+test("delete cancels only target notifications and leaves other queued delivery intact", async () => {
+  let harness;
+  harness = createHarness({
+    onJournalWrite({ data }) {
+      if (data.version !== 3) return;
+      harness.runtime.deliverPendingNotification("notify-target");
+      harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+    },
+  });
+  try {
+    await harness.restore();
+    for (const id of ["notify-target", "notify-other"]) {
+      seedTerminalRun(harness, { id, notificationPending: "completed" });
+      harness.runtime.queuedNotifications.add(expectedDeliveryKey(id, "completed"));
+    }
+
+    await deleteRun(harness, "notify-target");
+    assert.equal(harness.notifications.some(({ message }) => message.details.runId === "notify-target"), false);
+    assert.equal(harness.runtime.queuedNotifications.has(expectedDeliveryKey("notify-target", "completed")), false);
+    assert.equal(harness.notifications.filter(({ message }) => message.details.runId === "notify-other").length, 1);
+    assert.equal(harness.runtime.queuedNotifications.has(expectedDeliveryKey("notify-other", "completed")), true);
+    assert.notEqual(harness.runtime.registry.get("notify-other"), undefined);
+  } finally { harness.cleanup(); }
+});
+
+test("delete never changes Goal statistics, sidecars, or lazy-load bookkeeping", async () => {
+  let statsReads = 0;
+  const harness = createHarness({
+    readGoalStats() {
+      statsReads += 1;
+      throw new Error("delete must not read Goal stats");
+    },
+  });
+  try {
+    await harness.restore();
+    const id = "goal-delete";
+    seedTerminalRun(harness, { id });
+    const stats = { tokens: 77, tools: 4, turns: 5, compactions: 2 };
+    harness.runtime.goalActivity.set(id, structuredClone(stats));
+    harness.runtime.loadedGoalStatsSidecars.add(id);
+    const sidecarStats = { version: 1, runId: id, ...stats };
+    assert.equal(writeGoalStatsSidecar(getGoalStatsRoot(harness.sessionDir), harness.ownerSessionId, sidecarStats), true);
+    const sidecar = getGoalStatsSidecarPaths(getGoalStatsRoot(harness.sessionDir), harness.ownerSessionId, id).file;
+    const beforeSidecar = readFileSync(sidecar, "utf8");
+
+    await deleteRun(harness, id);
+    assert.deepEqual(harness.runtime.goalActivity.get(id), stats);
+    assert.equal(harness.runtime.loadedGoalStatsSidecars.has(id), true);
+    assert.equal(readFileSync(sidecar, "utf8"), beforeSidecar);
+    assert.deepEqual(harness.runtime.goalStats([id]), {
+      runCount: 1,
+      tokens: 77,
+      tools: 4,
+      turns: 5,
+      compactions: 2,
+    });
+    assert.equal(statsReads, 0);
+  } finally { harness.cleanup(); }
+});
+
 test("reload and restore retain terminal results for status until clear removes the run", async () => {
   const restored = createHarness({
     branch: [branchEntry({ version: 1, runs: [persistedRun({
@@ -3541,7 +3836,7 @@ test("reload and restore retain terminal results for status until clear removes 
     await clear(restored);
     await assert.rejects(
       restored.tools.get("subagent").execute("status", { action: "status", id: "restored-terminal" }),
-      /was cleared from the subagent history/,
+      /was removed from the retained subagent history/,
     );
   } finally { restored.cleanup(); }
 });
@@ -3633,7 +3928,7 @@ test("clear removes terminal run directories and appends one version-3 replaceme
     assert.deepEqual(listed.details.runs, []);
     await assert.rejects(
       restored.tools.get("subagent").execute("resume", { action: "resume", id, abstract: "again", message: "again" }),
-      new RegExp(`Run ${id} was cleared from the subagent history and is no longer available`),
+      new RegExp(`Run ${id} was removed from the retained subagent history and is no longer available`),
     );
   } finally { restored.cleanup(); }
 });
@@ -3655,7 +3950,7 @@ test("clear replay stays empty over legacy version-1 and version-2 history and l
     for (const id of ["legacy-one", "upsert-one"]) {
       await assert.rejects(
         clearedOnly.tools.get("subagent").execute("steer", { action: "steer", id, message: "go" }),
-        new RegExp(`Run ${id} was cleared from the subagent history and is no longer available`),
+        new RegExp(`Run ${id} was removed from the retained subagent history and is no longer available`),
       );
     }
   } finally { clearedOnly.cleanup(); }
@@ -3672,7 +3967,7 @@ test("clear replay stays empty over legacy version-1 and version-2 history and l
     assert.deepEqual(resumedHistory.runtime.registry.list().map((run) => run.id), ["after-clear"]);
     await assert.rejects(
       resumedHistory.tools.get("subagent").execute("interrupt", { action: "interrupt", id: "legacy-one" }),
-      /was cleared from the subagent history/,
+      /was removed from the retained subagent history/,
     );
     await assert.rejects(
       resumedHistory.tools.get("subagent").execute("interrupt", { action: "interrupt", id: "never-existed" }),
@@ -3895,7 +4190,7 @@ test("clear blocks poll and agent-settled callbacks from reviving a targeted run
   } finally { harness.cleanup(); }
 });
 
-test("every ID-bearing action reports a cleared run explicitly and never reuses its ID", async () => {
+test("every ID-bearing action reports a removed run explicitly and never reuses its ID", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
@@ -3906,13 +4201,14 @@ test("every ID-bearing action reports a cleared run explicitly and never reuses 
     await clear(harness);
 
     const subagent = harness.tools.get("subagent");
-    const cleared = /Run gone-run was cleared from the subagent history and is no longer available/;
+    const cleared = /Run gone-run was removed from the retained subagent history and is no longer available/;
     await assert.rejects(subagent.execute("status", { action: "status", id: "gone-run" }), cleared);
     await assert.rejects(subagent.execute("resume", { action: "resume", id: "gone-run", abstract: "a", message: "m" }), cleared);
     await assert.rejects(subagent.execute("steer", { action: "steer", id: "gone-run", message: "m" }), cleared);
     await assert.rejects(subagent.execute("interrupt", { action: "interrupt", id: "gone-run" }), cleared);
     await assert.rejects(subagent.execute("reply", { action: "reply", id: "gone-run", message: "m" }), cleared);
-    assert.equal(harness.runtime.clearedRunIds.has("gone-run"), true, "cleared IDs stay reserved against reuse");
+    await assert.rejects(subagent.execute("delete", { action: "delete", id: "gone-run" }), cleared);
+    assert.equal(harness.runtime.clearedRunIds.has("gone-run"), true, "removed IDs stay reserved against reuse");
 
     harness.runtime.setModelResolver((agent) => `preset/${agent}:high`);
     harness.runtime.setDenyResolver(() => []);

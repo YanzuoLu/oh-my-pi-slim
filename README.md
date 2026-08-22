@@ -92,6 +92,8 @@ The package exposes an intentionally small tool surface:
 
 ## Main tools
 
+The five lifecycle surfaces below expose no `confirmed` or `force` field. When protected work blocks deletion, the main model first inspects status when useful and asks the user. After agreement, it uses `pause`, `stop`, `interrupt`, Todo `modify`, or Goal `cancel` as appropriate, then retries the rejected action.
+
 ### `subagent`
 
 Runs specialists in isolated background child sessions and returns control immediately.
@@ -105,15 +107,16 @@ Runs specialists in isolated background child sessions and returns control immed
 | `steer` | Send guidance to a running run |
 | `resume` | Continue a terminal run's saved child session as a new run with a new ID and optionally override its cwd. Omitted cwd inherits the source run's working directory |
 | `reply` | Answer a waiting child and continue that same run |
-| `clear` | Remove all retained terminal history |
+| `delete` | Remove one retained terminal run |
+| `clear` | Remove all retained history when every run is terminal |
 
-`list` includes `starting`, `running`, `waiting`, `completed`, `failed`, and `interrupted` runs, but never includes terminal `output` or `error`. Use `status` with one retained run ID to inspect the same public fields and recover its terminal result when present. The subagent widget uses the same retained set and ordering, so terminal runs remain visible until `clear`.
+`list` includes `starting`, `running`, `waiting`, `completed`, `failed`, and `interrupted` runs, but never includes terminal `output` or `error`. Use `status` with one retained run ID to inspect the same public fields and recover its terminal result when present. The subagent widget uses the same retained set and ordering, so terminal runs remain visible until `delete` or `clear` removes them.
 
 `interrupt` is synchronous. It waits for the targeted run to reach a terminal status and returns that complete final result, including any stored `output` or `error`. When an explicit `interrupt` call takes over delivery for a live run, that terminal event is not sent separately and is not replayed after reload. Interruptions caused by shutdown, reload, tree navigation, or session replacement still arrive as ordinary terminal notifications. A run that already reached a terminal status before the call keeps its own terminal notification, receives no interrupt control, and returns only a compact status line. When the detached runner cannot be verified as stopped, the result says so explicitly and the run directory is retained.
 
 `resume` always runs on the model your current preset resolves for that agent, not on the model the source run used. When that crosses a provider or a model ID, the reused child session is compacted once before the resumed run is prompted, so a new model never inherits raw context written for another one. A change of thinking level alone reuses the session unchanged. The run stays `starting` for the whole preflight, an already compacted or too small session simply continues, and any other compaction failure fails the run instead of prompting it.
 
-`clear` is refused while any run is `starting`, `running`, or `waiting`. Once every retained run is terminal, it can clear the complete history; the cleared state remains empty after reload and restoration. Clearing Subagent history never changes Goal statistics.
+`delete` is refused for a `starting`, `running`, or `waiting` run, and `clear` is refused while any such run remains. The main model must ask before calling `interrupt`, then retry only after the run becomes terminal. A successful single delete or full clear persists across reload and restoration. Neither operation changes Goal statistics.
 
 A child uses `contact_supervisor` with `need_decision`, `interview_request`, or `progress_update`. Every request moves the child to `waiting`; the main session uses `reply` to continue the same run.
 
@@ -130,10 +133,10 @@ Tracks session tasks, dependencies, and progress in main and child sessions.
 | --- | --- |
 | `append` | Add a unique subject, abstract, and optional dependencies |
 | `modify` | Rename or update abstract, status, or dependencies |
-| `delete` | Delete an exact subject |
-| `clear` | Clear an empty or completed task set within the batch |
+| `delete` | Delete an exact pending or completed subject |
+| `clear` | Remove every pending and completed item when none is in progress |
 
-Subjects are case-sensitive and matched exactly. Multiple items may be `in_progress`. Dependencies must form an acyclic graph. `delete` is refused when another task still names the target in `blockedBy`. `clear` requires an empty or fully completed current group. An `update` batch is atomic: if any operation or the final dependency graph is invalid, nothing is committed.
+Subjects are case-sensitive and matched exactly. Multiple items may be `in_progress`. Dependencies must form an acyclic graph. `delete` is refused for the target's draft-relative `in_progress` status and when another task still names it in `blockedBy`. `clear` checks the draft produced by earlier operations in the same batch and rejects if any item there is `in_progress`. The model asks whether to change protected items to `pending` or `completed` with `modify`, then retries only after agreement. Every `update` batch is atomic.
 
 ### `loop`
 
@@ -142,13 +145,16 @@ Schedules self-contained prompts on a runtime-only fixed-delay timer.
 | Action | Effect |
 | --- | --- |
 | `create` | Create a loop with interval, abstract, and prompt |
-| `delete` | Remove a loop |
+| `delete` | Remove one paused loop |
+| `clear` | Remove all loops when every loop is paused |
 | `modify` | Change interval, abstract, or prompt |
 | `list` | List loops and their current state |
 | `pause` | Pause a loop |
 | `resume` | Resume after one full interval |
 
 Intervals are inclusive from `10s` through `7d`. Creation and resume wait one full interval. Each later delay begins after the previous tick finishes, so slow work does not build an overlapping schedule.
+
+An active loop cannot be deleted, and any active loop blocks `clear`. The main model asks before pausing the affected loops and retries only after agreement.
 
 Loops survive compaction and tree navigation, but not reload, new session, session resume, fork, or quit. Those transitions clear every loop.
 
@@ -159,7 +165,9 @@ Runs and observes long-running foreground Bash commands on POSIX systems.
 | Action | Effect |
 | --- | --- |
 | `create` | Start a command with an abstract, a required `checkAfter` silence threshold, optional cwd, and optional `notifyOn` literals |
-| `delete` | Stop if needed, then remove the monitor and its retained record |
+| `stop` | Synchronously stop one running monitor and return its complete terminal state |
+| `delete` | Remove one terminal monitor and its retained record |
+| `clear` | Remove all terminal monitor records when none is running |
 | `list` | List compact monitor states |
 | `status` | Inspect current state and retained combined output |
 
@@ -169,7 +177,7 @@ Runs and observes long-running foreground Bash commands on POSIX systems.
 
 Matcher and terminal notifications share one shape, and each states the monitor's current status. A matcher notification carries only the new lines that matched a `notifyOn` literal, one entry per line even when several literals hit it, while the delivered position still advances past every ordinary line so nothing unmatched is repeated later. A terminal notification always reports the final status, exit code, signal, and error. A completed command adds only the matched lines no earlier notification delivered, so a clean exit with ordinary output alone carries no lines. A failed or killed command adds a bounded diagnostic tail of the last twenty new lines, merged with any still undelivered matches by sequence number and deduplicated. Every payload stays within the same byte bounds, and `omitted` reports what was left behind. `status` is the single entry point for a record's full retained state and combined output.
 
-Terminal records and retained output remain available until `delete`. Use `status` to inspect the result, then `delete` when the record is no longer needed.
+`stop` preserves the terminal record and retained log. Its tool result exclusively delivers the terminal state, so the same stop does not send another terminal notification. A running monitor blocks `delete` and `clear`; the main model must ask before stopping it and retry only afterward. Terminal records and output remain available until `delete` or `clear`.
 
 ### `ask_user_question`
 
@@ -203,7 +211,7 @@ Manages one branch-local durable Goal with explicit criteria and evidence.
 | `resume` | Explicitly reactivate a paused Goal |
 | `complete` | Complete with evidence aligned to the criteria |
 | `cancel` | Cancel with a reason |
-| `clear` | Remove a finished Goal from the branch |
+| `clear` | Remove a paused, completed, or cancelled Goal from the branch |
 
 A Goal is durable on its branch. Reload, session resume, fork, and tree restoration restore unfinished work as paused; it never silently resumes. Provider failures retry automatically, repeated no-progress runs pause the Goal, and user aborts pause instead of cancelling. Completion requires exactly one non-empty evidence item for each criterion.
 
@@ -211,7 +219,7 @@ Autonomous continuation waits until blocking work is gone, including active or w
 
 A completed Goal's detail row joins the shared Ctrl+O collapse. With tool output collapsed the widget keeps only the Goal heading, and every other status keeps both rows in either state.
 
-`goal clear` removes only a completed or cancelled Goal from the branch. While a Goal is still being pursued or is paused, `clear` is refused and the model must ask you whether to cancel it first, then retry only if you agree. A cleared branch reports no Goal at all, and clearing takes that Goal's own statistics with it while leaving the retained subagent runs behind them untouched.
+`goal clear` removes a paused, completed, or cancelled Goal from the branch. An `active` or `retry_wait` Goal blocks `clear`; the main model must ask whether to pause or cancel it and retry only after agreement. A cleared branch reports no Goal at all, and clearing takes that Goal's own statistics with it while leaving retained subagent runs untouched.
 
 ## `/loop` and `/goal`
 
@@ -262,7 +270,7 @@ Provider, model, and thinking level are independently configurable per role. Aut
 `ctrl+shift+left` and `ctrl+shift+right` open a read-only, full-screen viewer for the child transcript of any retained subagent run. The viewer only shows: it has no reply, steer, or interrupt, and it never writes a session entry, a control file, or a run file.
 
 - Main is item 0 of one cycle. `ctrl+shift+right` moves Main to the first retained run, then run by run, then back to Main. `ctrl+shift+left` moves the same ring in reverse.
-- The cycle is the retained set the Agents widget shows, in the same order and with the same total: every `starting`, `running`, `waiting`, `completed`, `failed`, and `interrupted` run is reachable, including the ones the widget hides when it is collapsed or over its row budget. A status change only reorders the ring, so a run you are watching stays on screen when it finishes. Only `subagent clear` removes runs, and clearing everything returns you to Main.
+- The cycle is the retained set the Agents widget shows, in the same order and with the same total: every `starting`, `running`, `waiting`, `completed`, `failed`, and `interrupted` run is reachable, including the ones the widget hides when it is collapsed or over its row budget. A status change only reorders the ring, so a run you are watching stays on screen when it finishes. `subagent delete` removes one terminal run, while `subagent clear` removes all terminal history; losing the last retained run returns you to Main.
 - Inside the viewer, plain `Left`/`Right` and `ctrl+shift+left`/`ctrl+shift+right` cycle the same way. `Escape` or `q` returns to Main.
 - The transcript starts on the first row of the screen. Everything else lives at the bottom, in the order Main uses for its own dock: the live or waiting block, the `Read-Only` input placeholder, the run status rows, and the navigation hints.
 - The transcript itself is rendered by Pi's own transcript components, so user messages, assistant Markdown, thinking blocks, tool calls, tool results, compaction summaries, and branch summaries keep Main's colors, spacing, and framing.

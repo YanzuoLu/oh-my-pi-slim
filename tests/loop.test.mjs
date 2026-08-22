@@ -143,6 +143,7 @@ test("loop schema has a provider-portable root and exact public actions", () => 
   assert.equal(schema.anyOf, undefined);
   assert.equal(schema.oneOf, undefined);
   assert.deepEqual(Object.keys(schema.properties).sort(), [...LOOP_PUBLIC_FIELDS].sort());
+  assert.deepEqual(LOOP_ACTIONS, ["create", "delete", "clear", "modify", "list", "pause", "resume"]);
   assert.deepEqual(schema.properties.action.anyOf.map((branch) => branch.const), LOOP_ACTIONS);
   for (const field of ["id", "interval", "abstract", "prompt"]) {
     assert.equal("maxLength" in schema.properties[field], false);
@@ -151,14 +152,14 @@ test("loop schema has a provider-portable root and exact public actions", () => 
   const harness = createHarness();
   const tool = harness.tools.get("loop");
   assert.equal(tool.executionMode, "sequential");
-  assert.equal(tool.description, "Create and manage runtime-only fixed-delay loops from 10s through 7d. Creation and resume wait one full interval before firing. Each later delay starts only after the previous tick finishes. Each fire delivers the stored prompt for a future turn. Loop state survives compaction and tree navigation within the current runtime. Reload, session replacement, and shutdown clear every loop. Actions return current loop state, change receipts, or the retained loop list.");
+  assert.equal(tool.description, "Create and manage runtime-only fixed-delay loops from 10s through 7d. Creation and resume wait one full interval before firing. Each later delay starts only after the previous tick finishes. Each fire delivers the stored prompt for a future turn. Active loops must be paused before deletion or clearing. Loop state survives compaction and tree navigation within the current runtime. Reload, session replacement, and shutdown clear every loop. Actions return current loop state, change receipts, clear receipts, or the retained loop list.");
   assert.equal(tool.promptSnippet, "Manage fixed-delay prompt loops.");
   assert.deepEqual(tool.promptGuidelines, [
     "Call `loop create` only for a user message beginning with `/loop`.",
     "For bare `/loop`, call `loop list` and explain `/loop <interval> <prompt>`.",
     "Make every `loop create` prompt self-contained and repeatable for future turns.",
   ]);
-  assert.equal(schema.properties.action.description, "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. list accepts no other fields.");
+  assert.equal(schema.properties.action.description, "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. clear and list accept no other fields.");
   assert.equal(schema.properties.interval.description, "Fixed delay for create or modify, from 10s through 7d. Format: one positive integer plus s, m, h, or d.");
   assert.equal(typeof tool.renderCall, "function");
   assert.equal(typeof tool.renderResult, "function");
@@ -192,15 +193,20 @@ test("runtime enforces exact action fields, required fields, trimmed text, and e
     delete: { interval: "10s" },
     pause: { prompt: "x" },
     resume: { abstract: "x" },
+    clear: { id: "00000001" },
     list: { id: "00000001" },
   })) {
     await assert.rejects(harness.execute({ ...(valid[action] ?? { action, id: "00000001" }), ...extra }), /does not accept field/);
   }
+  await assert.rejects(harness.execute({ action: "clear-all" }), /Unsupported loop action: clear-all/);
   await assert.rejects(harness.execute({ action: "create", interval: "10s", abstract: "x" }), /requires prompt/);
   await assert.rejects(harness.execute({ action: "modify", id: "00000001" }), /requires at least one/);
   await assert.rejects(harness.execute({ action: "delete", id: "0000000" }), /exact 8-character/);
   await assert.rejects(harness.execute({ action: "list", unknown: true }), /does not accept field/);
+  await assert.rejects(harness.execute({ action: "clear", confirmed: true }), /does not accept field\(s\): confirmed/);
 
+  const emptyClear = await harness.execute({ action: "clear" });
+  assert.deepEqual(emptyClear.details, { cleared: true, changed: false, clearedCount: 0, ids: [] });
   const created = await harness.execute(valid.create);
   assert.equal(created.details.loop.abstract, "a");
   assert.equal(created.details.loop.prompt, "p");
@@ -227,10 +233,125 @@ test("CRUD preserves creation order, permits duplicate configurations, retries I
     assert.equal(loop.lastFailedAt, null);
     assert.equal(loop.lastError, null);
   }
+  await harness.execute({ action: "pause", id: "00000001" });
   const deleted = await harness.execute({ action: "delete", id: "00000001" });
   assert.deepEqual(deleted.details, { id: "00000001", deleted: true });
   assert.deepEqual(harness.runtime.list().map((loop) => loop.id), ["00000002"]);
   await assert.rejects(harness.execute({ action: "delete", id: "00000001" }), /was not found/);
+});
+
+test("delete rejects active loops without touching timers or gated fires and removes paused loops", async () => {
+  const harness = createHarness();
+  await harness.execute({ action: "create", interval: "10s", abstract: "protected", prompt: "protected prompt" });
+  harness.runtime.setDeliveryPaused(true);
+  harness.advance(10_000);
+  harness.fire(harness.timers[0]);
+  const nextTimer = harness.timers[1];
+  const before = structuredClone(harness.runtime.list()[0]);
+  const tokenBeforeReject = harness.runtime.loops.get("00000001").timerToken;
+
+  await assert.rejects(
+    harness.execute({ action: "delete", id: "00000001" }),
+    /Loop 00000001 has status active[\s\S]*Ask the user whether to pause this loop, then retry delete only if they agree\./,
+  );
+  assert.deepEqual(harness.runtime.list()[0], before);
+  assert.equal(harness.runtime.loops.get("00000001").timerToken, tokenBeforeReject);
+  assert.equal(nextTimer.cleared, false, "active rejection does not cancel the current timer");
+  assert.equal(harness.runtime.gatedFires.length, 1, "active rejection preserves gated fires");
+
+  harness.runtime.setDeliveryPaused(false);
+  assert.equal(harness.messages.length, 1, "the preserved gated fire remains deliverable");
+  await harness.execute({ action: "pause", id: "00000001" });
+  const record = harness.runtime.loops.get("00000001");
+  const tokenBeforeDelete = record.timerToken;
+  const deleted = await harness.execute({ action: "delete", id: "00000001" });
+  assert.deepEqual(deleted.details, { id: "00000001", deleted: true });
+  assert.equal(record.timerToken, tokenBeforeDelete + 1, "paused delete calls cancelTimer even after pause");
+  assert.deepEqual(harness.runtime.list(), []);
+});
+
+test("clear atomically rejects mixed active loops and clears all paused loops without resetting runtime", async () => {
+  const harness = createHarness();
+  await harness.execute({ action: "create", interval: "10s", abstract: "paused one", prompt: "first prompt" });
+  await harness.execute({ action: "create", interval: "10s", abstract: "active two", prompt: "second prompt" });
+  await harness.execute({ action: "pause", id: "00000001" });
+  harness.runtime.setDeliveryPaused(true);
+  harness.advance(10_000);
+  harness.fire(harness.timers[1]);
+  const activeTimer = harness.timers[2];
+  const before = structuredClone(harness.runtime.list());
+  const generation = harness.runtime.generation;
+  const tokens = new Map([...harness.runtime.loops].map(([id, loop]) => [id, loop.timerToken]));
+
+  await assert.rejects(
+    harness.execute({ action: "clear" }),
+    (error) => {
+      assert.match(error.message, /00000002 \(active two\)/);
+      assert.doesNotMatch(error.message, /00000001 \(paused one\)/);
+      assert.match(error.message, /Ask the user whether to pause these loops, then retry clear only if they agree\./);
+      return true;
+    },
+  );
+  assert.deepEqual(harness.runtime.list(), before, "mixed active clear refusal is atomic");
+  assert.equal(harness.runtime.generation, generation);
+  assert.equal(activeTimer.cleared, false);
+  assert.equal(harness.runtime.gatedFires.length, 1);
+  for (const [id, token] of tokens) assert.equal(harness.runtime.loops.get(id).timerToken, token);
+
+  await harness.execute({ action: "pause", id: "00000002" });
+  harness.runtime.gatedFires.push(Object.freeze({
+    generation,
+    id: "deadbeef",
+    abstract: "stale gated",
+    interval: "10s",
+    firedAt: new Date(harness.now()).toISOString(),
+    prompt: "must not deliver",
+  }));
+  const pausedRecords = [...harness.runtime.loops.values()].map((loop) => ({ loop, token: loop.timerToken }));
+  const cleared = await harness.execute({ action: "clear" });
+  assert.equal(cleared.content[0].text, "Cleared 2 loops.");
+  assert.deepEqual(cleared.details, {
+    cleared: true,
+    changed: true,
+    clearedCount: 2,
+    ids: ["00000001", "00000002"],
+  });
+  for (const { loop, token } of pausedRecords) {
+    assert.equal(loop.timerToken, token + 1, `clear redundantly canceled paused loop ${loop.id}`);
+  }
+  assert.deepEqual(harness.runtime.list(), []);
+  assert.equal(harness.runtime.gatedFires.length, 0);
+  assert.equal(harness.runtime.generation, generation);
+  assert.equal(harness.runtime.shuttingDown, false);
+  harness.runtime.setDeliveryPaused(false);
+  assert.equal(harness.messages.length, 0, "clear discards every gated fire");
+
+  const empty = await harness.execute({ action: "clear" });
+  assert.equal(empty.content[0].text, "No loops to clear.");
+  assert.deepEqual(empty.details, { cleared: true, changed: false, clearedCount: 0, ids: [] });
+  assert.equal(harness.runtime.generation, generation);
+});
+
+test("clear leaves stale deferred callbacks inert while later create and fire still work", async () => {
+  const harness = createHarness();
+  await harness.execute({ action: "create", interval: "10s", abstract: "stale", prompt: "stale prompt" });
+  harness.advance(10_000);
+  harness.timers[0].callback();
+  assert.equal(harness.deferred.length, 1);
+  await harness.execute({ action: "pause", id: "00000001" });
+  const generation = harness.runtime.generation;
+  await harness.execute({ action: "clear" });
+  assert.equal(harness.runtime.generation, generation);
+  harness.flushOne();
+  assert.equal(harness.messages.length, 0, "the callback deferred before clear no-ops after its loop is removed");
+
+  const created = await harness.execute({ action: "create", interval: "10s", abstract: "fresh", prompt: "fresh prompt" });
+  assert.equal(created.details.loop.id, "00000002");
+  harness.advance(10_000);
+  harness.fire(harness.timers[1]);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].message.details.id, "00000002");
+  assert.equal(harness.runtime.list()[0].fireCount, 1);
 });
 
 test("create waits one full interval and recursive one-shot scheduling uses fixed delay after fire handling", async () => {
@@ -438,6 +559,8 @@ test("stale timer callbacks no-op after interval modify, pause, or delete while 
 
   await harness.execute({ action: "resume", id: "00000001" });
   const beforeDelete = harness.timers.at(-1);
+  await assert.rejects(harness.execute({ action: "delete", id: "00000001" }), /has status active/);
+  await harness.execute({ action: "pause", id: "00000001" });
   await harness.execute({ action: "delete", id: "00000001" });
   beforeDelete.callback();
   assert.equal(harness.deferred.length, 0, "a cleared callback becomes stale after delete");
@@ -517,6 +640,7 @@ test("paused delivery gate retains FIFO immutable snapshots and pause/delete can
   harness.fire(harness.timers[2]);
   harness.fire(harness.timers[3]);
   await harness.execute({ action: "pause", id: "00000001" });
+  await harness.execute({ action: "pause", id: "00000002" });
   await harness.execute({ action: "delete", id: "00000002" });
   assert.equal(harness.runtime.list()[0].fireCount, 1);
   assert.equal(harness.runtime.list()[0].failureCount, 0);

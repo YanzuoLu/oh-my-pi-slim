@@ -8,7 +8,7 @@ export const SUBAGENT_NOTIFICATION_TYPE = "oh-my-pi-slim:subagent-notification";
 type UnknownRecord = Record<string, unknown>;
 type ToolResultLike = { content?: unknown; details?: unknown };
 type ToolRenderContextLike = { cwd?: string; args?: unknown; expanded?: boolean };
-type ToolResultRenderOptionsLike = { isPartial?: boolean; expanded?: boolean };
+type ToolResultRenderOptionsLike = { isPartial?: boolean; expanded?: boolean; isError?: boolean };
 type MessageLike = { content?: unknown; details?: unknown };
 type MessageRenderOptionsLike = { outputPad?: number; expanded?: boolean };
 
@@ -44,9 +44,13 @@ function contentText(content: unknown): string {
   }).join("\n");
 }
 
+function safeBody(text: string): string {
+  return text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, " ");
+}
+
 function safeFirstLine(text: string): string {
   const line = text.split(/\r?\n/).find((value) => value.trim()) ?? "";
-  return line.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim();
+  return safeBody(line).replace(/[\t\r\n]/g, " ").trim();
 }
 
 class ExpandableNotificationLine implements Component {
@@ -185,10 +189,10 @@ function addLiveActivity(container: Container, theme: Theme, value: unknown): vo
   }
 }
 
-function fallbackResult(result: ToolResultLike, theme: Theme, partial: boolean, expanded: boolean): Component {
+function fallbackResult(result: ToolResultLike, theme: Theme, partial: boolean, expanded: boolean, isError: boolean): Component {
   const text = contentText(result.content);
   if (text) {
-    if (expanded) return fullBody(text, theme, 0);
+    if (expanded || isError) return fullBody(safeBody(text), theme, 0);
     return new Text(theme.fg("toolOutput", safeFirstLine(text)), 0, 0);
   }
   return new Text(theme.fg(partial ? "warning" : "dim", partial ? "Result pending…" : "No result content."), 0, 0);
@@ -285,6 +289,26 @@ function renderRunList(runs: unknown[], theme: Theme, expanded: boolean): Contai
   return container;
 }
 
+function deleteReceipt(details: UnknownRecord, theme: Theme, expanded: boolean): Container | undefined {
+  const id = asString(details.id);
+  const warnings = Array.isArray(details.warnings) && details.warnings.every((warning) => typeof warning === "string")
+    ? [...details.warnings] as string[]
+    : undefined;
+  if (!id || details.deleted !== true || details.changed !== true || !warnings) return;
+  const warningTail = warnings.length > 0 ? ` · ${warnings.length} retained warning${warnings.length === 1 ? "" : "s"}` : "";
+  const container = new Container();
+  container.addChild(new Text(
+    `${formatSemanticGlyphPrefix(theme.fg("success", "✓"))}${theme.fg("toolOutput", `Deleted subagent run [${safeFirstLine(id)}]${warningTail}`)}`,
+    0,
+    0,
+  ));
+  if (!expanded || warnings.length === 0) return container;
+  container.addChild(new Spacer(1));
+  container.addChild(new Text(theme.fg("dim", "Warnings:"), 0, 0));
+  for (const warning of warnings) container.addChild(new Text(theme.fg("warning", `• ${safeBody(warning)}`), 0, 0));
+  return container;
+}
+
 function clearReceipt(details: UnknownRecord, theme: Theme, expanded: boolean): Container {
   const clearedCount = typeof details.clearedCount === "number" ? details.clearedCount : 0;
   const warnings = Array.isArray(details.warnings)
@@ -341,7 +365,7 @@ export function renderSubagentCall(argsValue: unknown, theme: Theme, context: To
       if (typeof args.message === "string") addFullSection(container, theme, "Guidance", args.message);
       else addField(container, theme, "Guidance", undefined, "(pending)");
     }
-  } else if (action === "status" || action === "interrupt") {
+  } else if (action === "status" || action === "interrupt" || action === "delete") {
     if (action !== "status" || expanded) addField(container, theme, "Run", args.id, "(pending)");
   } else if (action === "reply") {
     addField(container, theme, "Run", args.id, "(pending)");
@@ -387,12 +411,16 @@ export function renderSubagentResult(
   if (action === "clear" && details && typeof details.clearedCount === "number") {
     return spacedToolResult(clearReceipt(details, theme, expanded));
   }
+  if (action === "delete" && details) {
+    const receipt = deleteReceipt(details, theme, expanded);
+    if (receipt) return spacedToolResult(receipt);
+  }
   if (action === "list" && Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme, expanded));
   const run = asRecord(details?.run);
   if (action === "status" && run) return spacedToolResult(renderRunStatus(run, theme, expanded));
   if (run) return spacedToolResult(immediateAck(run, action, args, theme, expanded, asString(details?.outcome)));
   if (Array.isArray(runs)) return spacedToolResult(renderRunList(runs, theme, expanded));
-  return spacedToolResult(fallbackResult(result, theme, options.isPartial === true, expanded));
+  return spacedToolResult(fallbackResult(result, theme, options.isPartial === true, expanded, options.isError === true));
 }
 
 export function renderSubagentNotification(

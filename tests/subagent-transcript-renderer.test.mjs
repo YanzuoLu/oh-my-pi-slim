@@ -136,6 +136,14 @@ test("Ctrl+O expands complete action-specific call input without duplicate Actio
   assert.equal(interruptCollapsed, "subagent · interrupt (ctrl+o to expand)\nRun: run-interrupt-full");
   assert.equal(interruptExpanded, "subagent · interrupt\nRun: run-interrupt-full");
 
+  const deleteArgs = { action: "delete", id: "run-delete-full" };
+  const deleteBefore = structuredClone(deleteArgs);
+  const deleteCollapsed = render(renderSubagentCall(deleteArgs, theme, { expanded: false }));
+  const deleteExpanded = render(renderSubagentCall(deleteArgs, theme, { expanded: true }));
+  assert.equal(deleteCollapsed, "subagent · delete (ctrl+o to expand)\nRun: run-delete-full");
+  assert.equal(deleteExpanded, "subagent · delete\nRun: run-delete-full");
+  assert.deepEqual(deleteArgs, deleteBefore);
+
   const listCollapsed = render(renderSubagentCall({ action: "list" }, theme, { expanded: false }));
   assert.equal(listCollapsed, "subagent · list (ctrl+o to expand)");
   const listExpanded = render(renderSubagentCall({ action: "list" }, theme, { expanded: true }));
@@ -148,11 +156,15 @@ test("Ctrl+O expands complete action-specific call input without duplicate Actio
   assertFull(clearExpanded, ["subagent · clear", "Clears retained Subagent history", "run files", "child session files", "warnings"]);
   assert.doesNotMatch(clearExpanded, /Goal|sidecar/i);
 
-  for (const value of [createCollapsed, resumeCollapsed, steerCollapsed, replyCollapsed, statusCollapsed, interruptCollapsed, listCollapsed, clearCollapsed]) {
+  const collapsedCalls = [createCollapsed, resumeCollapsed, steerCollapsed, replyCollapsed, statusCollapsed, interruptCollapsed, deleteCollapsed, listCollapsed, clearCollapsed];
+  const expandedCalls = [createExpanded, resumeExpanded, steerExpanded, replyExpanded, statusExpanded, interruptExpanded, deleteExpanded, listExpanded, clearExpanded];
+  assert.equal(collapsedCalls.length, 9);
+  assert.equal(expandedCalls.length, 9);
+  for (const value of collapsedCalls) {
     assert.match(value.split("\n")[0], /\(ctrl\+o to expand\)$/);
     assert.doesNotMatch(value, /Action:/);
   }
-  for (const value of [createExpanded, resumeExpanded, steerExpanded, replyExpanded, statusExpanded, interruptExpanded, listExpanded, clearExpanded]) {
+  for (const value of expandedCalls) {
     assert.doesNotMatch(value, /\(ctrl\+o to expand\)|Action:/);
   }
 });
@@ -479,6 +491,55 @@ test("status result stays single-line collapsed and expands only public summary 
   assert.deepEqual(waiting, waitingBefore);
 });
 
+test("delete receipts show the run ID, retained-warning count, complete warnings, width safety, and no private fallback data", () => {
+  const result = {
+    content: [{ type: "text", text: "RAW_DELETE_MODEL_CONTENT_SENTINEL" }],
+    details: {
+      id: "delete-run-1",
+      deleted: true,
+      changed: true,
+      warnings: [
+        "Retained child session file: SESSION_WARNING_SENTINEL",
+        "Retained run directory: RUN_DIRECTORY_WARNING_SENTINEL",
+      ],
+      privateRun: "PRIVATE_RUN_SENTINEL",
+    },
+  };
+  const before = structuredClone(result);
+  const context = { args: { action: "delete", id: "delete-run-1" } };
+  const collapsedComponent = renderSubagentResult(result, { expanded: false, isPartial: false }, theme, context);
+  const collapsed = render(collapsedComponent);
+  assert.equal(collapsed, "✓  Deleted subagent run [delete-run-1] · 2 retained warnings");
+  assert.doesNotMatch(collapsed, /SESSION_WARNING_SENTINEL|RAW_DELETE_MODEL_CONTENT_SENTINEL/);
+  for (const width of [16, 28, 48]) {
+    assert.ok(collapsedComponent.render(width).every((line) => visibleWidth(line) <= width));
+  }
+  const expanded = render(renderSubagentResult(result, { expanded: true, isPartial: false }, theme, context));
+  assertFull(expanded, [
+    "✓  Deleted subagent run [delete-run-1] · 2 retained warnings",
+    "Warnings:",
+    "• Retained child session file: SESSION_WARNING_SENTINEL",
+    "• Retained run directory: RUN_DIRECTORY_WARNING_SENTINEL",
+  ]);
+  assert.doesNotMatch(expanded, /RAW_DELETE_MODEL_CONTENT_SENTINEL|PRIVATE_RUN_SENTINEL|privateRun|Deleted:|Changed:/);
+  assert.deepEqual(result, before);
+
+  const clean = {
+    content: [{ type: "text", text: "RAW_DELETE_CLEAN_SENTINEL" }],
+    details: { id: "delete-run-2", deleted: true, changed: true, warnings: [] },
+  };
+  const cleanBefore = structuredClone(clean);
+  assert.equal(
+    render(renderSubagentResult(clean, { expanded: false, isPartial: false }, theme, { args: { action: "delete", id: "delete-run-2" } })),
+    "✓  Deleted subagent run [delete-run-2]",
+  );
+  assert.equal(
+    render(renderSubagentResult(clean, { expanded: true, isPartial: false }, theme, { args: { action: "delete", id: "delete-run-2" } })),
+    "✓  Deleted subagent run [delete-run-2]",
+  );
+  assert.deepEqual(clean, cleanBefore);
+});
+
 test("clear receipts stay compact when collapsed and list every retained-item warning when expanded", () => {
   const changed = {
     content: [{ type: "text", text: "Cleared 3 retained subagent runs." }],
@@ -677,6 +738,26 @@ test("tool-result fallback collapses safely and expands full content", () => {
   ));
   assert.equal(statusCollapsed, collapsed);
   assert.equal(statusExpanded, expanded);
+
+  const activeRefusal = {
+    content: [{ type: "text", text: "Delete requires a terminal retained run\u0000.\nStill active: active-run (running).\nAsk the user whether to interrupt this active run, then retry delete only if they agree." }],
+    details: { legacy: true },
+  };
+  const refusalBefore = structuredClone(activeRefusal);
+  const refusalComponent = renderSubagentResult(
+    activeRefusal, { expanded: false, isPartial: false, isError: true }, theme, { args: { action: "delete", id: "active-run" } },
+  );
+  const refusal = render(refusalComponent, 38);
+  const refusalFlow = refusal.replace(/\s+/g, " ");
+  assert.match(refusalFlow, /Delete requires a terminal retained run \./);
+  assert.match(refusalFlow, /Still active: active-run \(running\)\./);
+  assert.match(refusalFlow, /Ask the user whether to interrupt this active run, then retry delete only if they agree\./);
+  assert.ok(refusalComponent.render(38).every((line) => visibleWidth(line) <= 38));
+  const refusalExpanded = render(renderSubagentResult(
+    activeRefusal, { expanded: true, isPartial: false, isError: true }, theme, { args: { action: "delete", id: "active-run" } },
+  ));
+  assertFull(refusalExpanded, ["Delete requires a terminal retained run .", "Still active: active-run (running).", "Ask the user whether to interrupt this active run, then retry delete only if they agree."]);
+  assert.deepEqual(activeRefusal, refusalBefore);
 
   const emptyPartial = render(renderSubagentResult(
     { content: [] }, { expanded: false, isPartial: true }, theme, { args: { action: "create" } },

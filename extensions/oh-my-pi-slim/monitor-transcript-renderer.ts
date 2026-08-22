@@ -22,6 +22,7 @@ type MessageLike = { content?: unknown; details?: unknown };
 type MessageRenderOptionsLike = { outputPad?: number; expanded?: boolean };
 
 const STATUSES = new Set<MonitorStatus>(["running", "completed", "failed", "killed"]);
+const STOP_OUTCOMES = new Set(["already-terminal", "stopped", "raced", "unconfirmed"]);
 
 function asRecord(value: unknown): UnknownRecord | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as UnknownRecord : undefined;
@@ -327,11 +328,77 @@ function renderMonitorList(monitors: readonly MonitorListItem[], theme: Theme): 
   return container;
 }
 
+function stopReceipt(details: UnknownRecord, state: MonitorOperationalState, theme: Theme, expanded: boolean): Container | undefined {
+  const changed = asBoolean(details.changed);
+  const outcome = asString(details.outcome);
+  const warning = asNullableString(details.warning);
+  if (changed === undefined || !outcome || !STOP_OUTCOMES.has(outcome) || warning === undefined) return;
+  const glyph = !changed
+    ? theme.fg("dim", "○")
+    : outcome === "unconfirmed"
+      ? theme.fg("error", "!")
+      : monitorStatusGlyph(state.status, theme);
+  const warningTail = warning ? " · warning" : "";
+  const summary = `${formatSemanticGlyphPrefix(glyph)}${theme.fg("toolOutput", `Monitor [${sanitizeMonitorText(state.id)}] · ${state.status} · ${outcome}${warningTail}`)}`;
+  const container = new Container();
+  container.addChild(new Text(summary, 0, 0));
+  if (!expanded) return container;
+  addField(container, theme, "Outcome", outcome, 2);
+  addSection(container, theme, "Warning", warning ?? "—", 2);
+  container.addChild(new Spacer(1));
+  container.addChild(renderOperationalState(state, theme, true, false));
+  return container;
+}
+
+function clearReceipt(details: UnknownRecord, theme: Theme, expanded: boolean): Container | undefined {
+  if (details.cleared !== true || typeof details.changed !== "boolean") return;
+  const clearedCount = asNumber(details.clearedCount);
+  const ids = stringArray(details.ids);
+  const warnings = stringArray(details.warnings);
+  if (clearedCount === undefined || !Number.isInteger(clearedCount) || clearedCount < 0 || !ids || !warnings) return;
+  const glyph = details.changed ? theme.fg("success", "✓") : theme.fg("dim", "○");
+  const summary = details.changed ? `Cleared ${clearedCount} monitors` : "No monitors to clear";
+  const warningTail = warnings.length > 0 ? ` · ${warnings.length} warning${warnings.length === 1 ? "" : "s"}` : "";
+  const container = new Container();
+  container.addChild(new Text(`${formatSemanticGlyphPrefix(glyph)}${theme.fg("toolOutput", `${summary}${warningTail}`)}`, 0, 0));
+  if (!expanded) return container;
+  if (ids.length > 0) {
+    container.addChild(new Spacer(1));
+    addStringList(container, theme, "Monitor IDs", ids);
+  }
+  if (warnings.length > 0) {
+    container.addChild(new Spacer(1));
+    addStringList(container, theme, "Warnings", warnings);
+  }
+  return container;
+}
+
+function deleteReceipt(details: UnknownRecord, theme: Theme, expanded: boolean): Container | undefined {
+  const id = asString(details.id);
+  const status = asStatus(details.status);
+  const warning = asNullableString(details.warning);
+  if (!id || details.deleted !== true || details.changed !== true || !status || status === "running" || warning === undefined) return;
+  const warningTail = warning ? " · warning" : "";
+  const container = new Container();
+  container.addChild(new Text(
+    `${formatSemanticGlyphPrefix(theme.fg("success", "✓"))}${theme.fg("toolOutput", `Deleted monitor [${sanitizeMonitorText(id)}] · ${status}${warningTail}`)}`,
+    0,
+    0,
+  ));
+  if (!expanded) return container;
+  addField(container, theme, "ID", id, 2);
+  addField(container, theme, "Status", status, 2);
+  addSection(container, theme, "Warning", warning ?? "—", 2);
+  return container;
+}
+
 function fallbackResult(result: ToolResultLike, options: ToolResultRenderOptionsLike, theme: Theme): Component {
   const text = contentText(result.content);
   if (text) {
-    if (options.expanded === true) return new Text(theme.fg(options.isError ? "error" : "toolOutput", sanitizeMonitorBody(text)), 0, 0);
-    return new WidthSafeLine(theme.fg(options.isError ? "error" : "toolOutput", safeFirstLine(text)));
+    if (options.expanded === true || options.isError === true) {
+      return new Text(theme.fg(options.isError ? "error" : "toolOutput", sanitizeMonitorBody(text)), 0, 0);
+    }
+    return new WidthSafeLine(theme.fg("toolOutput", safeFirstLine(text)));
   }
   return new Text(
     theme.fg(options.isPartial ? "warning" : "dim", options.isPartial ? "Result pending…" : "No result content."),
@@ -357,7 +424,7 @@ export function renderMonitorCall(argsValue: unknown, theme: Theme, context: Too
     } else {
       addField(container, theme, "Abstract", args.abstract);
     }
-  } else if (action === "delete") {
+  } else if (action === "delete" || action === "stop") {
     addField(container, theme, "ID", args.id);
   } else if (action === "status") {
     const start = asNumber(args.start) ?? 0;
@@ -387,29 +454,21 @@ export function renderMonitorResult(
     return spacedResult(monitors ? renderMonitorList(monitors, theme) : fallbackResult(result, options, theme));
   }
 
-  if (action === "delete" && details?.deleted === true && typeof details.id === "string") {
-    const forced = details.forced === true;
-    const warning = asNullableString(details.warning);
-    const container = new Container();
-    if (forced) {
-      container.addChild(new Text(
-        `${formatSemanticGlyphPrefix(theme.fg("warning", "!"))}${theme.fg("toolOutput", `Forced deletion · monitor [${sanitizeMonitorText(details.id)}]`)}`,
-        0,
-        0,
-      ));
-    } else {
-      container.addChild(new Text(
-        `${formatSemanticGlyphPrefix(theme.fg("success", "✓"))}${theme.fg("toolOutput", `Deleted monitor [${sanitizeMonitorText(details.id)}]`)}`,
-        0,
-        0,
-      ));
-    }
-    if (warning) addSection(container, theme, "Warning", warning, options.expanded === true ? 2 : 0);
-    else if (options.expanded === true) addField(container, theme, "Forced", forced, 2);
-    return spacedResult(container);
+  if (action === "clear" && details) {
+    const receipt = clearReceipt(details, theme, options.expanded === true);
+    if (receipt) return spacedResult(receipt);
+  }
+
+  if (action === "delete" && details) {
+    const receipt = deleteReceipt(details, theme, options.expanded === true);
+    if (receipt) return spacedResult(receipt);
   }
 
   const state = operationalStateFromValue(details?.monitor);
+  if (action === "stop" && details && state) {
+    const receipt = stopReceipt(details, state, theme, options.expanded === true);
+    if (receipt) return spacedResult(receipt);
+  }
   if (!state) return spacedResult(fallbackResult(result, options, theme));
   if (options.expanded === true) return spacedResult(renderOperationalState(state, theme));
   return spacedResult(new WidthSafeLine(compactStateLine(state, theme)));

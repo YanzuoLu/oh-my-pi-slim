@@ -3154,7 +3154,25 @@ test("a running run that completes keeps the selection and only reorders", async
   await opened;
 });
 
-test("clear empties the retained set and returns to Main", async () => {
+test("removing the selected retained ID chooses its neighbour", async () => {
+  const runs = [retainedRun("a", "running"), retainedRun("b", "running"), retainedRun("c", "running")];
+  const harness = createHarness({ runs });
+  const { opened } = await openViewer(harness);
+  await flush();
+  harness.key(KEY.right);
+  await flush();
+  assert.equal(harness.viewer.currentRun(), "b");
+
+  harness.setRuns([runs[0], runs[2]]);
+  harness.tick();
+  await flush();
+  assert.equal(harness.viewer.currentRun(), "c", "the run at the vacated position becomes selected");
+  assert.equal(harness.viewer.model().total, 2);
+  harness.viewer.close();
+  await opened;
+});
+
+test("removing the last retained ID returns the viewer to Main", async () => {
   const harness = createHarness({ runs: [retainedRun("a", "completed")] });
   const { opened } = await openViewer(harness);
   await flush();
@@ -3162,9 +3180,10 @@ test("clear empties the retained set and returns to Main", async () => {
   harness.tick();
   await opened;
   assert.equal(harness.viewer.isOpen(), false);
+  assert.equal(harness.viewer.currentRun(), undefined);
 });
 
-test("a read that lands after clear never writes a cache entry or repaints", async () => {
+test("a late read for a removed retained ID never revives its selection or body", async () => {
   let resolveRead;
   const harness = createHarness({
     runs: [retainedRun("a", "running")],
@@ -3172,16 +3191,16 @@ test("a read that lands after clear never writes a cache entry or repaints", asy
   });
   const { opened } = await openViewer(harness);
   await flush();
-  const rendersBefore = harness.renders;
-  // The run is cleared while its read is still in flight, but the overlay is still open.
+  // The run is removed while its read is still in flight, but the overlay is still open.
   harness.setRuns([retainedRun("b", "running")]);
   harness.tick();
   await flush();
+  const rendersAfterHandoff = harness.renders;
   resolveRead({ status: "ok", fingerprint: "late", contentKey: "late", transcript: transcriptOf([assistantText("m1", null, "late")]) });
   await flush();
   assert.equal(harness.viewer.currentRun(), "b");
-  assert.equal(harness.lines(80).join(" ").includes("late"), false, "a cleared run's read must not reach the screen");
-  void rendersBefore;
+  assert.equal(harness.renders, rendersAfterHandoff, "the late read cannot repaint the replacement selection");
+  assert.equal(harness.lines(80).join(" ").includes("late"), false, "the removed run's body cannot return to the screen");
   harness.viewer.close();
   await opened;
 });

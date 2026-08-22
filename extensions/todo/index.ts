@@ -69,7 +69,7 @@ export const clearOperationSchema = Type.Object({
   op: Type.Literal("clear", { description: "clear accepts no other fields." }),
 }, {
   additionalProperties: false,
-  description: "Use clear at most once after every current item is completed.",
+  description: "Use clear at most once.",
 });
 
 export const todoOperationSchema = Type.Union([
@@ -96,8 +96,13 @@ export const TODO_PROMPT_GUIDELINES = [
   "Preserve existing `todo` items unless the user or current work requires a change.",
   "Finish current in-progress `todo` work before appended work unless blocked or explicitly reordered.",
   "Complete each `todo` dependency before starting or completing its dependent item.",
-  "Remove all `todo` dependency references before deleting their target.",
-  "Use `todo` clear only after the current group finishes, then append the replacement group.",
+  "Remove all `todo` dependency references before deleting a pending or completed target.",
+  "Ask whether to set each in_progress `todo` item pending or completed before deleting or clearing it.",
+] as const;
+
+export const TODO_CHILD_PROMPT_GUIDELINES = [
+  "Keep each child-session `todo` status accurate before contacting the orchestrator.",
+  "Use `todo` dependencies to expose blockers before requesting an orchestrator decision.",
 ] as const;
 
 interface TodoListDetails {
@@ -190,9 +195,12 @@ export default function todoExtension(pi: ExtensionAPI): void {
     name: "todo",
     label: "Todo",
     executionMode: "sequential",
-    description: "Read or atomically update a session-local task ledger. `todo list` returns every item in original order. `todo update` applies ordered append, modify, delete, or clear operations as one batch. Multiple items may be in progress. Dependencies must form an acyclic graph and reference exact existing subjects. Deleting a referenced item is rejected. Clear is allowed only for an empty list or a fully completed task group. Any invalid operation or final graph rolls back the entire batch.",
+    description: "Read or atomically update a session-local task ledger. `todo list` returns every item in original order. `todo update` applies ordered append, modify, delete, or clear operations as one batch. Multiple items may be in progress. Dependencies must form an acyclic graph and reference exact existing subjects. Deleting an in_progress item is rejected before dependency checks. Deleting a referenced item is rejected. Clear rejects every current in_progress item. It removes all pending and completed items. Any invalid operation or final graph rolls back the entire batch.",
     promptSnippet: TODO_PROMPT_SNIPPET,
-    promptGuidelines: [...TODO_PROMPT_GUIDELINES],
+    promptGuidelines: [
+      ...TODO_PROMPT_GUIDELINES,
+      ...(process.env.PI_SUBAGENT_CHILD === "1" ? TODO_CHILD_PROMPT_GUIDELINES : []),
+    ],
     parameters: todoParameters,
 
     execute(_toolCallId, params, _signal, _onUpdate, ctx) {

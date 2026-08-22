@@ -308,13 +308,14 @@ test("Loop runtime refreshes the foreground widget on mutations, tree rebinding,
   assert.match(failedLines, /!  runtime changed \[00000001\]/);
   assert.match(failedLines, /1 failure: delivery unavailable/);
 
+  await execute({ action: "pause", id: "00000001" });
   await execute({ action: "delete", id: "00000001" });
   assert.equal(widgetCalls.at(-1).content, undefined);
   runtime.setUICtx(undefined);
   runtime.shutdown();
 });
 
-test("Loop tool calls render all six actions with uniform collapsed hints and no duplicate Action rows", () => {
+test("Loop tool calls render all seven actions with uniform collapsed hints and no duplicate Action rows", () => {
   const cases = [
     {
       args: { action: "create", interval: "10s", abstract: "Line one\nLine two\u0000", prompt: "Prompt one\nPrompt two" },
@@ -329,11 +330,13 @@ test("Loop tool calls render all six actions with uniform collapsed hints and no
       expanded: ["Loop: 00000001", "Interval: 1m", "Abstract:", "  New abstract", "  continued", "Prompt:", "  New prompt", "  continued"],
     },
     { args: { action: "delete", id: "00000001" }, collapsed: ["Loop: 00000001"], hidden: [], expanded: ["Loop: 00000001"] },
+    { args: { action: "clear" }, collapsed: [], hidden: ["Loop:", "ID:"], expanded: [] },
     { args: { action: "pause", id: "00000001" }, collapsed: ["Loop: 00000001"], hidden: [], expanded: ["Loop: 00000001"] },
     { args: { action: "resume", id: "00000001" }, collapsed: ["Loop: 00000001"], hidden: [], expanded: ["Loop: 00000001"] },
     { args: { action: "list" }, collapsed: [], hidden: [], expanded: [] },
   ];
 
+  assert.equal(cases.length, 7);
   for (const value of cases) {
     const before = structuredClone(value.args);
     const collapsed = render(renderLoopCall(value.args, theme, { expanded: false }));
@@ -403,18 +406,58 @@ test("Loop mutation and list results render compact receipts, no-change, full hi
   assert.deepEqual(listResult, before);
 });
 
-test("Loop result fallback collapses to one safe line and expands complete error content without mutation", () => {
+test("Loop clear receipts render before legacy fallback, stay compact and width-safe, and expand only public IDs", () => {
+  const changed = {
+    content: [{ type: "text", text: "RAW_CLEAR_MODEL_CONTENT_SENTINEL" }],
+    details: {
+      cleared: true,
+      changed: true,
+      clearedCount: 2,
+      ids: ["00000001", "00000002"],
+      privateTimerHandles: "PRIVATE_CLEAR_SENTINEL",
+    },
+  };
+  const before = structuredClone(changed);
+  const context = { args: { action: "clear" } };
+  const collapsedComponent = renderLoopResult(changed, { expanded: false }, theme, context);
+  assertBlankSeparator(collapsedComponent);
+  assert.equal(render(collapsedComponent), "✓  Cleared 2 loops");
+  for (const width of [8, 14, 24]) {
+    assert.ok(collapsedComponent.render(width).every((line) => visibleWidth(line) <= width));
+  }
+  const expanded = render(renderLoopResult(changed, { expanded: true }, theme, context));
+  assert.match(expanded, /✓  Cleared 2 loops/);
+  assert.match(expanded, /Loop IDs:\n  • 00000001\n  • 00000002/);
+  assert.doesNotMatch(expanded, /RAW_CLEAR_MODEL_CONTENT_SENTINEL|PRIVATE_CLEAR_SENTINEL|clearedCount|changed:/);
+  assert.deepEqual(changed, before);
+
+  const unchanged = {
+    content: [{ type: "text", text: "RAW_NOOP_MODEL_CONTENT_SENTINEL" }],
+    details: { cleared: true, changed: false, clearedCount: 0, ids: [] },
+  };
+  const unchangedBefore = structuredClone(unchanged);
+  assert.equal(render(renderLoopResult(unchanged, { expanded: false }, theme, context)), "○  No loops to clear");
+  assert.equal(render(renderLoopResult(unchanged, { expanded: true }, theme, context)), "○  No loops to clear");
+  assert.doesNotMatch(render(renderLoopResult(unchanged, { expanded: true }, theme, context)), /RAW_NOOP_MODEL_CONTENT_SENTINEL/);
+  assert.deepEqual(unchanged, unchangedBefore);
+});
+
+test("Loop error fallback keeps the complete safe refusal in collapsed and expanded views without mutation", () => {
   const result = {
-    content: [{ type: "text", text: "Loop error\u0000 first\nFull error second\nFull error third" }],
+    content: [{ type: "text", text: "Cannot clear active loops\u0000.\nAsk the user whether to pause these loops, then retry clear only if they agree." }],
     details: { legacy: true },
   };
   const before = structuredClone(result);
-  const collapsedComponent = renderLoopResult(result, { expanded: false, isError: true }, theme, { args: { action: "modify" } });
+  const collapsedComponent = renderLoopResult(result, { expanded: false, isError: true }, theme, { args: { action: "clear" } });
   assertBlankSeparator(collapsedComponent);
-  assert.equal(render(collapsedComponent), "Loop error  first");
-  const expandedComponent = renderLoopResult(result, { expanded: true, isError: true }, theme, { args: { action: "modify" } });
+  const collapsed = render(collapsedComponent, 38);
+  const collapsedFlow = collapsed.replace(/\s+/g, " ");
+  assert.match(collapsedFlow, /Cannot clear active loops \./);
+  assert.match(collapsedFlow, /Ask the user whether to pause these loops, then retry clear only if they agree\./);
+  assert.ok(collapsedComponent.render(38).every((line) => visibleWidth(line) <= 38));
+  const expandedComponent = renderLoopResult(result, { expanded: true, isError: true }, theme, { args: { action: "clear" } });
   assertBlankSeparator(expandedComponent);
-  assert.match(render(expandedComponent), /Loop error  first\nFull error second\nFull error third/);
+  assert.match(render(expandedComponent), /Cannot clear active loops \.\nAsk the user whether to pause these loops, then retry clear only if they agree\./);
   assert.deepEqual(result, before);
 });
 

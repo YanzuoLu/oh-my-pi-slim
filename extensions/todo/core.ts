@@ -271,8 +271,10 @@ export function applyTodoUpdate(
       if (operation.op === "clear") {
         if (clearSeen) throw new Error("clear can appear only once in an update.");
         clearSeen = true;
-        if (draft.some((task) => task.status !== "completed")) {
-          throw new Error("clear requires every current item to be completed.");
+        const inProgress = draft.filter((task) => task.status === "in_progress");
+        if (inProgress.length > 0) {
+          const subjects = inProgress.map((task) => `"${task.subject}"`).join(", ");
+          throw new Error(`clear cannot remove in_progress items: ${subjects}. Ask the user whether to set them back to pending or mark them completed, then retry clear only if they agree.`);
         }
         const changed = draft.length > 0;
         draft.splice(0, draft.length);
@@ -303,6 +305,9 @@ export function applyTodoUpdate(
       if (operation.op === "delete") {
         const index = draft.findIndex((task) => task.subject === operation.target);
         if (index < 0) throw new Error(`target "${operation.target}" does not exist.`);
+        if (draft[index].status === "in_progress") {
+          throw new Error(`cannot delete "${operation.target}" while its current status is in_progress. Ask the user whether to set it back to pending or mark it completed, then retry delete only if they agree.`);
+        }
         const referrers = draft
           .filter((task) => task.subject !== operation.target && task.blockedBy.includes(operation.target))
           .map((task) => `"${task.subject}"`);
