@@ -144,7 +144,7 @@ test("Ask tool metadata and action fields match the frozen contract", () => {
   runtime.registerTool();
   const tool = harness.tools.get("ask_user_question");
   assert.equal(tool.executionMode, "sequential");
-  assert.equal(tool.description, "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. `ask_user_question` is unavailable while a Goal is active.");
+  assert.equal(tool.description, "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. A partial submit keeps every confirmed answer, while cancelling discards all of them. `ask_user_question` is unavailable while a Goal is active.");
   assert.equal(tool.promptSnippet, "Collect structured user decisions.");
   assert.deepEqual(tool.promptGuidelines, [
     "Use `ask_user_question` when a user decision must direct the next step.",
@@ -175,7 +175,7 @@ test("runtime validation rejects exact duplicates, reserved labels, unknown fiel
   }, baseParams.questions[0]] }));
 });
 
-test("shared result builder normalizes option, empty custom, empty multi, partial submit, and cancel partial", () => {
+test("shared result builder normalizes answers, partial submit, empty submit, and discarded cancellation", () => {
   const questionnaire = validateQuestionnaire({ questions: [
     baseParams.questions[0],
     {
@@ -208,16 +208,53 @@ test("shared result builder normalizes option, empty custom, empty multi, partia
   assert.equal(partial.cancelled, false);
   assert.equal(partial.partial, true);
   const cancelled = buildAskResult(questionnaire, { answers: [{ questionIndex: 1, kind: "multi", answer: [] }], cancelled: true });
-  assert.equal(cancelled.cancelReason, "user_cancelled");
-  assert.equal(cancelled.answers.length, 1);
+  assert.deepEqual(cancelled, { answers: [], cancelled: true, partial: true, cancelReason: "user_cancelled" });
   assert.deepEqual(buildAskResult(questionnaire, { answers: [] }), {
     answers: [], cancelled: true, partial: true, cancelReason: "empty_submit",
   });
-  const content = askResultModelContent(cancelled, questionnaire);
-  assert.match(content, /not completed/);
-  assert.match(content, /Partial confirmed answers/);
-  assert.match(content, /no options selected/);
-  assert.match(content, /Unanswered questions/);
+  const partialContent = askResultModelContent(partial, questionnaire);
+  assert.match(partialContent, /Questionnaire partially submitted\./);
+  assert.match(partialContent, /Confirmed answers:/);
+  assert.match(partialContent, /Answer: note/);
+  assert.match(partialContent, /Unanswered questions:/);
+  const emptyContent = askResultModelContent(buildAskResult(questionnaire, { answers: [] }), questionnaire);
+  assert.match(emptyContent, /Questionnaire not completed because no answers were submitted\./);
+  assert.match(emptyContent, /No answers were confirmed\./);
+});
+
+test("the shared result builder discards cancelled driver answers, malformed ones included", () => {
+  const questionnaire = validateQuestionnaire({ questions: [
+    baseParams.questions[0],
+    { question: "Any extra?", header: "Extra", options: [{ label: "No", description: "No." }, { label: "Yes", description: "Yes." }] },
+  ] });
+  const canonical = { answers: [], cancelled: true, partial: true, cancelReason: "user_cancelled" };
+  const hostileDriverResults = [
+    { answers: [{ questionIndex: 0, kind: "option", answer: "Safe" }, { questionIndex: 1, kind: "option", answer: "Yes" }], cancelled: true },
+    // Every one of these would throw on a non-cancelled result. A cancel never inspects them at all.
+    { answers: [{ questionIndex: 9, kind: "option", answer: "Safe" }], cancelled: true },
+    { answers: [{ questionIndex: 0, kind: "option", answer: "Not an authored label" }], cancelled: true },
+    { answers: [{ questionIndex: 0, kind: "multi", answer: ["Safe"] }], cancelled: true },
+    { answers: [{ questionIndex: 0, kind: "nonsense", answer: "Safe" }], cancelled: true },
+    { answers: [null], cancelled: true },
+    { answers: [
+      { questionIndex: 0, kind: "option", answer: "Safe" },
+      { questionIndex: 0, kind: "option", answer: "Fast" },
+    ], cancelled: true },
+  ];
+  for (const driverResult of hostileDriverResults) {
+    assert.deepEqual(buildAskResult(questionnaire, driverResult), canonical, JSON.stringify(driverResult));
+  }
+  assert.throws(() => buildAskResult(questionnaire, { answers: [], cancelled: "yes" }), /cancelled must be a boolean/);
+  assert.throws(() => buildAskResult(questionnaire, { cancelled: true }), /must return an answers array/);
+
+  const content = askResultModelContent(canonical, questionnaire);
+  assert.match(content, /Questionnaire not completed because the user cancelled it\./);
+  assert.match(content, /No answers were retained\./);
+  assert.doesNotMatch(content, /Confirmed answers:/);
+  assert.doesNotMatch(content, /Safe|Yes/);
+  assert.match(content, /Unanswered questions:/);
+  assert.match(content, /1\. Path — Which path\?/);
+  assert.match(content, /2\. Extra — Any extra\?/);
 });
 
 test("single-flight queue runs one dialog at a time and waiting excludes queued invocations", async () => {
@@ -328,7 +365,7 @@ test("RPC single-select carries preview, custom input normalizes empty, and dial
   assert.equal(result.answers[1].answer, null);
 });
 
-test("RPC multi-select redraws toggles, preserves authored order, allows empty, supports custom, and cancels with partial answers", async () => {
+test("RPC multi-select redraws toggles, preserves authored order, allows empty, supports custom, and discards answers on cancel", async () => {
   const question = validateQuestionnaire({ questions: [{
     question: "Which extras?", header: "Extras", multiSelect: true,
     options: [{ label: "A", description: "A." }, { label: "B", description: "B." }, { label: "C", description: "C." }],
@@ -361,9 +398,48 @@ test("RPC multi-select redraws toggles, preserves authored order, allows empty, 
   const cancelChoices = ["Option 2: Fast", ASK_RPC_CANCEL_LABEL];
   const cancelUi = { async select() { return cancelChoices.shift(); }, async input() {} };
   const cancelled = buildAskResult(two, await createRpcAskDriver(cancelUi).ask(two, new AbortController().signal));
-  assert.equal(cancelled.cancelReason, "user_cancelled");
-  assert.equal(cancelled.partial, true);
-  assert.equal(cancelled.answers[0].answer, "Fast");
+  assert.deepEqual(cancelled, { answers: [], cancelled: true, partial: true, cancelReason: "user_cancelled" });
+});
+
+test("every RPC cancel entry discards answers that were already confirmed", async () => {
+  const single = validateQuestionnaire({ questions: [
+    baseParams.questions[0],
+    { question: "Second?", header: "Second", options: [{ label: "No", description: "No." }, { label: "Yes", description: "Yes." }] },
+  ] });
+  const multi = validateQuestionnaire({ questions: [
+    baseParams.questions[0],
+    {
+      question: "Which extras?", header: "Extras", multiSelect: true,
+      options: [{ label: "Logs", description: "Include logs." }, { label: "Metrics", description: "Include metrics." }],
+    },
+  ] });
+  const discarded = { answers: [], cancelled: true };
+
+  async function drive(questionnaire, selects, inputs = []) {
+    const pendingSelects = [...selects];
+    const pendingInputs = [...inputs];
+    const ui = {
+      async select() { return pendingSelects.shift(); },
+      async input() { return pendingInputs.shift(); },
+    };
+    return createRpcAskDriver(ui).ask(questionnaire, new AbortController().signal);
+  }
+
+  // Single-select: the explicit cancel entry and a dismissed select both drop the first answer.
+  assert.deepEqual(await drive(single, ["Option 1: Safe", ASK_RPC_CANCEL_LABEL]), discarded);
+  assert.deepEqual(await drive(single, ["Option 1: Safe", undefined]), discarded);
+  // Single-select custom input: a dismissed input drops the first answer too.
+  assert.deepEqual(await drive(single, ["Option 1: Safe", ASK_CUSTOM_LABEL], [undefined]), discarded);
+  // Multi-select: cancel, dismissed select, and dismissed custom input all discard toggles and answers.
+  assert.deepEqual(await drive(multi, ["Option 1: Safe", "[ ] Option 1: Logs", ASK_RPC_CANCEL_LABEL]), discarded);
+  assert.deepEqual(await drive(multi, ["Option 1: Safe", "[ ] Option 1: Logs", undefined]), discarded);
+  assert.deepEqual(await drive(multi, ["Option 1: Safe", "[ ] Option 1: Logs", ASK_CUSTOM_LABEL], [undefined]), discarded);
+
+  for (const questionnaire of [single, multi]) {
+    assert.deepEqual(buildAskResult(questionnaire, discarded), {
+      answers: [], cancelled: true, partial: true, cancelReason: "user_cancelled",
+    });
+  }
 });
 
 test("RPC exposes complete, partial, empty, and cancelled questionnaire outcomes", async () => {
@@ -400,10 +476,7 @@ test("RPC exposes complete, partial, empty, and cancelled questionnaire outcomes
   });
 
   const cancelled = await run(["Option 2: Fast", ASK_RPC_CANCEL_LABEL]);
-  assert.equal(cancelled.cancelled, true);
-  assert.equal(cancelled.cancelReason, "user_cancelled");
-  assert.equal(cancelled.partial, true);
-  assert.deepEqual(cancelled.answers.map((answer) => answer.answer), ["Fast"]);
+  assert.deepEqual(cancelled, { answers: [], cancelled: true, partial: true, cancelReason: "user_cancelled" });
 });
 
 test("RPC authored prefixes keep Submit, Cancel, and Done label collisions unambiguous", async () => {
@@ -486,8 +559,39 @@ test("registered tool uses the shared envelope and user cancel remains a normal 
   }) } });
   runtime.registerTool();
   const result = await harness.tools.get("ask_user_question").execute("call", baseParams, undefined, undefined, tuiCtx());
-  assert.equal(result.details.cancelReason, "user_cancelled");
-  assert.equal(result.details.answers[0].answer, "partial");
+  assert.deepEqual(result.details, { answers: [], cancelled: true, partial: true, cancelReason: "user_cancelled" });
   assert.match(result.content[0].text, /not completed/);
+  assert.match(result.content[0].text, /No answers were retained\./);
+  assert.doesNotMatch(result.content[0].text, /partial\b/);
   assert.doesNotMatch(result.content[0].text, /declin/i);
+});
+
+test("a host, tool, or session abort stays an AbortError and never becomes a user cancellation", async () => {
+  const harness = createPi();
+  const runtime = new AskRuntime(harness.pi, { tuiDriver: {
+    ask(_questionnaire, signal) {
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          const error = new Error("driver aborted");
+          error.name = "AbortError";
+          reject(error);
+        }, { once: true });
+      });
+    },
+  } });
+  runtime.registerTool();
+  const tool = harness.tools.get("ask_user_question");
+  const controller = new AbortController();
+  const pending = tool.execute("call", baseParams, controller.signal, undefined, tuiCtx());
+  await flush();
+  controller.abort("tool call cancelled");
+  await assert.rejects(pending, (error) => error.name === "AbortError" && /tool call cancelled/.test(error.message));
+
+  const preAborted = AbortSignal.abort("host already stopped");
+  await assert.rejects(
+    tool.execute("call", baseParams, preAborted, undefined, tuiCtx()),
+    (error) => error.name === "AbortError" && /host already stopped/.test(error.message),
+  );
+  assert.equal(runtime.waitingCount(), 0);
+  assert.equal(runtime.state().queuedCount, 0);
 });

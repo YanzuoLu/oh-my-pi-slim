@@ -69,7 +69,9 @@ function notificationJson(events, prefix) {
   return JSON.parse(notification.message.slice(prefix.length));
 }
 
-function runAskRpcDialog(agentDir) {
+const ASK_RPC_COMPLETE_SCRIPT = ["Option 1: Safe", "[ ] Option 2: Metrics", "Done with this question"];
+
+function runAskRpcDialog(agentDir, selectScript = ASK_RPC_COMPLETE_SCRIPT) {
   const args = [
     "--mode", "rpc",
     "--no-session",
@@ -122,9 +124,7 @@ function runAskRpcDialog(agentDir) {
         return;
       }
       if (event.type !== "extension_ui_request" || event.method !== "select") return;
-      const value = selectCount === 0
-        ? "Option 1: Safe"
-        : selectCount === 1 ? "[ ] Option 2: Metrics" : "Done with this question";
+      const value = selectScript[Math.min(selectCount, selectScript.length - 1)];
       selectCount += 1;
       child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: event.id, value })}\n`);
     };
@@ -169,7 +169,7 @@ test("real Pi isolated RPC main and child sessions expose exact package tools wi
     assert.deepEqual(main.activeTools, ["ask_user_question", "goal", "loop", "monitor", "subagent", "todo"]);
     assert.deepEqual(main.commands, ["goal", "loop"]);
     assert.deepEqual(main.descriptions, {
-      ask_user_question: "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. `ask_user_question` is unavailable while a Goal is active.",
+      ask_user_question: "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. A partial submit keeps every confirmed answer, while cancelling discards all of them. `ask_user_question` is unavailable while a Goal is active.",
       goal: "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a terminal Goal from the branch and rejects any nonterminal Goal. Actions return the current Goal state and whether it changed.",
       loop: "Create and manage runtime-only fixed-delay loops from 10s through 7d. Creation and resume wait one full interval before firing. Each later delay starts only after the previous tick finishes. Each fire delivers the stored prompt for a future turn. Loop state survives compaction and tree navigation within the current runtime. Reload, session replacement, and shutdown clear every loop. Actions return current loop state, change receipts, or the retained loop list.",
       monitor: "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor delete` stops a running group when needed and removes its retained record. Terminal records remain available until deletion. Runtime shutdown terminates active groups and clears retained monitor data.",
@@ -289,6 +289,30 @@ test("real Pi RPC Ask dialog completes through native extension UI without a mod
       ],
       cancelled: false,
       partial: false,
+    });
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("real Pi RPC Ask cancel discards the answer the user already confirmed", async () => {
+  mkdirSync(CACHE, { recursive: true });
+  const agentDir = mkdtempSync(join(CACHE, "omps-ask-rpc-cancel-smoke-"));
+  try {
+    // The first question is answered for real, then the second dialog is cancelled.
+    const { events, stderr } = await runAskRpcDialog(agentDir, ["Option 1: Safe", "Cancel questionnaire"]);
+    assert.doesNotMatch(stderr, /extension_error|runtime not initialized/i);
+    assert.equal(events.some((event) => event.type === "extension_error"), false);
+    assert.equal(events.some((event) => event.type === "agent_start" || event.type === "message_start"), false);
+    const selects = events.filter((event) => event.type === "extension_ui_request" && event.method === "select");
+    assert.equal(selects.length, 2);
+    assert.ok(selects[0].options.includes("Option 1: Safe"));
+    assert.ok(selects[1].options.includes("Cancel questionnaire"));
+    assert.deepEqual(notificationJson(events, "ASK_RPC_PROBE "), {
+      answers: [],
+      cancelled: true,
+      partial: true,
+      cancelReason: "user_cancelled",
     });
   } finally {
     rmSync(agentDir, { recursive: true, force: true });

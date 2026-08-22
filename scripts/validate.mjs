@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.17", "package version must be 0.10.17");
+check(packageJson.version === "0.10.18", "package version must be 0.10.18");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.17" && lock.packages?.[""]?.version === "0.10.17", "package-lock version must be 0.10.17");
+check(lock.version === "0.10.18" && lock.packages?.[""]?.version === "0.10.18", "package-lock version must be 0.10.18");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -770,7 +770,7 @@ const askDescription = propertyString(askToolMetadata, "description", "Ask tool 
 const askPromptSnippetMatch = /export const ASK_PROMPT_SNIPPET = ("(?:\\.|[^"\\])*")/.exec(askRuntime);
 const askPromptSnippet = askPromptSnippetMatch ? JSON.parse(askPromptSnippetMatch[1]) : "";
 check(Boolean(askPromptSnippetMatch), "Ask tool metadata must define a static promptSnippet");
-check(askDescription === "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. `ask_user_question` is unavailable while a Goal is active.", "Ask description must match the reviewed contract");
+check(askDescription === "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. A partial submit keeps every confirmed answer, while cancelling discards all of them. `ask_user_question` is unavailable while a Goal is active.", "Ask description must match the reviewed contract");
 check(askPromptSnippet === "Collect structured user decisions.", "Ask promptSnippet must match the reviewed contract");
 checkSteBlock(askDescription, "Ask description");
 checkSteBlock(askPromptSnippet, "Ask promptSnippet");
@@ -783,8 +783,29 @@ hasAll(askRuntime, [
   'ASK_RPC_CANCEL_LABEL = "Cancel questionnaire"',
   'ASK_RPC_DONE_LABEL = "Done with this question"',
   "if (choice === ASK_RPC_SUBMIT_LABEL) return { answers, cancelled: false }",
-  "if (choice === undefined || choice === ASK_RPC_CANCEL_LABEL) return { answers, cancelled: true }",
+  // Every RPC cancel path returns an empty answer set, so cancelling can never leak a confirmed answer.
+  "if (choice === undefined || choice === ASK_RPC_CANCEL_LABEL) return { answers: [], cancelled: true }",
+  "if (custom === undefined) return { answers: [], cancelled: true }",
 ], "Ask RPC submit and cancel contract");
+check(!/return \{ answers, cancelled: true \}/.test(askRuntime), "no Ask RPC cancel path may return collected answers");
+hasAll(askRuntime, [
+  // buildAskResult is the last line of defence: a cancelled driver result is discarded before normalization.
+  "if (driverResult.cancelled === true) {",
+  'return { answers: [], cancelled: true, partial: true, cancelReason: "user_cancelled" as const };',
+  '"No answers were retained."',
+], "Ask cancel discards every answer in the shared result builder and model content");
+hasAll(askTui, [
+  // A single question owns the whole questionnaire, so there is no Submit tab and no ghost index.
+  "this.hasSubmitTab = this.questionnaire.questions.length > 1;",
+  "return this.questionnaire.questions.length + (this.hasSubmitTab ? 1 : 0);",
+  "return this.hasSubmitTab && this.currentTab === this.questionnaire.questions.length;",
+  "if (!this.hasSubmitTab) {",
+  "if (this.onSubmitTab()) {",
+  "if (this.hasSubmitTab) {",
+  'this.onDone(cancelled ? { answers: [], cancelled: true } : { answers: answerSnapshot(this.answers) });',
+  '"Discard every confirmed answer and cancel the questionnaire."',
+  '"↑↓ move · Enter confirm · Esc cancel and discard"',
+], "Ask single-question direct completion, no Submit tab, and discarding cancel contract");
 hasAll(askTui, [
   "export class AskTuiDriver", "this.ui.custom", "overlay: true", 'width: "100%"', 'maxHeight: "90%"', 'anchor: "bottom-center"',
   "AskQuestionnaireComponent", "implements Component, Focusable", "this.editor.focused", "signal.addEventListener", "signal.removeEventListener",
@@ -2263,16 +2284,26 @@ const askTranscriptTests = read("tests/ask-transcript-renderer.test.mjs");
 hasAll(askRuntimeTests, [
   "single-flight queue runs one dialog at a time", "queued and active aborts reject exactly once", "RPC exposes complete, partial, empty, and cancelled",
   "headless reconciliation removes and restores only Ask", "typeof tool.renderCall", "typeof tool.renderResult",
-], "Ask core schema, result, RPC, single-flight, abort, headless, and renderer registration tests");
+  // Cancel discards answers at the driver and again in the shared builder, including malformed driver output.
+  "every RPC cancel entry discards answers that were already confirmed",
+  "the shared result builder discards cancelled driver answers, malformed ones included",
+  "No answers were retained",
+], "Ask core schema, result, cancel discard, RPC, single-flight, abort, headless, and renderer registration tests");
 hasAll(askUiTests, [
   "tabs wrap in both directions", "single-select cycles", "multi-select toggles", "per-tab drafts", "partial and zero answers",
   "wide two-column", "narrow stacked", "Abort closes the overlay exactly once", "RPC never uses custom overlay", "main lifecycle binds fresh TUI drivers",
   "CURSOR_MARKER", "visibleWidth(line) <=", "pasted\\n汉字", "authored Ask fields strip ANSI, OSC, C0, and C1", "originalParams", "originalValidated",
-], "Ask focused modal, tabs, input, draft, preview, abort, cleanup, RPC, focus, and width tests");
+  // A one-question questionnaire finishes on the confirming keystroke and never shows a Submit surface.
+  "a single question completes on confirmation and never shows a Submit tab or panel",
+  "a single custom question completes from inside the editor while Esc still keeps the draft",
+  "every TUI cancel entry discards answers that were already confirmed",
+], "Ask single-question direct completion, discarding cancel, modal, tabs, input, draft, preview, abort, cleanup, RPC, focus, and width tests");
 hasAll(askTranscriptTests, [
   "ask_user_question · 3 questions (ctrl+o to expand)", "full expanded schema", "one leading blank line", "Selected preview",
   "data invariance", "safely falls back", "package-isomorphic call and result renderers", "Action:",
-], "Ask focused Ctrl+O call, result, fallback, spacing, and invariance tests");
+  // Old transcripts keep their recorded answers, and a new cancel shows an honest empty result.
+  "the renderer replays historical cancelled details with answers untouched",
+], "Ask focused Ctrl+O call, result, history compatibility, fallback, spacing, and invariance tests");
 for (const file of ["tests/loop.test.mjs", "tests/provider-schema.test.mjs", "tests/subagent-runtime.test.mjs"]) {
   hasAll(read(file), ["./ask-runtime.js", "./ask-transcript-renderer.js", "./ask-tui.js"], `${file} Ask TypeScript load mappings`);
 }

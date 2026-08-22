@@ -173,7 +173,7 @@ test("Ask TUI uses one bottom-center full-width modal and tabs wrap in both dire
 });
 
 test("single-select cycles, confirms an authored option, and advances to Submit", async () => {
-  const harness = createDriverHarness({ questions: [question()] });
+  const harness = createDriverHarness({ questions: [question(), question({ question: "Second?", header: "Second" })] });
   harness.component.handleInput(KEY.down);
   assert.match(render(harness.component), /> 2\. Fast/);
   harness.component.handleInput(KEY.down);
@@ -184,11 +184,127 @@ test("single-select cycles, confirms an authored option, and advances to Submit"
   assert.match(render(harness.component), /> 3\. Type something\./);
   harness.component.handleInput(KEY.down);
   harness.component.handleInput(KEY.enter);
-  assert.match(render(harness.component), /1\/1 answered/);
+  assert.match(render(harness.component), /Second\?/);
+  harness.component.handleInput(KEY.enter);
+  assert.match(render(harness.component), /2\/2 answered/);
   harness.component.handleInput(KEY.enter);
   assert.deepEqual(await harness.pending, {
+    answers: [
+      { questionIndex: 0, kind: "option", answer: "Safe" },
+      { questionIndex: 1, kind: "option", answer: "Safe" },
+    ],
+  });
+});
+
+test("a single question completes on confirmation and never shows a Submit tab or panel", async () => {
+  const authored = createDriverHarness({ questions: [question()] });
+  const surface = render(authored.component);
+  assert.doesNotMatch(surface, /Submit/, "a one-question questionnaire has nothing left to submit");
+  assert.doesNotMatch(surface, /Cancel questionnaire/);
+  assert.match(surface, /↑↓ move · Enter confirm · Esc cancel and discard/);
+  assert.doesNotMatch(surface, /next tab|previous tab/);
+
+  // Tab, Shift-Tab, Right, and Left all resolve to the one real tab: there is no ghost index to reach.
+  for (const key of [KEY.tab, KEY.shiftTab, KEY.right, KEY.left, KEY.tab, KEY.tab]) {
+    authored.component.handleInput(key);
+    const cycled = render(authored.component);
+    assert.match(cycled, /Which path should we take/);
+    assert.doesNotMatch(cycled, /Submit/);
+  }
+  assert.equal(authored.doneCalls, 0);
+  authored.component.handleInput(KEY.enter);
+  assert.equal(authored.doneCalls, 1, "confirming the only question completes the questionnaire at once");
+  assert.deepEqual(await authored.pending, {
     answers: [{ questionIndex: 0, kind: "option", answer: "Safe" }],
   });
+
+  // A focused preview changes nothing about the completion path.
+  const previewed = createDriverHarness({ questions: [question()] });
+  assert.match(render(previewed.component), /Safe preview/);
+  previewed.component.handleInput(KEY.enter);
+  assert.deepEqual(await previewed.pending, {
+    answers: [{ questionIndex: 0, kind: "option", answer: "Safe" }],
+  });
+
+  // Multi-select keeps Enter and Space as toggles, and the existing Next row is the confirmation.
+  const multi = createDriverHarness({ questions: [multiQuestion()] });
+  assert.doesNotMatch(render(multi.component), /Submit/);
+  multi.component.handleInput(KEY.enter);
+  multi.component.handleInput(KEY.down);
+  multi.component.handleInput(KEY.space);
+  assert.equal(multi.doneCalls, 0, "Enter and Space only toggle while an authored option is focused");
+  assert.match(render(multi.component), /\[x\] 1\. Logs/);
+  assert.match(render(multi.component), /\[x\] 2\. Metrics/);
+  for (let index = 0; index < 3; index += 1) multi.component.handleInput(KEY.down);
+  assert.match(render(multi.component), /> 5\. Next/);
+  multi.component.handleInput(KEY.enter);
+  assert.deepEqual(await multi.pending, {
+    answers: [{ questionIndex: 0, kind: "multi", answer: ["Logs", "Metrics"] }],
+  });
+
+  // Space on the Next row confirms an empty multi-select without any Ctrl+Enter shortcut.
+  const emptyMulti = createDriverHarness({ questions: [multiQuestion()] });
+  for (let index = 0; index < 4; index += 1) emptyMulti.component.handleInput(KEY.down);
+  emptyMulti.component.handleInput(KEY.space);
+  assert.deepEqual(await emptyMulti.pending, {
+    answers: [{ questionIndex: 0, kind: "multi", answer: [] }],
+  });
+});
+
+test("a single custom question completes from inside the editor while Esc still keeps the draft", async () => {
+  const harness = createDriverHarness({ questions: [question()] });
+  goToCustom(harness.component, 2);
+  type(harness.component, "first");
+  harness.component.handleInput(KEY.newline);
+  type(harness.component, "second");
+  assert.equal(harness.doneCalls, 0, "Shift+Enter adds a line instead of confirming");
+
+  // Esc leaves the editor and keeps the draft, and a second Esc cancels the questionnaire.
+  harness.component.handleInput(KEY.escape);
+  assert.match(render(harness.component), /> 3\. Type something\./);
+  assert.equal(harness.doneCalls, 0);
+  harness.component.handleInput(KEY.enter);
+  const reopened = render(harness.component, 80);
+  assert.match(reopened, /first/);
+  assert.match(reopened, /second/);
+  harness.component.handleInput(KEY.enter);
+  assert.equal(harness.doneCalls, 1, "Enter inside the editor completes the one-question questionnaire");
+  assert.deepEqual(await harness.pending, {
+    answers: [{ questionIndex: 0, kind: "custom", answer: "first\nsecond" }],
+  });
+
+  const discarded = createDriverHarness({ questions: [question()] });
+  goToCustom(discarded.component, 2);
+  type(discarded.component, "draft only");
+  discarded.component.handleInput(KEY.escape);
+  discarded.component.handleInput(KEY.escape);
+  assert.deepEqual(await discarded.pending, { answers: [], cancelled: true });
+});
+
+test("every TUI cancel entry discards answers that were already confirmed", async () => {
+  const questions = { questions: [question(), question({ question: "Second?", header: "Second" })] };
+
+  const escaped = createDriverHarness(questions);
+  escaped.component.handleInput(KEY.enter);
+  assert.match(render(escaped.component), /Second\?/);
+  escaped.component.handleInput(KEY.escape);
+  assert.deepEqual(await escaped.pending, { answers: [], cancelled: true }, "Esc withdraws the whole questionnaire");
+
+  const cancelButton = createDriverHarness(questions);
+  cancelButton.component.handleInput(KEY.enter);
+  cancelButton.component.handleInput(KEY.enter);
+  const panel = render(cancelButton.component);
+  assert.match(panel, /2\/2 answered/);
+  assert.match(panel, /Discard every confirmed answer and cancel the questionnaire\./);
+  assert.doesNotMatch(panel, /keep any answers/);
+  cancelButton.component.handleInput(KEY.down);
+  cancelButton.component.handleInput(KEY.enter);
+  assert.deepEqual(await cancelButton.pending, { answers: [], cancelled: true });
+
+  const singleEscape = createDriverHarness({ questions: [question()] });
+  singleEscape.component.handleInput(KEY.down);
+  singleEscape.component.handleInput(KEY.escape);
+  assert.deepEqual(await singleEscape.pending, { answers: [], cancelled: true });
 });
 
 test("multi-select toggles with Space and Enter, clears on custom, confirms empty, and preserves authored order", async () => {
@@ -201,7 +317,6 @@ test("multi-select toggles with Space and Enter, clears on custom, confirms empt
   ordered.component.handleInput(KEY.enter);
   for (let index = 0; index < 4; index += 1) ordered.component.handleInput(KEY.down);
   ordered.component.handleInput(KEY.enter);
-  ordered.component.handleInput(KEY.enter);
   assert.deepEqual(await ordered.pending, {
     answers: [{ questionIndex: 0, kind: "multi", answer: ["Logs", "Traces"] }],
   });
@@ -213,7 +328,6 @@ test("multi-select toggles with Space and Enter, clears on custom, confirms empt
   assert.doesNotMatch(render(cleared.component), /Preview/);
   cleared.component.handleInput(KEY.escape);
   cleared.component.handleInput(KEY.down);
-  cleared.component.handleInput(KEY.enter);
   cleared.component.handleInput(KEY.enter);
   assert.deepEqual(await cleared.pending, {
     answers: [{ questionIndex: 0, kind: "multi", answer: [] }],
@@ -261,7 +375,6 @@ test("inline Pi Editor supports multiline, paste, IME focus, explicit submit/can
   const empty = createDriverHarness({ questions: [question()] });
   goToCustom(empty.component, 2);
   empty.component.handleInput(KEY.enter);
-  empty.component.handleInput(KEY.enter);
   assert.deepEqual(await empty.pending, {
     answers: [{ questionIndex: 0, kind: "custom", answer: null }],
   });
@@ -270,13 +383,12 @@ test("inline Pi Editor supports multiline, paste, IME focus, explicit submit/can
   goToCustom(pasted.component, 2);
   pasted.component.handleInput("\x1b[200~pasted\n汉字\x1b[201~");
   pasted.component.handleInput(KEY.enter);
-  pasted.component.handleInput(KEY.enter);
   assert.deepEqual(await pasted.pending, {
     answers: [{ questionIndex: 0, kind: "custom", answer: "pasted\n汉字" }],
   });
 });
 
-test("Submit supports partial and zero answers while Cancel preserves confirmed partial answers", async () => {
+test("Submit supports partial and zero answers while Cancel discards every confirmed answer", async () => {
   const questions = { questions: [question(), question({ question: "Second?", header: "Second" })] };
   const partial = createDriverHarness(questions);
   partial.component.handleInput(KEY.enter);
@@ -299,30 +411,13 @@ test("Submit supports partial and zero answers while Cancel preserves confirmed 
   cancelled.component.handleInput(KEY.down);
   cancelled.component.handleInput(KEY.enter);
   cancelled.component.handleInput(KEY.escape);
-  assert.deepEqual(await cancelled.pending, {
-    answers: [{ questionIndex: 0, kind: "option", answer: "Fast" }],
-    cancelled: true,
-  });
+  assert.deepEqual(await cancelled.pending, { answers: [], cancelled: true });
 
   const cancelButton = createDriverHarness(questions);
   cancelButton.component.handleInput(KEY.left);
   cancelButton.component.handleInput(KEY.down);
   cancelButton.component.handleInput(KEY.enter);
   assert.deepEqual(await cancelButton.pending, { answers: [], cancelled: true });
-
-  const confirmedDraft = createDriverHarness({ questions: [multiQuestion(), question({ question: "Second?", header: "Second" })] });
-  confirmedDraft.component.handleInput(KEY.space);
-  for (let index = 0; index < 4; index += 1) confirmedDraft.component.handleInput(KEY.down);
-  confirmedDraft.component.handleInput(KEY.enter);
-  confirmedDraft.component.handleInput(KEY.left);
-  confirmedDraft.component.handleInput(KEY.up);
-  confirmedDraft.component.handleInput(KEY.up);
-  confirmedDraft.component.handleInput(KEY.space);
-  confirmedDraft.component.handleInput(KEY.escape);
-  assert.deepEqual(await confirmedDraft.pending, {
-    answers: [{ questionIndex: 0, kind: "multi", answer: ["Logs"] }],
-    cancelled: true,
-  }, "unconfirmed edits do not erase the last confirmed partial answer");
 });
 
 test("preview is full markdown, wide two-column, narrow stacked, empty-state aware, hidden in custom, and width-safe", async () => {
@@ -432,7 +527,6 @@ test("Abort closes the overlay exactly once, rejects AbortError, removes listene
   const normalRemove = normalController.signal.removeEventListener.bind(normalController.signal);
   normalController.signal.removeEventListener = (...args) => { normalRemoves += 1; return normalRemove(...args); };
   const normal = createDriverHarness({ questions: [question()] }, normalController);
-  normal.component.handleInput(KEY.enter);
   normal.component.handleInput(KEY.enter);
   await normal.pending;
   assert.equal(normal.doneCalls, 1);

@@ -180,10 +180,15 @@ terminal record 与相关输出会一直保留到 `delete`。先用 `status` 检
 | Selection | 支持 single-select 与 multi-select |
 | Custom input | 支持 custom response |
 | Preview | single-select option 支持 preview |
-| Partial result | partial 或 cancelled answer 也会作为结构化结果返回 |
+| Partial result | submit 会返回已确认的全部 answer，包括 partial 或空集 |
+| Cancel | 丢弃全部 answer，包括已经确认的那些 |
 | Goal guard | Goal active 时不可用 |
 
-Ask 仅 main 可用，并要求交互式 UI；JSON 与 print mode 不提供该工具。
+只有一个 question 时没有单独的 Submit 步骤：确认一个 option、multi-select 的 `Next` 行或一段 custom response，问卷就当场完成。两个及以上 question 仍保留 `Submit` tab，可以在那里提交 partial 或空集 answer，也可以 cancel。
+
+Submit 与 cancel 含义不同。Submit 会原样交回你确认过的内容，所以 partial submit 是对部分 question 的真实回答，对其余 question 保持沉默。Cancel 则是完全撤回：model 拿不到任何 answer，并会被告知哪些 question 未回答。无论在 TUI 问卷还是 RPC dialog，每个 cancel 入口的行为都一致。
+
+Ask 仅 main 可用，并要求交互式 UI。JSON 与 print mode 不提供该工具。
 
 ### `goal`
 

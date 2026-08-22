@@ -117,7 +117,8 @@ test("Ask result collapsed summaries distinguish complete, partial, cancelled, a
   const cases = [
     [complete, "✓  Answered 3/3 · complete"],
     [partial, "◐  Answered 1/3 · partial"],
-    [cancelled, "!  Cancelled · 1/3 answered · user cancelled"],
+    // A new cancel discards every answer, so the honest summary is 0/3.
+    [cancelled, "!  Cancelled · 0/3 answered · user cancelled"],
     [empty, "!  Cancelled · 0/3 answered · empty submit"],
   ];
   for (const [details, expected] of cases) {
@@ -130,15 +131,76 @@ test("Ask result collapsed summaries distinguish complete, partial, cancelled, a
   }
 });
 
-test("expanded Ask result shows complete answers, selected preview, empty values, unanswered questions, cancel reason, and data invariance", () => {
+test("a new cancel renders an honest empty result in both densities", () => {
   const questionnaire = validateQuestionnaire(args);
   const details = buildAskResult(questionnaire, {
-    answers: [
-      { questionIndex: 0, kind: "option", answer: "Safe" },
-      { questionIndex: 1, kind: "multi", answer: [] },
-    ],
+    answers: [{ questionIndex: 0, kind: "option", answer: "Safe" }],
     cancelled: true,
   });
+  assert.deepEqual(details, { answers: [], cancelled: true, partial: true, cancelReason: "user_cancelled" });
+  const collapsed = render(renderAskResult({ details }, { expanded: false }, theme, { args }));
+  assert.equal(collapsed, "!  Cancelled · 0/3 answered · user cancelled");
+  const expanded = render(renderAskResult({ details }, { expanded: true }, theme, { args }));
+  containsAll(expanded, [
+    "Cancelled · 0/3 answered · user cancelled", "Cancelled: true", "Partial: true", "Cancel reason: user_cancelled",
+    "Answers", "No answers were confirmed.",
+    "Unanswered", "1. Path", "2. Extras", "3. Note",
+  ]);
+  assert.doesNotMatch(expanded, /Safe|Kind:|Selected preview/);
+});
+
+test("the renderer replays historical cancelled details with answers untouched", () => {
+  // Transcripts written before cancel discarded answers still carry them. The renderer is a pure
+  // projection of the recorded details, so it must show that history exactly as it was stored.
+  const legacyDetails = {
+    answers: [
+      {
+        questionIndex: 0,
+        question: "Which path should we take?",
+        header: "Path",
+        kind: "option",
+        answer: "Safe",
+        selected: ["Safe"],
+        preview: "# Full safe preview\n\nPREVIEW_BODY_SENTINEL",
+      },
+      { questionIndex: 1, question: "Which extras should be included?", header: "Extras", kind: "multi", answer: ["Logs"], selected: ["Logs"] },
+    ],
+    cancelled: true,
+    partial: true,
+    cancelReason: "user_cancelled",
+  };
+  const legacyContent = "Questionnaire not completed because the user cancelled it.\nPartial confirmed answers:";
+  const legacyResult = { content: [{ type: "text", text: legacyContent }], details: legacyDetails };
+  const before = structuredClone(legacyResult);
+
+  const collapsed = render(renderAskResult(legacyResult, { expanded: false }, theme, { args }));
+  assert.equal(collapsed, "!  Cancelled · 2/3 answered · user cancelled");
+  const expanded = render(renderAskResult(legacyResult, { expanded: true }, theme, { args }));
+  containsAll(expanded, [
+    "Cancelled · 2/3 answered · user cancelled", "Cancel reason: user_cancelled",
+    "1. Path", "Kind: option", "Safe", "Selected preview:", "PREVIEW_BODY_SENTINEL",
+    "2. Extras", "Kind: multi", "- Logs", "Unanswered", "3. Note",
+  ]);
+  assert.doesNotMatch(expanded, /No answers were confirmed/);
+
+  // The renderer never rewrites the model-facing content or the recorded details.
+  assert.deepEqual(legacyResult, before);
+  assert.equal(legacyResult.content[0].text, legacyContent);
+  assert.deepEqual(legacyResult.details, legacyDetails);
+});
+
+test("expanded Ask result shows complete answers, selected preview, empty values, unanswered questions, cancel reason, and data invariance", () => {
+  const questionnaire = validateQuestionnaire(args);
+  const details = {
+    ...buildAskResult(questionnaire, {
+      answers: [
+        { questionIndex: 0, kind: "option", answer: "Safe" },
+        { questionIndex: 1, kind: "multi", answer: [] },
+      ],
+    }),
+    cancelled: true,
+    cancelReason: "user_cancelled",
+  };
   const result = {
     content: [{ type: "text", text: "MODEL_CONTENT_MUST_STAY_EXACT\nSECOND_MODEL_LINE" }],
     details,

@@ -180,10 +180,15 @@ Opens a structured main-session questionnaire with one to four questions.
 | Selection | Supports single-select and multi-select questions |
 | Custom input | Accepts custom responses |
 | Preview | Shows previews for single-select options |
-| Partial results | Returns partial or cancelled answers as structured results |
+| Partial results | Submitting returns every confirmed answer, even a partial or empty set |
+| Cancelling | Discards every answer, including ones already confirmed |
 | Goal guard | Is unavailable while a Goal is active |
 
-Ask is main-only and requires an interactive UI; it is not offered in JSON or print modes.
+A single question has no separate Submit step: confirming an option, a multi-select `Next` row, or a custom response finishes the questionnaire right there. Two or more questions keep the `Submit` tab, where you can submit a partial or empty set of answers, or cancel.
+
+Submit and cancel mean different things. Submitting hands back exactly what you confirmed, so a partial submit is a real answer to some questions and silence on the rest. Cancelling is a full withdrawal: the model receives no answers at all and is told which questions went unanswered. Every cancel entry behaves the same way, in both the TUI questionnaire and the RPC dialog.
+
+Ask is main-only and requires an interactive UI. It is not offered in JSON or print modes.
 
 ### `goal`
 

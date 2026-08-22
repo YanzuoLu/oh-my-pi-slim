@@ -258,6 +258,11 @@ export function buildAskResult(questionnaire: ValidatedQuestionnaire, driverResu
   if (driverResult.cancelled !== undefined && typeof driverResult.cancelled !== "boolean") {
     throw new Error("Ask driver cancelled must be a boolean.");
   }
+  // A user cancellation is a full withdrawal. Driver answers are dropped without being normalized,
+  // so no driver, present or future, can smuggle a confirmed answer past a cancel.
+  if (driverResult.cancelled === true) {
+    return { answers: [], cancelled: true, partial: true, cancelReason: "user_cancelled" as const };
+  }
   const seen = new Set<number>();
   const answers = driverResult.answers.map((raw) => {
     if (!raw || typeof raw !== "object") throw new Error("Ask driver returned an invalid answer.");
@@ -265,13 +270,12 @@ export function buildAskResult(questionnaire: ValidatedQuestionnaire, driverResu
     seen.add(raw.questionIndex);
     return normalizedDriverAnswer(questionnaire, raw);
   }).sort((left, right) => left.questionIndex - right.questionIndex);
-  const userCancelled = driverResult.cancelled === true;
-  const emptySubmit = !userCancelled && answers.length === 0;
+  const emptySubmit = answers.length === 0;
   return {
     answers,
-    cancelled: userCancelled || emptySubmit,
+    cancelled: emptySubmit,
     partial: answers.length < questionnaire.questions.length,
-    ...((userCancelled || emptySubmit) ? { cancelReason: userCancelled ? "user_cancelled" as const : "empty_submit" as const } : {}),
+    ...(emptySubmit ? { cancelReason: "empty_submit" as const } : {}),
   };
 }
 
@@ -286,11 +290,12 @@ function answerDisplay(answer: AskPublicAnswer): string {
 
 export function askResultModelContent(result: AskResult, questionnaire: ValidatedQuestionnaire): string {
   const lines: string[] = [];
-  if (result.cancelled) {
-    lines.push(result.cancelReason === "empty_submit"
-      ? "Questionnaire not completed because no answers were submitted."
-      : "Questionnaire not completed because the user cancelled it.");
-    lines.push(result.answers.length > 0 ? "Partial confirmed answers:" : "No answers were confirmed.");
+  if (result.cancelReason === "user_cancelled") {
+    lines.push("Questionnaire not completed because the user cancelled it.");
+    lines.push("No answers were retained.");
+  } else if (result.cancelled) {
+    lines.push("Questionnaire not completed because no answers were submitted.");
+    lines.push("No answers were confirmed.");
   } else {
     lines.push(result.partial ? "Questionnaire partially submitted." : "Questionnaire completed.");
     lines.push("Confirmed answers:");
@@ -345,7 +350,7 @@ export function createRpcAskDriver(ui: Pick<ExtensionUIContext, "select" | "inpu
               ASK_RPC_CANCEL_LABEL,
             ], { signal });
             throwIfAborted(signal);
-            if (choice === undefined || choice === ASK_RPC_CANCEL_LABEL) return { answers, cancelled: true };
+            if (choice === undefined || choice === ASK_RPC_CANCEL_LABEL) return { answers: [], cancelled: true };
             if (choice === ASK_RPC_SUBMIT_LABEL) return { answers, cancelled: false };
             if (choice === ASK_RPC_DONE_LABEL) {
               answers.push({
@@ -358,7 +363,7 @@ export function createRpcAskDriver(ui: Pick<ExtensionUIContext, "select" | "inpu
             if (choice === ASK_CUSTOM_LABEL) {
               const custom = await ui.input(`${question.header}: ${question.question}`, ASK_CUSTOM_LABEL, { signal });
               throwIfAborted(signal);
-              if (custom === undefined) return { answers, cancelled: true };
+              if (custom === undefined) return { answers: [], cancelled: true };
               selected.clear();
               answers.push({ questionIndex, kind: "custom", answer: custom });
               break;
@@ -380,12 +385,12 @@ export function createRpcAskDriver(ui: Pick<ExtensionUIContext, "select" | "inpu
           ASK_RPC_CANCEL_LABEL,
         ], { signal });
         throwIfAborted(signal);
-        if (choice === undefined || choice === ASK_RPC_CANCEL_LABEL) return { answers, cancelled: true };
+        if (choice === undefined || choice === ASK_RPC_CANCEL_LABEL) return { answers: [], cancelled: true };
         if (choice === ASK_RPC_SUBMIT_LABEL) return { answers, cancelled: false };
         if (choice === ASK_CUSTOM_LABEL) {
           const custom = await ui.input(`${question.header}: ${question.question}`, ASK_CUSTOM_LABEL, { signal });
           throwIfAborted(signal);
-          if (custom === undefined) return { answers, cancelled: true };
+          if (custom === undefined) return { answers: [], cancelled: true };
           answers.push({ questionIndex, kind: "custom", answer: custom });
           continue;
         }
@@ -424,7 +429,7 @@ export class AskRuntime {
       name: ASK_TOOL_NAME,
       label: "Ask User Question",
       executionMode: "sequential",
-      description: "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. `ask_user_question` is unavailable while a Goal is active.",
+      description: "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. A partial submit keeps every confirmed answer, while cancelling discards all of them. `ask_user_question` is unavailable while a Goal is active.",
       promptSnippet: ASK_PROMPT_SNIPPET,
       promptGuidelines: [...ASK_PROMPT_GUIDELINES],
       parameters: askUserQuestionParameters,

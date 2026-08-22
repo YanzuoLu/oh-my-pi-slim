@@ -92,6 +92,12 @@ export class AskQuestionnaireComponent implements Component, Focusable {
   private readonly multiSelections: Array<Set<string>>;
   private readonly customDrafts: string[];
   private readonly editor: Editor;
+  /**
+   * A single question owns the whole questionnaire, so confirming it is the only decision left and
+   * a Submit tab would be a second, empty step. The tab exists only from two questions upward, and
+   * every index computation below derives from this flag so no ghost tab can ever be reached.
+   */
+  private readonly hasSubmitTab: boolean;
   private currentTab = 0;
   private submitIndex = 0;
   private customQuestionIndex: number | undefined;
@@ -103,6 +109,7 @@ export class AskQuestionnaireComponent implements Component, Focusable {
     this.tui = options.tui;
     this.theme = options.theme;
     this.onDone = options.onDone;
+    this.hasSubmitTab = this.questionnaire.questions.length > 1;
     this.optionIndexes = this.questionnaire.questions.map(() => 0);
     this.multiSelections = this.questionnaire.questions.map(() => new Set<string>());
     this.customDrafts = this.questionnaire.questions.map(() => "");
@@ -153,13 +160,18 @@ export class AskQuestionnaireComponent implements Component, Focusable {
   }
 
   private totalTabs(): number {
-    return this.questionnaire.questions.length + 1;
+    return this.questionnaire.questions.length + (this.hasSubmitTab ? 1 : 0);
+  }
+
+  private onSubmitTab(): boolean {
+    return this.hasSubmitTab && this.currentTab === this.questionnaire.questions.length;
   }
 
   private finish(cancelled: boolean): void {
     if (this.finished) return;
     this.finished = true;
-    this.onDone({ answers: answerSnapshot(this.answers), ...(cancelled ? { cancelled: true } : {}) });
+    // Cancelling is a full withdrawal: nothing the user confirmed earlier survives it.
+    this.onDone(cancelled ? { answers: [], cancelled: true } : { answers: answerSnapshot(this.answers) });
   }
 
   private moveTab(delta: number): void {
@@ -168,6 +180,10 @@ export class AskQuestionnaireComponent implements Component, Focusable {
   }
 
   private advance(questionIndex: number): void {
+    if (!this.hasSubmitTab) {
+      this.finish(false);
+      return;
+    }
     this.currentTab = questionIndex < this.questionnaire.questions.length - 1
       ? questionIndex + 1
       : this.questionnaire.questions.length;
@@ -249,7 +265,7 @@ export class AskQuestionnaireComponent implements Component, Focusable {
       return;
     }
 
-    if (this.currentTab === this.questionnaire.questions.length) {
+    if (this.onSubmitTab()) {
       if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
         this.submitIndex = (this.submitIndex + 1) % 2;
         this.requestRender();
@@ -301,10 +317,12 @@ export class AskQuestionnaireComponent implements Component, Focusable {
         ? this.theme.bg("selectedBg", this.theme.fg("text", text))
         : this.theme.fg(answered ? "success" : "muted", text));
     }
-    const submitText = " ✓ Submit ";
-    parts.push(this.currentTab === this.questionnaire.questions.length
-      ? this.theme.bg("selectedBg", this.theme.fg("text", submitText))
-      : this.theme.fg("accent", submitText));
+    if (this.hasSubmitTab) {
+      const submitText = " ✓ Submit ";
+      parts.push(this.currentTab === this.questionnaire.questions.length
+        ? this.theme.bg("selectedBg", this.theme.fg("text", submitText))
+        : this.theme.fg("accent", submitText));
+    }
     const lines: string[] = [];
     this.addWrapped(lines, parts.join(" "), width, " ");
     return lines;
@@ -426,7 +444,7 @@ export class AskQuestionnaireComponent implements Component, Focusable {
       const label = index === 0 ? ASK_RPC_SUBMIT_LABEL : ASK_RPC_CANCEL_LABEL;
       const description = index === 0
         ? "Return every confirmed answer, including a partial or empty questionnaire."
-        : "Cancel and keep any answers already confirmed.";
+        : "Discard every confirmed answer and cancel the questionnaire.";
       this.addWrapped(lines, this.theme.fg(active ? "accent" : index === 0 ? "text" : "warning", label), width, active ? this.theme.fg("accent", "> ") : "  ");
       this.addWrapped(lines, this.theme.fg("muted", description), width, "    ");
     }
@@ -438,12 +456,14 @@ export class AskQuestionnaireComponent implements Component, Focusable {
     const lines: string[] = [this.theme.fg("borderAccent", "─".repeat(renderWidth))];
     lines.push(...this.renderTabs(renderWidth));
     lines.push("");
-    if (this.currentTab === this.questionnaire.questions.length) lines.push(...this.renderSubmit(renderWidth));
+    if (this.onSubmitTab()) lines.push(...this.renderSubmit(renderWidth));
     else lines.push(...this.renderQuestion(this.currentTab, renderWidth));
     lines.push("");
     const help = this.customQuestionIndex !== undefined
       ? "Inline editor active"
-      : "Tab/Right next tab · Shift-Tab/Left previous tab · ↑↓ move · Enter confirm · Esc cancel";
+      : this.hasSubmitTab
+        ? "Tab/Right next tab · Shift-Tab/Left previous tab · ↑↓ move · Enter confirm · Esc cancel and discard"
+        : "↑↓ move · Enter confirm · Esc cancel and discard";
     this.addWrapped(lines, this.theme.fg("dim", help), renderWidth, " ");
     lines.push(this.theme.fg("borderAccent", "─".repeat(renderWidth)));
     return lines.map((line) => truncateToWidth(line, renderWidth, ""));
