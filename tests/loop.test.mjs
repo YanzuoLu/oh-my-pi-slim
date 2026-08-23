@@ -951,7 +951,7 @@ test("tree abort waits for shutdown completion and shutdown errors release the m
 });
 
 test("main sessions register Ask and runtime tools while child sessions return before registration", async () => {
-  function registrationHarness() {
+  function registrationHarness(sessionEntries = []) {
     const tools = [];
     const toolDefinitions = new Map();
     const commands = [];
@@ -962,7 +962,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
     const entries = [];
     const sends = [];
     return {
-      tools, toolDefinitions, commands, commandDefinitions, shortcuts, renderers, handlers, entries, sends,
+      tools, toolDefinitions, commands, commandDefinitions, shortcuts, renderers, handlers, entries, sessionEntries, sends,
       pi: {
         registerTool(definition) {
           tools.push(definition.name);
@@ -984,7 +984,11 @@ test("main sessions register Ask and runtime tools while child sessions return b
         getActiveTools() { return [...tools]; },
         getFlag() { return false; },
         setActiveTools() {},
-        appendEntry(customType, data) { entries.push({ customType, data }); },
+        appendEntry(customType, data) {
+          const entry = { type: "custom", customType, data };
+          entries.push(entry);
+          sessionEntries.push(entry);
+        },
         sendMessage(...args) { sends.push(["message", ...args]); },
         sendUserMessage(...args) { sends.push(["user", ...args]); },
       },
@@ -999,7 +1003,8 @@ test("main sessions register Ask and runtime tools while child sessions return b
   try {
     delete process.env.PI_SUBAGENT_CHILD;
     delete process.env.OMPS_SUBAGENT_CHILD;
-    const main = registrationHarness();
+    const sessionEntries = [];
+    const main = registrationHarness(sessionEntries);
     ohMyPiSlim(main.pi);
     assert.ok(main.tools.includes("ask_user_question"));
     assert.ok(main.tools.includes("goal"));
@@ -1025,12 +1030,16 @@ test("main sessions register Ask and runtime tools while child sessions return b
     fastAgentDir = mkdtempSync(join(CACHE, "fast-main-agent-"));
     process.env.PI_CODING_AGENT_DIR = fastAgentDir;
     process.env.OMPS_SKIP_BOOTSTRAP = "1";
-    const fastConfigPath = join(fastAgentDir, "oh-my-pi-slim.json");
+    const legacyConfigPath = join(fastAgentDir, "oh-my-pi-slim.json");
+    const legacyConfig = {
+      ...JSON.parse(readFileSync(join(ROOT, "config/oh-my-pi-slim.example.json"), "utf8")),
+      fast: true,
+    };
+    writeFileSync(legacyConfigPath, `${JSON.stringify(legacyConfig, null, 2)}\n`);
     const sessionDir = join(fastAgentDir, "sessions");
     mkdirSync(sessionDir, { recursive: true });
-    writeFileSync(fastConfigPath, `${JSON.stringify({ fast: true, presets: {}, unknown: { retained: true } }, null, 2)}\n`);
     const notifications = [];
-    const fastCtx = {
+    const makeCtx = (entries, sessionId) => ({
       cwd: ROOT,
       mode: "rpc",
       hasUI: true,
@@ -1042,38 +1051,96 @@ test("main sessions register Ask and runtime tools while child sessions return b
       model: { provider: "openai", id: "gpt-main" },
       isProjectTrusted: () => true,
       sessionManager: {
+        getEntries: () => entries,
         getBranch: () => [],
         getSessionDir: () => sessionDir,
-        getSessionId: () => "fast-main-session",
+        getSessionId: () => sessionId,
       },
-    };
+    });
+    const fastCtx = makeCtx(sessionEntries, "fast-main-session");
     const sessionStart = main.handlers.get("session_start")[0];
     const providerHook = main.handlers.get("before_provider_request");
+    const providerResult = (runtime, ctx) => runtime.handlers.get("before_provider_request")[0](
+      { payload: { model: "gpt-main" } },
+      ctx,
+    );
     assert.equal(providerHook.length, 1, "main unconditionally registers exactly one provider payload hook");
     await sessionStart({ reason: "startup" }, fastCtx);
-    assert.equal(providerHook[0]({ payload: { model: "gpt-main" } }, fastCtx).service_tier, "priority");
-
-    writeFileSync(fastConfigPath, `${JSON.stringify({ fast: false, presets: {}, unknown: { retained: true } }, null, 2)}\n`);
-    await sessionStart({ reason: "reload" }, fastCtx);
-    assert.equal(providerHook[0]({ payload: { model: "gpt-main" } }, fastCtx), undefined, "reload rereads Fast Mode as off");
+    assert.equal(JSON.parse(readFileSync(legacyConfigPath, "utf8")).fast, true, "the legal v1.0.0 preset config keeps its legacy field untouched");
+    assert.equal(providerResult(main, fastCtx), undefined, "empty session entries stay off even when legacy agent-global config says fast true");
 
     const fastCommand = main.commandDefinitions.get("fast");
-    const beforeUsage = readFileSync(fastConfigPath, "utf8");
+    const entriesBeforeUsage = sessionEntries.length;
     await fastCommand.handler("on", fastCtx);
-    assert.equal(readFileSync(fastConfigPath, "utf8"), beforeUsage, "Fast Mode accepts no command arguments");
+    assert.equal(sessionEntries.length, entriesBeforeUsage, "Fast Mode arguments never append session state");
     assert.deepEqual(notifications.at(-1), { message: "Usage: /fast", level: "warning" });
 
     await fastCommand.handler("", fastCtx);
-    const toggled = JSON.parse(readFileSync(fastConfigPath, "utf8"));
-    assert.equal(toggled.fast, true);
-    assert.deepEqual(toggled.unknown, { retained: true });
-    assert.equal(providerHook[0]({ payload: { model: "gpt-main" } }, fastCtx).service_tier, "priority");
-    assert.match(notifications.at(-1).message, /Fast Mode enabled.*account permission.*may fail/);
+    assert.deepEqual(sessionEntries.at(-1), {
+      type: "custom",
+      customType: "oh-my-pi-slim:fast-state",
+      data: { version: 1, fast: true },
+    });
+    assert.equal(providerResult(main, fastCtx).service_tier, "priority");
+    assert.match(notifications.at(-1).message, /Fast Mode enabled for this Pi session.*account permission.*may fail/);
 
-    writeFileSync(fastConfigPath, `${JSON.stringify({ fast: true, presets: null, unknown: { retained: true } }, null, 2)}\n`);
+    await fastCommand.handler("", fastCtx);
+    assert.deepEqual(sessionEntries.at(-1).data, { version: 1, fast: false });
+    assert.equal(providerResult(main, fastCtx), undefined);
+    await fastCommand.handler("", fastCtx);
+    assert.deepEqual(sessionEntries.at(-1).data, { version: 1, fast: true });
+
+    const appendEntry = main.pi.appendEntry;
+    main.pi.appendEntry = () => { throw new Error("injected append failure"); };
     await fastCommand.handler("", fastCtx);
     assert.equal(notifications.at(-1).level, "error");
-    assert.equal(providerHook[0]({ payload: { model: "gpt-main" } }, fastCtx).service_tier, "priority", "write failure does not change memory");
+    assert.match(notifications.at(-1).message, /injected append failure/);
+    assert.equal(providerResult(main, fastCtx).service_tier, "priority", "append failure does not change in-memory Fast Mode");
+    main.pi.appendEntry = appendEntry;
+
+    sessionEntries.push({
+      type: "custom",
+      customType: "oh-my-pi-slim:fast-state",
+      data: { version: 1, fast: false, invalid: true },
+    });
+    const reload = registrationHarness(sessionEntries);
+    ohMyPiSlim(reload.pi);
+    const reloadCtx = makeCtx(sessionEntries, "fast-main-session");
+    await reload.handlers.get("session_start")[0]({ reason: "reload" }, reloadCtx);
+    assert.equal(providerResult(reload, reloadCtx).service_tier, "priority", "reload restores the last valid state from the same full entry log");
+
+    for (const reason of ["resume", "fork"]) {
+      const restored = registrationHarness(sessionEntries);
+      ohMyPiSlim(restored.pi);
+      const restoredCtx = makeCtx(sessionEntries, `fast-${reason}-session`);
+      await restored.handlers.get("session_start")[0]({ reason }, restoredCtx);
+      assert.equal(providerResult(restored, restoredCtx).service_tier, "priority", `${reason} restores or inherits the copied session path state`);
+    }
+
+    const newSession = registrationHarness([]);
+    ohMyPiSlim(newSession.pi);
+    const newCtx = makeCtx(newSession.sessionEntries, "fast-new-session");
+    await newSession.handlers.get("session_start")[0]({ reason: "new" }, newCtx);
+    assert.equal(providerResult(newSession, newCtx), undefined, "a new empty session defaults Fast Mode off");
+
+    const treeEntries = [{
+      type: "custom",
+      customType: "oh-my-pi-slim:fast-state",
+      data: { version: 1, fast: true },
+    }];
+    const treeRuntime = registrationHarness(treeEntries);
+    ohMyPiSlim(treeRuntime.pi);
+    const treeCtx = makeCtx(treeEntries, "fast-tree-session");
+    await treeRuntime.handlers.get("session_start")[0]({ reason: "startup" }, treeCtx);
+    treeEntries.push({
+      type: "custom",
+      customType: "oh-my-pi-slim:fast-state",
+      data: { version: 1, fast: false },
+    });
+    const entriesBeforeTree = treeEntries.length;
+    await treeRuntime.handlers.get("session_tree")[0]({}, treeCtx);
+    assert.equal(treeEntries.length, entriesBeforeTree, "tree navigation never appends Fast Mode state");
+    assert.equal(providerResult(treeRuntime, treeCtx).service_tier, "priority", "tree navigation never recomputes session-wide Fast Mode from a branch");
 
     await main.toolDefinitions.get("goal").execute("goal-create", {
       action: "create",

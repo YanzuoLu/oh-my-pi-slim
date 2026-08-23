@@ -1,5 +1,4 @@
 {
-  "fast": false,
   "defaultPreset": "balanced",
   "presets": {
     "balanced": {

@@ -169,7 +169,7 @@ test("real Pi isolated RPC main and child sessions expose exact package tools wi
     const main = notificationJson(runPi(mainAgentDir, "/omps-load-probe"), "OMPS_LOAD_PROBE ");
     assert.deepEqual(main.tools, ["ask_user_question", "goal", "loop", "monitor", "subagent", "todo"]);
     const bootstrappedConfig = join(mainAgentDir, "oh-my-pi-slim.json");
-    assert.equal(JSON.parse(readFileSync(bootstrappedConfig, "utf8")).fast, false);
+    assert.equal("fast" in JSON.parse(readFileSync(bootstrappedConfig, "utf8")), false);
     assert.equal(statSync(bootstrappedConfig).mode & 0o777, 0o600);
     assert.deepEqual(main.activeTools, ["ask_user_question", "goal", "loop", "monitor", "subagent", "todo"]);
     assert.deepEqual(main.commands, ["fast", "goal", "loop"]);

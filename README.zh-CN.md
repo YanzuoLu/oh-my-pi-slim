@@ -243,7 +243,6 @@ completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠。tool output 折�
 
 基本结构如下：
 
-- `fast`：agent-global Fast Mode 状态，默认显式为 `false`。
 - `defaultPreset`：默认选择的 preset。
 - `presets.<name>`：`orchestrator` 与六个 specialist 的配置。
 - 每个角色包含 `provider`、`model` 与 `thinking`。
@@ -258,13 +257,15 @@ completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠。tool output 折�
 | `/omps status` | 查看激活状态 |
 | `/omps presets` | 列出 preset |
 | `/preset [name]` | 切换 preset；省略名称时列出 preset |
-| `/fast` | 切换 agent-global Fast Mode 状态，不接受任何参数 |
+| `/fast` | 切换当前 Pi session 的 Fast Mode，不接受任何参数 |
 
 ### Fast Mode
 
-Fast Mode 作用于全部普通 agent request。仅当 provider 精确为 `openai` 或 `openai-codex`，且 payload model 与当前 Pi model 匹配时，才会请求 `service_tier: "priority"`。该状态保存在上述全局 agent-dir 配置中，默认关闭，并且与 preset 是否激活相互独立。
+Fast Mode 属于当前 Pi session，新 session 默认关闭。最近一次 `/fast` toggle 对整个 session 的全部 branch 生效，因此 tree navigation 不会改变状态。reload、进程重启与 session resume 都会从 session history 恢复状态。fork 会继承 Pi 为创建该 fork 而复制的 target path 上最后一条 Fast Mode 状态。使用 `--no-session` 时，状态只在当前进程内保留，进程重启后不会恢复。
 
-切换后的状态只由 future child `create` 与 `resume` launch 继承。running child 不会热切换。compaction 与 branch summary model call 仍使用 default tier。账户没有 priority 权限时 request 可能失败。后加载的 extension 可以再次覆盖 OMPS 修改后的 payload。Fast Mode 不承诺 priority capacity 一定获批，也不承诺 request 一定更快。
+v1.0.0 写入 `oh-my-pi-slim.json` 顶层的 `fast` 字段现已被忽略，你可以手动删除该遗留字段。Fast Mode 仍与 preset 是否激活相互独立。
+
+Fast Mode 作用于全部普通 agent request。仅当 provider 精确为 `openai` 或 `openai-codex`，且 payload model 与当前 Pi model 匹配时，才会请求 `service_tier: "priority"`。切换后的状态只由 future child `create` 与 `resume` launch 继承。running child 不会热切换。compaction 与 branch summary model call 仍使用 default tier。账户没有 priority 权限时 request 可能失败。后加载的 extension 可以再次覆盖 OMPS 修改后的 payload。Fast Mode 不承诺 priority capacity 一定获批，也不承诺 request 一定更快。
 
 由于注入的 tier 不会反映在估算中，Pi 的 Codex footer cost 可能低估 priority-tier cost 约 2–2.5 倍。
 

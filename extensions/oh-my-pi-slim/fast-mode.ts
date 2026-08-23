@@ -1,49 +1,15 @@
-import { randomUUID } from "node:crypto";
-import {
-  chmodSync,
-  closeSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { basename, dirname, join } from "node:path";
-
 export const FAST_ENV_VAR = "OMPS_FAST_MODE";
+export const FAST_STATE_ENTRY_TYPE = "oh-my-pi-slim:fast-state";
+export const FAST_STATE_VERSION = 1;
 
 export interface FastModeModel {
   provider?: unknown;
   id?: unknown;
 }
 
-export interface FastFlagRead {
-  ok: boolean;
+export interface FastState {
+  version: typeof FAST_STATE_VERSION;
   fast: boolean;
-  raw?: Record<string, unknown>;
-  error?: string;
-}
-
-export interface FastModeWriteIO {
-  randomId: () => string;
-  open: typeof openSync;
-  write: typeof writeFileSync;
-  close: typeof closeSync;
-  chmod: typeof chmodSync;
-  rename: typeof renameSync;
-  unlink: typeof unlinkSync;
-}
-
-function defaultWriteIO(): FastModeWriteIO {
-  return {
-    randomId: randomUUID,
-    open: openSync,
-    write: writeFileSync,
-    close: closeSync,
-    chmod: chmodSync,
-    rename: renameSync,
-    unlink: unlinkSync,
-  };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -71,51 +37,38 @@ export function applyFastServiceTier(payload: unknown, model: FastModeModel | un
   }
 }
 
-export function readFastFlag(path: string): FastFlagRead {
-  let value: unknown;
-  try {
-    value = JSON.parse(readFileSync(path, "utf8"));
-  } catch (error) {
-    return {
-      ok: false,
-      fast: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-  if (!isPlainObject(value)) {
-    return { ok: false, fast: false, error: `${path} must contain a JSON object.` };
-  }
-  return { ok: true, fast: value.fast === true, raw: value };
+export function makeFastState(fast: boolean): FastState {
+  return { version: FAST_STATE_VERSION, fast };
 }
 
-export function writeFastFlag(
-  path: string,
-  raw: unknown,
-  next: boolean,
-  io: FastModeWriteIO = defaultWriteIO(),
-): void {
-  if (!isPlainObject(raw)) throw new Error(`${path} must contain a JSON object.`);
-  if (!isPlainObject(raw.presets)) throw new Error(`${path}.presets must be an object.`);
-
-  const value = { ...raw, fast: next };
-  const temp = join(dirname(path), `.${basename(path)}.fast-${process.pid}-${io.randomId()}.tmp`);
-  let descriptor: number | undefined;
-  let renamed = false;
+export function parseFastState(value: unknown): FastState | undefined {
   try {
-    descriptor = io.open(temp, "wx", 0o600);
-    io.write(descriptor, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-    io.close(descriptor);
-    descriptor = undefined;
-    io.chmod(temp, 0o600);
-    io.rename(temp, path);
-    renamed = true;
-  } catch (error) {
-    if (descriptor !== undefined) {
-      try { io.close(descriptor); } catch {}
-    }
-    if (!renamed) {
-      try { io.unlink(temp); } catch {}
-    }
-    throw error;
+    if (!isPlainObject(value)) return;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== 2 || !keys.includes("version") || !keys.includes("fast")) return;
+    if (value.version !== FAST_STATE_VERSION || typeof value.fast !== "boolean") return;
+    return { version: FAST_STATE_VERSION, fast: value.fast };
+  } catch {
+    return;
   }
+}
+
+export function replayFastState(entries: readonly unknown[]): boolean {
+  let fast = false;
+  try {
+    if (!Array.isArray(entries)) return fast;
+    for (const entry of entries) {
+      try {
+        if (!isPlainObject(entry)) continue;
+        if (entry.type !== "custom" || entry.customType !== FAST_STATE_ENTRY_TYPE) continue;
+        const state = parseFastState(entry.data);
+        if (state) fast = state.fast;
+      } catch {
+        // Malformed entries are ignored without discarding the latest valid session state.
+      }
+    }
+  } catch {
+    // A malformed collection fails closed while preserving any valid state already replayed.
+  }
+  return fast;
 }

@@ -12,7 +12,12 @@ import {
 import { registerAskRuntime } from "./ask-runtime.js";
 import { AskTuiDriver } from "./ask-tui.js";
 import { cleanupLegacySubagentSetup, ensurePackageSetup } from "./bootstrap.js";
-import { applyFastServiceTier, readFastFlag, writeFastFlag } from "./fast-mode.js";
+import {
+  applyFastServiceTier,
+  FAST_STATE_ENTRY_TYPE,
+  makeFastState,
+  replayFastState,
+} from "./fast-mode.js";
 import {
   GOAL_CONTINUATION_MESSAGE_TYPE,
   GOAL_REMINDER_MESSAGE_TYPE,
@@ -244,9 +249,6 @@ export function parseConfigFile(path: string): PresetConfig {
     presets[presetName] = preset;
   }
 
-  if (object.fast !== undefined && typeof object.fast !== "boolean") {
-    throw new Error(`${path}.fast must be a boolean.`);
-  }
   const defaultPreset = object.defaultPreset === undefined
     ? undefined
     : nonEmptyString(object.defaultPreset, `${path}.defaultPreset`);
@@ -542,27 +544,21 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("fast", {
-    description: "Toggle OpenAI priority service tier for ordinary agent requests.",
+    description: "Toggle OpenAI priority service tier for this Pi session.",
     handler: async (args, ctx) => {
       if (args.trim()) {
         report(ctx, "Usage: /fast", "warning");
         return;
       }
-      const path = join(getAgentDir(), CONFIG_FILE);
-      const current = readFastFlag(path);
-      if (!current.ok || !current.raw) {
-        report(ctx, `Could not read Fast Mode config at ${path}${current.error ? `: ${current.error}` : "."}`, "error");
-        return;
-      }
-      const next = !current.fast;
+      const next = !fastEnabled;
       try {
-        writeFastFlag(path, current.raw, next);
+        pi.appendEntry(FAST_STATE_ENTRY_TYPE, makeFastState(next));
       } catch (error) {
         report(ctx, `Could not update Fast Mode: ${error instanceof Error ? error.message : String(error)}`, "error");
         return;
       }
       fastEnabled = next;
-      report(ctx, `Fast Mode ${next ? "enabled" : "disabled"}. Priority service tier requires account permission, and requests may fail without access.`, "info");
+      report(ctx, `Fast Mode ${next ? "enabled" : "disabled"} for this Pi session. Priority service tier requires account permission, and requests may fail without access.`, "info");
     },
   });
 
@@ -674,7 +670,8 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     notificationGate.clearWithoutDelivery();
     goal?.setDeliveryPaused(false);
     sessionCtx = ctx;
-    fastEnabled = false;
+    // Fast Mode is session-wide across every branch, so replay the full session entry log rather than the active branch.
+    fastEnabled = replayFastState(ctx.sessionManager.getEntries());
     active = false;
     activePresetName = undefined;
     activePreset = undefined;
@@ -687,8 +684,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     try {
       assertNoLegacyBackend(pi);
       ensurePackageSetup(PACKAGE_ROOT);
-      const fastFlag = readFastFlag(join(getAgentDir(), CONFIG_FILE));
-      fastEnabled = fastFlag.ok && fastFlag.fast;
       await subagents.restore(ctx);
     } catch (error) {
       report(ctx, error instanceof Error ? error.message : String(error), "error");

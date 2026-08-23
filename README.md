@@ -243,7 +243,6 @@ The runtime preset file is `~/.pi/agent/oh-my-pi-slim.json`. On first use, the p
 
 The basic structure is:
 
-- `fast`: agent-global Fast Mode state, explicitly `false` by default.
 - `defaultPreset`: preset selected by default.
 - `presets.<name>`: configuration for `orchestrator` and all six specialists.
 - Each role: `provider`, `model`, and `thinking`.
@@ -258,13 +257,15 @@ Provider, model, and thinking level are independently configurable per role. Aut
 | `/omps status` | Show activation state |
 | `/omps presets` | List presets |
 | `/preset [name]` | Switch preset; omit the name to list presets |
-| `/fast` | Toggle the agent-global Fast Mode state; arguments are not accepted |
+| `/fast` | Toggle Fast Mode for the current Pi session; arguments are not accepted |
 
 ### Fast Mode
 
-Fast Mode affects all ordinary agent requests whose provider is exactly `openai` or `openai-codex` and whose payload model matches the active Pi model. It requests `service_tier: "priority"`. The state lives in the global agent-dir configuration above and defaults to off. It is independent of preset activation.
+Fast Mode belongs to the current Pi session and defaults to off for a new session. The latest `/fast` toggle applies to the whole session across every branch, so tree navigation does not change it. Reload, process restart, and session resume recover it from the session history. A fork inherits the last Fast Mode state on the target path that Pi copies into the fork. With `--no-session`, the state lasts only for the current process and cannot survive a restart.
 
-A toggle is inherited only by future child `create` and `resume` launches. Running children do not hot-switch. Compaction and branch-summary model calls keep their default service tier. An account without priority access may see requests fail. A later-loaded extension can override the payload after OMPS. Fast Mode does not promise that priority capacity will be granted or that a request will complete faster.
+The top-level `fast` field used by v1.0.0 in `oh-my-pi-slim.json` is ignored. You may remove that legacy field manually. Fast Mode remains independent of preset activation.
+
+Fast Mode affects all ordinary agent requests whose provider is exactly `openai` or `openai-codex` and whose payload model matches the active Pi model. It requests `service_tier: "priority"`. A toggle is inherited only by future child `create` and `resume` launches. Running children do not hot-switch. Compaction and branch-summary model calls keep their default service tier. An account without priority access may see requests fail. A later-loaded extension can override the payload after OMPS. Fast Mode does not promise that priority capacity will be granted or that a request will complete faster.
 
 Pi's Codex footer cost can underestimate priority-tier cost by roughly 2–2.5x because the injected tier is not reflected in its estimate.
 

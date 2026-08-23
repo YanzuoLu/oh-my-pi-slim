@@ -806,16 +806,16 @@ test("old presets inherit observer from explorer and explicit observer config is
       deny: { observer: ["ask_user_question"] },
     }));
     const config = parseConfigFile(configFile);
-    assert.equal("fast" in config, false, "preset parsing validates Fast Mode without returning dead runtime state");
+    assert.equal("fast" in config, false, "preset parsing returns no Fast Mode runtime state");
     assert.deepEqual(config.presets.legacy.observer, oldPreset.explorer);
     assert.equal(config.observerFallbackPresets.has("legacy"), true);
     assert.deepEqual(config.presets.explicit.observer, role("vision", "observer", "xhigh"));
     assert.equal(config.observerFallbackPresets.has("explicit"), false);
     assert.deepEqual(config.deny.observer, ["ask_user_question"]);
-    writeFileSync(configFile, JSON.stringify({ fast: true, presets: { legacy: oldPreset } }));
-    assert.equal("fast" in parseConfigFile(configFile), false);
-    writeFileSync(configFile, JSON.stringify({ fast: "true", presets: { legacy: oldPreset } }));
-    assert.throws(() => parseConfigFile(configFile), /\.fast must be a boolean/);
+    for (const legacyFast of [true, false, "true", 1, null, { stale: true }]) {
+      writeFileSync(configFile, JSON.stringify({ fast: legacyFast, presets: { legacy: oldPreset } }));
+      assert.equal("fast" in parseConfigFile(configFile), false, "arbitrary v1.0.0 fast fields are ignored");
+    }
     assert.equal(supportsImageInput({ input: ["text", "image"] }), true);
     assert.equal(supportsImageInput({ input: ["text"] }), false);
   } finally { rmSync(tempDir, { recursive: true, force: true }); }

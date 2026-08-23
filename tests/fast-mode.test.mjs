@@ -1,55 +1,28 @@
 import assert from "node:assert/strict";
-import {
-  chmodSync,
-  closeSync,
-  mkdirSync,
-  mkdtempSync,
-  openSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  rmSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const {
   FAST_ENV_VAR,
+  FAST_STATE_ENTRY_TYPE,
+  FAST_STATE_VERSION,
   applyFastServiceTier,
   fastEnabledFromEnv,
   fastEnvValue,
-  readFastFlag,
-  writeFastFlag,
+  makeFastState,
+  parseFastState,
+  replayFastState,
 } = await import("../extensions/oh-my-pi-slim/fast-mode.ts");
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
-const CACHE = join(ROOT, ".cache");
-mkdirSync(CACHE, { recursive: true });
-
-function withTempDir(run) {
-  const directory = mkdtempSync(join(CACHE, "fast-mode-"));
-  try { return run(directory); }
-  finally { rmSync(directory, { recursive: true, force: true }); }
-}
-
-function writeIo(overrides = {}) {
+function fastEntry(data, overrides = {}) {
   return {
-    randomId: () => "fixed-random",
-    open: openSync,
-    write: writeFileSync,
-    close: closeSync,
-    chmod: chmodSync,
-    rename: renameSync,
-    unlink: unlinkSync,
+    type: "custom",
+    customType: FAST_STATE_ENTRY_TYPE,
+    data,
     ...overrides,
   };
 }
 
-test("Fast Mode environment encoding accepts exactly the enabled snapshot", () => {
+test("Fast Mode environment encoding accepts exactly the enabled child snapshot", () => {
   assert.equal(FAST_ENV_VAR, "OMPS_FAST_MODE");
   assert.equal(fastEnvValue(true), "1");
   assert.equal(fastEnvValue(false), "0");
@@ -82,70 +55,61 @@ test("service tier injection requires exact provider and payload model without m
   assert.equal(applyFastServiceTier(throwing, { provider: "openai", id: "gpt-exact" }), undefined);
 });
 
-test("flag IO fails closed and preserves unknown config fields with mode 0600", () => withTempDir((directory) => {
-  const path = join(directory, "oh-my-pi-slim.json");
-  assert.deepEqual(readFastFlag(path).ok, false);
-  writeFileSync(path, "not json");
-  assert.equal(readFastFlag(path).ok, false);
-  writeFileSync(path, "[]\n");
-  assert.equal(readFastFlag(path).ok, false);
+test("Fast state maker and parser enforce exact version-1 boolean data", () => {
+  assert.equal(FAST_STATE_ENTRY_TYPE, "oh-my-pi-slim:fast-state");
+  assert.equal(FAST_STATE_VERSION, 1);
+  assert.deepEqual(makeFastState(true), { version: FAST_STATE_VERSION, fast: true });
+  assert.deepEqual(makeFastState(false), { version: 1, fast: false });
+  assert.deepEqual(parseFastState({ fast: true, version: 1 }), { version: 1, fast: true });
+  assert.deepEqual(parseFastState(Object.assign(Object.create(null), { version: 1, fast: false })), { version: 1, fast: false });
+  const symbolExtra = { version: 1, fast: true, [Symbol("extra")]: false };
+  const hiddenExtra = Object.defineProperty({ version: 1, fast: true }, "extra", { value: false });
 
-  const raw = {
-    fast: "not-a-boolean",
-    defaultPreset: "balanced",
-    presets: { balanced: { future: true } },
-    deny: { fixer: ["future_tool"] },
-    unknownTopLevel: { retained: true },
-  };
-  writeFileSync(path, `${JSON.stringify(raw)}\n`);
-  const read = readFastFlag(path);
-  assert.equal(read.ok, true);
-  assert.equal(read.fast, false, "only literal true enables Fast Mode");
-  writeFastFlag(path, read.raw, true, writeIo());
-  const updated = JSON.parse(readFileSync(path, "utf8"));
-  assert.deepEqual(updated, { ...raw, fast: true });
-  assert.equal(readFileSync(path, "utf8").endsWith("\n"), true);
-  assert.equal(statSync(path).mode & 0o777, 0o600);
-  assert.deepEqual(readdirSync(directory), ["oh-my-pi-slim.json"]);
-}));
+  for (const invalid of [
+    undefined,
+    null,
+    [],
+    true,
+    {},
+    { version: 1 },
+    { fast: true },
+    { version: 2, fast: true },
+    { version: 1, fast: "true" },
+    { version: 1, fast: true, extra: false },
+    symbolExtra,
+    hiddenExtra,
+  ]) assert.equal(parseFastState(invalid), undefined);
 
-test("writer rejects a non-object presets field before creating a temp file", () => withTempDir((directory) => {
-  const path = join(directory, "oh-my-pi-slim.json");
-  writeFileSync(path, "original\n");
-  for (const presets of [undefined, null, [], "invalid"]) {
-    assert.throws(() => writeFastFlag(path, { presets }, true, writeIo()), /\.presets must be an object/);
-    assert.equal(readFileSync(path, "utf8"), "original\n");
-    assert.deepEqual(readdirSync(directory), ["oh-my-pi-slim.json"]);
-  }
-}));
+  const throwing = new Proxy({}, { ownKeys() { throw new Error("broken keys"); } });
+  assert.doesNotThrow(() => parseFastState(throwing));
+  assert.equal(parseFastState(throwing), undefined);
+});
 
-test("writer closes and removes its temp file when writing fails", () => withTempDir((directory) => {
-  const path = join(directory, "oh-my-pi-slim.json");
-  writeFileSync(path, "original\n");
-  let descriptor;
-  let closed = false;
-  let removed;
-  const io = writeIo({
-    open(temp, flags, mode) {
-      descriptor = openSync(temp, flags, mode);
-      return descriptor;
-    },
-    write() { throw new Error("injected write failure"); },
-    close(fd) {
-      closed = true;
-      closeSync(fd);
-    },
-    unlink(temp) {
-      removed = temp;
-      unlinkSync(temp);
-    },
-  });
-  assert.throws(
-    () => writeFastFlag(path, { presets: {}, unknown: true }, true, io),
-    /injected write failure/,
-  );
-  assert.equal(closed, true);
-  assert.match(removed, /\.oh-my-pi-slim\.json\.fast-.*fixed-random\.tmp$/);
-  assert.equal(readFileSync(path, "utf8"), "original\n");
-  assert.deepEqual(readdirSync(directory), ["oh-my-pi-slim.json"]);
-}));
+test("session replay uses the last valid exact custom entry across the full entry log", () => {
+  const entries = [
+    fastEntry({ version: 1, fast: false }),
+    { type: "message", customType: FAST_STATE_ENTRY_TYPE, data: { version: 1, fast: true } },
+    fastEntry({ version: 1, fast: true }, { customType: "other-extension:fast-state" }),
+    fastEntry({ version: 1, fast: true }),
+    { type: "custom", customType: "branch-local-state", data: { branch: "other" } },
+  ];
+  assert.equal(replayFastState(entries), true);
+  assert.equal(replayFastState([...entries, fastEntry({ version: 1, fast: false })]), false);
+});
+
+test("session replay defaults off and skips malformed latest entries without erasing valid state", () => {
+  assert.equal(replayFastState([]), false);
+  assert.equal(replayFastState([fastEntry({ version: 1, fast: "true" })]), false);
+  assert.equal(replayFastState([
+    fastEntry({ version: 1, fast: true }),
+    fastEntry({ version: 1, fast: false, extra: "invalid latest" }),
+    fastEntry({ version: 2, fast: false }),
+    fastEntry(null),
+  ]), true, "an invalid latest candidate falls back to the last valid session state");
+
+  const throwingEntry = new Proxy({}, { get() { throw new Error("broken entry"); } });
+  assert.doesNotThrow(() => replayFastState([fastEntry({ version: 1, fast: true }), throwingEntry]));
+  assert.equal(replayFastState([fastEntry({ version: 1, fast: true }), throwingEntry]), true);
+  assert.doesNotThrow(() => replayFastState(undefined));
+  assert.equal(replayFastState(undefined), false);
+});

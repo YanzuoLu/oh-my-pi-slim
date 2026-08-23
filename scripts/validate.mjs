@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "1.0.0", "package version must be 1.0.0");
+check(packageJson.version === "1.0.1", "package version must be 1.0.1");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "1.0.0" && lock.packages?.[""]?.version === "1.0.0", "package-lock version must be 1.0.0");
+check(lock.version === "1.0.1" && lock.packages?.[""]?.version === "1.0.1", "package-lock version must be 1.0.1");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -458,7 +458,7 @@ hasAll(extension, [
   "let fastEnabled = false", "subagents.setFastModeResolver(() => fastEnabled)",
   'pi.on("before_provider_request", (event, ctx) => {', "if (!fastEnabled) return", "applyFastServiceTier(event.payload, ctx.model)",
   'pi.registerCommand("fast"', 'if (args.trim())', 'report(ctx, "Usage: /fast", "warning")',
-  "const current = readFastFlag(path)", "const next = !current.fast", "writeFastFlag(path, current.raw, next)", "fastEnabled = next",
+  "const next = !fastEnabled", "pi.appendEntry(FAST_STATE_ENTRY_TYPE, makeFastState(next))", "fastEnabled = next",
   "treeNotificationHold", "releaseTreeNotificationHoldDeferred", "subagents.restore(ctx, notificationGate.isPaused())",
   "loops.reset()", "loops.shutdown()", "await monitors?.reset()", "await monitors?.shutdown()",
   'loops.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)', "loops.refreshUI()",
@@ -468,29 +468,43 @@ hasAll(extension, [
 ], "main extension contract");
 hasAll(fastMode, [
   'export const FAST_ENV_VAR = "OMPS_FAST_MODE"',
+  'export const FAST_STATE_ENTRY_TYPE = "oh-my-pi-slim:fast-state"', 'export const FAST_STATE_VERSION = 1',
+  'export interface FastState {', 'version: typeof FAST_STATE_VERSION;', 'fast: boolean;',
   'export function fastEnvValue(enabled: boolean): "1" | "0"', 'return enabled ? "1" : "0"',
   "export function fastEnabledFromEnv(value: unknown): boolean", 'return value === "1"',
   "export function applyFastServiceTier", 'model.provider !== "openai" && model.provider !== "openai-codex"',
   'payload.model !== model.id', 'return { ...payload, service_tier: "priority" }',
-  "export function readFastFlag(path: string): FastFlagRead", "ok: false", "fast: value.fast === true",
-  "export function writeFastFlag", "isPlainObject(raw.presets)",
-  'io.open(temp, "wx", 0o600)', "io.write(descriptor", "io.close(descriptor)", "io.chmod(temp, 0o600)",
-  "io.rename(temp, path)", "io.unlink(temp)",
-], "Fast Mode pure payload and parameterized config IO module");
-hasNone(fastMode, ["fsync", "atomicWriteJson", "service_tier: next", "process.env[", "process.env."], "Fast Mode module forbidden state and write paths");
-check((fastMode.match(/io\.rename\(temp, path\)/g) ?? []).length === 1, "Fast Mode config rename must be the single final publish step");
+  "export function makeFastState(fast: boolean): FastState", "return { version: FAST_STATE_VERSION, fast }",
+  "export function parseFastState(value: unknown): FastState | undefined", "const keys = Reflect.ownKeys(value)",
+  'keys.length !== 2 || !keys.includes("version") || !keys.includes("fast")',
+  'value.version !== FAST_STATE_VERSION || typeof value.fast !== "boolean"',
+  "return { version: FAST_STATE_VERSION, fast: value.fast }",
+  "export function replayFastState(entries: readonly unknown[]): boolean", "let fast = false",
+  'entry.type !== "custom" || entry.customType !== FAST_STATE_ENTRY_TYPE', "const state = parseFastState(entry.data)",
+], "Fast Mode pure payload and session-entry replay module");
+hasNone(fastMode, [
+  'from "node:', "readFile", "writeFile", "openSync", "rename", "unlink", "chmod", "fsync", "randomUUID",
+  "atomicWriteJson", "process.env[", "process.env.", "FastFlagRead", "FastModeWriteIO", "readFastFlag", "writeFastFlag",
+], "Fast Mode module has no config IO, process state, or mutable singleton");
 check(!/(?:process\.env\.[A-Za-z0-9_]+|process\.env\[[^\]]+\])\s*=(?!=)/.test(extension), "main extension must never write process.env");
 check((extension.match(/pi\.on\("before_provider_request"/g) ?? []).length === 1, "main extension must unconditionally register exactly one Fast Mode provider hook");
 check((extension.match(/pi\.registerCommand\("fast"/g) ?? []).length === 1, "main extension must register only one bare Fast Mode command");
-hasNone(extension.slice(extension.indexOf('pi.registerCommand("fast"'), extension.indexOf('pi.registerCommand("preset"')), [
+check((extension.match(/\bfastEnabled\s*=/g) ?? []).length === 3, "Fast Mode must have exactly three assignments: initialization, toggle commit, and session replay");
+const fastCommandBlock = extension.slice(extension.indexOf('pi.registerCommand("fast"'), extension.indexOf('pi.registerCommand("preset"'));
+hasAll(fastCommandBlock, ['description: "Toggle OpenAI priority service tier for this Pi session."'], "Fast Mode session-scoped command description");
+hasNone(fastCommandBlock, [
   'setStatus(', 'process.env', 'action === "on"', 'action === "off"', '"status"', "getArgumentCompletions",
-], "Fast Mode command has no parameters, environment writes, or UI status surface");
-const presetConfigInterface = extension.slice(extension.indexOf("interface PresetConfig"), extension.indexOf("interface TreeNotificationHold"));
+  "readFastFlag", "writeFastFlag", "getAgentDir", "CONFIG_FILE",
+], "Fast Mode command has no parameters, config IO, environment writes, or UI status surface");
 check(
-  extension.includes("if (object.fast !== undefined && typeof object.fast !== \"boolean\")") &&
-  !presetConfigInterface.includes("fast:") && !extension.includes("fast: object.fast === true"),
-  "formal preset config parsing must validate optional Fast Mode without returning dead state",
+  fastCommandBlock.indexOf("pi.appendEntry(FAST_STATE_ENTRY_TYPE, makeFastState(next))") < fastCommandBlock.indexOf("fastEnabled = next"),
+  "Fast Mode command must append hidden session state before changing in-memory state",
 );
+check(
+  !extension.includes("object.fast") && !extension.slice(extension.indexOf("interface PresetConfig"), extension.indexOf("interface TreeNotificationHold")).includes("fast:"),
+  "preset config parsing must ignore every legacy Fast Mode field",
+);
+check(!/register(?:Message|Entry)Renderer\(FAST_STATE_ENTRY_TYPE/.test(extension), "Fast Mode state must rely on Pi's native hidden custom entries");
 check(
   extension.includes("subagents.setModelResolver();\n    subagents.setDenyResolver();") &&
   !extension.includes("subagents.setFastModeResolver();"),
@@ -538,17 +552,24 @@ const beforeSwitchHandler = extension.slice(beforeSwitchStart, beforeForkStart);
 const beforeForkHandler = extension.slice(beforeForkStart, beforeTreeStart);
 const beforeTreeHandler = extension.slice(beforeTreeStart, sessionTreeStart);
 const sessionTreeHandler = extension.slice(sessionTreeStart, inputStart);
+hasAll(sessionStartHandler, [
+  "Fast Mode is session-wide across every branch", "full session entry log rather than the active branch",
+  "fastEnabled = replayFastState(ctx.sessionManager.getEntries())",
+], "session_start Fast Mode full-session replay contract");
+check((extension.match(/sessionManager\.getEntries\(\)/g) ?? []).length === 1, "Fast Mode must replay from getEntries exactly once in session_start");
+hasNone(sessionStartHandler, ["getBranch", "getAgentDir", "CONFIG_FILE", "readFileSync"], "session_start Fast Mode replay must not read branch-local or agent-global config state");
 check(
-  sessionStartHandler.includes("fastEnabled = false") &&
-  sessionStartHandler.indexOf("ensurePackageSetup(PACKAGE_ROOT)") < sessionStartHandler.indexOf("readFastFlag(join(getAgentDir(), CONFIG_FILE))") &&
-  sessionStartHandler.indexOf("readFastFlag(join(getAgentDir(), CONFIG_FILE))") < sessionStartHandler.indexOf("await subagents.restore(ctx)"),
-  "session_start must fail closed then read Fast Mode after bootstrap and before subagent restore for every reason",
+  sessionStartHandler.indexOf("fastEnabled = replayFastState(ctx.sessionManager.getEntries())") < sessionStartHandler.indexOf("try {") &&
+  sessionStartHandler.indexOf("fastEnabled = replayFastState(ctx.sessionManager.getEntries())") < sessionStartHandler.indexOf("assertNoLegacyBackend(pi)") &&
+  sessionStartHandler.indexOf("fastEnabled = replayFastState(ctx.sessionManager.getEntries())") < sessionStartHandler.indexOf("ensurePackageSetup(PACKAGE_ROOT)"),
+  "session Fast Mode replay must not depend on bootstrap or legacy-backend setup",
 );
-check(
-  !beforeSwitchHandler.includes("fastEnabled = false") && !beforeForkHandler.includes("fastEnabled = false") &&
-  !beforeTreeHandler.includes("fastEnabled = false") && !sessionTreeHandler.includes("fastEnabled = false"),
-  "session switch, fork, and tree handlers must not independently clear Fast Mode",
-);
+for (const [name, handler] of [
+  ["session_before_switch", beforeSwitchHandler], ["session_before_fork", beforeForkHandler],
+  ["session_before_tree", beforeTreeHandler], ["session_tree", sessionTreeHandler],
+]) {
+  hasNone(handler, ["replayFastState", "makeFastState", "FAST_STATE_ENTRY_TYPE", "fastEnabled =", 'appendEntry('], `${name} must not clear, replay, or persist Fast Mode`);
+}
 const beforeAgentStartRegistrations = [...extension.matchAll(/pi\.on\("before_agent_start"/g)].map((match) => match.index);
 check(beforeAgentStartRegistrations.length === 2, `main extension must register exactly two before_agent_start handlers, found: ${beforeAgentStartRegistrations.length}`);
 const phaseReminderHandlerStart = beforeAgentStartRegistrations[0] ?? -1;
@@ -2006,8 +2027,9 @@ hasAll(subagentRuntimeTests, [
   'env.OMPS_FAST_MODE, "0"', 'env.OMPS_FAST_MODE, "1"',
   "child Fast Mode hook is snapshot-gated after the child early return",
   'for (const value of [undefined, "0", "true"])', "a non-child process registers none of the child hooks",
-  "preset parsing validates Fast Mode without returning dead runtime state", '"fast" in parseConfigFile(configFile), false',
-], "Fast Mode parser, child launch inheritance, and registration-boundary tests");
+  "preset parsing returns no Fast Mode runtime state", "arbitrary v1.0.0 fast fields are ignored",
+  'for (const legacyFast of [true, false, "true", 1, null, { stale: true }])',
+], "Fast Mode legacy-config ignore, child launch inheritance, and registration-boundary tests");
 hasAll(subagentRuntimeTests, [
   "Goal stats sidecars enforce private paths", "Goal stats capture writes only actual changes", "Goal stats sidecars preserve completed owned-run aggregates across branch restore",
   "getGoalStatsSidecarPaths", "writeGoalStatsSidecar", "readGoalStatsSidecar", "run-directory GC never deletes session-owned Goal stats sidecars",
@@ -2404,15 +2426,18 @@ hasNone(todoExtension, ['"Action"', "operationCounts", 'theme.bold(`todo · ${ac
 check(existsSync(join(ROOT, "tests/todo.test.mjs")), "Todo contract tests must exist");
 check(existsSync(join(ROOT, "tests/provider-schema.test.mjs")), "provider schema compatibility tests must exist");
 check(existsSync(join(ROOT, "tests/loop.test.mjs")), "Loop core contract tests must exist");
-check(existsSync(join(ROOT, "tests/fast-mode.test.mjs")), "Fast Mode pure and IO contract tests must exist");
+check(existsSync(join(ROOT, "tests/fast-mode.test.mjs")), "Fast Mode pure session-state contract tests must exist");
 const fastModeTests = read("tests/fast-mode.test.mjs");
 hasAll(fastModeTests, [
   "service tier injection requires exact provider and payload model without mutation",
-  "flag IO fails closed and preserves unknown config fields with mode 0600",
-  "writer rejects a non-object presets field before creating a temp file",
-  "writer closes and removes its temp file when writing fails",
-  'fastEnabledFromEnv("1")', 'fastEnabledFromEnv(value)', "injected write failure",
-], "Fast Mode payload, environment, permission, roundtrip, guard, and cleanup tests");
+  "Fast state maker and parser enforce exact version-1 boolean data",
+  "session replay uses the last valid exact custom entry across the full entry log",
+  "session replay defaults off and skips malformed latest entries without erasing valid state",
+  'FAST_STATE_ENTRY_TYPE, "oh-my-pi-slim:fast-state"', "assert.equal(FAST_STATE_VERSION, 1)",
+  "an invalid latest candidate falls back to the last valid session state",
+  'fastEnabledFromEnv("1")', 'fastEnabledFromEnv(value)', "broken entry",
+], "Fast Mode payload, environment, exact entry parsing, replay, and fail-closed tests");
+hasNone(fastModeTests, ["node:fs", "node:crypto", "readFastFlag", "writeFastFlag", "FastModeWriteIO"], "Fast Mode tests must not retain config IO seams");
 check(existsSync(join(ROOT, "tests/loop-ui.test.mjs")), "Loop visual contract tests must exist");
 check(existsSync(join(ROOT, "tests/goal-ui.test.mjs")), "Goal visual contract tests must exist");
 check(existsSync(join(ROOT, "tests/monitor-ui.test.mjs")), "Monitor visual contract tests must exist");
@@ -2513,10 +2538,17 @@ hasAll(loopUiTests, [
 ], "Loop focused ratio-free heading and no-expansion visual tests");
 const loopCoreTests = read("tests/loop.test.mjs");
 hasAll(loopCoreTests, [
-  "main unconditionally registers exactly one provider payload hook", "reload rereads Fast Mode as off",
-  "Fast Mode accepts no command arguments", "write failure does not change memory",
-  'assert.ok(main.commands.includes("fast"))', "account permission", "unknown: { retained: true }",
-], "Fast Mode main hook, command, persistence, reload, and failure tests");
+  "main unconditionally registers exactly one provider payload hook",
+  "the legal v1.0.0 preset config keeps its legacy field untouched",
+  "empty session entries stay off even when legacy agent-global config says fast true",
+  'JSON.parse(readFileSync(join(ROOT, "config/oh-my-pi-slim.example.json")',
+  "Fast Mode arguments never append session state", 'customType: "oh-my-pi-slim:fast-state"',
+  "Fast Mode enabled for this Pi session", "append failure does not change in-memory Fast Mode",
+  "reload restores the last valid state from the same full entry log", 'for (const reason of ["resume", "fork"])',
+  "restores or inherits the copied session path state", "a new empty session defaults Fast Mode off",
+  "tree navigation never appends Fast Mode state", "tree navigation never recomputes session-wide Fast Mode from a branch",
+  'assert.ok(main.commands.includes("fast"))', "injected append failure",
+], "Fast Mode main hook, command, session lifecycle, tree invariance, and append atomicity tests");
 hasAll(loopCoreTests, [
   "synchronous injected timeout callbacks activate after commit", "scheduler failures preserve active modify and paused resume atomicity",
   "scheduler unavailable", "tree abort waits for shutdown completion", "abort cannot release delivery before subagent shutdown completes",
@@ -2832,7 +2864,11 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "retained terminal runs are policy-hidden", "existing Ctrl+O expand hint is present",
         "keeps only the complete Ctrl+O hint", "omits both hints", "expanded Agents heading shows neither hint",
         "successful subagent `clear` remains clear after reload",
-        "agent-global Fast Mode state", "explicitly `false` by default", "`/fast`", "arguments are not accepted",
+        "current Pi session", "defaults to off for a new session", "latest `/fast` toggle", "whole session across every branch",
+        "tree navigation does not change it", "Reload, process restart, and session resume recover it from the session history",
+        "fork inherits the last Fast Mode state", "target path that Pi copies into the fork",
+        "With `--no-session`", "lasts only for the current process", "cannot survive a restart",
+        "top-level `fast` field used by v1.0.0", "is ignored", "remove that legacy field manually",
         "all ordinary agent requests", "provider is exactly `openai` or `openai-codex`", "payload model matches the active Pi model",
         "future child `create` and `resume` launches", "Running children do not hot-switch",
         "Compaction and branch-summary model calls keep their default service tier",
@@ -2872,7 +2908,11 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "固定的 `ctrl+shift+←/→ viewer` 提示", "先只保留完整的 Ctrl+O 提示", "两条提示都省略",
         "Agents heading 展开时不显示任何提示",
         "subagent `clear` 在 reload 后仍保持清空",
-        "agent-global Fast Mode 状态", "默认显式为 `false`", "`/fast`", "不接受任何参数",
+        "属于当前 Pi session", "新 session 默认关闭", "最近一次 `/fast` toggle", "整个 session 的全部 branch",
+        "tree navigation 不会改变状态", "reload、进程重启与 session resume", "从 session history 恢复状态",
+        "fork 会继承", "复制的 target path 上最后一条 Fast Mode 状态",
+        "使用 `--no-session`", "只在当前进程内保留", "进程重启后不会恢复",
+        "v1.0.0 写入", "顶层的 `fast` 字段现已被忽略", "手动删除该遗留字段",
         "全部普通 agent request", "provider 精确为 `openai` 或 `openai-codex`", "payload model 与当前 Pi model 匹配",
         "future child `create` 与 `resume` launch", "running child 不会热切换",
         "compaction 与 branch summary model call 仍使用 default tier",
@@ -2880,6 +2920,14 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "不承诺 priority capacity 一定获批", "不承诺 request 一定更快",
         "Codex footer cost", "2–2.5 倍",
       ], `${file} visible behavior contract`);
+
+  const presetIntro = section(english ? "## Presets and configuration" : "## Preset 与配置", "### Fast Mode");
+  const fastModeDoc = section("### Fast Mode", english ? "## Runtime, UI, and persistence" : "## Runtime、UI 与持久化");
+  hasNone(presetIntro, ["- `fast`"], `${file} bundled preset schema must not document legacy Fast Mode state`);
+  hasNone(fastModeDoc, [
+    "agent-global Fast Mode state", "global agent-dir configuration", "agent-global Fast Mode 状态", "全局 agent-dir 配置",
+    "project-global", "project scoped", "项目作用域",
+  ], `${file} Fast Mode must not claim project or agent-global persistence`);
 
   const subagent = section("### `subagent`", "### `todo`");
   const todo = section("### `todo`", "### `loop`");
@@ -3563,11 +3611,11 @@ hasAll(subagentRuntimeTests, [
 hasAll(read("tests/loop-load.test.mjs"), ['event.method === "custom"'], "load tests must assert the viewer never opens outside a TUI session");
 hasAll(read("tests/loop-load.test.mjs"), [
   'assert.deepEqual(main.commands, ["fast", "goal", "loop"])', "assert.deepEqual(child.commands, [])",
-  "JSON.parse(readFileSync(bootstrappedConfig", "statSync(bootstrappedConfig).mode & 0o777, 0o600",
+  '"fast" in JSON.parse(readFileSync(bootstrappedConfig', "statSync(bootstrappedConfig).mode & 0o777, 0o600",
 ], "load harness must lock the main-only Fast Mode command registration boundary");
 
 const preset = json("config/oh-my-pi-slim.example.json");
-check(preset.fast === false, "bundled config must explicitly default Fast Mode off");
+check(!Object.prototype.hasOwnProperty.call(preset, "fast"), "bundled config must not contain legacy agent-global Fast Mode state");
 check(Boolean(preset.presets?.[preset.defaultPreset]), "default preset must exist");
 for (const [presetName, value] of Object.entries(preset.presets ?? {})) {
   check(JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...ROLES].sort()), `${presetName} must define exactly seven roles`);
