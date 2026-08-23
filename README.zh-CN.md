@@ -112,6 +112,8 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 
 `list` 包含 `starting`、`running`、`waiting`、`completed`、`failed` 与 `interrupted` run，但绝不包含 terminal `output` 或 `error`。使用单个 retained run ID 调用 `status`，可查看相同公开字段，并在结果存在时取回 terminal 结果。subagent widget 使用相同的 retained 集合与排序，因此 terminal run 会一直显示到 `delete` 或 `clear` 将其移除。
 
+每个 active 或 waiting widget entry 都是不可拆分的两行 block。第一行把 identity 与 abstract 放在末尾 activity 之前。第二行承载 model、turn、tool、token、context、compaction 与 elapsed statistics。12 行 widget 预算绝不会拆开 active entry。
+
 `interrupt` 是同步的：它会等待目标 run 进入 terminal 状态，并直接返回完整最终结果，包括已保存的 `output` 或 `error`。当显式 `interrupt` 调用取得某个 live run 的结果交接权时，该 terminal event 不会再单独发送，reload 后也不会重放；而由 shutdown、reload、tree navigation 或 session 替换导致的中断，仍然按普通 terminal notification 送达。若 run 在调用前就已是 terminal，它保留自己的 terminal notification，不会收到 interrupt control，并且只返回精简回执。若无法确认 detached runner 已停止，结果会显式说明，并保留该 run 目录。
 
 `resume` 始终使用当前 preset 为该 agent 解析出的 model，而不是 source run 当时使用的 model。当这次变化跨越了 provider 或 model ID，被复用的 child session 会在 resumed run 收到第一个 prompt 之前先被 compact 一次，因此新 model 绝不会继承为另一个 model 写下的原始上下文。仅 thinking level 变化时，session 会被原样复用。整个 preflight 期间 run 保持 `starting`，已经 compact 过或过小的 session 会直接继续，其他任何 compaction 失败都会让该 run 失败，而不会再发出 prompt。
@@ -217,6 +219,8 @@ Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree res
 
 自主 continuation 会等待阻塞工作消失，包括 active 或 waiting subagent、Monitor 工作与 pending terminal delivery，以及 waiting Ask dialog。你可以随时用 `status`、`pause`、`resume` 或 `cancel` 控制推进。
 
+每次 agent prompt 都会按顺序持久化两条独立的 hidden reminder。phase reminder 在前，只有 Goal 为 `active` 时才紧随 Goal reminder。`retry_wait`、`paused`、`completed` 与 `cancelled` Goal 都不会收到 Goal reminder。在某次 prompt 中创建的 Goal 会从下一次 agent prompt 开始收到 reminder。
+
 completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠。tool output 折叠时，widget 只保留 Goal heading；其他状态在折叠与展开下都保留两行。
 
 `goal clear` 可从 branch 上移除 paused、completed 或 cancelled Goal。`active` 或 `retry_wait` Goal 会阻止 `clear`；main model 必须先询问是否暂停或取消，得到同意并执行后才重试。清理后的 branch 报告没有任何 Goal；清理会一并带走该 Goal 自己的统计，而 retained subagent run 保持不变。
@@ -239,6 +243,7 @@ completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠。tool output 折�
 
 基本结构如下：
 
+- `fast`：agent-global Fast Mode 状态，默认显式为 `false`。
 - `defaultPreset`：默认选择的 preset。
 - `presets.<name>`：`orchestrator` 与六个 specialist 的配置。
 - 每个角色包含 `provider`、`model` 与 `thinking`。
@@ -253,6 +258,15 @@ completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠。tool output 折�
 | `/omps status` | 查看激活状态 |
 | `/omps presets` | 列出 preset |
 | `/preset [name]` | 切换 preset；省略名称时列出 preset |
+| `/fast` | 切换 agent-global Fast Mode 状态，不接受任何参数 |
+
+### Fast Mode
+
+Fast Mode 作用于全部普通 agent request。仅当 provider 精确为 `openai` 或 `openai-codex`，且 payload model 与当前 Pi model 匹配时，才会请求 `service_tier: "priority"`。该状态保存在上述全局 agent-dir 配置中，默认关闭，并且与 preset 是否激活相互独立。
+
+切换后的状态只由 future child `create` 与 `resume` launch 继承。running child 不会热切换。compaction 与 branch summary model call 仍使用 default tier。账户没有 priority 权限时 request 可能失败。后加载的 extension 可以再次覆盖 OMPS 修改后的 payload。Fast Mode 不承诺 priority capacity 一定获批，也不承诺 request 一定更快。
+
+由于注入的 tier 不会反映在估算中，Pi 的 Codex footer cost 可能低估 priority-tier cost 约 2–2.5 倍。
 
 ## Runtime、UI 与持久化
 
@@ -269,6 +283,7 @@ completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠。tool output 折�
 
 `ctrl+shift+left` 与 `ctrl+shift+right` 打开只读全屏 viewer，查看任意 retained subagent run 的 child transcript。viewer 只展示：没有 reply、steer 或 interrupt，也不会写入 session entry、control 文件或 run 文件。
 
+- Agents widget 折叠时，只有存在因 policy 而隐藏的 retained terminal run，并且已有 Ctrl+O expand hint 时，heading 才会追加固定的 `ctrl+shift+←/→ viewer` 提示。宽度不足以容纳两条完整提示时，heading 先只保留完整的 Ctrl+O 提示；若仍放不下，则两条提示都省略。Agents heading 展开时不显示任何提示。
 - Main 是循环中的第 0 项。`ctrl+shift+right` 从 Main 进入第一个 retained run，逐个前进，最后回到 Main；`ctrl+shift+left` 沿同一个环反向移动。
 - 循环范围就是 Agents widget 展示的 retained 集合，顺序与总数完全一致：`starting`、`running`、`waiting`、`completed`、`failed`、`interrupted` 六种状态全部可达，包括 widget 折叠或超出行预算时隐藏的那些。状态变化只会重排，正在查看的 run 结束后仍留在屏幕上。`subagent delete` 删除一个 terminal run，`subagent clear` 删除全部 terminal history；最后一个 retained run 消失时自动回到 Main。
 - 在 viewer 内，普通 `Left`/`Right` 与 `ctrl+shift+left`/`ctrl+shift+right` 的循环方向一致；`Escape` 或 `q` 回到 Main。

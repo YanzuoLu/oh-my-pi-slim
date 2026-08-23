@@ -112,6 +112,8 @@ Runs specialists in isolated background child sessions and returns control immed
 
 `list` includes `starting`, `running`, `waiting`, `completed`, `failed`, and `interrupted` runs, but never includes terminal `output` or `error`. Use `status` with one retained run ID to inspect the same public fields and recover its terminal result when present. The subagent widget uses the same retained set and ordering, so terminal runs remain visible until `delete` or `clear` removes them.
 
+Each active or waiting widget entry is an atomic two-line block. The first line keeps identity and abstract ahead of trailing activity. The second line carries model, turn, tool, token, context, compaction, and elapsed statistics. The 12-line widget budget never splits an active entry.
+
 `interrupt` is synchronous. It waits for the targeted run to reach a terminal status and returns that complete final result, including any stored `output` or `error`. When an explicit `interrupt` call takes over delivery for a live run, that terminal event is not sent separately and is not replayed after reload. Interruptions caused by shutdown, reload, tree navigation, or session replacement still arrive as ordinary terminal notifications. A run that already reached a terminal status before the call keeps its own terminal notification, receives no interrupt control, and returns only a compact status line. When the detached runner cannot be verified as stopped, the result says so explicitly and the run directory is retained.
 
 `resume` always runs on the model your current preset resolves for that agent, not on the model the source run used. When that crosses a provider or a model ID, the reused child session is compacted once before the resumed run is prompted, so a new model never inherits raw context written for another one. A change of thinking level alone reuses the session unchanged. The run stays `starting` for the whole preflight, an already compacted or too small session simply continues, and any other compaction failure fails the run instead of prompting it.
@@ -217,6 +219,8 @@ A Goal is durable on its branch. Reload, session resume, fork, and tree restorat
 
 Autonomous continuation waits until blocking work is gone, including active or waiting subagents, Monitor work and pending terminal delivery, and a waiting Ask dialog. Use `status`, `pause`, `resume`, or `cancel` to stay in control.
 
+Each agent prompt persists two independent hidden reminders in order. The phase reminder comes first, followed by a Goal reminder only while the Goal is `active`. `retry_wait`, `paused`, `completed`, and `cancelled` Goals receive no Goal reminder. A Goal created during a prompt first receives its reminder on the next agent prompt.
+
 A completed Goal's detail row joins the shared Ctrl+O collapse. With tool output collapsed the widget keeps only the Goal heading, and every other status keeps both rows in either state.
 
 `goal clear` removes a paused, completed, or cancelled Goal from the branch. An `active` or `retry_wait` Goal blocks `clear`; the main model must ask whether to pause or cancel it and retry only after agreement. A cleared branch reports no Goal at all, and clearing takes that Goal's own statistics with it while leaving retained subagent runs untouched.
@@ -239,6 +243,7 @@ The runtime preset file is `~/.pi/agent/oh-my-pi-slim.json`. On first use, the p
 
 The basic structure is:
 
+- `fast`: agent-global Fast Mode state, explicitly `false` by default.
 - `defaultPreset`: preset selected by default.
 - `presets.<name>`: configuration for `orchestrator` and all six specialists.
 - Each role: `provider`, `model`, and `thinking`.
@@ -253,6 +258,15 @@ Provider, model, and thinking level are independently configurable per role. Aut
 | `/omps status` | Show activation state |
 | `/omps presets` | List presets |
 | `/preset [name]` | Switch preset; omit the name to list presets |
+| `/fast` | Toggle the agent-global Fast Mode state; arguments are not accepted |
+
+### Fast Mode
+
+Fast Mode affects all ordinary agent requests whose provider is exactly `openai` or `openai-codex` and whose payload model matches the active Pi model. It requests `service_tier: "priority"`. The state lives in the global agent-dir configuration above and defaults to off. It is independent of preset activation.
+
+A toggle is inherited only by future child `create` and `resume` launches. Running children do not hot-switch. Compaction and branch-summary model calls keep their default service tier. An account without priority access may see requests fail. A later-loaded extension can override the payload after OMPS. Fast Mode does not promise that priority capacity will be granted or that a request will complete faster.
+
+Pi's Codex footer cost can underestimate priority-tier cost by roughly 2–2.5x because the injected tier is not reflected in its estimate.
 
 ## Runtime, UI, and persistence
 
@@ -269,6 +283,7 @@ Provider, model, and thinking level are independently configurable per role. Aut
 
 `ctrl+shift+left` and `ctrl+shift+right` open a read-only, full-screen viewer for the child transcript of any retained subagent run. The viewer only shows: it has no reply, steer, or interrupt, and it never writes a session entry, a control file, or a run file.
 
+- When the Agents widget is collapsed, its heading appends the fixed `ctrl+shift+←/→ viewer` hint only when retained terminal runs are policy-hidden and the existing Ctrl+O expand hint is present. If the width cannot fit both complete hints, the heading keeps only the complete Ctrl+O hint. If that also does not fit, it omits both hints. An expanded Agents heading shows neither hint.
 - Main is item 0 of one cycle. `ctrl+shift+right` moves Main to the first retained run, then run by run, then back to Main. `ctrl+shift+left` moves the same ring in reverse.
 - The cycle is the retained set the Agents widget shows, in the same order and with the same total: every `starting`, `running`, `waiting`, `completed`, `failed`, and `interrupted` run is reachable, including the ones the widget hides when it is collapsed or over its row budget. A status change only reorders the ring, so a run you are watching stays on screen when it finishes. `subagent delete` removes one terminal run, while `subagent clear` removes all terminal history; losing the last retained run returns you to Main.
 - Inside the viewer, plain `Left`/`Right` and `ctrl+shift+left`/`ctrl+shift+right` cycle the same way. `Escape` or `q` returns to Main.

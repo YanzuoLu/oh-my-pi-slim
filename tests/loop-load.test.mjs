@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -17,6 +17,7 @@ function isolatedEnv(agentDir, child = false) {
   const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir };
   delete env.OMPS_ENABLE;
   delete env.OMPS_PRESET;
+  delete env.OMPS_FAST_MODE;
   if (child) {
     env.PI_SUBAGENT_CHILD = "1";
     env.OMPS_SUBAGENT_CHILD = "1";
@@ -149,7 +150,8 @@ function runAskRpcDialog(agentDir, selectScript = ASK_RPC_COMPLETE_SCRIPT) {
       settled = true;
       clearTimeout(timer);
       if (stdout) acceptLine(stdout.endsWith("\r") ? stdout.slice(0, -1) : stdout);
-      if (!resultSeen || (code !== 0 && signal !== "SIGTERM")) {
+      const stoppedAfterResult = code === 0 || signal === "SIGTERM" || (code === 143 && signal === null);
+      if (!resultSeen || !stoppedAfterResult) {
         reject(new Error(`Ask RPC probe exited with code ${code} signal ${signal}.\n${stderr}\n${stdoutLog}`));
         return;
       }
@@ -166,8 +168,11 @@ test("real Pi isolated RPC main and child sessions expose exact package tools wi
   try {
     const main = notificationJson(runPi(mainAgentDir, "/omps-load-probe"), "OMPS_LOAD_PROBE ");
     assert.deepEqual(main.tools, ["ask_user_question", "goal", "loop", "monitor", "subagent", "todo"]);
+    const bootstrappedConfig = join(mainAgentDir, "oh-my-pi-slim.json");
+    assert.equal(JSON.parse(readFileSync(bootstrappedConfig, "utf8")).fast, false);
+    assert.equal(statSync(bootstrappedConfig).mode & 0o777, 0o600);
     assert.deepEqual(main.activeTools, ["ask_user_question", "goal", "loop", "monitor", "subagent", "todo"]);
-    assert.deepEqual(main.commands, ["goal", "loop"]);
+    assert.deepEqual(main.commands, ["fast", "goal", "loop"]);
     assert.deepEqual(main.descriptions, {
       ask_user_question: "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. A partial submit keeps every confirmed answer, while cancelling discards all of them. `ask_user_question` is unavailable while a Goal is active.",
       goal: "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a paused, completed, or cancelled Goal. It rejects active and retry_wait Goals until the user agrees to pause or cancel. Actions return the current Goal state and whether it changed.",

@@ -30,6 +30,7 @@ const dependencyMap = {
   "./ask-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts", import.meta.url).href,
   "./ask-tui.js": new URL("../extensions/oh-my-pi-slim/ask-tui.ts", import.meta.url).href,
   "./bootstrap.js": new URL("../extensions/oh-my-pi-slim/bootstrap.ts", import.meta.url).href,
+  "./fast-mode.js": new URL("../extensions/oh-my-pi-slim/fast-mode.ts", import.meta.url).href,
   "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
   "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
   "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
@@ -705,6 +706,61 @@ test("child checkpoint ignores pending/contact batches and resumes only matching
   }
 });
 
+test("child Fast Mode hook is snapshot-gated after the child early return", async () => {
+  const previous = {
+    fast: process.env.OMPS_FAST_MODE,
+    ompsChild: process.env.OMPS_SUBAGENT_CHILD,
+    piChild: process.env.PI_SUBAGENT_CHILD,
+  };
+  const load = async (fast, child = true) => {
+    if (fast === undefined) delete process.env.OMPS_FAST_MODE;
+    else process.env.OMPS_FAST_MODE = fast;
+    if (child) {
+      process.env.OMPS_SUBAGENT_CHILD = "1";
+      process.env.PI_SUBAGENT_CHILD = "1";
+    } else {
+      delete process.env.OMPS_SUBAGENT_CHILD;
+      delete process.env.PI_SUBAGENT_CHILD;
+    }
+    const handlers = new Map();
+    const module = await import(`${new URL("../extensions/oh-my-pi-slim/child-supervisor.ts", import.meta.url).href}?fast-hook=${Date.now()}-${Math.random()}`);
+    module.default({
+      registerTool() {},
+      on(event, handler) {
+        const list = handlers.get(event) ?? [];
+        list.push(handler);
+        handlers.set(event, list);
+      },
+    });
+    return handlers;
+  };
+  try {
+    for (const value of [undefined, "0", "true"]) {
+      const handlers = await load(value);
+      assert.equal(handlers.has("before_provider_request"), false, `child value ${String(value)} stays default tier`);
+      assert.equal(handlers.has("session_start"), true, "ordinary child runtime still registers");
+    }
+    const enabled = await load("1");
+    assert.equal(enabled.get("before_provider_request").length, 1);
+    const payload = { model: "gpt-child", service_tier: "default" };
+    assert.deepEqual(
+      enabled.get("before_provider_request")[0]({ payload }, { model: { provider: "openai-codex", id: "gpt-child" } }),
+      { model: "gpt-child", service_tier: "priority" },
+    );
+    assert.equal(payload.service_tier, "default");
+
+    const mainEarlyPath = await load("1", false);
+    assert.deepEqual([...mainEarlyPath.keys()], [], "a non-child process registers none of the child hooks");
+  } finally {
+    if (previous.fast === undefined) delete process.env.OMPS_FAST_MODE;
+    else process.env.OMPS_FAST_MODE = previous.fast;
+    if (previous.ompsChild === undefined) delete process.env.OMPS_SUBAGENT_CHILD;
+    else process.env.OMPS_SUBAGENT_CHILD = previous.ompsChild;
+    if (previous.piChild === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = previous.piChild;
+  }
+});
+
 test("deny config is partial, exact, portable, and protects lifecycle tools", () => {
   const parsed = parseDenyConfig({
     explorer: ["ask_user_question", "FuturePluginTool"],
@@ -750,11 +806,16 @@ test("old presets inherit observer from explorer and explicit observer config is
       deny: { observer: ["ask_user_question"] },
     }));
     const config = parseConfigFile(configFile);
+    assert.equal("fast" in config, false, "preset parsing validates Fast Mode without returning dead runtime state");
     assert.deepEqual(config.presets.legacy.observer, oldPreset.explorer);
     assert.equal(config.observerFallbackPresets.has("legacy"), true);
     assert.deepEqual(config.presets.explicit.observer, role("vision", "observer", "xhigh"));
     assert.equal(config.observerFallbackPresets.has("explicit"), false);
     assert.deepEqual(config.deny.observer, ["ask_user_question"]);
+    writeFileSync(configFile, JSON.stringify({ fast: true, presets: { legacy: oldPreset } }));
+    assert.equal("fast" in parseConfigFile(configFile), false);
+    writeFileSync(configFile, JSON.stringify({ fast: "true", presets: { legacy: oldPreset } }));
+    assert.throws(() => parseConfigFile(configFile), /\.fast must be a boolean/);
     assert.equal(supportsImageInput({ input: ["text", "image"] }), true);
     assert.equal(supportsImageInput({ input: ["text"] }), false);
   } finally { rmSync(tempDir, { recursive: true, force: true }); }
@@ -1309,6 +1370,7 @@ test("create writes secure detached config, journals once, launches, and returns
     assert.equal(config.piInvocation.args.includes("--extension"), true);
     assert.deepEqual(config.deniedTools, []);
     assert.equal(config.env.OMPS_PARENT_RUN_ID, id);
+    assert.equal(config.env.OMPS_FAST_MODE, "0", "children inherit an explicit default-off snapshot");
     const identity = JSON.parse(readFileSync(harness.paths(id).identityFile, "utf8"));
     assert.deepEqual(identity, {
       v: 1,
@@ -1320,6 +1382,41 @@ test("create writes secure detached config, journals once, launches, and returns
     assert.equal(isDetachedRunnerIdentity(identity), true);
     assert.equal(statSync(harness.paths(id).identityFile).mode & 0o777, 0o600);
   } finally { harness.cleanup(); }
+});
+
+test("create and resume snapshot Fast Mode in both states and override stale shell environment", async () => {
+  const harness = createHarness();
+  const previousFast = process.env.OMPS_FAST_MODE;
+  process.env.OMPS_FAST_MODE = "1";
+  try {
+    await harness.restore();
+    harness.runtime.setFastModeResolver(() => false);
+    const createdOff = await createRun(harness, { abstract: "fast off create", task: "off" });
+    assert.equal(readConfig(harness, createdOff.details.run.id).env.OMPS_FAST_MODE, "0");
+
+    harness.runtime.setFastModeResolver(() => true);
+    const createdOn = await createRun(harness, { abstract: "fast on create", task: "on" });
+    assert.equal(readConfig(harness, createdOn.details.run.id).env.OMPS_FAST_MODE, "1");
+
+    const resumeWith = async (sourceId, enabled) => {
+      const sessionFile = join(harness.tempDir, `${sourceId}.jsonl`);
+      writeFileSync(sessionFile, "session");
+      harness.runtime.registry.add(persistedRun({ id: sourceId, status: "completed", sessionFile }));
+      harness.runtime.setModelResolver(() => "provider/model:high");
+      harness.runtime.setDenyResolver(() => []);
+      harness.runtime.setFastModeResolver(() => enabled);
+      const resumed = await harness.tools.get("subagent").execute(`resume-${sourceId}`, {
+        action: "resume", id: sourceId, abstract: `resume ${sourceId}`, message: "continue",
+      });
+      return readConfig(harness, resumed.details.run.id).env.OMPS_FAST_MODE;
+    };
+    assert.equal(await resumeWith("source-fast-off", false), "0");
+    assert.equal(await resumeWith("source-fast-on", true), "1");
+  } finally {
+    if (previousFast === undefined) delete process.env.OMPS_FAST_MODE;
+    else process.env.OMPS_FAST_MODE = previousFast;
+    harness.cleanup();
+  }
 });
 
 test("create persists exact deny entries and emits --exclude-tools without a positive allowlist", async () => {

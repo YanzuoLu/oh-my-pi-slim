@@ -31,6 +31,7 @@ const {
   GOAL_ACTIONS,
   GOAL_CONTINUATION_MESSAGE_TYPE,
   GOAL_PUBLIC_FIELDS,
+  GOAL_REMINDER_MESSAGE_TYPE,
   GOAL_RETRY_BACKOFF_MS,
   GOAL_STATE_ENTRY_TYPE,
   GOAL_STATE_MESSAGE_TYPE,
@@ -324,8 +325,10 @@ test("snapshot replay is strict, latest-valid, branch-local, and restoration pau
   assert.equal(restored.sent.at(-1).message.details.event, "session_restored");
 });
 
-test("phase and model-facing continuation text use exact independent blocks", async () => {
+test("Goal reminder type and model-facing text use exact independent blocks", async () => {
+  assert.equal(GOAL_REMINDER_MESSAGE_TYPE, "oh-my-pi-slim:goal-reminder");
   const harness = createHarness();
+  assert.equal(harness.runtime.phaseReminder(), undefined);
   const created = await harness.execute(createInput);
   const goal = created.details.goal;
   assert.equal(goalPhaseReminder(goal.abstract), `<system-reminder>\n!IMPORTANT! You are pursuing the active Goal: Ship the Goal core. Keep this run aligned with it and continue making concrete progress. !END!\n</system-reminder>`);
@@ -348,8 +351,27 @@ test("phase and model-facing continuation text use exact independent blocks", as
     "If safe progress is blocked, call `goal pause` with a concrete reason.",
     "Call `goal complete` only with one evidence entry for every criterion.",
   ].join("\n"));
+
   await harness.execute({ action: "pause", reason: "blocker" });
   assert.equal(harness.runtime.phaseReminder(), undefined);
+
+  const retrying = createHarness();
+  await retrying.execute(createInput);
+  retrying.runtime.onAgentStart();
+  retrying.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "error", errorMessage: "rate limited" }] });
+  retrying.runtime.onAgentSettled(retrying.ctx);
+  assert.equal(retrying.runtime.status().status, "retry_wait");
+  assert.equal(retrying.runtime.phaseReminder(), undefined);
+
+  const completed = createHarness();
+  await completed.execute(createInput);
+  await completed.execute({ action: "complete", evidence: ["proof one", "proof two"] });
+  assert.equal(completed.runtime.phaseReminder(), undefined);
+
+  const cancelled = createHarness();
+  await cancelled.execute(createInput);
+  await cancelled.execute({ action: "cancel", reason: "superseded" });
+  assert.equal(cancelled.runtime.phaseReminder(), undefined);
 });
 
 test("continuation waits for the full safe gate, uses steer with acknowledgement, and external input invalidates deferred work", async () => {

@@ -13,6 +13,7 @@ export const GOAL_ACTIONS = ["create", "modify", "status", "pause", "resume", "c
 export const GOAL_PUBLIC_FIELDS = ["action", "abstract", "objective", "criteria", "reason", "evidence"] as const;
 export const GOAL_STATE_ENTRY_TYPE = "oh-my-pi-slim:goal-state";
 export const GOAL_CONTINUATION_MESSAGE_TYPE = "oh-my-pi-slim:goal-continuation";
+export const GOAL_REMINDER_MESSAGE_TYPE = "oh-my-pi-slim:goal-reminder";
 export const GOAL_STATE_MESSAGE_TYPE = "oh-my-pi-slim:goal-state-event";
 export const GOAL_SNAPSHOT_VERSION = 1;
 export const GOAL_RETRY_BACKOFF_MS = [10_000, 30_000, 60_000, 300_000, 900_000, 3_600_000] as const;

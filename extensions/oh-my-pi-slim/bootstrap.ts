@@ -207,7 +207,7 @@ export function ensurePackageSetup(packageRoot: string): void {
   if (!existsSync(userPresetPath)) {
     mkdirSync(agentDir, { recursive: true });
     try {
-      writeFileSync(userPresetPath, readFileSync(bundledPresetPath), { flag: "wx" });
+      writeFileSync(userPresetPath, readFileSync(bundledPresetPath), { flag: "wx", mode: 0o600 });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }

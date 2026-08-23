@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "0.10.19", "package version must be 0.10.19");
+check(packageJson.version === "1.0.0", "package version must be 1.0.0");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "0.10.19" && lock.packages?.[""]?.version === "0.10.19", "package-lock version must be 0.10.19");
+check(lock.version === "1.0.0" && lock.packages?.[""]?.version === "1.0.0", "package-lock version must be 1.0.0");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -192,6 +192,7 @@ const monitorTranscriptRenderer = read("extensions/oh-my-pi-slim/monitor-transcr
 const loopWidget = read("extensions/oh-my-pi-slim/loop-widget.ts");
 const loopTranscriptRenderer = read("extensions/oh-my-pi-slim/loop-transcript-renderer.ts");
 const checkpoint = read("extensions/oh-my-pi-slim/subagent-checkpoint.ts");
+const fastMode = read("extensions/oh-my-pi-slim/fast-mode.ts");
 const runtime = read("extensions/oh-my-pi-slim/subagent-runtime.ts");
 const core = read("extensions/oh-my-pi-slim/subagent-core.ts");
 const child = read("extensions/oh-my-pi-slim/child-supervisor.ts");
@@ -425,7 +426,10 @@ const childGate = extension.indexOf('process.env.PI_SUBAGENT_CHILD === "1" || pr
 const loopRegistration = extension.indexOf("registerLoopRuntime(pi)", functionStart);
 const monitorRegistration = extension.indexOf("registerMonitorRuntime(pi)", functionStart);
 const runtimeRegistration = extension.indexOf("registerSubagentRuntime(pi)", functionStart);
+const fastResolverRegistration = extension.indexOf("subagents.setFastModeResolver(() => fastEnabled)", runtimeRegistration);
+const mainFastHookRegistration = extension.indexOf('pi.on("before_provider_request"', runtimeRegistration);
 check(functionStart >= 0 && childGate > functionStart && childGate < loopRegistration && loopRegistration < monitorRegistration && monitorRegistration < runtimeRegistration, "main extension must return before Loop, Monitor, and subagent registration");
+check(runtimeRegistration < fastResolverRegistration && fastResolverRegistration < mainFastHookRegistration, "main Fast Mode resolver and hook must register only after the child early return and subagent runtime");
 hasAll(extension, [
   "assertNoLegacyBackend(pi)",
   "ensurePackageSetup(PACKAGE_ROOT)",
@@ -451,6 +455,10 @@ hasAll(extension, [
   "bindAskDriver(ctx)", "bindAskDriver()",
   "registerGoalRuntime(pi", "asks.setGoalActiveResolver", "subagents.subscribeRunCreated", "goal?.onAgentSettled(ctx)",
   "registerLoopRuntime(pi)", "registerMonitorRuntime(pi)",
+  "let fastEnabled = false", "subagents.setFastModeResolver(() => fastEnabled)",
+  'pi.on("before_provider_request", (event, ctx) => {', "if (!fastEnabled) return", "applyFastServiceTier(event.payload, ctx.model)",
+  'pi.registerCommand("fast"', 'if (args.trim())', 'report(ctx, "Usage: /fast", "warning")',
+  "const current = readFastFlag(path)", "const next = !current.fast", "writeFastFlag(path, current.raw, next)", "fastEnabled = next",
   "treeNotificationHold", "releaseTreeNotificationHoldDeferred", "subagents.restore(ctx, notificationGate.isPaused())",
   "loops.reset()", "loops.shutdown()", "await monitors?.reset()", "await monitors?.shutdown()",
   'loops.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)', "loops.refreshUI()",
@@ -458,6 +466,36 @@ hasAll(extension, [
   'goal?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)', "goal?.setUICtx(undefined)", "goal?.refreshFromBranch(ctx)",
   "monitors?.acknowledgeNotificationMessage(message)", "monitors?.retryQueuedNotificationsAfterAgentSettled()",
 ], "main extension contract");
+hasAll(fastMode, [
+  'export const FAST_ENV_VAR = "OMPS_FAST_MODE"',
+  'export function fastEnvValue(enabled: boolean): "1" | "0"', 'return enabled ? "1" : "0"',
+  "export function fastEnabledFromEnv(value: unknown): boolean", 'return value === "1"',
+  "export function applyFastServiceTier", 'model.provider !== "openai" && model.provider !== "openai-codex"',
+  'payload.model !== model.id', 'return { ...payload, service_tier: "priority" }',
+  "export function readFastFlag(path: string): FastFlagRead", "ok: false", "fast: value.fast === true",
+  "export function writeFastFlag", "isPlainObject(raw.presets)",
+  'io.open(temp, "wx", 0o600)', "io.write(descriptor", "io.close(descriptor)", "io.chmod(temp, 0o600)",
+  "io.rename(temp, path)", "io.unlink(temp)",
+], "Fast Mode pure payload and parameterized config IO module");
+hasNone(fastMode, ["fsync", "atomicWriteJson", "service_tier: next", "process.env[", "process.env."], "Fast Mode module forbidden state and write paths");
+check((fastMode.match(/io\.rename\(temp, path\)/g) ?? []).length === 1, "Fast Mode config rename must be the single final publish step");
+check(!/(?:process\.env\.[A-Za-z0-9_]+|process\.env\[[^\]]+\])\s*=(?!=)/.test(extension), "main extension must never write process.env");
+check((extension.match(/pi\.on\("before_provider_request"/g) ?? []).length === 1, "main extension must unconditionally register exactly one Fast Mode provider hook");
+check((extension.match(/pi\.registerCommand\("fast"/g) ?? []).length === 1, "main extension must register only one bare Fast Mode command");
+hasNone(extension.slice(extension.indexOf('pi.registerCommand("fast"'), extension.indexOf('pi.registerCommand("preset"')), [
+  'setStatus(', 'process.env', 'action === "on"', 'action === "off"', '"status"', "getArgumentCompletions",
+], "Fast Mode command has no parameters, environment writes, or UI status surface");
+const presetConfigInterface = extension.slice(extension.indexOf("interface PresetConfig"), extension.indexOf("interface TreeNotificationHold"));
+check(
+  extension.includes("if (object.fast !== undefined && typeof object.fast !== \"boolean\")") &&
+  !presetConfigInterface.includes("fast:") && !extension.includes("fast: object.fast === true"),
+  "formal preset config parsing must validate optional Fast Mode without returning dead state",
+);
+check(
+  extension.includes("subagents.setModelResolver();\n    subagents.setDenyResolver();") &&
+  !extension.includes("subagents.setFastModeResolver();"),
+  "preset deactivation and session resolver reset must leave the Fast Mode resolver installed",
+);
 check(
   extension.includes("!IMPORTANT! Scheduler workflow: First choose the lightest workflow that fits the work. If direct execution is justified, complete it and verify proportionately. Otherwise: plan lanes/dependencies → dispatch background specialists → continue non-overlapping work when available → await completion notifications → reconcile terminal results → verify. !END!"),
   "phase reminder must preserve direct execution while forbidding overlapping post-dispatch work and waiting for notifications",
@@ -500,15 +538,60 @@ const beforeSwitchHandler = extension.slice(beforeSwitchStart, beforeForkStart);
 const beforeForkHandler = extension.slice(beforeForkStart, beforeTreeStart);
 const beforeTreeHandler = extension.slice(beforeTreeStart, sessionTreeStart);
 const sessionTreeHandler = extension.slice(sessionTreeStart, inputStart);
-const beforeAgentStartHandlerStart = extension.indexOf('pi.on("before_agent_start"');
-const beforeAgentStartHandlerEnd = extension.indexOf('pi.on("agent_start"', beforeAgentStartHandlerStart);
-const beforeAgentStartHandler = extension.slice(beforeAgentStartHandlerStart, beforeAgentStartHandlerEnd);
-hasAll(beforeAgentStartHandler, [
-  "const goalReminder = goal?.phaseReminder()", "goalReminder ? `${PHASE_REMINDER}\\n\\n${goalReminder}` : PHASE_REMINDER",
+check(
+  sessionStartHandler.includes("fastEnabled = false") &&
+  sessionStartHandler.indexOf("ensurePackageSetup(PACKAGE_ROOT)") < sessionStartHandler.indexOf("readFastFlag(join(getAgentDir(), CONFIG_FILE))") &&
+  sessionStartHandler.indexOf("readFastFlag(join(getAgentDir(), CONFIG_FILE))") < sessionStartHandler.indexOf("await subagents.restore(ctx)"),
+  "session_start must fail closed then read Fast Mode after bootstrap and before subagent restore for every reason",
+);
+check(
+  !beforeSwitchHandler.includes("fastEnabled = false") && !beforeForkHandler.includes("fastEnabled = false") &&
+  !beforeTreeHandler.includes("fastEnabled = false") && !sessionTreeHandler.includes("fastEnabled = false"),
+  "session switch, fork, and tree handlers must not independently clear Fast Mode",
+);
+const beforeAgentStartRegistrations = [...extension.matchAll(/pi\.on\("before_agent_start"/g)].map((match) => match.index);
+check(beforeAgentStartRegistrations.length === 2, `main extension must register exactly two before_agent_start handlers, found: ${beforeAgentStartRegistrations.length}`);
+const phaseReminderHandlerStart = beforeAgentStartRegistrations[0] ?? -1;
+const goalReminderHandlerStart = beforeAgentStartRegistrations[1] ?? -1;
+const beforeAgentStartHandlerEnd = extension.indexOf('pi.on("agent_start"', Math.max(goalReminderHandlerStart, 0));
+const phaseReminderHandler = extension.slice(phaseReminderHandlerStart, goalReminderHandlerStart);
+const goalReminderHandler = extension.slice(goalReminderHandlerStart, beforeAgentStartHandlerEnd);
+check(
+  phaseReminderHandlerStart >= 0 && phaseReminderHandlerStart < goalReminderHandlerStart && goalReminderHandlerStart < beforeAgentStartHandlerEnd,
+  "phase and Goal before_agent_start handlers must run in phase-to-goal order before agent_start",
+);
+check(
+  /\}\);\s*pi\.on\("before_agent_start"/.test(extension.slice(phaseReminderHandlerStart, goalReminderHandlerStart + 32)),
+  "the phase and Goal before_agent_start registrations must be consecutive",
+);
+hasAll(phaseReminderHandler, [
+  'pi.on("before_agent_start", (event, ctx) => {', "asks.reconcileHostMode(ctx)",
+  "const goalReminder = goal?.phaseReminder()", 'customType: "oh-my-pi-slim:phase-reminder"',
+  "content: PHASE_REMINDER", "display: false",
   "if (!active || !activePreset || !activePresetName) return goalReminder ? { message } : undefined",
-  "systemPrompt: `${systemPrompt}\\n\\n${ORCHESTRATOR_PROMPT}`",
-], "Goal independent phase-message and fixed orchestrator prompt boundary");
-check(!/systemPrompt:\s*[^\n]*goalReminder/.test(beforeAgentStartHandler), "Goal phase reminder must not dynamically rewrite the system prompt");
+  "let systemPrompt = removeMainPiDocumentation(event.systemPrompt)",
+  "if (isAnthropicOAuth(ctx)) systemPrompt = removeMainPiIdentity(systemPrompt)",
+  "systemPrompt: `${systemPrompt}\\n\\n${ORCHESTRATOR_PROMPT}`", "message,",
+], "phase reminder and fixed orchestrator prompt handler");
+hasNone(phaseReminderHandler, [
+  "GOAL_REMINDER_MESSAGE_TYPE", "content: goalReminder", "sendMessage", "appendEntry", "registerMessageRenderer", "messages:",
+], "phase reminder handler must return one phase-only message without side effects");
+hasAll(goalReminderHandler, [
+  'pi.on("before_agent_start", () => {', "const goalReminder = goal?.phaseReminder()", "if (!goalReminder) return",
+  "customType: GOAL_REMINDER_MESSAGE_TYPE", "content: goalReminder", "display: false",
+], "active Goal reminder handler");
+hasNone(goalReminderHandler, [
+  "PHASE_REMINDER", "systemPrompt", "ORCHESTRATOR_PROMPT", "reconcileHostMode", "sendMessage", "appendEntry",
+  "registerMessageRenderer", "event", "ctx", "messages:",
+], "Goal reminder handler must return only one hidden Goal message without side effects");
+check((phaseReminderHandler.match(/\bcustomType:/g) ?? []).length === 1, "phase reminder handler must return exactly one custom message");
+check((goalReminderHandler.match(/\bcustomType:/g) ?? []).length === 1, "Goal reminder handler must return exactly one custom message");
+check((extension.match(/"oh-my-pi-slim:phase-reminder"/g) ?? []).length === 1, "phase reminder custom type must remain unique");
+check(!extension.includes('goalReminder ? `${PHASE_REMINDER}\\n\\n${goalReminder}` : PHASE_REMINDER'), "phase and Goal reminder concatenation must be removed");
+hasAll(extension.slice(0, extension.indexOf("const EXTENSION_DIR")), ["GOAL_REMINDER_MESSAGE_TYPE"], "main extension Goal reminder constant import");
+const messageEndHandler = extension.slice(extension.indexOf('pi.on("message_end"'), extension.indexOf('pi.on("tool_execution_start"'));
+hasNone(messageEndHandler, ["GOAL_REMINDER_MESSAGE_TYPE", "goal-reminder"], "Goal reminder must not enter message_end acknowledgement");
+check(!/registerMessageRenderer\(GOAL_REMINDER_MESSAGE_TYPE/.test(`${extension}\n${goalRuntime}`), "Goal reminder must not register a renderer");
 hasNone(goalRuntime, ['pi.on("context"', "systemPrompt:", "systemPromptOptions", "before_provider_request"], "Goal dynamic system and context injection boundary");
 hasAll(sessionStartHandler, [
   "invalidateCheckpoint(false)", "clearTreeNotificationHold()", "asks.reset()", "bindAskDriver(ctx)", "asks.reconcileHostMode(ctx)",
@@ -549,7 +632,8 @@ check(!/\b(?:notes?|collapse|config|i18n)\b/i.test(`${askRuntime}\n${askTui}`), 
 
 hasAll(goalRuntime, [
   'export const GOAL_ACTIONS = ["create", "modify", "status", "pause", "resume", "complete", "cancel", "clear"] as const',
-  'GOAL_STATE_ENTRY_TYPE = "oh-my-pi-slim:goal-state"', 'GOAL_CONTINUATION_MESSAGE_TYPE', 'GOAL_STATE_MESSAGE_TYPE',
+  'GOAL_STATE_ENTRY_TYPE = "oh-my-pi-slim:goal-state"', 'GOAL_CONTINUATION_MESSAGE_TYPE',
+  'GOAL_REMINDER_MESSAGE_TYPE = "oh-my-pi-slim:goal-reminder"', 'GOAL_STATE_MESSAGE_TYPE',
   "export const goalParameters = Type.Object({", "}, { additionalProperties: false });", 'executionMode: "sequential"', 'name: "goal"',
   'this.pi.registerCommand("goal"', 'expandPromptTemplates: false', 'deliverAs: "steer" as const',
   "parseGoalSnapshot", "replayGoalBranch", "ctx.sessionManager.getBranch()", "this.pi.appendEntry(GOAL_STATE_ENTRY_TYPE",
@@ -1722,6 +1806,13 @@ hasAll(core, [
 ], "runtime core");
 hasNone(core, [...REMOVED_CAPABILITIES, "SUPERVISOR_ACTIONS", "SUPERVISOR_PUBLIC_FIELDS", "pending(): SupervisorRequest", "replyTo"], "runtime core");
 check(/SUBAGENT_ACTIONS = \[\s*"create",\s*"list",\s*"status",\s*"interrupt",\s*"steer",\s*"resume",\s*"reply",\s*"delete",\s*"clear",\s*\] as const/.test(core), "SUBAGENT_ACTIONS must keep the exact unified action order");
+hasAll(runtime, [
+  "type FastModeResolver = () => boolean", "private fastModeResolver: FastModeResolver = () => false",
+  "setFastModeResolver(resolver: FastModeResolver = () => false)",
+  "[FAST_ENV_VAR]: fastEnvValue(this.fastModeResolver())",
+], "subagent Fast Mode launch snapshot resolver");
+check((runtime.match(/\[FAST_ENV_VAR\]: fastEnvValue\(this\.fastModeResolver\(\)\)/g) ?? []).length === 1, "create and resume must share one explicit two-state child environment snapshot in buildLaunchConfig");
+hasNone(runtime, ["delete this.fastModeResolver", "this.fastModeResolver = undefined"], "subagent deactivate and shutdown keep the Fast Mode resolver");
 
 hasAll(checkpoint, [
   "export const CHECKPOINT_RESUME_TEXT", "export function completedToolBatch",
@@ -1748,6 +1839,16 @@ hasAll(child, [
   'pi.sendUserMessage(CHECKPOINT_RESUME_TEXT, { deliverAs: "followUp" })',
   "pendingCheckpoint = undefined",
 ], "child supervisor extension");
+hasAll(child, [
+  'const FAST_MODE_ENABLED = fastEnabledFromEnv(process.env[FAST_ENV_VAR])',
+  'if (FAST_MODE_ENABLED) {', 'pi.on("before_provider_request", (event, ctx) => applyFastServiceTier(event.payload, ctx.model))',
+], "child Fast Mode snapshot hook");
+const childFunctionStart = child.indexOf("export default function childSupervisor");
+const childEarlyReturn = child.indexOf('process.env.OMPS_SUBAGENT_CHILD !== "1"', childFunctionStart);
+const childFastHook = child.indexOf('pi.on("before_provider_request"', childFunctionStart);
+const childToolRegistration = child.indexOf("pi.registerTool", childFunctionStart);
+check(childFunctionStart < childEarlyReturn && childEarlyReturn < childFastHook && childFastHook < childToolRegistration, "child Fast Mode hook must remain behind the child early return and ahead of ordinary child logic");
+check((child.match(/pi\.on\("before_provider_request"/g) ?? []).length === 1, "child supervisor must define exactly one environment-gated provider hook");
 const contactSchemaStart = child.indexOf("export const contactSupervisorParameters");
 const contactSchemaEnd = child.indexOf("export default function childSupervisor", contactSchemaStart);
 const contactSchema = child.slice(contactSchemaStart, contactSchemaEnd);
@@ -1901,6 +2002,13 @@ hasAll(read("tests/fixtures/stub-pi-rpc.mjs"), [
 ], "RPC fixture compaction scenarios, event injection, and command ordering");
 const subagentRuntimeTests = read("tests/subagent-runtime.test.mjs");
 hasAll(subagentRuntimeTests, [
+  "create and resume snapshot Fast Mode in both states and override stale shell environment",
+  'env.OMPS_FAST_MODE, "0"', 'env.OMPS_FAST_MODE, "1"',
+  "child Fast Mode hook is snapshot-gated after the child early return",
+  'for (const value of [undefined, "0", "true"])', "a non-child process registers none of the child hooks",
+  "preset parsing validates Fast Mode without returning dead runtime state", '"fast" in parseConfigFile(configFile), false',
+], "Fast Mode parser, child launch inheritance, and registration-boundary tests");
+hasAll(subagentRuntimeTests, [
   "Goal stats sidecars enforce private paths", "Goal stats capture writes only actual changes", "Goal stats sidecars preserve completed owned-run aggregates across branch restore",
   "getGoalStatsSidecarPaths", "writeGoalStatsSidecar", "readGoalStatsSidecar", "run-directory GC never deletes session-owned Goal stats sidecars",
 ], "Subagent Goal stats sidecar security, bounded-write, and cross-branch tests");
@@ -1988,18 +2096,22 @@ hasAll(subagentWidgetTests, [
   "the idle heading must stay dim without bold emphasis",
   "hidden rows never change the retained counts", "two hidden terminal rows still count toward the heading",
   "removing the last retained ID retracts the widget", "roleAnsiTheme",
-  "collapsed Agents body keeps starting, running, and waiting rows and hides every terminal run",
-  "expanded keeps the previous body byte for byte",
-  '"**●**  **Agents (3/6)** · ctrl+o to expand"', '["○  Agents (3/3) · ctrl+o to expand"]',
-  "a collapsed widget with nothing hidden shows no hint at all",
+  "collapsed Agents body keeps starting, running, and waiting rows while hiding terminal rows",
+  "expanded keeps the previous body byte for byte", "COMBINED_HINT",
+  "a collapsed widget with nothing policy-hidden shows no hint",
   "an all-terminal collapsed widget keeps a heading-only body with no tree",
-  "the last collapsed active entry keeps its three-line block and closes the tree",
+  "the last collapsed active entry keeps its two-line block and closes the tree",
+  "collapsed Agents hint degrades from Viewer plus expand to expand-only to no semantic hint",
+  "wide headings show Viewer before expand", "medium headings preserve the complete original expand hint",
+  "tight headings drop both semantic hint segments instead of truncating either one",
+  "Viewer and expand hints share one dim non-bold segment",
   "withConfiguredExpandKey", '"app.tools.expand"', '" · ctrl+shift+e to expand"',
-  "the hint renders identically in the active and idle heading states",
-  "the hint is never bold", "must drop the whole hint, never half of it",
-  "heading counts ignore both filtering and overflow",
-  "policy-hidden terminal runs stay out of the overflow summary",
-  "three whole lines per surviving active run plus the queued row, none split",
+  "Viewer remains fixed while the existing expand hint follows its configured binding",
+  "heading counts ignore policy filtering and overflow",
+  "terminal policy-hidden runs out of more", "the 12-line budget keeps five whole two-line active blocks",
+  "multiline waiting messages and terminal errors stay newline-free and preserve atomic renderer layout",
+  "a waiting run remains one atomic two-line entry", "every returned renderer string is one physical line",
+  "Do not render this second line", "stack detail must stay hidden",
   "reads Pi's live expansion state on every render without re-registering the widget",
   "Ctrl+O must not re-register the widget", "Ctrl+O toggles straight back to the full body",
   "a host without getToolsExpanded stays expanded",
@@ -2011,7 +2123,7 @@ hasAll(bootstrap, [
   'join(agentDir, "extensions", "subagent", "config.json")',
   "disableBuiltins",
   "maxSubagentDepth",
-  "writeFileSync(userPresetPath, readFileSync(bundledPresetPath), { flag: \"wx\" })",
+  "writeFileSync(userPresetPath, readFileSync(bundledPresetPath), { flag: \"wx\", mode: 0o600 })",
 ], "bootstrap migration cleanup");
 check(!/export function ensurePackageSetup[\s\S]*disableBuiltins\s*=\s*true/.test(bootstrap), "future bootstrap must not maintain disableBuiltins");
 check(!/export function ensurePackageSetup[\s\S]*maxSubagentDepth\s*=\s*1/.test(bootstrap), "future bootstrap must not maintain maxSubagentDepth");
@@ -2292,6 +2404,15 @@ hasNone(todoExtension, ['"Action"', "operationCounts", 'theme.bold(`todo · ${ac
 check(existsSync(join(ROOT, "tests/todo.test.mjs")), "Todo contract tests must exist");
 check(existsSync(join(ROOT, "tests/provider-schema.test.mjs")), "provider schema compatibility tests must exist");
 check(existsSync(join(ROOT, "tests/loop.test.mjs")), "Loop core contract tests must exist");
+check(existsSync(join(ROOT, "tests/fast-mode.test.mjs")), "Fast Mode pure and IO contract tests must exist");
+const fastModeTests = read("tests/fast-mode.test.mjs");
+hasAll(fastModeTests, [
+  "service tier injection requires exact provider and payload model without mutation",
+  "flag IO fails closed and preserves unknown config fields with mode 0600",
+  "writer rejects a non-object presets field before creating a temp file",
+  "writer closes and removes its temp file when writing fails",
+  'fastEnabledFromEnv("1")', 'fastEnabledFromEnv(value)', "injected write failure",
+], "Fast Mode payload, environment, permission, roundtrip, guard, and cleanup tests");
 check(existsSync(join(ROOT, "tests/loop-ui.test.mjs")), "Loop visual contract tests must exist");
 check(existsSync(join(ROOT, "tests/goal-ui.test.mjs")), "Goal visual contract tests must exist");
 check(existsSync(join(ROOT, "tests/monitor-ui.test.mjs")), "Monitor visual contract tests must exist");
@@ -2392,10 +2513,18 @@ hasAll(loopUiTests, [
 ], "Loop focused ratio-free heading and no-expansion visual tests");
 const loopCoreTests = read("tests/loop.test.mjs");
 hasAll(loopCoreTests, [
+  "main unconditionally registers exactly one provider payload hook", "reload rereads Fast Mode as off",
+  "Fast Mode accepts no command arguments", "write failure does not change memory",
+  'assert.ok(main.commands.includes("fast"))', "account permission", "unknown: { retained: true }",
+], "Fast Mode main hook, command, persistence, reload, and failure tests");
+hasAll(loopCoreTests, [
   "synchronous injected timeout callbacks activate after commit", "scheduler failures preserve active modify and paused resume atomicity",
   "scheduler unavailable", "tree abort waits for shutdown completion", "abort cannot release delivery before subagent shutdown completes",
   "shutdown failure schedules deferred gate release before propagating", "ordinary input releases a canceled tree gate",
-], "Loop scheduler seam and tree abort compensation tests");
+  "main registers exactly two ordered before_agent_start handlers", "an inactive preset with an active Goal returns phase then Goal reminders in one prompt",
+  "reminder handlers never send or enqueue another message", "reminder handlers append no entries of their own",
+  "reminder handlers create no recursive or additional turn", "Goal reminder registers no renderer",
+], "Loop scheduler seam, tree abort compensation, and independent reminder registration tests");
 const askRuntimeTests = read("tests/ask-runtime.test.mjs");
 const askUiTests = read("tests/ask-ui.test.mjs");
 const askTranscriptTests = read("tests/ask-transcript-renderer.test.mjs");
@@ -2566,7 +2695,9 @@ const goalTests = read("tests/goal.test.mjs");
 const goalUiTests = read("tests/goal-ui.test.mjs");
 hasAll(goalTests, [
   "Goal schema is a strict portable object", "create, modify, terminal replacement", "status and repeated pause or resume no-ops", "retry-success cleanup is internally guarded", "snapshot replay is strict",
-  "phase and model-facing continuation text", "continuation waits for the full safe gate", "provider failures use unbounded frozen backoff",
+  "Goal reminder type and model-facing text", 'GOAL_REMINDER_MESSAGE_TYPE, "oh-my-pi-slim:goal-reminder"',
+  'runtime.status().status, "retry_wait"', 'runtime.phaseReminder(), undefined',
+  "continuation waits for the full safe gate", "provider failures use unbounded frozen backoff",
   "user abort pauses, host abort does not", "no-progress counts only automatic continuation runs", "ownership and Goal view stats",
   "slash command resends a real user message", "continuationNumber", "refreshUI()",
   "clear is a no-op with no Goal and never appends a tombstone",
@@ -2630,7 +2761,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "## Highlights", "## Six specialists", "## Requirements and package management", "### Requirements", "### Install",
         "### Migrate from external Ask and Process packages", "### Update", "### Remove", "## Tool availability", "## Main tools",
         "### `subagent`", "### `todo`", "### `loop`", "### `monitor`", "### `ask_user_question`", "### `goal`",
-        "## `/loop` and `/goal`", "## Presets and configuration", "## Runtime, UI, and persistence",
+        "## `/loop` and `/goal`", "## Presets and configuration", "### Fast Mode", "## Runtime, UI, and persistence",
         "### Subagent viewer", "## Deliberate scope",
         "## Development", "## License",
       ]
@@ -2638,7 +2769,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "## 核心特性", "## 六个 specialist", "## 要求与包管理", "### 要求", "### 安装",
         "### 从外部 Ask 与 Process package 迁移", "### 更新", "### 移除", "## 工具可用性", "## Main 工具",
         "### `subagent`", "### `todo`", "### `loop`", "### `monitor`", "### `ask_user_question`", "### `goal`",
-        "## `/loop` 与 `/goal`", "## Preset 与配置", "## Runtime、UI 与持久化",
+        "## `/loop` 与 `/goal`", "## Preset 与配置", "### Fast Mode", "## Runtime、UI 与持久化",
         "### Subagent viewer", "## 有意限制",
         "## 开发", "## License",
       ];
@@ -2674,6 +2805,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "Exactly `contact_supervisor` and `todo`",
         "never automatically uninstalls external packages",
         "every retained run", "compact public state", "never includes terminal `output` or `error`", "`status` with one retained run ID", "same retained set and ordering",
+        "atomic two-line block", "identity and abstract ahead of trailing activity", "model, turn, tool, token, context, compaction, and elapsed statistics", "12-line widget budget never splits an active entry",
         "Remove one retained terminal run", "The main model must ask before calling `interrupt`", "without rolling back file changes", "Neither operation changes Goal statistics",
         "saved child session as a new run with a new ID and optionally override its cwd. Omitted cwd inherits the source run's working directory", "continue that same run",
         "always runs on the model your current preset resolves for that agent",
@@ -2687,6 +2819,8 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "one to four questions", "single-select", "multi-select", "custom responses", "previews", "unavailable while a Goal is active",
         "branch-local durable Goal", "restore unfinished work as paused", "Provider failures retry automatically", "user aborts pause instead of cancelling", "one non-empty evidence item for each criterion",
         "active or waiting subagents", "Monitor work", "waiting Ask dialog",
+        "two independent hidden reminders in order", "phase reminder comes first", "only while the Goal is `active`",
+        "`retry_wait`, `paused`, `completed`, and `cancelled` Goals receive no Goal reminder", "on the next agent prompt",
         "A completed Goal's detail row joins the shared Ctrl+O collapse",
         "every other status keeps both rows in either state",
         "removes a paused, completed, or cancelled Goal from the branch",
@@ -2694,13 +2828,24 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "A cleared branch reports no Goal at all",
         "leaving retained subagent runs untouched", "no `confirmed` or `force` field",
         "safely queued during compaction and tree operations", "collapsed and expanded views", "compact widgets",
+        "When the Agents widget is collapsed", "fixed `ctrl+shift+←/→ viewer` hint",
+        "retained terminal runs are policy-hidden", "existing Ctrl+O expand hint is present",
+        "keeps only the complete Ctrl+O hint", "omits both hints", "expanded Agents heading shows neither hint",
         "successful subagent `clear` remains clear after reload",
+        "agent-global Fast Mode state", "explicitly `false` by default", "`/fast`", "arguments are not accepted",
+        "all ordinary agent requests", "provider is exactly `openai` or `openai-codex`", "payload model matches the active Pi model",
+        "future child `create` and `resume` launches", "Running children do not hot-switch",
+        "Compaction and branch-summary model calls keep their default service tier",
+        "without priority access may see requests fail", "later-loaded extension can override the payload",
+        "does not promise that priority capacity will be granted or that a request will complete faster",
+        "Codex footer cost", "2–2.5x",
       ]
     : [
         "精确为 `subagent`、`todo`、`loop`、`monitor`、`ask_user_question`、`goal`",
         "精确为 `contact_supervisor` 与 `todo`",
         "不会自动卸载外部 package",
         "全部 retained run", "精简公开状态", "绝不包含 terminal `output` 或 `error`", "单个 retained run ID 调用 `status`", "相同的 retained 集合与排序",
+        "不可拆分的两行 block", "identity 与 abstract 放在末尾 activity 之前", "model、turn、tool、token、context、compaction 与 elapsed statistics", "12 行 widget 预算绝不会拆开 active entry",
         "删除一个 retained terminal run", "main model 必须先询问是否执行 `interrupt`", "不回滚文件修改", "都不改变 Goal statistics",
         "保存的 child session 创建新 run，并生成新 ID。可选覆盖 cwd，省略时继承 source run 的工作目录", "继续同一个 run",
         "始终使用当前 preset 为该 agent 解析出的 model",
@@ -2714,6 +2859,8 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "一到四个 question", "single-select", "multi-select", "custom response", "preview", "Goal active 时不可用",
         "branch-local durable Goal", "恢复为 paused", "provider failure 会自动重试", "用户 abort 也会暂停而不是取消", "每条 criterion 必须精确对应一条非空 evidence",
         "active 或 waiting subagent", "Monitor 工作", "waiting Ask dialog",
+        "两条独立的 hidden reminder", "phase reminder 在前", "只有 Goal 为 `active` 时",
+        "`retry_wait`、`paused`、`completed` 与 `cancelled` Goal 都不会收到 Goal reminder", "下一次 agent prompt",
         "completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠",
         "其他状态在折叠与展开下都保留两行",
         "可从 branch 上移除 paused、completed 或 cancelled Goal",
@@ -2721,7 +2868,17 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "清理后的 branch 报告没有任何 Goal",
         "retained subagent run 保持不变", "没有 `confirmed` 或 `force` 字段",
         "compaction 与 tree operation 期间", "collapsed/expanded", "紧凑 widget",
+        "Agents widget 折叠时", "policy 而隐藏的 retained terminal run", "已有 Ctrl+O expand hint",
+        "固定的 `ctrl+shift+←/→ viewer` 提示", "先只保留完整的 Ctrl+O 提示", "两条提示都省略",
+        "Agents heading 展开时不显示任何提示",
         "subagent `clear` 在 reload 后仍保持清空",
+        "agent-global Fast Mode 状态", "默认显式为 `false`", "`/fast`", "不接受任何参数",
+        "全部普通 agent request", "provider 精确为 `openai` 或 `openai-codex`", "payload model 与当前 Pi model 匹配",
+        "future child `create` 与 `resume` launch", "running child 不会热切换",
+        "compaction 与 branch summary model call 仍使用 default tier",
+        "没有 priority 权限时 request 可能失败", "后加载的 extension 可以再次覆盖",
+        "不承诺 priority capacity 一定获批", "不承诺 request 一定更快",
+        "Codex footer cost", "2–2.5 倍",
       ], `${file} visible behavior contract`);
 
   const subagent = section("### `subagent`", "### `todo`");
@@ -2761,23 +2918,33 @@ check(!/pi\.on\("tool_execution_start"[\s\S]{0,120}subagents\.onTurnStart/.test(
 hasAll(widgetRenderer, [
   "MAX_SUBAGENT_WIDGET_LINES = 12", '"├─"', '"└─"', "renderSubagentWidgetLines", "waiting",
   "formatWidgetModel", "formatSubagentModel", "run.model", "formatWidgetTurns", "formatWidgetSessionTokens",
-  "describeWidgetActivity", "activeLines.length * 3", "queuedLines.length", "budget >= 3", "run.abstract", "shortAbstract",
+  "describeWidgetActivity", "activeLines.length * 2", "queuedLines.length", "budget >= 2", "run.abstract", "shortAbstract",
+  'shortAbstract(run.request?.message ?? "") || "supervisor reply required"',
+  'shortAbstract(run.error).slice(0, 60)',
   "sortRetainedSubagentRuns(runs)", "lines.push(...sections.queuedLines, ...sections.finishedLines)",
   "const expanded = params.expanded ?? true",
   "const policyHidden = expanded ? 0 : categories.finished.length",
   "const shown: Categories = expanded ? categories : { ...categories, finished: [] }",
   "subagentHeadingLine(", "subagentWidgetHeading(runs, theme),", 'policyHidden > 0 ? params.hint ?? "" : "",',
-  "buildSections(shown, spinnerFrame, theme, truncate, nowMs)",
-], "subagent widget renderer");
+  "buildSections(shown, spinnerFrame, theme, truncate, nowMs, terminalWidth)",
+  "export type ActiveRunLines = [summary: string, stats: string]", "maxSummaryWidth?: number", "visibleWidth(identity) > maxSummaryWidth",
+  "visibleWidth(identity) + visibleWidth(separator) > maxSummaryWidth", "const summaryIndex = lines.length - 2",
+  'lines[summaryIndex] = lines[summaryIndex].replace("├─", "└─")',
+  'lines[summaryIndex + 1] = lines[summaryIndex + 1].replace("│  ", "   ")',
+  'theme.fg("dim", " · ")', 'theme.fg(waiting ? "warning" : "dim", activityText)',
+  'AGENTS_VIEWER_HINT = " · ctrl+shift+←/→ viewer"',
+], "subagent widget two-line active renderer");
 const subagentHintBlock = widgetRenderer.slice(
   widgetRenderer.indexOf("function subagentHeadingLine"),
   widgetRenderer.indexOf("interface Categories"),
 );
 hasAll(subagentHintBlock, [
-  'if (hint !== "" && visibleWidth(heading) + visibleWidth(hint) <= width)',
-  '`${heading}${theme.fg("dim", hint)}`', "return truncateToWidth(heading, width)",
-], "Agents collapsed hint is one atomic dim segment that only fits or disappears");
-hasNone(subagentHintBlock, ["theme.bold(hint)", "slice(0,", "to collapse"], "Agents hint must never be bold, split, or inverted");
+  'const fullHint = expandHint === "" ? "" : `${AGENTS_VIEWER_HINT}${expandHint}`',
+  'visibleWidth(heading) + visibleWidth(fullHint) <= width', 'theme.fg("dim", fullHint)',
+  'visibleWidth(heading) + visibleWidth(expandHint) <= width', 'theme.fg("dim", expandHint)',
+  "return truncateToWidth(heading, width)",
+], "Agents collapsed hint preserves Viewer plus expand, then expand-only, then no semantic hint");
+hasNone(subagentHintBlock, ["theme.bold(fullHint)", "theme.bold(expandHint)", "slice(0,", "to collapse"], "Agents hints must never be bold, split, or inverted");
 const subagentHeadingBlock = widgetRenderer.slice(
   widgetRenderer.indexOf("function subagentWidgetHeading"),
   widgetRenderer.indexOf("function subagentHeadingLine"),
@@ -3394,8 +3561,13 @@ hasAll(subagentRuntimeTests, [
   "renderSubagentWidgetLines",
 ], "runtime tests must cover the cloned viewer snapshot and its widget parity");
 hasAll(read("tests/loop-load.test.mjs"), ['event.method === "custom"'], "load tests must assert the viewer never opens outside a TUI session");
+hasAll(read("tests/loop-load.test.mjs"), [
+  'assert.deepEqual(main.commands, ["fast", "goal", "loop"])', "assert.deepEqual(child.commands, [])",
+  "JSON.parse(readFileSync(bootstrappedConfig", "statSync(bootstrappedConfig).mode & 0o777, 0o600",
+], "load harness must lock the main-only Fast Mode command registration boundary");
 
 const preset = json("config/oh-my-pi-slim.example.json");
+check(preset.fast === false, "bundled config must explicitly default Fast Mode off");
 check(Boolean(preset.presets?.[preset.defaultPreset]), "default preset must exist");
 for (const [presetName, value] of Object.entries(preset.presets ?? {})) {
   check(JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...ROLES].sort()), `${presetName} must define exactly seven roles`);

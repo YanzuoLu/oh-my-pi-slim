@@ -76,6 +76,8 @@ const roleAnsiTheme = {
 };
 
 const DEFAULT_HINT = " · ctrl+o to expand";
+const VIEWER_HINT = " · ctrl+shift+←/→ viewer";
+const COMBINED_HINT = `${VIEWER_HINT}${DEFAULT_HINT}`;
 
 /** Installs a user-configured `app.tools.expand` binding so the hint proves it reads the live keymap. */
 function withConfiguredExpandKey(keys, body) {
@@ -190,36 +192,80 @@ test("shared retained sorting keeps list, restored state, and widget IDs in acti
   assert.deepEqual(sortRetainedSubagentRuns(ties).map((item) => item.id), ["running-a", "waiting-b", "terminal-a", "terminal-b"]);
 });
 
-test("pure active renderer uses three exact lines and terminal renderers keep outcome icons", () => {
-  const [runningHeader, runningStats, runningActivity] = renderActiveRunLines(
+test("pure active renderer uses two exact lines and terminal renderers keep outcome icons", () => {
+  const [runningSummary, runningStats] = renderActiveRunLines(
     run({ status: "running", model: "openai/gpt-5.6-sol:xhigh", updatedAt: "2026-04-16T23:59:56.000Z" }),
     0,
     theme,
     NOW_MS,
   );
-  assert.equal(runningHeader, "⠋  **fixer [run-1]**  implement the widget");
+  assert.equal(runningSummary, "⠋  **fixer [run-1]**  implement the widget · thinking…");
   assert.equal(runningStats, "(openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s");
-  assert.equal(runningActivity, "thinking…");
-  assert.doesNotMatch(runningHeader, /↻|tool use|token|5\.0s/);
+  assert.doesNotMatch(runningSummary, /↻|tool use|token|5\.0s/);
   assert.match(runningStats, /^\(openai\) gpt-5\.6-sol • xhigh · ↻  0/);
 
-  const [waitingHeader, waitingStats, waitingActivity] = renderActiveRunLines(run({
+  const [waitingSummary, waitingStats] = renderActiveRunLines(run({
     status: "waiting",
     model: "openai/gpt-5.6-sol:xhigh",
     request: { runId: "run-1", reason: "need_decision", message: "Choose A or B", createdAt: "now" },
   }), 3, theme, NOW_MS);
-  assert.equal(waitingHeader, "!  **fixer [run-1]** waiting  implement the widget");
+  assert.equal(waitingSummary, "!  **fixer [run-1]** waiting  implement the widget · Choose A or B");
   assert.equal(waitingStats, "(openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s");
-  assert.doesNotMatch(`${runningHeader}\n${waitingHeader}\n${runningStats}`, /[⠋!↻] [^ ]|[⠋!↻] {3}/);
-  assert.equal(waitingActivity, "Choose A or B");
+  assert.doesNotMatch(`${runningSummary}\n${waitingSummary}\n${runningStats}`, /[⠋!↻] [^ ]|[⠋!↻] {3}/);
+
+  const [styledRunning] = renderActiveRunLines(run({ status: "running" }), 0, roleAnsiTheme, NOW_MS);
+  const [styledWaiting] = renderActiveRunLines(run({
+    status: "waiting",
+    request: { runId: "run-1", reason: "need_decision", message: "Choose A or B", createdAt: "now" },
+  }), 0, roleAnsiTheme, NOW_MS);
+  assert.match(styledRunning, /\u001b\[2m · \u001b\[0m\u001b\[2mthinking…\u001b\[0m$/, "running activity and its separator stay dim");
+  assert.match(styledWaiting, /\u001b\[2m · \u001b\[0m\u001b\[33mChoose A or B\u001b\[0m$/, "waiting activity keeps the warning role after a dim separator");
 
   assert.match(renderFinishedRunLine(run({ status: "completed" }), theme, NOW_MS), /✓/);
   assert.match(renderFinishedRunLine(run({ status: "failed", error: "boom" }), theme, NOW_MS), /✗.*failed: boom/);
   assert.match(renderFinishedRunLine(run({ status: "interrupted" }), theme, NOW_MS), /✗.*interrupted/);
 });
 
-test("activity formatting keeps model first, then stats, tools, response, tokens, context, and compactions", () => {
-  const [toolHeader, toolStats, toolActivity] = renderActiveRunLines(run({
+test("multiline waiting messages and terminal errors stay newline-free and preserve atomic renderer layout", () => {
+  const waiting = run({
+    id: "waiting-multiline",
+    status: "waiting",
+    request: {
+      runId: "waiting-multiline",
+      reason: "need_decision",
+      message: "\nChoose the safe option\nDo not render this second line",
+      createdAt: "now",
+    },
+  });
+  const failed = run({
+    id: "failed-multiline",
+    status: "failed",
+    error: "\nPrimary failure\nstack detail must stay hidden",
+  });
+  const activeLines = renderActiveRunLines(waiting, 0, theme, NOW_MS);
+  const finishedLine = renderFinishedRunLine(failed, theme, NOW_MS);
+  const widgetLines = renderSubagentWidgetLines({
+    runs: [failed, waiting],
+    spinnerFrame: 0,
+    terminalWidth: 200,
+    theme,
+    nowMs: NOW_MS,
+  });
+
+  assert.equal(activeLines.length, 2, "a waiting run remains one atomic two-line entry");
+  assert.equal(widgetLines.length, 4, "the heading, two-line waiting entry, and terminal entry stay atomic");
+  assert.match(activeLines[0], /Choose the safe option$/);
+  assert.doesNotMatch(activeLines[0], /Do not render this second line/);
+  assert.match(finishedLine, /failed: Primary failure$/);
+  assert.doesNotMatch(finishedLine, /stack detail must stay hidden/);
+  for (const line of [...activeLines, finishedLine, ...widgetLines]) {
+    assert.equal(typeof line, "string");
+    assert.equal(line.includes("\n"), false, "every returned renderer string is one physical line");
+  }
+});
+
+test("activity formatting keeps the abstract before activity and model before stats, tools, response, tokens, context, and compactions", () => {
+  const [toolSummary, toolStats] = renderActiveRunLines(run({
     status: "running",
     model: "openai/gpt-5.6-sol:minimal",
     activity: {
@@ -232,11 +278,10 @@ test("activity formatting keeps model first, then stats, tools, response, tokens
       compactionCount: 2,
     },
   }), 0, theme, NOW_MS);
-  assert.equal(toolHeader, "⠋  **fixer [run-1]**  implement the widget");
+  assert.equal(toolSummary, "⠋  **fixer [run-1]**  implement the widget · reading, searching 2 patterns…");
   assert.equal(toolStats, "(openai) gpt-5.6-sol • minimal · ↻  3 · 2 tool uses · 12.3k token (72% · ⇊  2) · 5.0s");
-  assert.equal(toolActivity, "reading, searching 2 patterns…");
 
-  const [, responseStats, responseActivity] = renderActiveRunLines(run({
+  const [responseSummary, responseStats] = renderActiveRunLines(run({
     status: "running",
     activity: {
       turnCount: 1, toolUses: 0, activeTools: {},
@@ -245,10 +290,10 @@ test("activity formatting keeps model first, then stats, tools, response, tokens
     },
   }), 0, theme, NOW_MS);
   assert.equal(responseStats, "(provider) model • high · ↻  1 · 5.0s");
-  assert.equal(responseActivity, "A concise response line that is visible");
+  assert.equal(responseSummary, "⠋  **fixer [run-1]**  implement the widget · A concise response line that is visible");
 });
 
-test("pure widget renderer preserves the three-line active tree and queued summary", () => {
+test("pure widget renderer preserves the two-line active tree and queued summary", () => {
   const lines = renderSubagentWidgetLines({
     runs: [
       run({ id: "done", status: "completed" }),
@@ -262,9 +307,8 @@ test("pure widget renderer preserves the three-line active tree and queued summa
   });
   assert.deepEqual(lines, [
     "**●**  **Agents (1/3)**",
-    "├─ ⠋  **fixer [live]**  implement the widget",
-    "│  ├─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
-    "│  └─ thinking…",
+    "├─ ⠋  **fixer [live]**  implement the widget · thinking…",
+    "│  └─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
     "├─ ◦  fixer [queue]  implement the widget · ↻  0 · 5.0s queued",
     "└─ ✓  fixer [done]  implement the widget · ↻  0 · 5.0s",
   ]);
@@ -282,6 +326,26 @@ test("pure widget renderer preserves the three-line active tree and queued summa
     assert.ok(ansiLines.every((line) => visibleWidth(line) <= terminalWidth));
     if (terminalWidth === 80) assert.match(ansiLines.map((line) => stripVTControlCharacters(line)).join("\n"), /↻  0 · 5\.0s/);
   }
+
+  const priorityPrefix = "└─ ⠋  fixer [priority]  摘要优先🙂";
+  const priorityLines = renderSubagentWidgetLines({
+    runs: [run({
+      id: "priority",
+      status: "running",
+      abstract: "摘要优先🙂",
+      activity: {
+        turnCount: 1, toolUses: 0, activeTools: {}, responseText: "ACTIVITY-TAIL",
+        tokens: 0, compactionCount: 0,
+      },
+    })],
+    spinnerFrame: 0,
+    terminalWidth: visibleWidth(priorityPrefix),
+    theme: vtTheme,
+    nowMs: NOW_MS,
+  });
+  assert.equal(stripVTControlCharacters(priorityLines[1]), priorityPrefix, "narrow wide-character output keeps the complete identity and abstract prefix before dropping activity");
+  assert.doesNotMatch(priorityLines.join("\n"), /ACTIVITY-TAIL/);
+  assert.ok(priorityLines.every((line) => visibleWidth(line) <= visibleWidth(priorityPrefix)));
 });
 
 test("pure widget renderer caps at 12 lines, keeps active entries atomic, and reports overflow exactly", () => {
@@ -306,18 +370,16 @@ test("pure widget renderer caps at 12 lines, keeps active entries atomic, and re
   });
   assert.equal(lines.length, MAX_SUBAGENT_WIDGET_LINES);
   assert.equal(lines[0], "**●**  **Agents (2/9)**", "hidden rows never change the retained counts");
-  assert.match(lines[1], /active-0.*waiting/);
-  assert.match(lines[2], /^│  ├─ \(openai\) gpt-5\.6-sol • xhigh · ↻  0/);
-  assert.equal(lines[3], "│  └─ supervisor reply required");
-  assert.match(lines[4], /active-1/);
-  assert.match(lines[7], /active-2/);
-  assert.doesNotMatch(lines.join("\n"), /active-3|active-4/);
-  assert.match(lines[10], /^├─ ◦  fixer \[queue-0\].* queued$/);
-  assert.equal(lines[11], "└─ +5 more (2 active, 1 queued, 2 finished)");
-  assert.doesNotMatch(lines.join("\n"), /queue-1|finished-/);
-  assert.doesNotMatch(lines.join("\n"), /finished-/);
+  assert.match(lines[1], /active-0.*waiting.*implement the widget · supervisor reply required/);
+  assert.match(lines[2], /^│  └─ \(openai\) gpt-5\.6-sol • xhigh · ↻  0/);
+  assert.match(lines[3], /active-1.* · thinking…$/);
+  assert.match(lines[5], /active-2.* · thinking…$/);
+  assert.match(lines[7], /active-3.* · thinking…$/);
+  assert.match(lines[9], /active-4.* · thinking…$/);
+  assert.equal(lines[11], "└─ +4 more (2 queued, 2 finished)");
+  assert.doesNotMatch(lines.join("\n"), /queue-|finished-/);
 
-  const terminalRuns = Array.from({ length: 8 }, (_, index) => run({
+  const terminalRuns = Array.from({ length: 9 }, (_, index) => run({
     id: `term-${index}`,
     status: index % 2 === 0 ? "completed" : "failed",
     createdAt: new Date(Date.parse("2026-04-16T23:40:00.000Z") + index * 1_000).toISOString(),
@@ -335,8 +397,8 @@ test("pure widget renderer caps at 12 lines, keeps active entries atomic, and re
     .filter((line) => /^(?:├─|└─) /.test(line) && !line.includes("more ("))
     .map((line) => /\[([^\]]+)\]/.exec(line)?.[1])
     .filter(Boolean);
-  assert.equal(orderedOverflow[0], "**●**  **Agents (8/10)**", "two hidden terminal rows still count toward the heading");
-  assert.deepEqual(visibleIds, ["active", "starting", "term-7", "term-6", "term-5", "term-4", "term-3", "term-2"]);
+  assert.equal(orderedOverflow[0], "**●**  **Agents (9/11)**", "two hidden terminal rows still count toward the heading");
+  assert.deepEqual(visibleIds, ["active", "starting", "term-8", "term-7", "term-6", "term-5", "term-4", "term-3", "term-2"]);
   assert.equal(orderedOverflow.at(-1), "└─ +2 more (2 finished)");
   assert.doesNotMatch(orderedOverflow.join("\n"), /term-0|term-1/);
 });
@@ -428,7 +490,7 @@ test("a single retained ID disappearing updates widget counts and the last remov
   assert.equal(widgetCalls.at(-1).content, undefined, "removing the last retained ID retracts the widget");
 });
 
-test("collapsed Agents body keeps starting, running, and waiting rows and hides every terminal run", () => {
+test("collapsed Agents body keeps starting, running, and waiting rows while hiding terminal rows", () => {
   const runs = [
     run({ id: "live", status: "running", model: "openai/gpt-5.6-sol:xhigh", updatedAt: "2026-04-16T23:59:56.000Z" }),
     run({ id: "held", status: "waiting", model: "openai/gpt-5.6-sol:xhigh" }),
@@ -437,22 +499,23 @@ test("collapsed Agents body keeps starting, running, and waiting rows and hides 
     run({ id: "bad", status: "failed", error: "boom" }),
     run({ id: "stopped", status: "interrupted" }),
   ];
+  const originalRuns = structuredClone(runs);
   const render = (overrides) => renderSubagentWidgetLines({
     runs, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS, ...overrides,
   });
 
   const expanded = render({});
   assert.deepEqual(render({ expanded: true, hint: DEFAULT_HINT }), expanded, "expanded keeps the previous body byte for byte");
-  assert.equal(expanded.length, 11);
+  assert.equal(expanded.length, 9);
+  assert.match(expanded.join("\n"), /\[queue\].*queued/);
+  assert.match(expanded.join("\n"), /\[ok\]|\[bad\]|\[stopped\]/);
 
   assert.deepEqual(render({ expanded: false, hint: DEFAULT_HINT }), [
-    "**●**  **Agents (3/6)** · ctrl+o to expand",
-    "├─ !  **fixer [held]** waiting  implement the widget",
-    "│  ├─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
-    "│  └─ supervisor reply required",
-    "├─ ⠋  **fixer [live]**  implement the widget",
-    "│  ├─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
-    "│  └─ thinking…",
+    `**●**  **Agents (3/6)**${COMBINED_HINT}`,
+    "├─ !  **fixer [held]** waiting  implement the widget · supervisor reply required",
+    "│  └─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
+    "├─ ⠋  **fixer [live]**  implement the widget · thinking…",
+    "│  └─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
     "└─ ◦  fixer [queue]  implement the widget · ↻  0 · 5.0s queued",
   ]);
 
@@ -460,14 +523,29 @@ test("collapsed Agents body keeps starting, running, and waiting rows and hides 
   assert.deepEqual(
     renderSubagentWidgetLines({ runs: liveOnly, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS, expanded: false, hint: DEFAULT_HINT }),
     renderSubagentWidgetLines({ runs: liveOnly, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS }),
-    "a collapsed widget with nothing hidden shows no hint at all",
+    "a collapsed widget with nothing policy-hidden shows no hint",
+  );
+
+  const startingOnly = [run({ id: "queue", status: "starting" })];
+  assert.deepEqual(
+    renderSubagentWidgetLines({ runs: startingOnly, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS, expanded: false, hint: DEFAULT_HINT }),
+    [
+      "**●**  **Agents (0/1)**",
+      "└─ ◦  fixer [queue]  implement the widget · ↻  0 · 5.0s queued",
+    ],
+    "starting stays live in the heading and visible as a collapsed queued row",
+  );
+  assert.match(
+    renderSubagentWidgetLines({ runs: startingOnly, spinnerFrame: 0, terminalWidth: 200, theme: roleAnsiTheme, nowMs: NOW_MS, expanded: false, hint: DEFAULT_HINT })[0],
+    /^\u001b\[35m\u001b\[1m●/,
+    "starting keeps the active heading role while its row remains visible",
   );
 
   const terminalOnly = runs.filter((value) => !["starting", "running", "waiting"].includes(value.status));
   const idle = { runs: terminalOnly, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS };
   assert.deepEqual(
     renderSubagentWidgetLines({ ...idle, expanded: false, hint: DEFAULT_HINT }),
-    ["○  Agents (3/3) · ctrl+o to expand"],
+    [`○  Agents (3/3)${COMBINED_HINT}`],
     "an all-terminal collapsed widget keeps a heading-only body with no tree",
   );
   assert.equal(renderSubagentWidgetLines({ ...idle, expanded: true, hint: DEFAULT_HINT }).length, 4);
@@ -476,58 +554,88 @@ test("collapsed Agents body keeps starting, running, and waiting rows and hides 
     runs: [runs[0], runs[3]], spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS, expanded: false, hint: DEFAULT_HINT,
   });
   assert.deepEqual(soloActive, [
-    "**●**  **Agents (1/2)** · ctrl+o to expand",
-    "└─ ⠋  **fixer [live]**  implement the widget",
-    "   ├─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
-    "   └─ thinking…",
-  ], "the last collapsed active entry keeps its three-line block and closes the tree");
+    `**●**  **Agents (1/2)**${COMBINED_HINT}`,
+    "└─ ⠋  **fixer [live]**  implement the widget · thinking…",
+    "   └─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
+  ], "the last collapsed active entry keeps its two-line block and closes the tree");
+  assert.deepEqual(runs, originalRuns, "expanded and collapsed rendering leave retained run data unchanged");
   assert.deepEqual(renderSubagentWidgetLines({ runs: [], spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS, expanded: false, hint: DEFAULT_HINT }), []);
 });
 
-test("collapsed Agents hint is one dim non-bold segment with the configured key, dropped whole when the width is tight", () => {
+test("collapsed Agents hint degrades from Viewer plus expand to expand-only to no semantic hint", () => {
   const mixed = [run({ id: "live", status: "running" }), run({ id: "ok", status: "completed" })];
+  const originalMixed = structuredClone(mixed);
   const terminalOnly = [run({ id: "ok", status: "completed" })];
-  const heading = (runs, widgetTheme, terminalWidth) => renderSubagentWidgetLines({
-    runs, spinnerFrame: 0, terminalWidth, theme: widgetTheme, nowMs: NOW_MS, expanded: false, hint: DEFAULT_HINT,
+  const liveOnly = [run({ id: "live", status: "running" })];
+  const heading = (runs, widgetTheme, terminalWidth, overrides = {}) => renderSubagentWidgetLines({
+    runs, spinnerFrame: 0, terminalWidth, theme: widgetTheme, nowMs: NOW_MS,
+    expanded: false, hint: DEFAULT_HINT, ...overrides,
   })[0];
-  const dimHint = "\u001b[2m · ctrl+o to expand\u001b[0m";
+  const idleBase = "○  Agents (1/1)";
+  const full = `${idleBase}${COMBINED_HINT}`;
+  const expandOnly = `${idleBase}${DEFAULT_HINT}`;
 
+  assert.equal(heading(terminalOnly, theme, visibleWidth(full)), full, "wide headings show Viewer before expand");
+  assert.equal(
+    heading(terminalOnly, theme, visibleWidth(expandOnly)),
+    expandOnly,
+    "medium headings preserve the complete original expand hint",
+  );
+  assert.equal(
+    heading(terminalOnly, theme, visibleWidth(expandOnly) - 1),
+    idleBase,
+    "tight headings drop both semantic hint segments instead of truncating either one",
+  );
+
+  const dimCombinedHint = `\u001b[2m${COMBINED_HINT}\u001b[0m`;
+  const dimExpandHint = `\u001b[2m${DEFAULT_HINT}\u001b[0m`;
   const activeHeading = heading(mixed, roleAnsiTheme, 200);
   assert.equal(
     activeHeading,
-    `\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mAgents (1/2)\u001b[22m\u001b[0m${dimHint}`,
+    `\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mAgents (1/2)\u001b[22m\u001b[0m${dimCombinedHint}`,
   );
-  const idleHeading = heading(terminalOnly, roleAnsiTheme, 200);
-  assert.equal(idleHeading, `\u001b[2m○\u001b[0m  \u001b[2mAgents (1/1)\u001b[0m${dimHint}`);
-  assert.ok(
-    activeHeading.endsWith(dimHint) && idleHeading.endsWith(dimHint),
-    "the hint renders identically in the active and idle heading states",
+  const idleHeading = heading(terminalOnly, roleAnsiTheme, visibleWidth(full));
+  assert.equal(idleHeading, `\u001b[2m○\u001b[0m  \u001b[2mAgents (1/1)\u001b[0m${dimCombinedHint}`);
+  const mediumAnsi = heading(terminalOnly, roleAnsiTheme, visibleWidth(expandOnly));
+  assert.equal(mediumAnsi, `\u001b[2m○\u001b[0m  \u001b[2mAgents (1/1)\u001b[0m${dimExpandHint}`);
+  for (const [line, width] of [
+    [idleHeading, visibleWidth(full)],
+    [mediumAnsi, visibleWidth(expandOnly)],
+    [heading(terminalOnly, roleAnsiTheme, visibleWidth(expandOnly) - 1), visibleWidth(expandOnly) - 1],
+  ]) assert.ok(visibleWidth(line) <= width);
+  assert.doesNotMatch(
+    activeHeading.slice(activeHeading.indexOf(dimCombinedHint)),
+    /\u001b\[1m/,
+    "Viewer and expand hints share one dim non-bold segment",
   );
-  assert.doesNotMatch(activeHeading.slice(activeHeading.indexOf(dimHint)), /\u001b\[1m/, "the hint is never bold");
+
+  assert.doesNotMatch(heading(mixed, theme, 200, { expanded: true }), /viewer|expand/, "expanded mode keeps the heading hint-free");
+  assert.doesNotMatch(heading(liveOnly, theme, 200), /viewer|expand/, "no policy-hidden rows keeps the collapsed heading hint-free");
 
   withConfiguredExpandKey("ctrl+shift+e", () => {
-    assert.equal(widgetExpandHint(), " · ctrl+shift+e to expand");
+    const configuredExpandHint = widgetExpandHint();
+    assert.equal(configuredExpandHint, " · ctrl+shift+e to expand");
     assert.equal(
       renderSubagentWidgetLines({
-        runs: mixed, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS, expanded: false, hint: widgetExpandHint(),
+        runs: mixed, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS, expanded: false, hint: configuredExpandHint,
       })[0],
-      "**●**  **Agents (1/2)** · ctrl+shift+e to expand",
+      `**●**  **Agents (1/2)**${VIEWER_HINT}${configuredExpandHint}`,
+      "Viewer remains fixed while the existing expand hint follows its configured binding",
     );
   });
   assert.equal(widgetExpandHint(), DEFAULT_HINT, "an unconfigured keymap falls back to Pi's default binding");
 
-  const full = "○  Agents (1/1) · ctrl+o to expand";
-  assert.equal(heading(terminalOnly, theme, full.length), full);
-  for (const width of [1, 5, 10, 16, full.length - 1]) {
+  for (const width of [1, 5, 10, visibleWidth(idleBase)]) {
     const narrow = heading(terminalOnly, theme, width);
     assert.ok(visibleWidth(narrow) <= width, `width ${width} must stay inside the terminal`);
-    assert.doesNotMatch(narrow, /·|expand|ctrl/, `width ${width} must drop the whole hint, never half of it`);
+    assert.doesNotMatch(narrow, /·|viewer|expand|ctrl|←|→/, `width ${width} must not expose a partial semantic hint`);
   }
+  assert.deepEqual(mixed, originalMixed, "hint rendering leaves retained run data unchanged");
 });
 
-test("collapsed Agents overflow spends the 12-line budget on live runs only and keeps the retained counts", () => {
+test("collapsed Agents overflow keeps queued rows eligible and terminal policy-hidden runs out of more", () => {
   const runs = [
-    ...Array.from({ length: 5 }, (_, index) => run({
+    ...Array.from({ length: 6 }, (_, index) => run({
       id: `active-${index}`,
       status: index === 0 ? "waiting" : "running",
       model: "openai/gpt-5.6-sol:xhigh",
@@ -540,10 +648,10 @@ test("collapsed Agents overflow spends the 12-line budget on live runs only and 
   });
 
   assert.equal(collapsed.length, MAX_SUBAGENT_WIDGET_LINES);
-  assert.equal(collapsed[0], "**●**  **Agents (4/10)** · ctrl+o to expand", "heading counts ignore both filtering and overflow");
-  assert.equal(collapsed.at(-1), "└─ +2 more (2 active)", "policy-hidden terminal runs stay out of the overflow summary");
-  assert.doesNotMatch(collapsed.join("\n"), /finished-/);
-  assert.equal(collapsed.slice(1, -1).length, 10, "three whole lines per surviving active run plus the queued row, none split");
+  assert.equal(collapsed[0], `**●**  **Agents (4/11)**${COMBINED_HINT}`, "heading counts ignore policy filtering and overflow");
+  assert.equal(collapsed.at(-1), "└─ +2 more (1 active, 1 queued)", "overflow counts both eligible active and queued rows");
+  assert.doesNotMatch(collapsed.join("\n"), /finished-|queue-0|active-5/);
+  assert.equal(collapsed.slice(1, -1).length, 10, "the 12-line budget keeps five whole two-line active blocks");
 });
 
 test("SubagentWidget reads Pi's live expansion state on every render without re-registering the widget", () => {
@@ -564,12 +672,12 @@ test("SubagentWidget reads Pi's live expansion state on every render without re-
 
   widget.update();
   const registrations = widgetCalls.filter((call) => typeof call.content === "function").length;
-  assert.equal(component.render().length, 5);
+  assert.equal(component.render().length, 4);
 
   expanded = false;
   const collapsed = component.render();
-  assert.equal(collapsed[0], "**●**  **Agents (1/2)** · ctrl+o to expand");
-  assert.equal(collapsed.length, 4);
+  assert.equal(collapsed[0], `**●**  **Agents (1/2)**${COMBINED_HINT}`);
+  assert.equal(collapsed.length, 3);
   assert.equal(
     widgetCalls.filter((call) => typeof call.content === "function").length,
     registrations,
@@ -577,7 +685,7 @@ test("SubagentWidget reads Pi's live expansion state on every render without re-
   );
 
   expanded = true;
-  assert.equal(component.render().length, 5, "Ctrl+O toggles straight back to the full body");
+  assert.equal(component.render().length, 4, "Ctrl+O toggles straight back to the full body");
   assert.equal(widgetCalls.filter((call) => typeof call.content === "function").length, registrations);
 
   const legacyCalls = [];
@@ -591,7 +699,7 @@ test("SubagentWidget reads Pi's live expansion state on every render without re-
     },
   });
   legacyWidget.update();
-  assert.equal(legacyComponent.render().length, 5, "a host without getToolsExpanded stays expanded");
+  assert.equal(legacyComponent.render().length, 4, "a host without getToolsExpanded stays expanded");
   assert.doesNotMatch(legacyComponent.render().join("\n"), /to expand/);
 });
 

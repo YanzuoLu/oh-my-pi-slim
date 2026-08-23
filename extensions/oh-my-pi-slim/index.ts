@@ -12,7 +12,13 @@ import {
 import { registerAskRuntime } from "./ask-runtime.js";
 import { AskTuiDriver } from "./ask-tui.js";
 import { cleanupLegacySubagentSetup, ensurePackageSetup } from "./bootstrap.js";
-import { GOAL_CONTINUATION_MESSAGE_TYPE, registerGoalRuntime, type GoalRuntime } from "./goal-runtime.js";
+import { applyFastServiceTier, readFastFlag, writeFastFlag } from "./fast-mode.js";
+import {
+  GOAL_CONTINUATION_MESSAGE_TYPE,
+  GOAL_REMINDER_MESSAGE_TYPE,
+  registerGoalRuntime,
+  type GoalRuntime,
+} from "./goal-runtime.js";
 import { registerLoopRuntime } from "./loop-runtime.js";
 import { MONITOR_NOTIFICATION_TYPE, registerMonitorRuntime } from "./monitor-runtime.js";
 import { removeMainPiDocumentation, removeMainPiIdentity } from "./prompt-context.js";
@@ -238,6 +244,9 @@ export function parseConfigFile(path: string): PresetConfig {
     presets[presetName] = preset;
   }
 
+  if (object.fast !== undefined && typeof object.fast !== "boolean") {
+    throw new Error(`${path}.fast must be a boolean.`);
+  }
   const defaultPreset = object.defaultPreset === undefined
     ? undefined
     : nonEmptyString(object.defaultPreset, `${path}.defaultPreset`);
@@ -316,6 +325,12 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   const loops = registerLoopRuntime(pi);
   const monitors = registerMonitorRuntime(pi);
   const subagents = registerSubagentRuntime(pi);
+  let fastEnabled = false;
+  subagents.setFastModeResolver(() => fastEnabled);
+  pi.on("before_provider_request", (event, ctx) => {
+    if (!fastEnabled) return;
+    return applyFastServiceTier(event.payload, ctx.model);
+  });
   // Read-only viewer: it owns no session state, writes nothing, and only reads cloned snapshots.
   const subagentViewer = createSubagentViewer({ snapshot: () => subagents.viewerSnapshot() });
   let goal: GoalRuntime | undefined;
@@ -526,6 +541,31 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     updateStatus(ctx);
   }
 
+  pi.registerCommand("fast", {
+    description: "Toggle OpenAI priority service tier for ordinary agent requests.",
+    handler: async (args, ctx) => {
+      if (args.trim()) {
+        report(ctx, "Usage: /fast", "warning");
+        return;
+      }
+      const path = join(getAgentDir(), CONFIG_FILE);
+      const current = readFastFlag(path);
+      if (!current.ok || !current.raw) {
+        report(ctx, `Could not read Fast Mode config at ${path}${current.error ? `: ${current.error}` : "."}`, "error");
+        return;
+      }
+      const next = !current.fast;
+      try {
+        writeFastFlag(path, current.raw, next);
+      } catch (error) {
+        report(ctx, `Could not update Fast Mode: ${error instanceof Error ? error.message : String(error)}`, "error");
+        return;
+      }
+      fastEnabled = next;
+      report(ctx, `Fast Mode ${next ? "enabled" : "disabled"}. Priority service tier requires account permission, and requests may fail without access.`, "info");
+    },
+  });
+
   pi.registerCommand("preset", {
     description: "Switch the oh-my-pi-slim preset: /preset <name>",
     getArgumentCompletions: (argumentPrefix) => {
@@ -634,6 +674,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     notificationGate.clearWithoutDelivery();
     goal?.setDeliveryPaused(false);
     sessionCtx = ctx;
+    fastEnabled = false;
     active = false;
     activePresetName = undefined;
     activePreset = undefined;
@@ -646,6 +687,8 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     try {
       assertNoLegacyBackend(pi);
       ensurePackageSetup(PACKAGE_ROOT);
+      const fastFlag = readFastFlag(join(getAgentDir(), CONFIG_FILE));
+      fastEnabled = fastFlag.ok && fastFlag.fast;
       await subagents.restore(ctx);
     } catch (error) {
       report(ctx, error instanceof Error ? error.message : String(error), "error");
@@ -778,7 +821,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     const goalReminder = goal?.phaseReminder();
     const message = {
       customType: "oh-my-pi-slim:phase-reminder",
-      content: goalReminder ? `${PHASE_REMINDER}\n\n${goalReminder}` : PHASE_REMINDER,
+      content: PHASE_REMINDER,
       display: false,
     };
     if (!active || !activePreset || !activePresetName) return goalReminder ? { message } : undefined;
@@ -787,6 +830,18 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     return {
       systemPrompt: `${systemPrompt}\n\n${ORCHESTRATOR_PROMPT}`,
       message,
+    };
+  });
+
+  pi.on("before_agent_start", () => {
+    const goalReminder = goal?.phaseReminder();
+    if (!goalReminder) return;
+    return {
+      message: {
+        customType: GOAL_REMINDER_MESSAGE_TYPE,
+        content: goalReminder,
+        display: false,
+      },
     };
   });
 

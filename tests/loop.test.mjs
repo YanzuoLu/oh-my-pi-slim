@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
-import { dirname } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test, { beforeEach } from "node:test";
 
 const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
@@ -17,6 +17,7 @@ const dependencyMap = {
   "./ask-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts", import.meta.url).href,
   "./ask-tui.js": new URL("../extensions/oh-my-pi-slim/ask-tui.ts", import.meta.url).href,
   "./bootstrap.js": new URL("../extensions/oh-my-pi-slim/bootstrap.ts", import.meta.url).href,
+  "./fast-mode.js": new URL("../extensions/oh-my-pi-slim/fast-mode.ts", import.meta.url).href,
   "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
   "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
   "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
@@ -72,6 +73,9 @@ const { resetWidgetStackHost } = await import("../extensions/oh-my-pi-slim/widge
 beforeEach(() => resetWidgetStackHost());
 
 const START_MS = Date.parse("2026-05-01T00:00:00.000Z");
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const CACHE = join(ROOT, ".cache");
+mkdirSync(CACHE, { recursive: true });
 
 function createHarness({ ids = ["00000001", "00000002", "00000003"], send, runCallbackOnClear = false } = {}) {
   let now = START_MS;
@@ -949,29 +953,49 @@ test("tree abort waits for shutdown completion and shutdown errors release the m
 test("main sessions register Ask and runtime tools while child sessions return before registration", async () => {
   function registrationHarness() {
     const tools = [];
+    const toolDefinitions = new Map();
     const commands = [];
+    const commandDefinitions = new Map();
     const shortcuts = [];
+    const renderers = [];
     const handlers = new Map();
+    const entries = [];
+    const sends = [];
     return {
-      tools, commands, shortcuts, handlers,
+      tools, toolDefinitions, commands, commandDefinitions, shortcuts, renderers, handlers, entries, sends,
       pi: {
-        registerTool(definition) { tools.push(definition.name); },
-        registerCommand(name) { commands.push(name); },
-        registerMessageRenderer() {},
+        registerTool(definition) {
+          tools.push(definition.name);
+          toolDefinitions.set(definition.name, definition);
+        },
+        registerCommand(name, definition) {
+          commands.push(name);
+          commandDefinitions.set(name, definition);
+        },
+        registerMessageRenderer(customType) { renderers.push(customType); },
         registerFlag() {},
         registerShortcut(shortcut) { shortcuts.push(shortcut); },
-        on(name, handler) { handlers.set(name, handler); },
+        on(name, handler) {
+          const registered = handlers.get(name) ?? [];
+          registered.push(handler);
+          handlers.set(name, registered);
+        },
         getAllTools() { return tools.map((name) => ({ name })); },
         getActiveTools() { return [...tools]; },
+        getFlag() { return false; },
         setActiveTools() {},
-        sendMessage() {},
-        sendUserMessage() {},
+        appendEntry(customType, data) { entries.push({ customType, data }); },
+        sendMessage(...args) { sends.push(["message", ...args]); },
+        sendUserMessage(...args) { sends.push(["user", ...args]); },
       },
     };
   }
 
   const previousPiChild = process.env.PI_SUBAGENT_CHILD;
   const previousOmpsChild = process.env.OMPS_SUBAGENT_CHILD;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousSkipBootstrap = process.env.OMPS_SKIP_BOOTSTRAP;
+  let fastAgentDir;
   try {
     delete process.env.PI_SUBAGENT_CHILD;
     delete process.env.OMPS_SUBAGENT_CHILD;
@@ -984,12 +1008,100 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.ok(main.tools.includes("subagent"));
     assert.ok(main.commands.includes("goal"));
     assert.ok(main.commands.includes("loop"));
+    assert.ok(main.commands.includes("fast"));
     assert.equal(main.commands.includes("monitor"), false);
     assert.deepEqual(main.shortcuts, ["ctrl+shift+left", "ctrl+shift+right"], "main sessions register exactly the two viewer shortcuts");
     assert.ok(main.handlers.has("session_before_fork"));
     assert.ok(main.handlers.has("session_before_tree"));
     assert.ok(main.handlers.has("session_tree"));
     assert.ok(main.handlers.has("session_shutdown"));
+
+    const beforeAgentStart = main.handlers.get("before_agent_start");
+    assert.equal(beforeAgentStart.length, 2, "main registers exactly two ordered before_agent_start handlers");
+    const promptCtx = { mode: "rpc" };
+    assert.deepEqual(beforeAgentStart.map((handler) => handler({ systemPrompt: "base" }, promptCtx)), [undefined, undefined]);
+    assert.deepEqual(main.sends, [], "reminder handlers never send or enqueue another message");
+
+    fastAgentDir = mkdtempSync(join(CACHE, "fast-main-agent-"));
+    process.env.PI_CODING_AGENT_DIR = fastAgentDir;
+    process.env.OMPS_SKIP_BOOTSTRAP = "1";
+    const fastConfigPath = join(fastAgentDir, "oh-my-pi-slim.json");
+    const sessionDir = join(fastAgentDir, "sessions");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(fastConfigPath, `${JSON.stringify({ fast: true, presets: {}, unknown: { retained: true } }, null, 2)}\n`);
+    const notifications = [];
+    const fastCtx = {
+      cwd: ROOT,
+      mode: "rpc",
+      hasUI: true,
+      ui: {
+        theme: { fg: (_color, text) => text },
+        notify(message, level) { notifications.push({ message, level }); },
+        setStatus() {},
+      },
+      model: { provider: "openai", id: "gpt-main" },
+      isProjectTrusted: () => true,
+      sessionManager: {
+        getBranch: () => [],
+        getSessionDir: () => sessionDir,
+        getSessionId: () => "fast-main-session",
+      },
+    };
+    const sessionStart = main.handlers.get("session_start")[0];
+    const providerHook = main.handlers.get("before_provider_request");
+    assert.equal(providerHook.length, 1, "main unconditionally registers exactly one provider payload hook");
+    await sessionStart({ reason: "startup" }, fastCtx);
+    assert.equal(providerHook[0]({ payload: { model: "gpt-main" } }, fastCtx).service_tier, "priority");
+
+    writeFileSync(fastConfigPath, `${JSON.stringify({ fast: false, presets: {}, unknown: { retained: true } }, null, 2)}\n`);
+    await sessionStart({ reason: "reload" }, fastCtx);
+    assert.equal(providerHook[0]({ payload: { model: "gpt-main" } }, fastCtx), undefined, "reload rereads Fast Mode as off");
+
+    const fastCommand = main.commandDefinitions.get("fast");
+    const beforeUsage = readFileSync(fastConfigPath, "utf8");
+    await fastCommand.handler("on", fastCtx);
+    assert.equal(readFileSync(fastConfigPath, "utf8"), beforeUsage, "Fast Mode accepts no command arguments");
+    assert.deepEqual(notifications.at(-1), { message: "Usage: /fast", level: "warning" });
+
+    await fastCommand.handler("", fastCtx);
+    const toggled = JSON.parse(readFileSync(fastConfigPath, "utf8"));
+    assert.equal(toggled.fast, true);
+    assert.deepEqual(toggled.unknown, { retained: true });
+    assert.equal(providerHook[0]({ payload: { model: "gpt-main" } }, fastCtx).service_tier, "priority");
+    assert.match(notifications.at(-1).message, /Fast Mode enabled.*account permission.*may fail/);
+
+    writeFileSync(fastConfigPath, `${JSON.stringify({ fast: true, presets: null, unknown: { retained: true } }, null, 2)}\n`);
+    await fastCommand.handler("", fastCtx);
+    assert.equal(notifications.at(-1).level, "error");
+    assert.equal(providerHook[0]({ payload: { model: "gpt-main" } }, fastCtx).service_tier, "priority", "write failure does not change memory");
+
+    await main.toolDefinitions.get("goal").execute("goal-create", {
+      action: "create",
+      abstract: "Independent reminder",
+      objective: "Keep Goal guidance separate from phase guidance.",
+      criteria: ["Both hidden messages remain independent"],
+    });
+    const entryCountAfterCreate = main.entries.length;
+    const reminderResults = beforeAgentStart.map((handler) => handler({ systemPrompt: "base" }, promptCtx));
+    assert.deepEqual(reminderResults, [
+      {
+        message: {
+          customType: "oh-my-pi-slim:phase-reminder",
+          content: `<system-reminder>\n!IMPORTANT! Scheduler workflow: First choose the lightest workflow that fits the work. If direct execution is justified, complete it and verify proportionately. Otherwise: plan lanes/dependencies → dispatch background specialists → continue non-overlapping work when available → await completion notifications → reconcile terminal results → verify. !END!\n</system-reminder>`,
+          display: false,
+        },
+      },
+      {
+        message: {
+          customType: "oh-my-pi-slim:goal-reminder",
+          content: `<system-reminder>\n!IMPORTANT! You are pursuing the active Goal: Independent reminder. Keep this run aligned with it and continue making concrete progress. !END!\n</system-reminder>`,
+          display: false,
+        },
+      },
+    ], "an inactive preset with an active Goal returns phase then Goal reminders in one prompt");
+    assert.equal(main.entries.length, entryCountAfterCreate, "reminder handlers append no entries of their own");
+    assert.deepEqual(main.sends, [], "reminder handlers create no recursive or additional turn");
+    assert.equal(main.renderers.includes("oh-my-pi-slim:goal-reminder"), false, "Goal reminder registers no renderer");
 
     const source = readFileSync(new URL("../extensions/oh-my-pi-slim/index.ts", import.meta.url), "utf8");
     const beforeFork = source.slice(source.indexOf('pi.on("session_before_fork"'), source.indexOf('pi.on("session_before_tree"'));
@@ -1014,5 +1126,10 @@ test("main sessions register Ask and runtime tools while child sessions return b
     else process.env.PI_SUBAGENT_CHILD = previousPiChild;
     if (previousOmpsChild === undefined) delete process.env.OMPS_SUBAGENT_CHILD;
     else process.env.OMPS_SUBAGENT_CHILD = previousOmpsChild;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousSkipBootstrap === undefined) delete process.env.OMPS_SKIP_BOOTSTRAP;
+    else process.env.OMPS_SKIP_BOOTSTRAP = previousSkipBootstrap;
+    if (fastAgentDir) rmSync(fastAgentDir, { recursive: true, force: true });
   }
 });

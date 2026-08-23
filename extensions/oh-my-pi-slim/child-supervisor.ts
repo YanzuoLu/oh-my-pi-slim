@@ -9,7 +9,9 @@ import {
   completedToolBatch,
   contextUsageNeedsCheckpoint,
 } from "./subagent-checkpoint.js";
+import { applyFastServiceTier, FAST_ENV_VAR, fastEnabledFromEnv } from "./fast-mode.js";
 
+const FAST_MODE_ENABLED = fastEnabledFromEnv(process.env[FAST_ENV_VAR]);
 const REASONS = ["need_decision", "interview_request", "progress_update"] as const;
 
 export const contactSupervisorParameters = Type.Object({
@@ -31,6 +33,10 @@ export const contactSupervisorParameters = Type.Object({
 
 export default function childSupervisor(pi: ExtensionAPI): void {
   if (process.env.OMPS_SUBAGENT_CHILD !== "1" || process.env.PI_SUBAGENT_CHILD !== "1") return;
+
+  if (FAST_MODE_ENABLED) {
+    pi.on("before_provider_request", (event, ctx) => applyFastServiceTier(event.payload, ctx.model));
+  }
 
   let pendingCheckpoint: { cycle: number } | undefined;
   let checkpointCycle = 0;
