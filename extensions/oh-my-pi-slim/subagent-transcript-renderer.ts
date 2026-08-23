@@ -14,6 +14,7 @@ type MessageRenderOptionsLike = { outputPad?: number; expanded?: boolean };
 
 const RAW_HTML_TAG = /<\/?[A-Za-z][^>]*>/;
 const LIVE_STATUSES = new Set(["starting", "running"]);
+const ACTIVE_STATUSES = new Set(["starting", "running", "waiting"]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "interrupted"]);
 /** Interrupt outcomes whose tool result is itself the complete final delivery. */
 const INTERRUPT_FINAL_OUTCOMES = new Set(["stopped", "raced", "unconfirmed"]);
@@ -144,7 +145,7 @@ function compactRunHeaderParts(
   const identity = runIdentity(run);
   const status = statusOverride ?? identity.status;
   const abstractText = includeAbstract ? transcriptRunAbstract(run) : undefined;
-  const abstract = abstractText ? `  ${abstractText}` : "";
+  const abstract = abstractText ? ` ${theme.fg("muted", "·")} ${abstractText}` : "";
   return {
     head: `${formatSemanticGlyphPrefix(statusGlyph(status, theme))}${theme.fg("toolTitle", theme.bold(identity.agent))} ${theme.fg("accent", `[${identity.id}]`)}`,
     tail: ` ${theme.fg("muted", `· ${status}`)}${abstract}`,
@@ -271,13 +272,22 @@ function renderRunStatus(run: UnknownRecord, theme: Theme, expanded: boolean): C
 }
 
 function renderRunList(runs: unknown[], theme: Theme, expanded: boolean): Container {
+  const active = runs.filter((value) => ACTIVE_STATUSES.has(runIdentity(asRecord(value) ?? {}).status)).length;
+  const terminal = runs.length - active;
+  const role = active > 0 ? "accent" : "dim";
+  const glyph = active > 0 ? theme.bold("●") : "○";
+  const label = active > 0 ? theme.bold(`Agents (${terminal}/${runs.length})`) : `Agents (${terminal}/${runs.length})`;
   const container = new Container();
-  container.addChild(styledTitle(theme, "Retained subagent run status", `· ${runs.length}`));
-  // A collapsed list keeps only the heading count; every run row, empty-list note, and summary
-  // field stays behind ctrl+o so a long retained list never floods the transcript.
+  container.addChild(new Text(
+    `${formatSemanticGlyphPrefix(theme.fg(role, glyph))}${theme.fg(role, label)}`,
+    0,
+    0,
+  ));
+  // A collapsed list keeps only the heading. Rows, the empty note, and summary fields stay behind
+  // expansion so a long retained list never floods the transcript.
   if (!expanded) return container;
   if (runs.length === 0) {
-    container.addChild(new Text(theme.fg("dim", "No retained runs."), 0, 0));
+    container.addChild(new Text(theme.fg("dim", "No agents."), 0, 0));
     return container;
   }
   runs.forEach((value) => {
@@ -295,7 +305,7 @@ function deleteReceipt(details: UnknownRecord, theme: Theme, expanded: boolean):
     ? [...details.warnings] as string[]
     : undefined;
   if (!id || details.deleted !== true || details.changed !== true || !warnings) return;
-  const warningTail = warnings.length > 0 ? ` · ${warnings.length} retained warning${warnings.length === 1 ? "" : "s"}` : "";
+  const warningTail = warnings.length > 0 ? ` · ${warnings.length} warning${warnings.length === 1 ? "" : "s"}` : "";
   const container = new Container();
   container.addChild(new Text(
     `${formatSemanticGlyphPrefix(theme.fg("success", "✓"))}${theme.fg("toolOutput", `Deleted subagent run [${safeFirstLine(id)}]${warningTail}`)}`,
@@ -319,7 +329,7 @@ function clearReceipt(details: UnknownRecord, theme: Theme, expanded: boolean): 
   const summary = changed
     ? `Cleared ${clearedCount} retained run${clearedCount === 1 ? "" : "s"}`
     : "No retained runs to clear";
-  const tail = warnings.length > 0 ? ` · ${warnings.length} retained item${warnings.length === 1 ? "" : "s"}` : "";
+  const tail = warnings.length > 0 ? ` · ${warnings.length} warning${warnings.length === 1 ? "" : "s"}` : "";
   const container = new Container();
   container.addChild(new Text(`${formatSemanticGlyphPrefix(glyph)}${theme.fg("toolOutput", `${summary}${tail}`)}`, 0, 0));
   if (!expanded || warnings.length === 0) return container;

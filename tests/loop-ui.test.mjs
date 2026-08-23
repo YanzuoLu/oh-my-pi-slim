@@ -394,15 +394,19 @@ test("Loop mutation and list results render compact receipts, no-change, full hi
 
   const listResult = { details: { loops: [activeLoop, loop({ id: "00000002", status: "paused", nextFireAt: null, abstract: "Paused loop" })] }, content: [{ type: "text", text: "model list" }] };
   const before = structuredClone(listResult);
-  const collapsed = render(renderLoopResult(listResult, { expanded: false }, theme, { args: { action: "list" } }));
-  assert.match(collapsed, /^●  Loops \(1\/2\)/);
-  assert.match(collapsed, /!  Review the latest project state \[00000001\] · Every 10s · 2 fires/);
-  assert.match(collapsed, /Ⅱ  Paused loop \[00000002\] · Every 10s · 0 fires/);
-  assert.doesNotMatch(collapsed, /Prompt:|Full failure line/);
-  const expanded = render(renderLoopResult(listResult, { expanded: true }, theme, { args: { action: "list" } }));
-  assert.match(expanded, /●  Loops \(1\/2\)/);
+  const collapsedComponent = renderLoopResult(listResult, { expanded: false }, theme, { args: { action: "list" } });
+  assert.deepEqual(renderLines(collapsedComponent), ["", "●  Loops (1/2)"]);
+  const expandedComponent = renderLoopResult(listResult, { expanded: true }, theme, { args: { action: "list" } });
+  const expandedLines = renderLines(expandedComponent);
+  assert.equal(expandedLines[1], "●  Loops (1/2)");
+  assert.equal(expandedLines[2], "", "each expanded loop block starts after one blank line");
+  const expanded = render(expandedComponent);
   assert.equal((expanded.match(/Prompt:/g) ?? []).length, 2);
   assert.match(expanded, /Full failure line two/);
+
+  const emptyList = { details: { loops: [] } };
+  assert.equal(render(renderLoopResult(emptyList, { expanded: false }, theme, { args: { action: "list" } })), "○  Loops (0/0)");
+  assert.equal(render(renderLoopResult(emptyList, { expanded: true }, theme, { args: { action: "list" } })), "○  Loops (0/0)\nNo loops.");
   assert.deepEqual(listResult, before);
 });
 

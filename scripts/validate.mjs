@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "1.0.2", "package version must be 1.0.2");
+check(packageJson.version === "1.0.3", "package version must be 1.0.3");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "1.0.2" && lock.packages?.[""]?.version === "1.0.2", "package-lock version must be 1.0.2");
+check(lock.version === "1.0.3" && lock.packages?.[""]?.version === "1.0.3", "package-lock version must be 1.0.3");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -260,8 +260,7 @@ hasNone(widgetStackHost, [
   "instanceof", "registerShortcut", "setStatus", "notify(", "overlay", "appendEntry", "registerTool",
   "theme.fg(", "theme.bold(", "truncateToWidth", "as unknown as", "host.unbind(owner)",
 ], "widget stack host must stay a binding and dispatch layer with no styling, cast, or module singleton");
-// One shared UI type: the widget classes hold `WidgetStackUI` directly instead of a partial copy,
-// and Agents extends it rather than redeclaring the host surface.
+// One shared UI type: every widget class holds `WidgetStackUI` directly instead of a partial copy.
 for (const [name, source] of [
   ["Goal widget", goalWidget],
   ["Monitor widget", monitorWidget],
@@ -278,11 +277,13 @@ for (const [name, source] of [
 }
 hasAll(subagentWidget, [
   'import { widgetStackHost, type WidgetStackUI } from "./widget-stack-host.js"',
-  "export interface SubagentWidgetUI extends WidgetStackUI {",
-  "setStatus(key: string, text: string | undefined): void;",
+  "private uiCtx: WidgetStackUI | undefined",
+  "setUICtx(ctx: WidgetStackUI | undefined): void",
   "theme: input.theme,",
-], "Agents widget must extend the shared host UI type and keep its own status bar");
-hasNone(subagentWidget, ["as unknown as", "as WidgetTheme"], "Agents widget must not cast around the shared types");
+], "Agents widget must use the shared host UI type without owning footer status");
+hasNone(subagentWidget, [
+  "SubagentWidgetUI", "setStatus(", "lastStatusText", "updateStatusBar", "as unknown as", "as WidgetTheme",
+], "Agents widget must not publish, refresh, clear, or type its own footer status");
 hasAll(todoWidget, [
   "private ui: ExtensionUIContext | undefined",
 ], "Todo widget keeps Pi's own extension UI type");
@@ -550,6 +551,16 @@ check(!/\(v\d+\.\d+\.\d+\)/.test(extension), "main extension must not hardcode a
 check((extension.match(/setStatus\(/g) ?? []).length === 1, "main extension must route every OMPS status refresh through one minimal setStatus write");
 const mainStatusKeys = [...extension.matchAll(/setStatus\(\s*"([^"]+)"/g)].map((match) => match[1]);
 check(JSON.stringify(mainStatusKeys) === JSON.stringify(["oh-my-pi-slim"]), "main extension must use only the existing OMPS status key");
+const statusOwners = readdirSync(join(ROOT, "extensions"), { recursive: true, withFileTypes: true })
+  .filter((entry) => entry.isFile() && /\.(ts|mjs)$/.test(entry.name))
+  .map((entry) => join(entry.parentPath, entry.name))
+  .filter((path) => readFileSync(path, "utf8").includes("setStatus("))
+  .map((path) => path.slice(join(ROOT, "extensions").length + 1))
+  .sort();
+check(
+  JSON.stringify(statusOwners) === JSON.stringify(["oh-my-pi-slim/index.ts"]),
+  `main OMPS status must be the package's only footer writer, found: ${statusOwners.join(", ")}`,
+);
 check((extension.match(/pi\.on\("model_select"/g) ?? []).length === 1, "main extension must register exactly one model_select status refresh");
 const modelSelectHandler = extension.slice(extension.indexOf('pi.on("model_select"'), extension.indexOf('pi.on("session_start"'));
 hasAll(modelSelectHandler, ["updateStatus(ctx)"], "model_select status refresh");
@@ -560,7 +571,7 @@ hasNone(shutdownStatusHandler, ["setStatus("], "shutdown must not duplicate the 
 const presetStatusBody = extension.slice(extension.indexOf("export function presetStatusContent"), extension.indexOf("function isAnthropicOAuth"));
 hasNone(presetStatusBody, [".bold(", "theme.bold", "glyph", "Glyph"], "OMPS status plain accent-only rendering");
 check((json("package.json").version ?? "").trim().length > 0, "package.json must define a non-empty version for the OMPS status line");
-check(json("package.json").version === "1.0.2", "Fast status must ship in v1.0.2");
+check(json("package.json").version === "1.0.3", "Fast status must ship in v1.0.3");
 
 const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
 const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
@@ -1398,7 +1409,10 @@ hasNone(monitorHeadingBlock, [
 hasAll(monitorTranscriptRenderer, [
   "renderMonitorCall", "renderMonitorResult", "renderMonitorNotification", 'theme.bold("monitor")', 'monitorStatusGlyph("running", theme)',
   '`· ${safeAction}${expanded ? "" : " (ctrl+o to expand)"}`', "spacedResult", "safeFirstLine", "sanitizeMonitorBody",
-  'theme.bold(`Monitors (${running}/${monitors.length})`)', "renderOperationalState", 'addCombinedLines(container, theme, "Combined lines"',
+  'const terminal = monitors.length - running', 'const glyph = active ? theme.bold("●") : "○"',
+  'const label = active ? theme.bold(`Monitors (${terminal}/${monitors.length})`) : `Monitors (${terminal}/${monitors.length})`',
+  "if (!expanded) return container", 'theme.fg("dim", "No monitors.")', "container.addChild(new Spacer(1))",
+  "renderOperationalState", 'addCombinedLines(container, theme, "Combined lines"',
   'details?.kind === "update"', 'details?.kind === "silence"', 'details?.kind === "matcher"', 'details?.kind === "terminal"', 'details?.kind === "summary"',
   "function silenceNotification(value: UnknownRecord): SilenceNotification | undefined",
   "function renderSilenceNotification(details: SilenceNotification, expanded: boolean, theme: Theme): Component",
@@ -1557,7 +1571,9 @@ hasAll(loopTranscriptRenderer, [
   "renderLoopCall", "renderLoopResult", "renderLoopFire", "styledTitle(", '"loop"', 'theme.fg("accent", "↻")',
   '`· ${action}${expanded ? "" : " (ctrl+o to expand)"}`',
   "context.expanded === true", "options.expanded === true", "spacedResult", "safeFirstLine", "sanitizeLoopBody",
-  'theme.bold(`Loops (${active}/${sorted.length})`)', "addCompleteLoop", 'addSection(container, theme, "Prompt"',
+  'const glyph = active > 0 ? theme.bold("●") : "○"',
+  'const label = active > 0 ? theme.bold(`Loops (${active}/${sorted.length})`) : `Loops (${active}/${sorted.length})`',
+  "if (!expanded) return container", 'theme.fg("dim", "No loops.")', "addCompleteLoop", 'addSection(container, theme, "Prompt"',
   'addField(container, theme, "Fired at"', "LoopFireLine", '· fire ${this.details.fireCount}',
   "ExpandableNotificationLine", 'theme.fg("muted", " (ctrl+o to expand)")', "visibleWidth(this.hint)",
   'verbs: Record<Exclude<LoopAction, "list" | "clear">, string>', '"Created"', '"Deleted"', '"Modified"', '"Paused"', '"Resumed"',
@@ -2128,7 +2144,7 @@ hasAll(subagentRuntimeTests, [
 ], "Subagent terminal steer race compact receipt and untouched notification lifecycle test");
 const subagentWidgetTests = read("tests/subagent-widget.test.mjs");
 hasAll(subagentWidgetTests, [
-  "terminal runs never drop or linger out and dispose clears widget, status, and timer",
+  "terminal runs never drop or linger out and dispose clears widget and timer",
   "shared retained sorting keeps list, restored state, and widget IDs in active, starting, terminal-newest parity",
   "a retained terminal run keeps the widget registered",
   "clearing every retained run removes the widget",
@@ -2402,8 +2418,10 @@ hasAll(todoWidget, [
   'operations.filter((operation) => operation.op === "modify")',
   'operations.filter((operation) => operation.op === "delete")',
   'operations.filter((operation) => operation.op === "clear")',
-  'Applied ${append} append · ${modify} modify · ${deletes} delete · ${clear} clear → ${changed} changed · ${noChange} no-change',
-  'addResultField(container, theme, "Status"', 'addResultSection(container, theme, "Abstract"',
+  'Applied ${append} append · ${modify} modify · ${deletes} delete · ${clear} clear → ${changed} changed · ${noChange} no change',
+  'theme.fg(changed > 0 ? "success" : "dim", changed > 0 ? "✓" : "○")',
+  'const active = hasOpenTodoTasks(tasks)', 'const glyph = active ? theme.bold("●") : "○"',
+  'theme.fg("dim", "No todos.")', 'addResultField(container, theme, "Status"', 'addResultSection(container, theme, "Abstract"',
   'addResultList(container, theme, "Blocked by"', "no-change",
 ], "built-in Todo widget and result-renderer contract");
 hasAll(todoWidget, [
@@ -2629,14 +2647,16 @@ hasAll(todoTests, [
   'todo · list (ctrl+o to expand)', 'todo · update (ctrl+o to expand)',
   'assert.equal(collapsed, "todo · update (ctrl+o to expand)")',
   'Action:|Operations:|Append:|Modify:|Delete:|Clear:',
-  '✓  Applied 1 append · 2 modify · 0 delete · 0 clear → 2 changed · 1 no-change',
-  '✓  Applied 0 append · 0 modify · 1 delete · 0 clear → 1 changed · 0 no-change',
+  '✓  Applied 1 append · 2 modify · 0 delete · 0 clear → 2 changed · 1 no change',
+  '✓  Applied 0 append · 0 modify · 1 delete · 0 clear → 1 changed · 0 no change',
   "widget priority sorts every state from current dependencies", "missing-ref", "sorts before slicing",
   'cannot delete "Core" because "Left", "Right" depend on it',
   "widget active and all-completed idle headings keep exact roles, ANSI, width, overflow, and row treatment",
   "widget heading refreshes both ways across update, delete, clear, replay, tree, compact, and session restore",
   '"○  Todos (14/14)"', "all-completed widget must not render any accent role",
-  "tool result keeps its existing non-widget heading visual", "roleAnsiTheme",
+  "an all-completed list result uses the idle heading visual", "roleAnsiTheme",
+  '○  Applied 0 append · 0 modify · 0 delete · 1 clear → 0 changed · 1 no change',
+  "top-level, delete, and clear receipts all use success", '"○  Todos (0/0)\\nNo todos."',
   "collapsed widget keeps pending and in_progress rows, including blocked pending, and hides only completed ones",
   '"●  Todos (2/6) · ctrl+o to expand"', '"├─ ○  blocked-work ⛓  open-dependency"',
   '["○  Todos (2/2) · ctrl+o to expand"]', "a collapsed ledger with nothing hidden shows no hint at all",
@@ -2654,12 +2674,12 @@ hasAll(todoTests, [
 const subagentTranscriptTests = read("tests/subagent-transcript-renderer.test.mjs");
 hasAll(subagentTranscriptTests, [
   "collapsed list results show only the retained-run heading count",
-  'assert.deepEqual(collapsedLines, ["", "Retained subagent run status · 3"])',
-  'assert.deepEqual(emptyCollapsedLines, ["", "Retained subagent run status · 0"])',
-  'assert.equal(emptyExpanded, "Retained subagent run status · 0\\nNo retained runs.")',
-  "clear receipts stay compact when collapsed and list every retained-item warning when expanded",
+  'assert.deepEqual(collapsedLines, ["", "●  Agents (1/3)"])',
+  'assert.deepEqual(emptyCollapsedLines, ["", "○  Agents (0/0)"])',
+  'assert.equal(emptyExpanded, "○  Agents (0/0)\\nNo agents.")',
+  "clear receipts stay compact when collapsed and list every warning when expanded",
   "subagent · clear (ctrl+o to expand)", "Clears retained Subagent history", "run files", "child session files",
-  "assert.doesNotMatch(clearExpanded, /Goal|sidecar/i)", "Retained subagent run status · 3",
+  "assert.doesNotMatch(clearExpanded, /Goal|sidecar/i)", "●  Agents (1/3)", "· 1 warning", "· 2 warnings",
   "status result stays single-line collapsed", "subagent · status · run-status-full (ctrl+o to expand)",
   "without duplicate Action rows", "(ctrl+o to expand)", "Action:",
   'assert.doesNotMatch(value, /\\(ctrl\\+o to expand\\)|Action:/)',
@@ -3078,7 +3098,9 @@ hasAll(transcriptRenderer, [
   "ExpandableNotificationLine", 'theme.fg("muted", " (ctrl+o to expand)")', "visibleWidth(this.hint)",
   'actionFromContext(context, "create")',
   "immediateAck", "renderRunStatus", "renderRunList", "addRunSummaryDetails", "addFinalOutput", "spacedToolResult", '"Live response"',
-  '"Retained subagent run status"', "run.abstract", "run.reason", 'addField(container, theme, "Abstract", args.abstract',
+  'const active = runs.filter', 'theme.bold(`Agents (${terminal}/${runs.length})`)', 'theme.fg("dim", "No agents.")',
+  'const abstract = abstractText ? ` ${theme.fg("muted", "·")} ${abstractText}` : ""',
+  "run.abstract", "run.reason", 'addField(container, theme, "Abstract", args.abstract',
   'addField(container, theme, "Cwd", args.cwd ?? context.cwd, "(parent session cwd)")',
   'addField(container, theme, "Cwd", args.cwd, "(source run cwd)")',
   "clearReceipt", "details.clearedCount", "details.warnings", "details.changed === true",
@@ -3137,12 +3159,15 @@ hasAll(statusRenderer, [
   "TERMINAL_STATUSES.has(runIdentity(run).status)", "addFinalOutput(container, theme, run)",
 ], "single retained-run status renderer");
 hasAll(listRenderer, [
-  "styledTitle", "compactRunHeader", "undefined, true", "addRunSummaryDetails(container, theme, run)",
-  "if (!expanded) return container",
+  "compactRunHeader", "undefined, true", "addRunSummaryDetails(container, theme, run)",
+  'const terminal = runs.length - active', 'const role = active > 0 ? "accent" : "dim"',
+  'const glyph = active > 0 ? theme.bold("●") : "○"',
+  'const label = active > 0 ? theme.bold(`Agents (${terminal}/${runs.length})`) : `Agents (${terminal}/${runs.length})`',
+  "if (!expanded) return container", 'theme.fg("dim", "No agents.")',
 ], "retained-run list renderer");
 check(
   listRenderer.indexOf("if (!expanded) return container") <
-    listRenderer.indexOf('theme.fg("dim", "No retained runs.")') &&
+    listRenderer.indexOf('theme.fg("dim", "No agents.")') &&
   listRenderer.indexOf("if (!expanded) return container") < listRenderer.indexOf("runs.forEach"),
   "a collapsed retained-run list must return right after the heading, before any run row or empty-list note",
 );
@@ -3528,8 +3553,11 @@ check(
   "rendered rows must run transcript, live, Read-Only, status, then hints",
 );
 
-// One cloned snapshot API on the runtime, filtered to the viewer statuses.
+// One cloned snapshot API on the runtime with Viewer-only creation ordering and full membership.
 hasAll(runtime, [
+  "function compareViewerRunsByCreatedAt(left: ViewerRunSnapshot, right: ViewerRunSnapshot): number",
+  "const leftCreated = Date.parse(left.createdAt)", "const rightCreated = Date.parse(right.createdAt)",
+  "if (leftValid !== rightValid) return leftValid ? -1 : 1", "return left.id < right.id ? -1 : 1", "runs.sort(compareViewerRunsByCreatedAt)",
   "viewerSnapshot(): ViewerSnapshot",
   "for (const run of this.registry.list()) {",
   "cloneViewerValue(run.request)",
@@ -3565,7 +3593,7 @@ hasAll(read("tests/loop.test.mjs"), [
 hasAll(viewerTests, [
   "every retained status stays in the cycle and i/N counts the whole retained set",
   "a retained set larger than the widget's visible budget keeps every run in the cycle",
-  "a running run that completes keeps the selection and only reorders",
+  "a running run that completes keeps the selection and creation-stable index",
   "a starting run shows a stable pending body and keeps polling",
   "a terminal run without a readable session file falls back to its retained result",
   "a terminal error stays visible even when the transcript is present",
@@ -3649,9 +3677,11 @@ hasAll(askTui, [
 ], "Ask exposes one public coordination hook instead of a patched viewer");
 hasAll(subagentRuntimeTests, [
   "viewerSnapshot",
-  "viewerSnapshot membership is the retained set itself, in widget order",
+  "viewerSnapshot membership matches registry, list, and widget while navigation uses creation order",
+  "viewerSnapshot sorts valid creation times oldest-first, places invalid times last, and stays stable across lifecycle updates",
+  'const expected = ["oldest", "tie-a", "tie-b", "newer", "invalid-a", "invalid-z"]',
   "renderSubagentWidgetLines",
-], "runtime tests must cover the cloned viewer snapshot and its widget parity");
+], "runtime tests must cover cloned Viewer creation ordering and retained membership parity");
 hasAll(read("tests/loop-load.test.mjs"), ['event.method === "custom"'], "load tests must assert the viewer never opens outside a TUI session");
 hasAll(read("tests/loop-load.test.mjs"), [
   'assert.deepEqual(main.commands, ["fast", "goal", "loop"])', "assert.deepEqual(child.commands, [])",

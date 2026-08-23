@@ -1047,9 +1047,9 @@ test("widget immediately reorders after status, dependency completion or restore
   ]);
 
   const collapsed = renderComponent(harness.tool.renderResult(removed, { expanded: false }, theme, {}));
-  assert.equal(collapsed, "✓  Applied 0 append · 0 modify · 1 delete · 0 clear → 1 changed · 0 no-change");
+  assert.equal(collapsed, "✓  Applied 0 append · 0 modify · 1 delete · 0 clear → 1 changed · 0 no change");
   const expanded = renderComponent(harness.tool.renderResult(removed, { expanded: true }, theme, {}));
-  assert.match(expanded, /^✓  Applied 0 append · 0 modify · 1 delete · 0 clear → 1 changed · 0 no-change/);
+  assert.match(expanded, /^✓  Applied 0 append · 0 modify · 1 delete · 0 clear → 1 changed · 0 no change/);
   assert.match(expanded, /1\. ✓  Deleted "active"\./);
 });
 
@@ -1130,12 +1130,12 @@ test("Ctrl+O expands Todo update and list results without changing model data", 
   const updateCollapsedComponent = harness.tool.renderResult(updateResult, { expanded: false }, theme, {});
   assertBlankResultSeparator(updateCollapsedComponent);
   const updateCollapsed = renderComponent(updateCollapsedComponent);
-  assert.equal(updateCollapsed, "✓  Applied 1 append · 2 modify · 0 delete · 0 clear → 2 changed · 1 no-change");
+  assert.equal(updateCollapsed, "✓  Applied 1 append · 2 modify · 0 delete · 0 clear → 2 changed · 1 no change");
   assert.doesNotMatch(updateCollapsed, /Appended|Modified|No change|Abstract/);
   const updateExpandedComponent = harness.tool.renderResult(updateResult, { expanded: true }, theme, {});
   assertBlankResultSeparator(updateExpandedComponent);
   const updateExpanded = renderComponent(updateExpandedComponent);
-  assert.match(updateExpanded, /^✓  Applied 1 append · 2 modify · 0 delete · 0 clear → 2 changed · 1 no-change/);
+  assert.match(updateExpanded, /^✓  Applied 1 append · 2 modify · 0 delete · 0 clear → 2 changed · 1 no change/);
   assert.match(updateExpanded, /1\. ✓  Appended "A"\./);
   assert.match(updateExpanded, /2\. ○  → ✓  Modified "A": status pending to completed\./);
   assert.match(updateExpanded, /3\. ○  No change for "A"\./);
@@ -1145,7 +1145,7 @@ test("Ctrl+O expands Todo update and list results without changing model data", 
 
   const completedListResult = runList(harness.tool, harness.ctx);
   const completedListCollapsed = renderComponent(harness.tool.renderResult(completedListResult, { expanded: false }, theme, {}));
-  assert.equal(completedListCollapsed, "●  Todos (1/1)", "tool result keeps its existing non-widget heading visual");
+  assert.equal(completedListCollapsed, "○  Todos (1/1)", "an all-completed list result uses the idle heading visual");
 
   runUpdate(harness.tool, harness.ctx, [{ op: "append", subject: "B", abstract: "Second abstract", blockedBy: ["A"] }]);
   const listResult = runList(harness.tool, harness.ctx);
@@ -1159,6 +1159,7 @@ test("Ctrl+O expands Todo update and list results without changing model data", 
   assertBlankResultSeparator(listExpandedComponent);
   const listExpandedLines = renderComponentLines(listExpandedComponent);
   const listExpanded = renderComponent(listExpandedComponent);
+  assert.deepEqual(listExpandedLines.slice(0, 4), ["", "●  Todos (1/2)", "", "✓  A"]);
   for (const value of [
     "●  Todos (1/2)", "✓  A", "Status: completed", "Abstract:", "Abstract line one", "Abstract line two",
     "Blocked by:", "○  B", "Status: pending", "Second abstract", "- A",
@@ -1180,6 +1181,28 @@ test("Ctrl+O expands Todo update and list results without changing model data", 
   ]) assert.equal(listExpandedLines.includes(line), true, `missing exact result hierarchy line: ${JSON.stringify(line)}`);
   assert.deepEqual(listResult, listBefore);
   assert.equal(listResult.content[0].text, JSON.stringify(listResult.details.tasks));
+
+  assert.equal(renderComponent(widgetModule.renderTodoListResult([], theme, false)), "○  Todos (0/0)");
+  assert.equal(renderComponent(widgetModule.renderTodoListResult([], theme, true)), "○  Todos (0/0)\nNo todos.");
+
+  const noChangeHarness = createHarness({ mode: "rpc" });
+  noChangeHarness.emit("session_start", { reason: "startup" });
+  const noChangeResult = runUpdate(noChangeHarness.tool, noChangeHarness.ctx, [{ op: "clear" }]);
+  assert.equal(
+    renderComponent(noChangeHarness.tool.renderResult(noChangeResult, { expanded: false }, theme, {})),
+    "○  Applied 0 append · 0 modify · 0 delete · 1 clear → 0 changed · 1 no change",
+  );
+  const destructiveReceipts = widgetModule.renderTodoReceipts(
+    [
+      { operation: 1, kind: "delete", text: 'Deleted "A".' },
+      { operation: 2, kind: "clear", text: "Cleared all items." },
+    ],
+    [{ op: "delete", target: "A" }, { op: "clear" }],
+    roleAnsiTheme,
+    true,
+  ).render(240).join("\n");
+  assert.equal((destructiveReceipts.match(/\u001b\[32m✓\u001b\[0m/g) ?? []).length, 3, "top-level, delete, and clear receipts all use success");
+  assert.doesNotMatch(destructiveReceipts, /\u001b\[33m✓/);
 });
 
 test("Todo fallback collapses safely and expands full text", () => {

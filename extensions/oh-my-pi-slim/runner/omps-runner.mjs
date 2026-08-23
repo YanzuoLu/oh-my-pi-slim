@@ -432,7 +432,7 @@ async function applyControl(control) {
     ) {
       transition("running", { request: undefined });
       void withTimeout(
-        client.prompt(`Supervisor reply for run ${config.runId}:\n\n${control.message}`),
+        client.prompt(control.message),
         REPLY_PROMPT_TIMEOUT_MS,
         "supervisor reply prompt",
       ).catch((error) => finish("failed", { error: errorText(error) }));

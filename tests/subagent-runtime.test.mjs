@@ -267,7 +267,6 @@ function createHarness({
   const alive = new Set();
   const processIdentities = new Map();
   const widgetCalls = [];
-  const statusCalls = [];
   const pi = {
     registerTool(definition) { tools.set(definition.name, definition); },
     registerMessageRenderer(type, renderer) { messageRenderers.set(type, renderer); },
@@ -319,7 +318,6 @@ function createHarness({
   runtime.registerTools();
   const ui = {
     setWidget(key, content, options) { widgetCalls.push({ key, content, options }); },
-    setStatus(key, text) { statusCalls.push({ key, text }); },
   };
   const ctx = {
     cwd: ROOT,
@@ -335,7 +333,7 @@ function createHarness({
   };
   return {
     tempDir, sessionDir, ownerSessionId, runtime, tools, messageRenderers, notifications, journalWrites, launches,
-    intervals, clearedIntervals, alive, killed, controlWrites, widgetCalls, statusCalls, ctx,
+    intervals, clearedIntervals, alive, killed, controlWrites, widgetCalls, ctx,
     advance(ms) { clock += ms; },
     setProcessIdentity(pid, identity) { processIdentities.set(pid, identity); },
     paths(id, owner = ownerSessionId) { return getRunPaths(getRunRoot(sessionDir), owner, id); },
@@ -4379,9 +4377,9 @@ test("viewerSnapshot hands the read-only viewer a deep copy of every retained ru
     const snapshot = harness.runtime.viewerSnapshot();
     assert.equal(harness.journalWrites.length, journalWritesBefore, "viewerSnapshot must not write a journal entry");
     assert.deepEqual(
-      snapshot.runs.map((run) => run.id),
-      harness.runtime.registry.list().map((run) => run.id),
-      "membership is the retained set in registry order",
+      [...snapshot.runs.map((run) => run.id)].sort(),
+      [...harness.runtime.registry.list().map((run) => run.id)].sort(),
+      "membership is exactly the retained set even though the viewer owns its navigation order",
     );
     assert.ok(snapshot.runs.some((run) => run.id === starting.details.run.id), "a starting run is retained too");
     assert.ok(snapshot.runs.some((run) => run.id === terminal.id), "a terminal run stays in the cycle");
@@ -4436,7 +4434,7 @@ test("viewerSnapshot stays empty and safe without an attached session", () => {
   } finally { harness.cleanup(); }
 });
 
-test("viewerSnapshot membership is the retained set itself, in widget order", async () => {
+test("viewerSnapshot membership matches registry, list, and widget while navigation uses creation order", async () => {
   const harness = createHarness();
   try {
     await harness.restore();
@@ -4464,9 +4462,9 @@ test("viewerSnapshot membership is the retained set itself, in widget order", as
     const snapshot = harness.runtime.viewerSnapshot();
     const retained = harness.runtime.registry.list();
     assert.deepEqual(
-      snapshot.runs.map((run) => run.id),
-      retained.map((run) => run.id),
-      "the viewer sees exactly the retained runs, in registry order",
+      [...snapshot.runs.map((run) => run.id)].sort(),
+      [...retained.map((run) => run.id)].sort(),
+      "the viewer sees exactly the retained membership without borrowing registry display order",
     );
     assert.equal(snapshot.runs.length, 6);
     assert.deepEqual(
@@ -4496,6 +4494,44 @@ test("viewerSnapshot membership is the retained set itself, in widget order", as
     assert.equal(snapshot.runs.find((run) => run.id === failed.id).error, "provider error");
     assert.equal(snapshot.runs.find((run) => run.id === running.id).transcriptCutoff, undefined);
     assert.equal(snapshot.runs.find((run) => run.id === startingId).transcriptCutoff, undefined);
+  } finally { harness.cleanup(); }
+});
+
+test("viewerSnapshot sorts valid creation times oldest-first, places invalid times last, and stays stable across lifecycle updates", async () => {
+  const harness = createHarness();
+  try {
+    await harness.restore();
+    for (const run of [
+      persistedRun({ id: "newer", status: "completed", createdAt: "2026-04-17T00:03:00.000Z", updatedAt: "2026-04-17T00:03:00.000Z" }),
+      persistedRun({ id: "tie-b", status: "completed", createdAt: "2026-04-17T00:02:00.000Z", updatedAt: "2026-04-17T00:08:00.000Z" }),
+      persistedRun({ id: "invalid-z", status: "completed", createdAt: "not-a-date", updatedAt: "2026-04-17T00:09:00.000Z" }),
+      persistedRun({ id: "oldest", status: "failed", createdAt: "2026-04-17T00:01:00.000Z", updatedAt: "2026-04-17T00:07:00.000Z" }),
+      persistedRun({ id: "tie-a", status: "failed", createdAt: "2026-04-17T00:02:00.000Z", updatedAt: "2026-04-17T00:02:00.000Z" }),
+      persistedRun({ id: "invalid-a", status: "interrupted", createdAt: "also-not-a-date", updatedAt: "2026-04-17T00:10:00.000Z" }),
+    ]) harness.runtime.registry.add(run, run.status === "running" || run.status === "waiting");
+
+    const expected = ["oldest", "tie-a", "tie-b", "newer", "invalid-a", "invalid-z"];
+    assert.deepEqual(harness.runtime.viewerSnapshot().runs.map((run) => run.id), expected);
+    const registryIds = harness.runtime.registry.list().map((run) => run.id);
+    assert.notDeepEqual(registryIds, expected, "registry display sorting remains independent");
+    const listed = await harness.tools.get("subagent").execute("list", { action: "list" });
+    assert.deepEqual(listed.details.runs.map((run) => run.id), registryIds, "the list action keeps registry business sorting");
+
+    harness.runtime.registry.update("tie-a", { status: "completed", updatedAt: "2030-01-01T00:00:00.000Z" });
+    assert.deepEqual(harness.runtime.viewerSnapshot().runs.map((run) => run.id), expected, "status and updatedAt never move a viewer item");
+
+    harness.runtime.registry.add(persistedRun({
+      id: "resume-new",
+      status: "starting",
+      sourceRunId: "tie-a",
+      createdAt: "2026-04-17T00:04:00.000Z",
+      updatedAt: "2026-04-17T00:04:00.000Z",
+    }), true);
+    assert.deepEqual(
+      harness.runtime.viewerSnapshot().runs.map((run) => run.id),
+      ["oldest", "tie-a", "tie-b", "newer", "resume-new", "invalid-a", "invalid-z"],
+      "a resumed run joins after older valid creations with its own new createdAt",
+    );
   } finally { harness.cleanup(); }
 });
 

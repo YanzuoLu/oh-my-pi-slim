@@ -454,7 +454,6 @@ test("a single retained ID disappearing updates widget counts and the last remov
   const tui = { terminal: { columns: 120 }, requestRender() {} };
   const widget = new SubagentWidget(() => runs, { setInterval() { return "timer"; }, clearInterval() {} });
   widget.setUICtx({
-    setStatus() {},
     setWidget(key, content) {
       widgetCalls.push({ key, content });
       component = typeof content === "function" ? content(tui, theme) : undefined;
@@ -663,7 +662,6 @@ test("SubagentWidget reads Pi's live expansion state on every render without re-
   const widget = new SubagentWidget(() => runs, { setInterval() { return "timer"; }, clearInterval() {} });
   widget.setUICtx({
     getToolsExpanded: () => expanded,
-    setStatus() {},
     setWidget(key, content) {
       widgetCalls.push({ key, content });
       component = typeof content === "function" ? content(tui, theme) : undefined;
@@ -692,7 +690,6 @@ test("SubagentWidget reads Pi's live expansion state on every render without re-
   let legacyComponent;
   const legacyWidget = new SubagentWidget(() => runs, { setInterval() { return "timer"; }, clearInterval() {} });
   legacyWidget.setUICtx({
-    setStatus() {},
     setWidget(key, content) {
       legacyCalls.push({ key, content });
       legacyComponent = typeof content === "function" ? content(tui, theme) : undefined;
@@ -708,7 +705,6 @@ test("widget registers its callback once, ticks at 80ms, then requests render", 
   const intervals = [];
   const cleared = [];
   const widgetCalls = [];
-  const statusCalls = [];
   let renders = 0;
   const widget = new SubagentWidget(() => runs, {
     setInterval(callback, ms) { intervals.push({ callback, ms, token: Symbol("timer") }); return intervals.at(-1).token; },
@@ -716,7 +712,6 @@ test("widget registers its callback once, ticks at 80ms, then requests render", 
   });
   const tui = { terminal: { columns: 120 }, requestRender() { renders += 1; } };
   const ui = {
-    setStatus(key, text) { statusCalls.push({ key, text }); },
     setWidget(key, content, options) {
       widgetCalls.push({ key, content, options });
       if (typeof content === "function") content(tui, theme);
@@ -729,19 +724,16 @@ test("widget registers its callback once, ticks at 80ms, then requests render", 
   assert.equal(widgetCalls.length, 1);
   assert.equal(widgetCalls[0].key, WIDGET_STACK_KEY, "Agents joins the one aggregate widget instead of owning a key");
   assert.deepEqual(widgetCalls[0].options, { placement: "aboveEditor" });
-  assert.equal(statusCalls.at(-1).text, "1 running agent");
 
   intervals[0].callback();
   widget.update();
   assert.equal(widgetCalls.length, 1, "the factory must not be replaced on later updates");
   assert.equal(renders, 2);
-  assert.equal(statusCalls.length, 1, "unchanged status text must not be reset");
 
   runs = [run({ status: "completed" })];
   widget.update();
   widget.onTurnStart();
   assert.equal(typeof widgetCalls.at(-1).content, "function", "a retained terminal run keeps the widget registered");
-  assert.equal(statusCalls.at(-1).text, undefined, "only active runs drive the status bar");
   assert.equal(cleared.length, 0, "the tick timer stops only when nothing is retained");
 
   runs = [];
@@ -750,17 +742,15 @@ test("widget registers its callback once, ticks at 80ms, then requests render", 
   assert.equal(cleared.length, 1);
 });
 
-test("terminal runs never drop or linger out and dispose clears widget, status, and timer", () => {
+test("terminal runs never drop or linger out and dispose clears widget and timer", () => {
   let runs = [run({ status: "failed", error: "boom" })];
   const widgetCalls = [];
-  const statusCalls = [];
   const cleared = [];
   const widget = new SubagentWidget(() => runs, {
     setInterval() { return "timer"; },
     clearInterval(timer) { cleared.push(timer); },
   });
   const ui = {
-    setStatus(key, text) { statusCalls.push({ key, text }); },
     setWidget(key, content) { widgetCalls.push({ key, content }); },
   };
   widget.setUICtx(ui);
@@ -776,6 +766,5 @@ test("terminal runs never drop or linger out and dispose clears widget, status, 
   widget.update();
   widget.dispose();
   assert.equal(widgetCalls.at(-1).content, undefined);
-  assert.equal(statusCalls.at(-1).text, undefined);
   assert.deepEqual(cleared, ["timer"]);
 });

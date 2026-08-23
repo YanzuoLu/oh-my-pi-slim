@@ -45,22 +45,16 @@ export function assembleSubagentWidgetState(runs: readonly RunSummary[]): Subage
   };
 }
 
-/** The aggregate host's UI plus the status bar, which Agents owns on its own. */
-export interface SubagentWidgetUI extends WidgetStackUI {
-  setStatus(key: string, text: string | undefined): void;
-}
-
 interface WidgetOptions {
   setInterval?: (callback: () => void, ms: number) => unknown;
   clearInterval?: (timer: unknown) => void;
 }
 
 export class SubagentWidget {
-  private uiCtx: SubagentWidgetUI | undefined;
+  private uiCtx: WidgetStackUI | undefined;
   private widgetFrame = 0;
   private widgetInterval: unknown;
   private published = false;
-  private lastStatusText: string | undefined;
   private readonly section: WidgetStackSection;
   private readonly listRuns: () => PersistedRun[];
   private readonly setIntervalFn: (callback: () => void, ms: number) => unknown;
@@ -84,7 +78,7 @@ export class SubagentWidget {
     };
   }
 
-  setUICtx(ctx: SubagentWidgetUI | undefined): void {
+  setUICtx(ctx: WidgetStackUI | undefined): void {
     if (ctx === this.uiCtx) {
       // Re-binding the same UI is how a tree restore reclaims the host after `dispose` released it.
       if (ctx) widgetStackHost().bind(AGENTS_WIDGET_OWNER, ctx);
@@ -93,7 +87,6 @@ export class SubagentWidget {
     this.retract();
     if (this.uiCtx) widgetStackHost().unbind(AGENTS_WIDGET_OWNER, this.uiCtx);
     this.uiCtx = ctx;
-    this.lastStatusText = undefined;
     if (ctx) widgetStackHost().bind(AGENTS_WIDGET_OWNER, ctx);
   }
 
@@ -114,26 +107,9 @@ export class SubagentWidget {
 
   private clearWidget(): void {
     this.retract();
-    if (this.lastStatusText !== undefined) {
-      this.uiCtx!.setStatus("subagents", undefined);
-      this.lastStatusText = undefined;
-    }
     if (this.widgetInterval !== undefined) {
       this.clearIntervalFn(this.widgetInterval);
       this.widgetInterval = undefined;
-    }
-  }
-
-  private updateStatusBar(state: SubagentWidgetState): void {
-    const parts: string[] = [];
-    if (state.runningCount > 0) parts.push(`${state.runningCount} running`);
-    if (state.waitingCount > 0) parts.push(`${state.waitingCount} waiting`);
-    if (state.queuedCount > 0) parts.push(`${state.queuedCount} queued`);
-    const total = state.runningCount + state.waitingCount + state.queuedCount;
-    const next = total > 0 ? `${parts.join(", ")} agent${total === 1 ? "" : "s"}` : undefined;
-    if (next !== this.lastStatusText) {
-      this.uiCtx!.setStatus("subagents", next);
-      this.lastStatusText = next;
     }
   }
 
@@ -147,7 +123,6 @@ export class SubagentWidget {
     }
 
     if (state.hasActive) this.ensureTimer();
-    this.updateStatusBar(state);
     this.widgetFrame += 1;
     if (!this.published) {
       this.published = true;
@@ -163,12 +138,8 @@ export class SubagentWidget {
       this.widgetInterval = undefined;
     }
     this.retract();
-    if (this.uiCtx) {
-      this.uiCtx.setStatus("subagents", undefined);
-      widgetStackHost().unbind(AGENTS_WIDGET_OWNER, this.uiCtx);
-    }
+    if (this.uiCtx) widgetStackHost().unbind(AGENTS_WIDGET_OWNER, this.uiCtx);
     // Dropping the UI here is what makes a spinner tick that lands after dispose a no-op.
     this.uiCtx = undefined;
-    this.lastStatusText = undefined;
   }
 }

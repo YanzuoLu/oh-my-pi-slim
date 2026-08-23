@@ -37,6 +37,11 @@ function recordCommand(type) {
   appendFileSync(process.env.OMPS_STUB_COMMAND_LOG, `${type}\n`);
 }
 
+function recordPrompt(message) {
+  if (!process.env.OMPS_STUB_PROMPT_LOG || typeof message !== "string") return;
+  appendFileSync(process.env.OMPS_STUB_PROMPT_LOG, `${JSON.stringify(message)}\n`);
+}
+
 function assistant(text, stopReason = "stop", totalTokens = 42) {
   lastAssistantText = text;
   send({
@@ -97,6 +102,7 @@ function handleCompact(command) {
 
 function handlePrompt(command) {
   promptCount += 1;
+  recordPrompt(command.message);
   if (scenario === "contact-reply-hang" && promptCount === 2) return;
   respond(command, {});
   setTimeout(() => {

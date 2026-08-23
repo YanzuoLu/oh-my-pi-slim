@@ -177,13 +177,21 @@ function addResultList(container: Container, theme: Theme, label: string, values
 
 export function renderTodoListResult(tasks: readonly TodoTask[], theme: Theme, expanded = false): Component {
   const completed = countCompletedTodoTasks(tasks);
+  const active = hasOpenTodoTasks(tasks);
+  const role = active ? "accent" : "dim";
+  const glyph = active ? theme.bold("●") : "○";
+  const label = active ? theme.bold(`Todos (${completed}/${tasks.length})`) : `Todos (${completed}/${tasks.length})`;
   const container = new Container();
   container.addChild(new Text(
-    `${formatSemanticGlyphPrefix(theme.fg("accent", theme.bold("●")))}${theme.fg("accent", theme.bold(`Todos (${completed}/${tasks.length})`))}`,
+    `${formatSemanticGlyphPrefix(theme.fg(role, glyph))}${theme.fg(role, label)}`,
     0,
     0,
   ));
   if (!expanded) return container;
+  if (tasks.length === 0) {
+    container.addChild(new Text(theme.fg("dim", "No todos."), 0, 0));
+    return container;
+  }
   for (const task of tasks) {
     container.addChild(new Spacer(1));
     container.addChild(new Text(
@@ -216,9 +224,10 @@ export function renderTodoReceipts(
   const clear = operations.filter((operation) => operation.op === "clear").length;
   const noChange = receipts.filter((receipt) => receipt.kind === "no-change").length;
   const changed = receipts.length - noChange;
+  const summary = `Applied ${append} append · ${modify} modify · ${deletes} delete · ${clear} clear → ${changed} changed · ${noChange} no change`;
   const container = new Container();
   container.addChild(new Text(
-    `${formatSemanticGlyphPrefix(theme.fg("success", "✓"))}${theme.fg("toolOutput", `Applied ${append} append · ${modify} modify · ${deletes} delete · ${clear} clear → ${changed} changed · ${noChange} no-change`)}`,
+    `${formatSemanticGlyphPrefix(theme.fg(changed > 0 ? "success" : "dim", changed > 0 ? "✓" : "○"))}${theme.fg("toolOutput", summary)}`,
     0,
     0,
   ));
@@ -227,9 +236,7 @@ export function renderTodoReceipts(
     const transition = receiptStatusTransition(receipt, theme);
     const glyph = transition ?? (receipt.kind === "no-change"
       ? theme.fg("dim", "○")
-      : receipt.kind === "clear" || receipt.kind === "delete"
-        ? theme.fg("warning", "✓")
-        : theme.fg("success", "✓"));
+      : theme.fg("success", "✓"));
     container.addChild(new Spacer(1));
     container.addChild(new Text(
       `${theme.fg("dim", `${receipt.operation}.`)} ${transition ?? formatSemanticGlyphPrefix(glyph)}${theme.fg("toolOutput", sanitizeTodoText(receipt.text))}`,

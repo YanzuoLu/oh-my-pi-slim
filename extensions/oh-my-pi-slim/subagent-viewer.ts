@@ -977,8 +977,9 @@ export class SubagentViewer implements SubagentViewerKeyTarget {
     const nextIds = snapshot.runs.map((run) => run.id);
     const signature = this.signature();
     this.adoptSnapshot(snapshot);
-    // Membership is the retained set, so a lifecycle change only reorders. An id leaves after
-    // `subagent delete` or `subagent clear`, which is exactly when the neighbour rule has to run.
+    // Membership is the retained set and snapshot order is creation-stable, so lifecycle and
+    // `updatedAt` changes keep the selected ID in place. An ID leaves only after `subagent delete`
+    // or `subagent clear`, which is exactly when the neighbour rule has to run.
     if (runId !== undefined && !nextIds.includes(runId)) {
       const replacement = neighborAfterViewerRemoval(previousIds, nextIds, runId);
       if (replacement === undefined) {

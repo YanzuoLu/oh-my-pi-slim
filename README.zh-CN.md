@@ -288,7 +288,7 @@ Fast Mode 作用于全部普通 agent request。仅当 provider 精确为 `opena
 
 - Agents widget 折叠时，只有存在因 policy 而隐藏的 retained terminal run，并且已有 Ctrl+O expand hint 时，heading 才会追加固定的 `ctrl+shift+←/→ viewer` 提示。宽度不足以容纳两条完整提示时，heading 先只保留完整的 Ctrl+O 提示；若仍放不下，则两条提示都省略。Agents heading 展开时不显示任何提示。
 - Main 是循环中的第 0 项。`ctrl+shift+right` 从 Main 进入第一个 retained run，逐个前进，最后回到 Main；`ctrl+shift+left` 沿同一个环反向移动。
-- 循环范围就是 Agents widget 展示的 retained 集合，顺序与总数完全一致：`starting`、`running`、`waiting`、`completed`、`failed`、`interrupted` 六种状态全部可达，包括 widget 折叠或超出行预算时隐藏的那些。状态变化只会重排，正在查看的 run 结束后仍留在屏幕上。`subagent delete` 删除一个 terminal run，`subagent clear` 删除全部 terminal history；最后一个 retained run 消失时自动回到 Main。
+- 循环范围与 Agents widget 的 retained 集合及总数一致。`starting`、`running`、`waiting`、`completed`、`failed`、`interrupted` 六种状态全部可达，也包括 widget 折叠或超出行预算时隐藏的 run。viewer 导航按 `createdAt` 从早到晚排列，同一时间按 ID 排序，非法时间稳定放在合法时间之后并按 ID 排序。状态与 `updatedAt` 变化不会移动 run，resume 产生的新 run 则按自己的新创建时间加入后方。`subagent delete` 删除一个 terminal run，`subagent clear` 删除全部 terminal history。最后一个 retained run 消失时自动回到 Main。
 - 在 viewer 内，普通 `Left`/`Right` 与 `ctrl+shift+left`/`ctrl+shift+right` 的循环方向一致；`Escape` 或 `q` 回到 Main。
 - transcript 从屏幕第一行开始；其余信息全部位于底部，顺序与 Main 自己的底部区域一致：live/waiting 区、`Read-Only` 输入占位栏、run 状态行、导航提示。
 - transcript 由 Pi 自己的 transcript 组件渲染，因此 user 消息、assistant Markdown、thinking 块、tool call、tool result、compaction summary 与 branch summary 都保持 Main 的配色、间距与框架。

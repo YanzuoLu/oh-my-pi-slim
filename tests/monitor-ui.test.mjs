@@ -608,15 +608,25 @@ test("Monitor create/status/list/delete results render compact receipts, full op
       { id: "00000004", status: "killed", abstract: "fourth" },
     ] },
   };
-  assertBlankSeparator(renderMonitorResult(listResult, { expanded: false }, theme, { args: { action: "list" } }));
-  for (const expanded of [false, true]) {
-    const text = render(renderMonitorResult(listResult, { expanded }, theme, { args: { action: "list" } }));
-    assert.match(text, /^●  Monitors \(1\/4\)/);
-    for (const expected of ["↻  first [00000001] · running", "✓  second [00000002] · completed", "!  third [00000003] · failed", "×  fourth [00000004] · killed"]) {
-      assert.match(text, escaped(expected));
-    }
-    assert.doesNotMatch(text, /[↻✓!×●] [^ ]|[↻✓!×●] {3}/);
+  const listCollapsedComponent = renderMonitorResult(listResult, { expanded: false }, theme, { args: { action: "list" } });
+  assertBlankSeparator(listCollapsedComponent);
+  assert.deepEqual(renderLines(listCollapsedComponent), ["", "●  Monitors (3/4)"]);
+  const listExpandedComponent = renderMonitorResult(listResult, { expanded: true }, theme, { args: { action: "list" } });
+  const listExpandedLines = renderLines(listExpandedComponent);
+  assert.deepEqual(listExpandedLines.slice(0, 4), ["", "●  Monitors (3/4)", "", "↻  first [00000001] · running"]);
+  const listExpanded = render(listExpandedComponent);
+  for (const expected of ["↻  first [00000001] · running", "✓  second [00000002] · completed", "!  third [00000003] · failed", "×  fourth [00000004] · killed"]) {
+    assert.match(listExpanded, escaped(expected));
   }
+  assert.doesNotMatch(listExpanded, /[↻✓!×●] [^ ]|[↻✓!×●] {3}/);
+
+  const emptyList = { details: { monitors: [] } };
+  assert.equal(render(renderMonitorResult(emptyList, { expanded: false }, theme, { args: { action: "list" } })), "○  Monitors (0/0)");
+  assert.equal(render(renderMonitorResult(emptyList, { expanded: true }, theme, { args: { action: "list" } })), "○  Monitors (0/0)\nNo monitors.");
+  const activeAnsi = renderMonitorResult(listResult, { expanded: false }, roleAnsiTheme, { args: { action: "list" } }).render(200)[1].trimEnd();
+  const idleAnsi = renderMonitorResult(emptyList, { expanded: false }, roleAnsiTheme, { args: { action: "list" } }).render(200)[1].trimEnd();
+  assert.equal(activeAnsi, "\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mMonitors (3/4)\u001b[22m\u001b[0m");
+  assert.equal(idleAnsi, "\u001b[2m○\u001b[0m  \u001b[2mMonitors (0/0)\u001b[0m");
 
   const normalResult = { details: { id: "00000001", deleted: true, changed: true, status: "completed", warning: null } };
   const normalBefore = structuredClone(normalResult);

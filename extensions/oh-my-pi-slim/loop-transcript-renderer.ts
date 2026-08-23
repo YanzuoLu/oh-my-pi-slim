@@ -177,14 +177,6 @@ function fireFromDetails(value: unknown): LoopFireDetails | undefined {
   return { id, abstract, interval, fireCount, prompt, firedAt };
 }
 
-function fireLabel(count: number): string {
-  return `${count} fire${count === 1 ? "" : "s"}`;
-}
-
-function failureLabel(count: number): string {
-  return `${count} failure${count === 1 ? "" : "s"}`;
-}
-
 function statusGlyph(loop: PublicLoop, theme: Theme): string {
   if (loop.status === "paused") return theme.fg("dim", "Ⅱ");
   if (loop.lastError) return theme.fg("error", "!");
@@ -218,24 +210,23 @@ function addCompleteLoop(container: Container, loop: PublicLoop, theme: Theme): 
 function renderLoopList(loops: readonly PublicLoop[], theme: Theme, expanded: boolean): Container {
   const sorted = sortLoopsForDisplay(loops);
   const active = sorted.filter((loop) => loop.status === "active").length;
+  const role = active > 0 ? "accent" : "dim";
+  const glyph = active > 0 ? theme.bold("●") : "○";
+  const label = active > 0 ? theme.bold(`Loops (${active}/${sorted.length})`) : `Loops (${active}/${sorted.length})`;
   const container = new Container();
-  const headingRole = active > 0 ? "accent" : "dim";
   container.addChild(new Text(
-    `${formatSemanticGlyphPrefix(theme.fg(headingRole, theme.bold("●")))}${theme.fg(headingRole, theme.bold(`Loops (${active}/${sorted.length})`))}`,
+    `${formatSemanticGlyphPrefix(theme.fg(role, glyph))}${theme.fg(role, label)}`,
     0,
     0,
   ));
+  if (!expanded) return container;
+  if (sorted.length === 0) {
+    container.addChild(new Text(theme.fg("dim", "No loops."), 0, 0));
+    return container;
+  }
   for (const loop of sorted) {
     container.addChild(new Spacer(1));
-    if (expanded) {
-      addCompleteLoop(container, loop, theme);
-      continue;
-    }
-    container.addChild(new Text(
-      `${formatSemanticGlyphPrefix(statusGlyph(loop, theme))}${theme.fg("toolOutput", sanitizeLoopText(loop.abstract))} ${theme.fg("dim", `[${sanitizeLoopText(loop.id)}] · Every ${sanitizeLoopText(loop.interval)} · ${fireLabel(loop.fireCount)}`)}`,
-      0,
-      0,
-    ));
+    addCompleteLoop(container, loop, theme);
   }
   return container;
 }

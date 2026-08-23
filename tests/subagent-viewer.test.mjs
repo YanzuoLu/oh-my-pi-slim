@@ -3132,7 +3132,7 @@ test("a retained set larger than the widget's visible budget keeps every run in 
   assert.equal(harness.viewer.isOpen(), false);
 });
 
-test("a running run that completes keeps the selection and only reorders", async () => {
+test("a running run that completes keeps the selection and creation-stable index", async () => {
   const runs = [retainedRun("a", "running"), retainedRun("b", "running"), retainedRun("c", "running")];
   const harness = createHarness({ runs });
   const { opened } = await openViewer(harness);
@@ -3142,13 +3142,16 @@ test("a running run that completes keeps the selection and only reorders", async
   assert.equal(harness.viewer.currentRun(), "b");
   const before = harness.viewer.model().index;
 
-  // A terminal run sorts after the live ones, so the same id moves to the end of the ring.
-  harness.setRuns([runs[0], runs[2], retainedRun("b", "completed", { output: "done" })]);
+  // The Viewer snapshot is creation-ordered, so a terminal transition changes presentation only.
+  harness.setRuns([runs[0], retainedRun("b", "completed", {
+    output: "done",
+    updatedAt: "2030-01-01T00:00:00.000Z",
+  }), runs[2]]);
   harness.tick();
   await flush();
   assert.equal(harness.viewer.currentRun(), "b", "a status change never drops the selection");
   assert.equal(harness.viewer.model().total, 3);
-  assert.notEqual(harness.viewer.model().index, before, "the run took its new place in the order");
+  assert.equal(harness.viewer.model().index, before, "status and updatedAt changes do not move the run");
   assert.equal(harness.viewer.isOpen(), true);
   harness.viewer.close();
   await opened;

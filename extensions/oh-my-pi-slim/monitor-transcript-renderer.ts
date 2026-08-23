@@ -309,16 +309,26 @@ function renderOperationalState(
   return container;
 }
 
-function renderMonitorList(monitors: readonly MonitorListItem[], theme: Theme): Container {
+function renderMonitorList(monitors: readonly MonitorListItem[], theme: Theme, expanded: boolean): Container {
   const running = monitors.filter((monitor) => monitor.status === "running").length;
+  const terminal = monitors.length - running;
+  const active = running > 0;
+  const role = active ? "accent" : "dim";
+  const glyph = active ? theme.bold("●") : "○";
+  const label = active ? theme.bold(`Monitors (${terminal}/${monitors.length})`) : `Monitors (${terminal}/${monitors.length})`;
   const container = new Container();
-  const headingRole = running > 0 ? "accent" : "dim";
   container.addChild(new Text(
-    `${formatSemanticGlyphPrefix(theme.fg(headingRole, theme.bold("●")))}${theme.fg(headingRole, theme.bold(`Monitors (${running}/${monitors.length})`))}`,
+    `${formatSemanticGlyphPrefix(theme.fg(role, glyph))}${theme.fg(role, label)}`,
     0,
     0,
   ));
+  if (!expanded) return container;
+  if (monitors.length === 0) {
+    container.addChild(new Text(theme.fg("dim", "No monitors."), 0, 0));
+    return container;
+  }
   for (const monitor of monitors) {
+    container.addChild(new Spacer(1));
     container.addChild(new Text(
       `${formatSemanticGlyphPrefix(monitorStatusGlyph(monitor.status, theme))}${theme.fg("toolOutput", sanitizeMonitorText(monitor.abstract))} ${theme.fg("dim", `[${sanitizeMonitorText(monitor.id)}] · ${monitor.status}`)}`,
       0,
@@ -451,7 +461,7 @@ export function renderMonitorResult(
 
   if (action === "list") {
     const monitors = listItemsFromValue(details?.monitors);
-    return spacedResult(monitors ? renderMonitorList(monitors, theme) : fallbackResult(result, options, theme));
+    return spacedResult(monitors ? renderMonitorList(monitors, theme, options.expanded === true) : fallbackResult(result, options, theme));
   }
 
   if (action === "clear" && details) {

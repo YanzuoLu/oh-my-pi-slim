@@ -67,7 +67,7 @@ import {
   type ViewerRunSnapshot,
   type ViewerSnapshot,
 } from "./subagent-viewer-data.js";
-import { SubagentWidget, type SubagentWidgetUI } from "./subagent-widget.js";
+import { SubagentWidget } from "./subagent-widget.js";
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = join(EXTENSION_DIR, "../..");
@@ -353,6 +353,17 @@ function cloneViewerValue<T>(value: T): T | undefined {
   catch { return undefined; }
 }
 
+function compareViewerRunsByCreatedAt(left: ViewerRunSnapshot, right: ViewerRunSnapshot): number {
+  const leftCreated = Date.parse(left.createdAt);
+  const rightCreated = Date.parse(right.createdAt);
+  const leftValid = Number.isFinite(leftCreated);
+  const rightValid = Number.isFinite(rightCreated);
+  if (leftValid && rightValid && leftCreated !== rightCreated) return leftCreated < rightCreated ? -1 : 1;
+  if (leftValid !== rightValid) return leftValid ? -1 : 1;
+  if (left.id === right.id) return 0;
+  return left.id < right.id ? -1 : 1;
+}
+
 function cloneViewerActivity(activity: DetachedRunActivity | undefined): ViewerRunActivity {
   const activeTools: Record<string, { name: string; startedAt?: string }> = {};
   for (const [key, tool] of Object.entries(activity?.activeTools ?? {})) {
@@ -523,10 +534,11 @@ export class OmpsSubagentRuntime {
   /**
    * Read-only snapshot for the Subagent viewer.
    *
-   * Membership is the retained set itself, in `registry.list()` order, which is the same ordering
-   * the Agents widget renders. Every retained run is included in every lifecycle status, so the
-   * viewer's `i/N` and the widget's retained total can never disagree. Every field is copied, so
-   * the viewer can never reach the registry, the activity map, or a retained run object.
+   * Membership is exactly the retained set used by `registry.list()`, the list result, and the
+   * Agents widget. Only this snapshot has its own navigation order. Valid `createdAt` values sort
+   * oldest first with ID tie-breaking, followed by invalid values in ID order. Status and
+   * `updatedAt` therefore never move an existing run, while a resumed run joins at its new creation
+   * position. Every field is copied, so the viewer cannot reach runtime-owned objects.
    */
   viewerSnapshot(): ViewerSnapshot {
     const runs: ViewerRunSnapshot[] = [];
@@ -552,6 +564,7 @@ export class OmpsSubagentRuntime {
         transcriptCutoff: isTerminalStatus(run.status) ? run.updatedAt : undefined,
       });
     }
+    runs.sort(compareViewerRunsByCreatedAt);
     let childSessionDir: string | undefined;
     try { childSessionDir = this.ctx ? this.childSessionDir() : undefined; }
     catch { childSessionDir = undefined; }
@@ -632,7 +645,7 @@ export class OmpsSubagentRuntime {
     this.modelResolver = undefined;
     this.denyResolver = undefined;
     this.shuttingDown = false;
-    this.widget.setUICtx(ctx.mode === "tui" ? ctx.ui as unknown as SubagentWidgetUI : undefined);
+    this.widget.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined);
 
     const entries: unknown[] = [];
     const deliveredNotifications = new Map<string, NotificationDelivery>();

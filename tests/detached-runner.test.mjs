@@ -105,7 +105,13 @@ function commandLog(path) {
   try { return readFileSync(path, "utf8").split("\n").filter(Boolean); } catch { return []; }
 }
 
+/** Exact prompt strings received by the RPC stub, one JSON string per line. */
+function promptLog(path) {
+  try { return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)); } catch { return []; }
+}
+
 let migrationSequence = 0;
+let promptLogSequence = 0;
 
 /** A cross-model resume run: a reused session file plus the internal preflight marker the runtime writes. */
 function makeMigrationRun(scenario, { resumeCompactFrom = "legacy/other-model:low", model } = {}) {
@@ -119,6 +125,12 @@ function makeMigrationRun(scenario, { resumeCompactFrom = "legacy/other-model:lo
     },
   });
   return { ...run, logFile, commands: () => commandLog(logFile), cleanupLog: () => rmSync(logFile, { force: true }) };
+}
+
+function makePromptLoggedRun(scenario) {
+  const logFile = join(CACHE, `stub-prompts-${++promptLogSequence}-${Date.now()}.jsonl`);
+  const run = makeRun(scenario, { extraEnv: { OMPS_STUB_PROMPT_LOG: logFile } });
+  return { ...run, logFile, prompts: () => promptLog(logFile), cleanupLog: () => rmSync(logFile, { force: true }) };
 }
 
 async function waitFor(predicate, timeoutMs = 4000) {
@@ -592,7 +604,8 @@ test("a missing marker or an unchanged model base skips the migration compaction
 });
 
 test("waiting request persists, legacy controls are rejected, and matching sequence reply continues", async () => {
-  const run = makeRun("contact");
+  const run = makePromptLoggedRun("contact");
+  const reply = "continue exactly";
   try {
     const waiting = await waitForStatus(run, "waiting");
     assert.equal("id" in waiting.request, false);
@@ -608,18 +621,25 @@ test("waiting request persists, legacy controls are rejected, and matching seque
     assert.equal(stillWaiting.waitingSeq, 1);
     assert.equal(stillWaiting.updatedAt, waitingUpdatedAt);
 
-    sendControl(run, { token: run.config.token, type: "reply", waitingSeq: 1, message: "continue" });
+    sendControl(run, { token: run.config.token, type: "reply", waitingSeq: 1, message: reply });
     const completed = await waitForStatus(run, "completed");
     assert.equal(completed.output, "completed after reply");
     assert.equal(completed.request, undefined);
+    const prompts = run.prompts();
+    assert.deepEqual(prompts, [run.config.task, reply]);
+    assert.equal(prompts[1], reply, "the matching reply is the exact second prompt");
+    assert.doesNotMatch(prompts[1], /Supervisor reply for run/);
+    assert.equal(prompts[1].includes(run.config.runId), false);
+    assert.equal(prompts[1].includes("\n"), false);
     assert.equal(await waitForExit(run), 0);
   } finally {
+    run.cleanupLog();
     await cleanup(run);
   }
 });
 
 test("sequence-one reply cannot wake sequence two and consecutive waiting cycles complete", async () => {
-  const run = makeRun("contact-cycles");
+  const run = makePromptLoggedRun("contact-cycles");
   try {
     const first = await waitForStatus(run, "waiting");
     assert.equal(first.waitingSeq, 1);
@@ -638,8 +658,10 @@ test("sequence-one reply cannot wake sequence two and consecutive waiting cycles
     sendControl(run, { token: run.config.token, type: "reply", waitingSeq: 2, message: "second answer" });
     const completed = await waitForStatus(run, "completed");
     assert.equal(completed.output, "completed after reply");
+    assert.deepEqual(run.prompts(), [run.config.task, "first answer", "second answer"]);
     assert.equal(await waitForExit(run), 0);
   } finally {
+    run.cleanupLog();
     await cleanup(run);
   }
 });
