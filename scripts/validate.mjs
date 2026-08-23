@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "1.0.3", "package version must be 1.0.3");
+check(packageJson.version === "1.0.4", "package version must be 1.0.4");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "1.0.3" && lock.packages?.[""]?.version === "1.0.3", "package-lock version must be 1.0.3");
+check(lock.version === "1.0.4" && lock.packages?.[""]?.version === "1.0.4", "package-lock version must be 1.0.4");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -571,7 +571,7 @@ hasNone(shutdownStatusHandler, ["setStatus("], "shutdown must not duplicate the 
 const presetStatusBody = extension.slice(extension.indexOf("export function presetStatusContent"), extension.indexOf("function isAnthropicOAuth"));
 hasNone(presetStatusBody, [".bold(", "theme.bold", "glyph", "Glyph"], "OMPS status plain accent-only rendering");
 check((json("package.json").version ?? "").trim().length > 0, "package.json must define a non-empty version for the OMPS status line");
-check(json("package.json").version === "1.0.3", "Fast status must ship in v1.0.3");
+check(json("package.json").version === "1.0.4", "Fast status must ship in v1.0.4");
 
 const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
 const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
@@ -703,6 +703,11 @@ hasAll(goalRuntime, [
   "Use Todo, Monitor, and Subagents when useful.", "If safe progress is blocked, call `goal pause` with a concrete reason.",
   "Call `goal complete` only with one evidence entry for every criterion.",
 ], "Goal durable core, cached UI, renderer registration, and continuation numbering contract");
+const goalAgentSettledBlock = goalRuntime.slice(goalRuntime.indexOf("onAgentSettled(ctx:"), goalRuntime.indexOf("async execute(inputValue:"));
+hasAll(goalAgentSettledBlock, [
+  'final?.stopReason === "error" && !hostAbort',
+  'final?.stopReason === "aborted" && !hostAbort',
+], "Goal host-abort gates for provider errors and aborted runs");
 hasNone(goalRuntime, ["\"Rules:\"", '"- Pursue this Goal now."', '"- Make concrete progress in this run."'], "Goal frozen model text rewrite boundary");
 hasNone(goalRuntime, ["registerEntryRenderer", "registerShortcut", "goalId", "revision", "action: \"list\""], "Goal public-ID and action boundary");
 hasAll(goalWidget, [
@@ -2788,6 +2793,7 @@ hasAll(goalTests, [
   "Goal reminder type and model-facing text", 'GOAL_REMINDER_MESSAGE_TYPE, "oh-my-pi-slim:goal-reminder"',
   'runtime.status().status, "retry_wait"', 'runtime.phaseReminder(), undefined',
   "continuation waits for the full safe gate", "provider failures use unbounded frozen backoff",
+  'test("host abort with provider error preserves active Goal without retry state, events, entries, or timer", async () => {',
   "user abort pauses, host abort does not", "no-progress counts only automatic continuation runs", "ownership and Goal view stats",
   "slash command resends a real user message", "continuationNumber", "refreshUI()",
   "clear is a no-op with no Goal and never appends a tombstone",

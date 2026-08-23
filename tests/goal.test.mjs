@@ -434,6 +434,29 @@ test("provider failures use unbounded frozen backoff, timer-safe activation, and
   assert.equal(harness.runtime.status().lastProviderError, null);
 });
 
+test("host abort with provider error preserves active Goal without retry state, events, entries, or timer", async () => {
+  const harness = createHarness();
+  await harness.execute(createInput);
+  const stateEventsBefore = harness.sent.filter((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE).length;
+  const stateEntriesBefore = harness.branch.filter((entry) => entry.customType === GOAL_STATE_ENTRY_TYPE).length;
+  const branchEntriesBefore = harness.branch.length;
+
+  harness.runtime.onAgentStart();
+  harness.runtime.markHostAbort();
+  harness.runtime.onAgentEnd({
+    messages: [{ role: "assistant", stopReason: "error", errorMessage: "This operation was aborted" }],
+  });
+  harness.runtime.onAgentSettled(harness.ctx, { suppressContinuation: true });
+
+  assert.equal(harness.runtime.status().status, "active");
+  assert.equal(harness.runtime.status().retryAttempt, 0);
+  assert.equal(harness.runtime.status().lastProviderError, null);
+  assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE).length, stateEventsBefore);
+  assert.equal(harness.branch.filter((entry) => entry.customType === GOAL_STATE_ENTRY_TYPE).length, stateEntriesBefore);
+  assert.equal(harness.branch.length, branchEntriesBefore);
+  assert.equal(harness.timers.length, 0);
+});
+
 test("user abort pauses, host abort does not, and no-progress counts only automatic continuation runs", async () => {
   const userAbort = createHarness();
   await userAbort.execute(createInput);

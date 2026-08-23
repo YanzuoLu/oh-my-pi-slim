@@ -772,7 +772,7 @@ export class GoalRuntime {
 
     if (!this.snapshot) return;
     const status = this.snapshot.goal.status;
-    if ((status === "active" || status === "retry_wait") && final?.stopReason === "error") {
+    if ((status === "active" || status === "retry_wait") && final?.stopReason === "error" && !hostAbort) {
       this.enterRetryWait(final.errorMessage ?? "Provider request failed.");
       return;
     }
