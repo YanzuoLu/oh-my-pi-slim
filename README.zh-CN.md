@@ -265,6 +265,8 @@ Fast Mode 属于当前 Pi session，新 session 默认关闭。最近一次 `/fa
 
 v1.0.0 写入 `oh-my-pi-slim.json` 顶层的 `fast` 字段现已被忽略，你可以手动删除该遗留字段。Fast Mode 仍与 preset 是否激活相互独立。
 
+当 OMPS active 且 current provider 精确为 `openai` 或 `openai-codex` 时，现有 OMPS status 会追加 `Fast Mode On` 或 `Fast Mode Off`。其他 provider 不显示 Fast Mode suffix。该状态只反映 session toggle，不证明 server 已接受 priority service。
+
 Fast Mode 作用于全部普通 agent request。仅当 provider 精确为 `openai` 或 `openai-codex`，且 payload model 与当前 Pi model 匹配时，才会请求 `service_tier: "priority"`。切换后的状态只由 future child `create` 与 `resume` launch 继承。running child 不会热切换。compaction 与 branch summary model call 仍使用 default tier。账户没有 priority 权限时 request 可能失败。后加载的 extension 可以再次覆盖 OMPS 修改后的 payload。Fast Mode 不承诺 priority capacity 一定获批，也不承诺 request 一定更快。
 
 由于注入的 tier 不会反映在估算中，Pi 的 Codex footer cost 可能低估 priority-tier cost 约 2–2.5 倍。

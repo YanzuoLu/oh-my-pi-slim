@@ -26,10 +26,14 @@ export function fastEnabledFromEnv(value: unknown): boolean {
   return value === "1";
 }
 
+export function isFastModeProvider(provider: unknown): boolean {
+  return provider === "openai" || provider === "openai-codex";
+}
+
 export function applyFastServiceTier(payload: unknown, model: FastModeModel | undefined): Record<string, unknown> | undefined {
   try {
     if (!isPlainObject(payload) || !model) return;
-    if (model.provider !== "openai" && model.provider !== "openai-codex") return;
+    if (!isFastModeProvider(model.provider)) return;
     if (typeof model.id !== "string" || payload.model !== model.id) return;
     return { ...payload, service_tier: "priority" };
   } catch {

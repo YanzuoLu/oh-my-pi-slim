@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "1.0.1", "package version must be 1.0.1");
+check(packageJson.version === "1.0.2", "package version must be 1.0.2");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "1.0.1" && lock.packages?.[""]?.version === "1.0.1", "package-lock version must be 1.0.1");
+check(lock.version === "1.0.2" && lock.packages?.[""]?.version === "1.0.2", "package-lock version must be 1.0.2");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -472,7 +472,9 @@ hasAll(fastMode, [
   'export interface FastState {', 'version: typeof FAST_STATE_VERSION;', 'fast: boolean;',
   'export function fastEnvValue(enabled: boolean): "1" | "0"', 'return enabled ? "1" : "0"',
   "export function fastEnabledFromEnv(value: unknown): boolean", 'return value === "1"',
-  "export function applyFastServiceTier", 'model.provider !== "openai" && model.provider !== "openai-codex"',
+  "export function isFastModeProvider(provider: unknown): boolean",
+  'return provider === "openai" || provider === "openai-codex"',
+  "export function applyFastServiceTier", "if (!isFastModeProvider(model.provider)) return",
   'payload.model !== model.id', 'return { ...payload, service_tier: "priority" }',
   "export function makeFastState(fast: boolean): FastState", "return { version: FAST_STATE_VERSION, fast }",
   "export function parseFastState(value: unknown): FastState | undefined", "const keys = Reflect.ownKeys(value)",
@@ -495,11 +497,20 @@ hasAll(fastCommandBlock, ['description: "Toggle OpenAI priority service tier for
 hasNone(fastCommandBlock, [
   'setStatus(', 'process.env', 'action === "on"', 'action === "off"', '"status"', "getArgumentCompletions",
   "readFastFlag", "writeFastFlag", "getAgentDir", "CONFIG_FILE",
-], "Fast Mode command has no parameters, config IO, environment writes, or UI status surface");
+], "Fast Mode command has no parameters, config IO, environment writes, or independent status write");
 check(
   fastCommandBlock.indexOf("pi.appendEntry(FAST_STATE_ENTRY_TYPE, makeFastState(next))") < fastCommandBlock.indexOf("fastEnabled = next"),
   "Fast Mode command must append hidden session state before changing in-memory state",
 );
+check(
+  fastCommandBlock.indexOf("fastEnabled = next") < fastCommandBlock.indexOf("updateStatus(ctx)"),
+  "Fast Mode command must refresh the shared OMPS status after committing the session toggle",
+);
+check((fastCommandBlock.match(/updateStatus\(ctx\)/g) ?? []).length === 1, "Fast Mode success path must refresh status exactly once");
+const fastUsageBlock = fastCommandBlock.slice(fastCommandBlock.indexOf("if (args.trim())"), fastCommandBlock.indexOf("const next = !fastEnabled"));
+const fastFailureBlock = fastCommandBlock.slice(fastCommandBlock.indexOf("} catch (error) {"), fastCommandBlock.indexOf("fastEnabled = next"));
+hasNone(fastUsageBlock, ["updateStatus("], "Fast Mode Usage path must not refresh status");
+hasNone(fastFailureBlock, ["updateStatus("], "Fast Mode append failure path must not refresh status");
 check(
   !extension.includes("object.fast") && !extension.slice(extension.indexOf("interface PresetConfig"), extension.indexOf("interface TreeNotificationHold")).includes("fast:"),
   "preset config parsing must ignore every legacy Fast Mode field",
@@ -521,11 +532,12 @@ hasAll(extension, [
   'const PACKAGE_VERSION = readPackageVersion(join(PACKAGE_ROOT, "package.json"))',
   "function readPackageVersion(path: string): string",
   "return nonEmptyString((raw as Record<string, unknown>).version, `${path}.version`)",
-  "export function presetStatusContent(theme: Pick<Theme, \"fg\">, presetName: string | undefined): string | undefined",
+  "export function presetStatusContent(",
+  'theme: Pick<Theme, "fg">', "presetName: string | undefined", "fastEnabled?: boolean", "model?: FastModeModel",
   "if (presetName === undefined) return undefined",
-  'return theme.fg("accent", `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})`)',
-  'ctx.ui.setStatus("oh-my-pi-slim", presetStatusContent(ctx.ui.theme, active ? activePresetName : undefined))',
-  'ctx.ui.setStatus("oh-my-pi-slim", undefined)',
+  'const fastStatus = isFastModeProvider(model?.provider) ? ` · Fast Mode ${fastEnabled ? "On" : "Off"}` : ""',
+  'return theme.fg("accent", `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})${fastStatus}`)',
+  'presetStatusContent(ctx.ui.theme, active ? activePresetName : undefined, fastEnabled, ctx.model)',
 ], "main extension status line contract");
 hasNone(extension, [
   "`orchestrator${",
@@ -535,11 +547,20 @@ hasNone(extension, [
   "process.cwd()",
 ], "main extension status line removed sources");
 check(!/\(v\d+\.\d+\.\d+\)/.test(extension), "main extension must not hardcode a package version in the status line");
-check((extension.match(/setStatus\(/g) ?? []).length === 2, "main extension must set the oh-my-pi-slim status only when updating and when shutting down");
-check(!/setStatus\("(?!oh-my-pi-slim")/.test(extension), "main extension must keep the oh-my-pi-slim status key");
+check((extension.match(/setStatus\(/g) ?? []).length === 1, "main extension must route every OMPS status refresh through one minimal setStatus write");
+const mainStatusKeys = [...extension.matchAll(/setStatus\(\s*"([^"]+)"/g)].map((match) => match[1]);
+check(JSON.stringify(mainStatusKeys) === JSON.stringify(["oh-my-pi-slim"]), "main extension must use only the existing OMPS status key");
+check((extension.match(/pi\.on\("model_select"/g) ?? []).length === 1, "main extension must register exactly one model_select status refresh");
+const modelSelectHandler = extension.slice(extension.indexOf('pi.on("model_select"'), extension.indexOf('pi.on("session_start"'));
+hasAll(modelSelectHandler, ["updateStatus(ctx)"], "model_select status refresh");
+check((modelSelectHandler.match(/updateStatus\(ctx\)/g) ?? []).length === 1, "model_select handler must refresh status exactly once");
+const shutdownStatusHandler = extension.slice(extension.indexOf('pi.on("session_shutdown"'));
+hasAll(shutdownStatusHandler, ["active = false", "activePresetName = undefined", "updateStatus(ctx)"], "shutdown clears the shared OMPS status through updateStatus");
+hasNone(shutdownStatusHandler, ["setStatus("], "shutdown must not duplicate the shared status write");
 const presetStatusBody = extension.slice(extension.indexOf("export function presetStatusContent"), extension.indexOf("function isAnthropicOAuth"));
 hasNone(presetStatusBody, [".bold(", "theme.bold", "glyph", "Glyph"], "OMPS status plain accent-only rendering");
 check((json("package.json").version ?? "").trim().length > 0, "package.json must define a non-empty version for the OMPS status line");
+check(json("package.json").version === "1.0.2", "Fast status must ship in v1.0.2");
 
 const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
 const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
@@ -556,6 +577,10 @@ hasAll(sessionStartHandler, [
   "Fast Mode is session-wide across every branch", "full session entry log rather than the active branch",
   "fastEnabled = replayFastState(ctx.sessionManager.getEntries())",
 ], "session_start Fast Mode full-session replay contract");
+check(
+  /catch \(error\) \{[\s\S]*?report\(ctx,[\s\S]*?updateStatus\(ctx\);\s*return;/.test(sessionStartHandler),
+  "session_start setup failure must clear stale OMPS status before returning",
+);
 check((extension.match(/sessionManager\.getEntries\(\)/g) ?? []).length === 1, "Fast Mode must replay from getEntries exactly once in session_start");
 hasNone(sessionStartHandler, ["getBranch", "getAgentDir", "CONFIG_FILE", "readFileSync"], "session_start Fast Mode replay must not read branch-local or agent-global config state");
 check(
@@ -2429,15 +2454,28 @@ check(existsSync(join(ROOT, "tests/loop.test.mjs")), "Loop core contract tests m
 check(existsSync(join(ROOT, "tests/fast-mode.test.mjs")), "Fast Mode pure session-state contract tests must exist");
 const fastModeTests = read("tests/fast-mode.test.mjs");
 hasAll(fastModeTests, [
-  "service tier injection requires exact provider and payload model without mutation",
+  "provider eligibility accepts only the exact OpenAI provider names",
+  "service tier injection reuses provider eligibility and requires the exact payload model without mutation",
+  "isFastModeProvider(provider)", "isFastModeProvider\\(model\\.provider\\)",
   "Fast state maker and parser enforce exact version-1 boolean data",
   "session replay uses the last valid exact custom entry across the full entry log",
   "session replay defaults off and skips malformed latest entries without erasing valid state",
   'FAST_STATE_ENTRY_TYPE, "oh-my-pi-slim:fast-state"', "assert.equal(FAST_STATE_VERSION, 1)",
   "an invalid latest candidate falls back to the last valid session state",
   'fastEnabledFromEnv("1")', 'fastEnabledFromEnv(value)', "broken entry",
-], "Fast Mode payload, environment, exact entry parsing, replay, and fail-closed tests");
+], "Fast Mode provider helper reuse, payload, environment, exact entry parsing, replay, and fail-closed tests");
 hasNone(fastModeTests, ["node:fs", "node:crypto", "readFastFlag", "writeFastFlag", "FastModeWriteIO"], "Fast Mode tests must not retain config IO seams");
+check(existsSync(join(ROOT, "tests/preset-status.test.mjs")), "OMPS preset status contract tests must exist");
+const presetStatusTests = read("tests/preset-status.test.mjs");
+hasAll(presetStatusTests, [
+  "Fast Mode On or Off for both exact OpenAI providers", 'for (const provider of ["openai", "openai-codex"])',
+  "other providers, case mismatches, and an undefined model", "inactive OMPS status clears the same footer slot",
+  "the existing two-argument call stays suffix-free", "the complete status line is rendered in one accent span",
+  "OMPS status version tracks package metadata", "status source uses one OMPS key and refreshes every required lifecycle",
+  "one model_select handler refreshes status for model command, cycle, and setModel changes",
+  "a successful Fast Mode toggle refreshes only after append and assignment", "Usage does not refresh status",
+  "append failure does not refresh status", "a failed session restore clears the stale footer before returning", "session_shutdown",
+], "OMPS Fast status rendering and source contract tests");
 check(existsSync(join(ROOT, "tests/loop-ui.test.mjs")), "Loop visual contract tests must exist");
 check(existsSync(join(ROOT, "tests/goal-ui.test.mjs")), "Goal visual contract tests must exist");
 check(existsSync(join(ROOT, "tests/monitor-ui.test.mjs")), "Monitor visual contract tests must exist");
@@ -2869,6 +2907,9 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "fork inherits the last Fast Mode state", "target path that Pi copies into the fork",
         "With `--no-session`", "lasts only for the current process", "cannot survive a restart",
         "top-level `fast` field used by v1.0.0", "is ignored", "remove that legacy field manually",
+        "When OMPS is active", "current provider is exactly `openai` or `openai-codex`", "existing OMPS status appends",
+        "`Fast Mode On` or `Fast Mode Off`", "Other providers show no Fast Mode suffix", "reflects only the session toggle",
+        "does not prove that the server accepted priority service",
         "all ordinary agent requests", "provider is exactly `openai` or `openai-codex`", "payload model matches the active Pi model",
         "future child `create` and `resume` launches", "Running children do not hot-switch",
         "Compaction and branch-summary model calls keep their default service tier",
@@ -2913,6 +2954,9 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "fork 会继承", "复制的 target path 上最后一条 Fast Mode 状态",
         "使用 `--no-session`", "只在当前进程内保留", "进程重启后不会恢复",
         "v1.0.0 写入", "顶层的 `fast` 字段现已被忽略", "手动删除该遗留字段",
+        "OMPS active", "current provider 精确为 `openai` 或 `openai-codex`", "现有 OMPS status 会追加",
+        "`Fast Mode On` 或 `Fast Mode Off`", "其他 provider 不显示 Fast Mode suffix", "只反映 session toggle",
+        "不证明 server 已接受 priority service",
         "全部普通 agent request", "provider 精确为 `openai` 或 `openai-codex`", "payload model 与当前 Pi model 匹配",
         "future child `create` 与 `resume` launch", "running child 不会热切换",
         "compaction 与 branch summary model call 仍使用 default tier",

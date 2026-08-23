@@ -15,8 +15,10 @@ import { cleanupLegacySubagentSetup, ensurePackageSetup } from "./bootstrap.js";
 import {
   applyFastServiceTier,
   FAST_STATE_ENTRY_TYPE,
+  isFastModeProvider,
   makeFastState,
   replayFastState,
+  type FastModeModel,
 } from "./fast-mode.js";
 import {
   GOAL_CONTINUATION_MESSAGE_TYPE,
@@ -290,9 +292,15 @@ function availablePresetsMessage(config: PresetConfig): string {
 }
 
 /** Footer status content for the active preset. Undefined clears the status slot. */
-export function presetStatusContent(theme: Pick<Theme, "fg">, presetName: string | undefined): string | undefined {
+export function presetStatusContent(
+  theme: Pick<Theme, "fg">,
+  presetName: string | undefined,
+  fastEnabled?: boolean,
+  model?: FastModeModel,
+): string | undefined {
   if (presetName === undefined) return undefined;
-  return theme.fg("accent", `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})`);
+  const fastStatus = isFastModeProvider(model?.provider) ? ` · Fast Mode ${fastEnabled ? "On" : "Off"}` : "";
+  return theme.fg("accent", `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})${fastStatus}`);
 }
 
 function isAnthropicOAuth(ctx: ExtensionContext): boolean {
@@ -414,7 +422,10 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
 
   function updateStatus(ctx: ExtensionContext): void {
     if (!ctx.hasUI) return;
-    ctx.ui.setStatus("oh-my-pi-slim", presetStatusContent(ctx.ui.theme, active ? activePresetName : undefined));
+    ctx.ui.setStatus(
+      "oh-my-pi-slim",
+      presetStatusContent(ctx.ui.theme, active ? activePresetName : undefined, fastEnabled, ctx.model),
+    );
   }
 
   function takeTreeNotificationHold(): TreeNotificationHold | undefined {
@@ -558,6 +569,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
         return;
       }
       fastEnabled = next;
+      updateStatus(ctx);
       report(ctx, `Fast Mode ${next ? "enabled" : "disabled"} for this Pi session. Priority service tier requires account permission, and requests may fail without access.`, "info");
     },
   });
@@ -651,6 +663,10 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     return typeof saved === "string" && saved.trim() ? saved.trim() : undefined;
   }
 
+  pi.on("model_select", (_event, ctx) => {
+    updateStatus(ctx);
+  });
+
   pi.on("session_start", async (event, ctx) => {
     invalidateCheckpoint(false);
     clearTreeNotificationHold();
@@ -687,6 +703,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       await subagents.restore(ctx);
     } catch (error) {
       report(ctx, error instanceof Error ? error.message : String(error), "error");
+      updateStatus(ctx);
       return;
     }
     const flagPreset = pi.getFlag("omps-preset");
@@ -968,6 +985,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     subagents.setDenyResolver();
     originalModel = undefined;
     originalThinking = undefined;
-    if (ctx.hasUI) ctx.ui.setStatus("oh-my-pi-slim", undefined);
+    updateStatus(ctx);
   });
 }

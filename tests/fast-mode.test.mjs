@@ -8,6 +8,7 @@ const {
   applyFastServiceTier,
   fastEnabledFromEnv,
   fastEnvValue,
+  isFastModeProvider,
   makeFastState,
   parseFastState,
   replayFastState,
@@ -30,7 +31,15 @@ test("Fast Mode environment encoding accepts exactly the enabled child snapshot"
   for (const value of [undefined, "", "0", "true", 1, true]) assert.equal(fastEnabledFromEnv(value), false);
 });
 
-test("service tier injection requires exact provider and payload model without mutation", () => {
+test("provider eligibility accepts only the exact OpenAI provider names", () => {
+  for (const provider of ["openai", "openai-codex"]) assert.equal(isFastModeProvider(provider), true);
+  for (const provider of [undefined, null, "", "anthropic", "OpenAI", "OPENAI", "openai-Codex", 1, true]) {
+    assert.equal(isFastModeProvider(provider), false);
+  }
+});
+
+test("service tier injection reuses provider eligibility and requires the exact payload model without mutation", () => {
+  assert.match(applyFastServiceTier.toString(), /isFastModeProvider\(model\.provider\)/);
   for (const provider of ["openai", "openai-codex"]) {
     const payload = { model: "gpt-exact", service_tier: "default", nested: { kept: true } };
     const result = applyFastServiceTier(payload, { provider, id: "gpt-exact" });
