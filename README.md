@@ -265,7 +265,7 @@ Fast Mode belongs to the current Pi session and defaults to off for a new sessio
 
 The top-level `fast` field used by v1.0.0 in `oh-my-pi-slim.json` is ignored. You may remove that legacy field manually. Fast Mode remains independent of preset activation.
 
-When OMPS is active and the current provider is exactly `openai` or `openai-codex`, the existing OMPS status appends `Fast Mode On` or `Fast Mode Off`. Other providers show no Fast Mode suffix. This status reflects only the session toggle. It does not prove that the server accepted priority service.
+When OMPS is active and the active preset contains at least one role whose provider is exactly `openai` or `openai-codex`, the existing OMPS status appends `Fast Mode On` or `Fast Mode Off`. A preset whose seven roles all use other providers shows no Fast Mode suffix, even if Main is switched manually to OpenAI. This suffix reflects only the session toggle. It does not report the current Main provider. It does not prove that the server accepted priority service.
 
 Fast Mode affects all ordinary agent requests whose provider is exactly `openai` or `openai-codex` and whose payload model matches the active Pi model. It requests `service_tier: "priority"`. A toggle is inherited only by future child `create` and `resume` launches. Running children do not hot-switch. Compaction and branch-summary model calls keep their default service tier. An account without priority access may see requests fail. A later-loaded extension can override the payload after OMPS. Fast Mode does not promise that priority capacity will be granted or that a request will complete faster.
 

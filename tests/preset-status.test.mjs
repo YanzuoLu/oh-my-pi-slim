@@ -34,37 +34,71 @@ const PACKAGE_JSON_URL = new URL("../package.json", import.meta.url);
 const PACKAGE_VERSION = JSON.parse(readFileSync(PACKAGE_JSON_URL, "utf8")).version;
 const INDEX_URL = new URL("../extensions/oh-my-pi-slim/index.ts", import.meta.url);
 
-const { presetStatusContent } = await import(INDEX_URL.href);
+const { presetFastModeEligible, presetStatusContent } = await import(INDEX_URL.href);
 
+const ROLES = ["orchestrator", "explorer", "librarian", "oracle", "designer", "fixer", "observer"];
 const theme = { fg: (role, text) => `<${role}>${text}</${role}>` };
-const preset = "sol_fable_ora_opus_mix";
-const baseStatus = `OMPS Preset: ${preset} (v${PACKAGE_VERSION})`;
+const presetName = "sol_fable_ora_opus_mix";
+const baseStatus = `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})`;
 
-function status(fastEnabled, provider) {
-  return presetStatusContent(theme, preset, fastEnabled, provider === undefined ? undefined : { provider, id: "gpt-exact" });
+function makePreset(orchestratorProvider = "anthropic", overrides = {}) {
+  return Object.fromEntries(ROLES.map((role) => [role, {
+    provider: role === "orchestrator" ? orchestratorProvider : "anthropic",
+    model: `${role}-model`,
+    thinking: "high",
+    ...overrides[role],
+  }]));
 }
 
-test("active OMPS status appends Fast Mode On or Off for both exact OpenAI providers", () => {
+function status(fastEnabled, preset) {
+  return presetStatusContent(theme, presetName, fastEnabled, presetFastModeEligible(preset));
+}
+
+test("active preset eligibility checks all seven roles and accepts both exact OpenAI providers", () => {
+  const allNonOpenAI = makePreset();
+  assert.deepEqual(Object.keys(allNonOpenAI), ROLES);
+  assert.equal(presetFastModeEligible(allNonOpenAI), false);
+
   for (const provider of ["openai", "openai-codex"]) {
-    assert.equal(status(true, provider), `<accent>${baseStatus} · Fast Mode On</accent>`);
-    assert.equal(status(false, provider), `<accent>${baseStatus} · Fast Mode Off</accent>`);
+    assert.equal(presetFastModeEligible(makePreset("anthropic", { designer: { provider } })), true);
+    assert.equal(presetFastModeEligible(makePreset(provider)), true);
   }
 });
 
-test("other providers, case mismatches, and an undefined model keep the original preset status", () => {
-  for (const provider of ["anthropic", "OpenAI", "OPENAI", "openai-Codex", ""]) {
-    assert.equal(status(true, provider), `<accent>${baseStatus}</accent>`);
-    assert.equal(status(false, provider), `<accent>${baseStatus}</accent>`);
+test("Main can be non-OpenAI while any OpenAI specialist qualifies the active preset", () => {
+  for (const role of ROLES.slice(1)) {
+    const preset = makePreset("anthropic", { [role]: { provider: "openai" } });
+    assert.equal(preset.orchestrator.provider, "anthropic");
+    assert.equal(presetFastModeEligible(preset), true, `${role} must qualify the preset`);
   }
-  assert.equal(status(true, undefined), `<accent>${baseStatus}</accent>`);
-  assert.equal(status(false, undefined), `<accent>${baseStatus}</accent>`);
-  assert.equal(presetStatusContent(theme, preset), `<accent>${baseStatus}</accent>`, "the existing two-argument call stays suffix-free");
+  assert.equal(status(true, makePreset("anthropic", { observer: { provider: "openai-codex" } })), `<accent>${baseStatus} · Fast Mode On</accent>`);
 });
 
-test("inactive OMPS status clears the same footer slot regardless of Fast Mode or model", () => {
+test("all non-OpenAI providers and case mismatches do not qualify the active preset", () => {
+  assert.equal(presetFastModeEligible(makePreset()), false);
+  for (const provider of ["OpenAI", "OPENAI", "openai-Codex", "OPENAI-CODEX", ""]) {
+    assert.equal(presetFastModeEligible(makePreset("anthropic", { explorer: { provider } })), false);
+  }
+  assert.equal(presetFastModeEligible(undefined), false);
+});
+
+test("eligible active preset status appends Fast Mode On or Off as a session toggle only", () => {
+  const eligiblePreset = makePreset("anthropic", { librarian: { provider: "openai" } });
+  assert.equal(status(true, eligiblePreset), `<accent>${baseStatus} · Fast Mode On</accent>`);
+  assert.equal(status(false, eligiblePreset), `<accent>${baseStatus} · Fast Mode Off</accent>`);
+});
+
+test("a manually selected OpenAI Main cannot qualify an all-non-OpenAI active preset", () => {
+  const allNonOpenAI = makePreset();
+  assert.equal(status(true, allNonOpenAI), `<accent>${baseStatus}</accent>`);
+  assert.equal(status(false, allNonOpenAI), `<accent>${baseStatus}</accent>`);
+  assert.equal(presetStatusContent(theme, presetName), `<accent>${baseStatus}</accent>`, "the existing two-argument call stays suffix-free");
+});
+
+test("inactive OMPS status clears the same footer slot regardless of Fast Mode or preset eligibility", () => {
   assert.equal(presetStatusContent(theme, undefined), undefined);
-  assert.equal(presetStatusContent(theme, undefined, true, { provider: "openai", id: "gpt-exact" }), undefined);
-  assert.equal(presetStatusContent(theme, undefined, false, { provider: "openai-codex", id: "gpt-exact" }), undefined);
+  assert.equal(presetStatusContent(theme, undefined, true, true), undefined);
+  assert.equal(presetStatusContent(theme, undefined, false, true), undefined);
 });
 
 test("the complete status line is rendered in one accent span", () => {
@@ -75,7 +109,7 @@ test("the complete status line is rendered in one accent span", () => {
       return `<${role}>${text}</${role}>`;
     },
   };
-  const content = presetStatusContent(trackingTheme, preset, true, { provider: "openai", id: "gpt-exact" });
+  const content = presetStatusContent(trackingTheme, presetName, true, true);
   assert.equal(content, `<accent>${baseStatus} · Fast Mode On</accent>`);
   assert.deepEqual(calls, [{ role: "accent", text: `${baseStatus} · Fast Mode On` }]);
   assert.equal(content.match(/<accent>/g)?.length, 1);
@@ -93,11 +127,12 @@ test("OMPS status version tracks package metadata instead of a checked-in litera
   assert.equal(presetStatusContent(theme, "any_preset"), `<accent>OMPS Preset: any_preset (v${PACKAGE_VERSION})</accent>`);
 });
 
-test("status source uses one OMPS key and refreshes every required lifecycle", () => {
+test("status source uses active preset eligibility and refreshes every required lifecycle", () => {
   const source = readFileSync(INDEX_URL, "utf8");
   const statusKeys = [...source.matchAll(/setStatus\(\s*"([^"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(statusKeys, ["oh-my-pi-slim"], "updateStatus owns the only status write and existing key");
-  assert.match(source, /presetStatusContent\(ctx\.ui\.theme, active \? activePresetName : undefined, fastEnabled, ctx\.model\)/);
+  assert.match(source, /Object\.values\(preset\)\.some\(\(role\) => isFastModeProvider\(role\.provider\)\)/);
+  assert.match(source, /presetStatusContent\(ctx\.ui\.theme, active \? activePresetName : undefined, fastEnabled, presetFastModeEligible\(activePreset\)\)/);
   assert.doesNotMatch(source, /`orchestrator\$\{/);
 
   const activateBlock = source.slice(source.indexOf("async function activate"), source.indexOf("async function deactivate"));
@@ -120,12 +155,24 @@ test("status source uses one OMPS key and refreshes every required lifecycle", (
   assert.doesNotMatch(shutdownBlock, /setStatus\(/, "shutdown clears through updateStatus instead of a duplicate write");
 });
 
-test("one model_select handler refreshes status for model command, cycle, and setModel changes", () => {
+test("preset switch updates active preset before status and omps off clears it", () => {
   const source = readFileSync(INDEX_URL, "utf8");
-  assert.equal(source.match(/pi\.on\("model_select"/g)?.length, 1);
-  const handler = source.slice(source.indexOf('pi.on("model_select"'), source.indexOf('pi.on("session_start"'));
-  assert.match(handler, /updateStatus\(ctx\)/);
-  assert.equal(handler.match(/updateStatus\(ctx\)/g)?.length, 1);
+  const activateBlock = source.slice(source.indexOf("async function activate"), source.indexOf("async function deactivate"));
+  assert.ok(activateBlock.indexOf("activePreset = preset") < activateBlock.indexOf("updateStatus(ctx)"));
+
+  const presetCommand = source.slice(source.indexOf('pi.registerCommand("preset"'), source.indexOf('pi.registerCommand("omps"'));
+  assert.match(presetCommand, /await activate\(ctx, requestedPreset\)/);
+
+  const ompsCommand = source.slice(source.indexOf('pi.registerCommand("omps"'), source.indexOf("function consumeReloadPresetSlot"));
+  assert.match(ompsCommand, /if \(action === "off"\) \{\s*await deactivate\(ctx\)/);
+  assert.match(ompsCommand, /await activate\(ctx, requestedPreset\)/);
+});
+
+test("status has no model_select handler because current Main model is irrelevant", () => {
+  const source = readFileSync(INDEX_URL, "utf8");
+  assert.equal(source.match(/pi\.on\("model_select"/g)?.length ?? 0, 0);
+  const updateStatusBlock = source.slice(source.indexOf("function updateStatus"), source.indexOf("function takeTreeNotificationHold"));
+  assert.doesNotMatch(updateStatusBlock, /ctx\.model/);
 });
 
 test("a successful Fast Mode toggle refreshes only after append and assignment", () => {

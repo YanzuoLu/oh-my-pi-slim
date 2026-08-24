@@ -18,7 +18,6 @@ import {
   isFastModeProvider,
   makeFastState,
   replayFastState,
-  type FastModeModel,
 } from "./fast-mode.js";
 import {
   GOAL_CONTINUATION_MESSAGE_TYPE,
@@ -70,7 +69,7 @@ interface RolePreset {
   thinking: ThinkingLevel;
 }
 
-type Preset = Record<RoleName, RolePreset>;
+export type Preset = Record<RoleName, RolePreset>;
 type DenyConfig = Record<SpecialistName, string[]>;
 
 interface PresetConfig {
@@ -291,15 +290,20 @@ function availablePresetsMessage(config: PresetConfig): string {
   return `Available presets: ${Object.keys(config.presets).join(", ")}. Default: ${config.defaultPreset ?? "none"}.\nUsage: /preset <name>`;
 }
 
+/** Whether any of the active preset's seven roles uses an exact Fast Mode provider. */
+export function presetFastModeEligible(preset: Preset | undefined): boolean {
+  return preset !== undefined && Object.values(preset).some((role) => isFastModeProvider(role.provider));
+}
+
 /** Footer status content for the active preset. Undefined clears the status slot. */
 export function presetStatusContent(
   theme: Pick<Theme, "fg">,
   presetName: string | undefined,
   fastEnabled?: boolean,
-  model?: FastModeModel,
+  fastEligible?: boolean,
 ): string | undefined {
   if (presetName === undefined) return undefined;
-  const fastStatus = isFastModeProvider(model?.provider) ? ` · Fast Mode ${fastEnabled ? "On" : "Off"}` : "";
+  const fastStatus = fastEligible ? ` · Fast Mode ${fastEnabled ? "On" : "Off"}` : "";
   return theme.fg("accent", `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})${fastStatus}`);
 }
 
@@ -424,7 +428,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     if (!ctx.hasUI) return;
     ctx.ui.setStatus(
       "oh-my-pi-slim",
-      presetStatusContent(ctx.ui.theme, active ? activePresetName : undefined, fastEnabled, ctx.model),
+      presetStatusContent(ctx.ui.theme, active ? activePresetName : undefined, fastEnabled, presetFastModeEligible(activePreset)),
     );
   }
 
@@ -662,10 +666,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     delete store[RELOAD_PRESET_STORE_KEY];
     return typeof saved === "string" && saved.trim() ? saved.trim() : undefined;
   }
-
-  pi.on("model_select", (_event, ctx) => {
-    updateStatus(ctx);
-  });
 
   pi.on("session_start", async (event, ctx) => {
     invalidateCheckpoint(false);
