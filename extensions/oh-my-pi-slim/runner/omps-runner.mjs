@@ -21,6 +21,7 @@ const HEARTBEAT_MS = 1500;
 const CONTROL_POLL_MS = 300;
 const STARTUP_TIMEOUT_MS = 9000;
 const REPLY_PROMPT_TIMEOUT_MS = 10_000;
+const STEER_IDLE_QUEUE_GRACE_MS = 250;
 const ACTIVITY_FLUSH_MS = 100;
 const RESPONSE_TEXT_MAX_BYTES = 2 * 1024;
 const TERMINAL = new Set(["completed", "failed", "interrupted"]);
@@ -85,6 +86,8 @@ function normalizeConfig(value) {
     typeof value.approve === "boolean" && nonEmpty(value.childSessionDir) &&
     (value.resumeSessionFile === undefined || nonEmpty(value.resumeSessionFile)) &&
     (value.resumeCompactFrom === undefined || nonEmpty(value.resumeCompactFrom)) &&
+    (value.steerResponseTimeoutMs === undefined ||
+      (Number.isInteger(value.steerResponseTimeoutMs) && value.steerResponseTimeoutMs > 0)) &&
     isRecord(value.piInvocation) && nonEmpty(value.piInvocation.command) &&
     Array.isArray(value.piInvocation.args) && value.piInvocation.args.every((arg) => typeof arg === "string") &&
     isRecord(value.env) && Object.values(value.env).every((entry) => typeof entry === "string") &&
@@ -199,6 +202,16 @@ let preflighting = false;
 let lastAssistantOutput = "";
 let tokenResetPending = false;
 let providerTokenBaseline = 0;
+/** A contact request remains valid across non-steer retry and compaction turns. */
+let pendingRequest;
+/** Accepted steer controls are submitted serially and consumed one generation per steer turn. */
+let steerGeneration = 0;
+let consumedSteerGeneration = 0;
+let activeTurnGeneration = 0;
+let initialTurnPending = true;
+const steerRecords = [];
+let steerSubmissionTail = Promise.resolve();
+let latestSettlement;
 
 function writeState() {
   atomicWriteJson(stateFile, state);
@@ -281,26 +294,44 @@ function updateStats(stats) {
   if (typeof stats.sessionFile === "string") state.sessionFile = stats.sessionFile;
 }
 
-async function collectFinalMetadata() {
+async function readFinalMetadata() {
   try {
     const [lastText, childState, stats] = await Promise.all([
       withTimeout(client.getLastAssistantText(), STARTUP_TIMEOUT_MS, "get_last_assistant_text"),
       withTimeout(client.getState(), STARTUP_TIMEOUT_MS, "get_state"),
       withTimeout(client.getSessionStats(), STARTUP_TIMEOUT_MS, "get_session_stats"),
     ]);
-    if (typeof lastText === "string" && lastText.trim()) {
-      lastAssistantOutput = lastText.trim();
-      state.responseText = boundedResponseText(lastAssistantOutput);
-    }
-    if (isRecord(childState) && typeof childState.sessionFile === "string") state.sessionFile = childState.sessionFile;
-    updateStats(stats);
+    return { lastText, childState, stats };
   } catch {
     // Event-derived output and the last known session path remain authoritative fallbacks.
+    return undefined;
   }
+}
+
+function applyFinalMetadata(metadata) {
+  if (!metadata) return;
+  if (typeof metadata.lastText === "string" && metadata.lastText.trim()) {
+    lastAssistantOutput = metadata.lastText.trim();
+    state.responseText = boundedResponseText(lastAssistantOutput);
+  }
+  if (isRecord(metadata.childState) && typeof metadata.childState.sessionFile === "string") {
+    state.sessionFile = metadata.childState.sessionFile;
+  }
+  updateStats(metadata.stats);
+}
+
+async function collectFinalMetadata() {
+  applyFinalMetadata(await readFinalMetadata());
+}
+
+function clearSteerBarriers() {
+  pendingRequest = undefined;
+  latestSettlement = undefined;
 }
 
 async function publishTerminal(status, patch = {}, { collect = false } = {}) {
   if (collect) await collectFinalMetadata();
+  clearSteerBarriers();
   const terminalPatch = {
     ...patch,
     request: undefined,
@@ -323,13 +354,130 @@ async function finish(status, patch = {}, options = {}) {
   await publishTerminal(status, patch, options);
 }
 
-async function settleRun() {
-  if (ending || state.status === "waiting") return;
-  await collectFinalMetadata();
+function settlementIsCurrent(settlement) {
+  return !ending && state.status !== "waiting" && latestSettlement === settlement;
+}
+
+function steerSubmissionBlockers() {
+  return steerRecords.filter((record) => ["queued", "submitting"].includes(record.status));
+}
+
+function childIsBusy(childState) {
+  return isRecord(childState) && (childState.isStreaming === true || childState.isCompacting === true);
+}
+
+function childPendingMessages(childState) {
+  return isRecord(childState) && Number.isInteger(childState.pendingMessageCount) && childState.pendingMessageCount > 0
+    ? childState.pendingMessageCount
+    : 0;
+}
+
+function waitForIdleQueueGrace() {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, STEER_IDLE_QUEUE_GRACE_MS);
+    timer.unref?.();
+  });
+}
+
+function reportDroppedSteers(settlement, pendingMessageCount) {
+  const dropped = steerRecords.filter((record) => (
+    !record.consumed && !record.reported && record.generation > settlement.generation &&
+    ["acknowledged", "unconfirmed"].includes(record.status)
+  ));
+  for (const record of dropped) {
+    record.reported = true;
+    console.error(`Steer dropped without a child turn for generation ${record.generation}.`);
+  }
+  if (pendingMessageCount > 0) {
+    console.error(`Child became idle with ${pendingMessageCount} queued message(s); late steer was dropped.`);
+  }
+}
+
+async function settleRun(settlement) {
+  if (!settlementIsCurrent(settlement) || settlement.collecting) return;
+  if (steerSubmissionBlockers().length > 0) return;
+
+  settlement.collecting = true;
+  let metadata = await readFinalMetadata();
+  if (!settlementIsCurrent(settlement)) {
+    settlement.collecting = false;
+    return;
+  }
+  if (!metadata && !client.isAlive()) {
+    settlement.collecting = false;
+    latestSettlement = undefined;
+    return;
+  }
+  if (childIsBusy(metadata?.childState)) {
+    settlement.collecting = false;
+    latestSettlement = undefined;
+    return;
+  }
+
+  let pendingMessageCount = childPendingMessages(metadata?.childState);
+  if (pendingMessageCount > 0) {
+    await waitForIdleQueueGrace();
+    if (!settlementIsCurrent(settlement)) {
+      settlement.collecting = false;
+      return;
+    }
+    let childState;
+    try {
+      childState = await withTimeout(client.getState(), STARTUP_TIMEOUT_MS, "late steer state confirmation");
+    } catch {
+      if (!client.isAlive()) {
+        settlement.collecting = false;
+        latestSettlement = undefined;
+        return;
+      }
+      childState = metadata?.childState;
+    }
+    if (!settlementIsCurrent(settlement)) {
+      settlement.collecting = false;
+      return;
+    }
+    if (childIsBusy(childState)) {
+      settlement.collecting = false;
+      latestSettlement = undefined;
+      return;
+    }
+    pendingMessageCount = childPendingMessages(childState);
+    if (metadata) metadata = { ...metadata, childState };
+  }
+
+  settlement.collecting = false;
+  if (!settlementIsCurrent(settlement) || steerSubmissionBlockers().length > 0) return;
+  reportDroppedSteers(settlement, pendingMessageCount);
+  applyFinalMetadata(metadata);
   const failed = lastStopReason === "error" || lastStopReason === "aborted";
   await finish(failed ? "failed" : "completed", failed ? {
     error: lastError || client.getStderr() || "Child run failed.",
   } : {});
+}
+
+async function submitSteer(record, message) {
+  if (ending) return;
+  record.status = "submitting";
+  try {
+    await client.steer(message);
+    record.status = "acknowledged";
+  } catch (error) {
+    record.status = error?.code === "RPC_TIMEOUT" ? "unconfirmed" : "failed";
+    const outcome = record.status === "unconfirmed" ? "delivery unconfirmed" : "control failed";
+    console.error(`Steer ${outcome} for generation ${record.generation}: ${errorText(error)}`);
+  } finally {
+    const settlement = latestSettlement;
+    if (!ending && settlement) settleRun(settlement).catch((error) => {
+      console.error(`Settlement retry failed after steer control: ${errorText(error)}`);
+    });
+  }
+}
+
+function enqueueSteer(message) {
+  const record = { generation: ++steerGeneration, status: "queued", consumed: false };
+  steerRecords.push(record);
+  const submission = steerSubmissionTail.then(() => submitSteer(record, message));
+  steerSubmissionTail = submission.catch(() => undefined);
 }
 
 function handleEvent(event) {
@@ -337,6 +485,17 @@ function handleEvent(event) {
   // A migration compaction is not a turn: its turn-level events would fake completion and pollute activity.
   if (preflighting && PREFLIGHT_IGNORED_EVENT_TYPES.has(event.type)) return;
   if (event.type === "turn_start") {
+    const consumed = initialTurnPending
+      ? undefined
+      : steerRecords.find((record) => !record.consumed && !["queued", "failed"].includes(record.status));
+    initialTurnPending = false;
+    if (consumed) {
+      consumed.consumed = true;
+      consumedSteerGeneration = consumed.generation;
+    }
+    activeTurnGeneration = consumedSteerGeneration;
+    if (pendingRequest && steerGeneration > pendingRequest.generation) pendingRequest = undefined;
+    latestSettlement = undefined;
     patchActivity({ turnCount: state.turnCount + 1 });
     return;
   }
@@ -391,11 +550,7 @@ function handleEvent(event) {
         isRecord(request) && request.runId === config.runId &&
         ["need_decision", "interview_request", "progress_update"].includes(request.reason) &&
         typeof request.message === "string" && typeof request.createdAt === "string"
-      ) {
-        const waitingSeq = (Number.isInteger(state.waitingSeq) ? state.waitingSeq : 0) + 1;
-        transition("waiting", { activeTools, request, waitingSeq });
-        return;
-      }
+      ) pendingRequest = { request, generation: steerGeneration };
     }
     patchActivity({ activeTools });
     return;
@@ -407,7 +562,19 @@ function handleEvent(event) {
     }
     return;
   }
-  if (event.type === "agent_settled") void settleRun();
+  if (event.type === "agent_settled") {
+    if (pendingRequest) {
+      const { request } = pendingRequest;
+      pendingRequest = undefined;
+      latestSettlement = undefined;
+      const waitingSeq = (Number.isInteger(state.waitingSeq) ? state.waitingSeq : 0) + 1;
+      transition("waiting", { request, waitingSeq });
+      return;
+    }
+    const settlement = { generation: activeTurnGeneration };
+    latestSettlement = settlement;
+    void settleRun(settlement);
+  }
 }
 
 function validControl(value) {
@@ -421,7 +588,13 @@ function validControl(value) {
 async function applyControl(control) {
   if (ending || control.token !== config.token) return;
   if (control.type === "steer") {
-    if (state.status === "running" && nonEmpty(control.message)) void client.steer(control.message).catch(() => undefined);
+    if (state.status === "running" && nonEmpty(control.message)) {
+      if (control.message.trimStart().startsWith("/")) {
+        console.error("Ignoring unsupported slash steer from detached RPC control.");
+      } else {
+        enqueueSteer(control.message);
+      }
+    }
     return;
   }
   if (control.type === "reply") {
@@ -524,6 +697,9 @@ try {
     args: config.piInvocation.args,
     cwd: config.cwd,
     env: config.env,
+    ...(config.steerResponseTimeoutMs === undefined
+      ? {}
+      : { steerResponseTimeoutMs: config.steerResponseTimeoutMs }),
   });
   client.onEvent(handleEvent);
   client.onExit((error) => {

@@ -9,6 +9,9 @@ const sessionFile = join(process.cwd(), `stub-${scenario}-session.jsonl`);
 let lastAssistantText = null;
 let promptCount = 0;
 let settled = false;
+let pendingMessageCount = 0;
+let isCompacting = false;
+let firstMultipleSteerAcknowledged = false;
 
 if (process.env.OMPS_STUB_PID_FILE) writeFileSync(process.env.OMPS_STUB_PID_FILE, String(process.pid));
 if (scenario === "terminal-order") {
@@ -42,6 +45,14 @@ function recordPrompt(message) {
   appendFileSync(process.env.OMPS_STUB_PROMPT_LOG, `${JSON.stringify(message)}\n`);
 }
 
+function metadataResponse(command, data) {
+  if (scenario === "steer-metadata" && settled && promptCount === 1) {
+    setTimeout(() => respond(command, data), 900);
+    return;
+  }
+  respond(command, data);
+}
+
 function assistant(text, stopReason = "stop", totalTokens = 42) {
   lastAssistantText = text;
   send({
@@ -56,6 +67,7 @@ function assistant(text, stopReason = "stop", totalTokens = 42) {
 }
 
 function complete(text) {
+  pendingMessageCount = Math.max(0, pendingMessageCount - 1);
   send({ type: "turn_start", turnIndex: promptCount, timestamp: Date.now() });
   send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text.slice(0, 4) }, usage: { totalTokens: 21 } });
   send({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "read", args: {} });
@@ -102,9 +114,83 @@ function handleCompact(command) {
 
 function handlePrompt(command) {
   promptCount += 1;
+  const currentPrompt = promptCount;
+  if (command.streamingBehavior === "steer") pendingMessageCount += 1;
+  settled = false;
   recordPrompt(command.message);
   if (scenario === "contact-reply-hang" && promptCount === 2) return;
-  respond(command, {});
+  if (scenario === "steer-interrupt" && command.streamingBehavior === "steer") return;
+  if (scenario === "steer-timeout" && command.streamingBehavior === "steer") {
+    setTimeout(() => {
+      assistant("timeout steer preserved output");
+      settled = true;
+      send({ type: "agent_settled" });
+    }, 50);
+    return;
+  }
+  if (scenario === "steer-compacting-timeout" && command.streamingBehavior === "steer") {
+    isCompacting = true;
+    settled = true;
+    setTimeout(() => send({ type: "agent_settled" }), 30);
+    setTimeout(() => respond(command, {}), 150);
+    setTimeout(() => {
+      isCompacting = false;
+      settled = false;
+      pendingMessageCount = Math.max(0, pendingMessageCount - 1);
+      send({ type: "turn_start", turnIndex: 2, timestamp: Date.now() });
+      assistant("compacting steer complete");
+      settled = true;
+      send({ type: "agent_settled" });
+    }, 500);
+    return;
+  }
+  if (scenario === "contact-after-failed-steer" && command.streamingBehavior === "steer") {
+    respondError(command, "injected steer control failure");
+    setTimeout(() => {
+      send({ type: "tool_execution_start", toolCallId: "contact-after-failure", toolName: "contact_supervisor", args: {} });
+      send({
+        type: "tool_execution_end",
+        toolCallId: "contact-after-failure",
+        toolName: "contact_supervisor",
+        result: {
+          details: {
+            request: {
+              runId: process.env.OMPS_RUN_ID,
+              reason: "need_decision",
+              message: "contact after failed steer",
+              createdAt: new Date().toISOString(),
+            },
+          },
+        },
+        isError: false,
+      });
+      send({ type: "compaction_end", result: { summary: "retry after failed steer" }, aborted: false });
+      send({ type: "turn_start", turnIndex: 2, timestamp: Date.now() });
+      assistant("contact retry settled");
+      settled = true;
+      send({ type: "agent_settled" });
+    }, 30);
+    return;
+  }
+  if (scenario === "steer-slow-ack" && command.streamingBehavior === "steer") {
+    setTimeout(() => {
+      respond(command, {});
+      setTimeout(() => complete(`slow steer: ${command.message}`), 30);
+    }, 1500);
+    return;
+  }
+  if (scenario === "steer-multiple" && currentPrompt === 2) {
+    setTimeout(() => {
+      firstMultipleSteerAcknowledged = true;
+      respond(command, {});
+    }, 150);
+  } else {
+    if (scenario === "steer-multiple" && currentPrompt === 3 && !firstMultipleSteerAcknowledged) {
+      respondError(command, "concurrent steer submission");
+      return;
+    }
+    respond(command, {});
+  }
   setTimeout(() => {
     if (scenario.startsWith("resume-compact")) completeWithoutCompaction(`${scenario} completion`);
     else if (scenario === "normal" || scenario === "terminal-order") complete(`${scenario} completion`);
@@ -270,6 +356,52 @@ function handlePrompt(command) {
         settled = true;
         send({ type: "agent_settled" });
       }, 440);
+    } else if (scenario === "steer-metadata") {
+      if (promptCount === 1) {
+        send({ type: "turn_start", turnIndex: 1, timestamp: Date.now() });
+        assistant("initial turn settled");
+        settled = true;
+        send({ type: "agent_settled" });
+      } else if (command.streamingBehavior === "steer") {
+        pendingMessageCount = Math.max(0, pendingMessageCount - 1);
+        send({ type: "turn_start", turnIndex: 2, timestamp: Date.now() });
+        setTimeout(() => {
+          assistant(`steered after metadata: ${command.message}`);
+          settled = true;
+          send({ type: "agent_settled" });
+        }, 1200);
+      }
+    } else if ([
+      "steer-stranded", "steer-slow-ack", "steer-multiple", "steer-interrupt", "steer-timeout",
+      "steer-streaming-queue", "steer-compacting-timeout", "contact-after-failed-steer",
+    ].includes(scenario)) {
+      if (currentPrompt === 1) {
+        send({ type: "turn_start", turnIndex: 1, timestamp: Date.now() });
+        if (scenario === "steer-stranded") assistant("initial output preserved");
+      } else if (scenario === "steer-stranded") {
+        settled = true;
+        send({ type: "agent_settled" });
+      } else if (scenario === "steer-streaming-queue") {
+        pendingMessageCount = Math.max(0, pendingMessageCount - 1);
+        send({ type: "turn_start", turnIndex: 2, timestamp: Date.now() });
+        assistant("first queued turn", "toolUse");
+        send({ type: "agent_settled" });
+        setTimeout(() => {
+          send({ type: "turn_start", turnIndex: 3, timestamp: Date.now() });
+          assistant("streaming queue complete");
+          settled = true;
+          send({ type: "agent_settled" });
+        }, 500);
+      } else if (scenario === "steer-multiple") {
+        const steerIndex = currentPrompt - 1;
+        setTimeout(() => {
+          pendingMessageCount = Math.max(0, pendingMessageCount - 1);
+          send({ type: "turn_start", turnIndex: currentPrompt, timestamp: Date.now() });
+          assistant(`steer ${steerIndex}: ${command.message}`);
+          settled = true;
+          send({ type: "agent_settled" });
+        }, steerIndex * 50);
+      }
     } else if ((scenario === "contact-cycles" && promptCount <= 2) || (scenario.startsWith("contact") && promptCount === 1)) {
       send({ type: "turn_start", turnIndex: 1, timestamp: Date.now() });
       send({ type: "tool_execution_start", toolCallId: "contact-1", toolName: "contact_supervisor", args: {} });
@@ -289,13 +421,41 @@ function handlePrompt(command) {
         },
         isError: false,
       });
-      send({ type: "agent_settled" });
+      if (scenario === "contact-stream-steer") {
+        send({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "contact returned" },
+          usage: { totalTokens: 24 },
+        });
+      } else if (scenario === "contact-then-compaction") {
+        send({ type: "compaction_end", result: { summary: "contact compaction" }, aborted: false });
+        send({ type: "turn_start", turnIndex: 2, timestamp: Date.now() });
+        assistant("contact survived compaction");
+        settled = true;
+        send({ type: "agent_settled" });
+      } else if (scenario === "contact-settle-delay") {
+        send({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "contact awaiting settle" },
+          usage: { totalTokens: 24 },
+        });
+        setTimeout(() => {
+          settled = true;
+          send({ type: "agent_settled" });
+        }, 500);
+      } else {
+        settled = true;
+        send({ type: "agent_settled" });
+      }
     } else if (scenario === "contact-reply-crash") {
       process.stderr.write("reply crash\n");
       process.exit(23);
-    } else if (scenario.startsWith("contact")) complete("completed after reply");
+    } else if (scenario.startsWith("contact")) complete(
+      scenario === "contact-stream-steer" ? `steered after contact: ${command.message}` : "completed after reply",
+    );
     else if (scenario === "steer") {
-      send({ type: "turn_start", turnIndex: 1, timestamp: Date.now() });
+      if (promptCount === 1) send({ type: "turn_start", turnIndex: 1, timestamp: Date.now() });
+      else if (command.streamingBehavior === "steer") complete(`steered: ${command.message}`);
     } else if (scenario === "crash") {
       process.stderr.write("stub crash\n");
       process.exit(17);
@@ -310,7 +470,7 @@ input.on("line", (line) => {
   if (!command || typeof command.id !== "string") return;
   recordCommand(command.type);
   if (command.type === "get_state") {
-    respond(command, { sessionFile, isStreaming: !settled });
+    metadataResponse(command, { sessionFile, isStreaming: !settled, isCompacting, pendingMessageCount });
   } else if (command.type === "get_session_stats") {
     let total = 42;
     let contextUsage = { tokens: 42, contextWindow: 200, percent: 25 };
@@ -333,20 +493,20 @@ input.on("line", (line) => {
       total = 9000;
       contextUsage = { tokens: null, contextWindow: 2000, percent: null };
     }
-    respond(command, {
+    metadataResponse(command, {
       sessionFile,
       tokens: { input: 20, output: 22, cacheRead: 0, cacheWrite: 0, total },
       contextUsage,
     });
   } else if (command.type === "get_last_assistant_text") {
-    respond(command, { text: lastAssistantText });
+    metadataResponse(command, { text: lastAssistantText });
   } else if (command.type === "prompt") {
     handlePrompt(command);
   } else if (command.type === "compact") {
     handleCompact(command);
   } else if (command.type === "steer") {
+    // Legacy steer only queues into an active stream and cannot start an idle prompt.
     respond(command, {});
-    if (scenario === "steer") setTimeout(() => complete(`steered: ${command.message}`), 20);
   } else if (command.type === "abort") {
     respond(command, {});
   } else {

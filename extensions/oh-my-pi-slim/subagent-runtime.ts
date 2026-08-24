@@ -1503,7 +1503,11 @@ export class OmpsSubagentRuntime {
     if (!target) throw new Error(`Run ${id} has no valid detached control target.`);
     if (action === "steer") {
       if (run.status !== "running") throw new Error(`steer requires a running run; ${id} is ${run.status}.`);
-      this.controlWriter(target.paths, target.config.token, "steer", requireString(input.message, "message"));
+      const message = requireString(input.message, "message");
+      if (message.trimStart().startsWith("/")) {
+        throw new Error("steer messages beginning with / are unsupported because detached RPC control cannot preserve slash-command expansion semantics.");
+      }
+      this.controlWriter(target.paths, target.config.token, "steer", message);
       return toolText(`Steer requested for ${id}.`, { run: this.formatRun(run) });
     }
     return this.interruptRun(id, signal);

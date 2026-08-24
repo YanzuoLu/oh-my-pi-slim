@@ -1871,6 +1871,12 @@ test("steer only enqueues a control and returns requested", async () => {
     harness.alive.add(999);
     atomicWriteJson(harness.paths(id).stateFile, stateFor(id, config.token));
     await inspect(harness, id);
+    await assert.rejects(
+      harness.tools.get("subagent").execute("slash-steer", { action: "steer", id, message: "  /compact now" }),
+      /steer messages beginning with \/ are unsupported/i,
+    );
+    assert.equal(controls(harness, id).length, 0, "a slash steer is rejected before any control write");
+
     const result = await harness.tools.get("subagent").execute("steer", { action: "steer", id, message: "focus" });
     assert.match(result.content[0].text, /requested/i);
     assert.equal(controls(harness, id).at(-1).type, "steer");
@@ -3616,11 +3622,16 @@ test("launch configs stay compatible across the optional resume preflight marker
     const started = await createRun(harness);
     const legacy = readConfig(harness, started.details.run.id);
     assert.equal("resumeCompactFrom" in legacy, false, "create never writes the resume preflight marker");
+    assert.equal("steerResponseTimeoutMs" in legacy, false, "normal runtime launches never write the test timeout seam");
     assert.equal(isDetachedLaunchConfig(legacy), true, "an old config without the marker stays valid");
     assert.equal(isDetachedLaunchConfig({ ...legacy, resumeCompactFrom: "old/model:low" }), true);
     assert.equal(isDetachedLaunchConfig({ ...legacy, resumeCompactFrom: "" }), false);
     assert.equal(isDetachedLaunchConfig({ ...legacy, resumeCompactFrom: 5 }), false);
     assert.equal(isDetachedLaunchConfig({ ...legacy, resumeCompactFrom: null }), false);
+    assert.equal(isDetachedLaunchConfig({ ...legacy, steerResponseTimeoutMs: 75 }), true);
+    for (const steerResponseTimeoutMs of [0, -1, 1.5, "75", null]) {
+      assert.equal(isDetachedLaunchConfig({ ...legacy, steerResponseTimeoutMs }), false);
+    }
 
     const runnerCheck = execFileSync(process.execPath, ["--input-type=module", "--eval", [
       'import { readFileSync, writeFileSync } from "node:fs";',
@@ -3631,6 +3642,8 @@ test("launch configs stay compatible across the optional resume preflight marker
     ].join("\n")], { encoding: "utf8" });
     assert.match(runnerCheck, /value\.resumeCompactFrom === undefined \|\| nonEmpty\(value\.resumeCompactFrom\)/,
       "the runner mirrors the same optional marker rule");
+    assert.match(runnerCheck, /Number\.isInteger\(value\.steerResponseTimeoutMs\) && value\.steerResponseTimeoutMs > 0/,
+      "the runner mirrors the positive-integer timeout seam rule");
   } finally { harness.cleanup(); }
 });
 

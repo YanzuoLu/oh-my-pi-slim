@@ -2,15 +2,19 @@ import { spawn } from "node:child_process";
 
 const STDERR_LIMIT = 64 * 1024;
 const STOP_GRACE_MS = 1000;
+const STEER_RESPONSE_TIMEOUT_MS = 60_000;
 
 export class RpcChild {
-  constructor({ command, args = [], cwd, env = {} }) {
+  constructor({ command, args = [], cwd, env = {}, steerResponseTimeoutMs = STEER_RESPONSE_TIMEOUT_MS }) {
     if (typeof command !== "string" || command.length === 0) throw new Error("RPC command is required.");
     if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) throw new Error("RPC args must be strings.");
     this.command = command;
     this.args = [...args];
     this.cwd = cwd;
     this.env = { ...env };
+    this.steerResponseTimeoutMs = Number.isFinite(steerResponseTimeoutMs) && steerResponseTimeoutMs > 0
+      ? steerResponseTimeoutMs
+      : STEER_RESPONSE_TIMEOUT_MS;
     this.child = null;
     this.requestId = 0;
     this.pending = new Map();
@@ -80,7 +84,13 @@ export class RpcChild {
   }
 
   prompt(message) { return this.#data("prompt", { message }); }
-  steer(message) { return this.#data("steer", { message }); }
+  steer(message) {
+    return this.#data(
+      "prompt",
+      { message, streamingBehavior: "steer" },
+      { timeoutMs: this.steerResponseTimeoutMs, label: "steer prompt" },
+    );
+  }
   abort() { return this.#data("abort"); }
   /** Awaits the child's own compaction response, so a caller can use it as a completion barrier. */
   compact() { return this.#data("compact"); }
@@ -109,13 +119,17 @@ export class RpcChild {
     this.child = null;
   }
 
-  async #data(type, fields = {}) {
-    const response = await this.#send({ type, ...fields });
-    if (!response.success) throw new Error(response.error || `RPC command ${type} failed.`);
+  async #data(type, fields = {}, options = {}) {
+    const response = await this.#send({ type, ...fields }, options);
+    if (!response.success) {
+      const error = new Error(response.error || `RPC command ${type} failed.`);
+      error.code = "RPC_RESPONSE_ERROR";
+      throw error;
+    }
     return response.data;
   }
 
-  #send(command) {
+  #send(command, { timeoutMs, label = `RPC command ${command.type}` } = {}) {
     const child = this.child;
     const stdin = child?.stdin;
     if (!child || !stdin) return Promise.reject(new Error("RPC child is not started."));
@@ -125,11 +139,23 @@ export class RpcChild {
     }
     const id = `req_${++this.requestId}`;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? setTimeout(() => {
+          const pending = this.pending.get(id);
+          if (!pending) return;
+          this.pending.delete(id);
+          const error = new Error(`${label} timed out after ${timeoutMs} ms.`);
+          error.code = "RPC_TIMEOUT";
+          pending.reject(error);
+        }, timeoutMs)
+        : undefined;
+      timer?.unref?.();
+      this.pending.set(id, { resolve, reject, timer });
       stdin.write(`${JSON.stringify({ ...command, id })}\n`, "utf8", (error) => {
         if (!error) return;
         const pending = this.pending.get(id);
         this.pending.delete(id);
+        clearTimeout(pending?.timer);
         pending?.reject(error);
       });
     });
@@ -149,6 +175,7 @@ export class RpcChild {
         const pending = this.pending.get(value.id);
         if (pending) {
           this.pending.delete(value.id);
+          clearTimeout(pending.timer);
           pending.resolve(value);
         }
         continue;
@@ -160,7 +187,10 @@ export class RpcChild {
   #recordExit(error) {
     if (this.exitError) return;
     this.exitError = error;
-    for (const pending of this.pending.values()) pending.reject(error);
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
     this.pending.clear();
     for (const listener of [...this.exitListeners]) listener(error);
   }

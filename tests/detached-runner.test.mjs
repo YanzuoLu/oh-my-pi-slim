@@ -112,6 +112,7 @@ function promptLog(path) {
 
 let migrationSequence = 0;
 let promptLogSequence = 0;
+let observedRunSequence = 0;
 
 /** A cross-model resume run: a reused session file plus the internal preflight marker the runtime writes. */
 function makeMigrationRun(scenario, { resumeCompactFrom = "legacy/other-model:low", model } = {}) {
@@ -131,6 +132,28 @@ function makePromptLoggedRun(scenario) {
   const logFile = join(CACHE, `stub-prompts-${++promptLogSequence}-${Date.now()}.jsonl`);
   const run = makeRun(scenario, { extraEnv: { OMPS_STUB_PROMPT_LOG: logFile } });
   return { ...run, logFile, prompts: () => promptLog(logFile), cleanupLog: () => rmSync(logFile, { force: true }) };
+}
+
+function makeObservedRun(scenario, { configPatch } = {}) {
+  const suffix = `${++observedRunSequence}-${Date.now()}`;
+  const commandLogFile = join(CACHE, `stub-observed-commands-${suffix}.log`);
+  const promptLogFile = join(CACHE, `stub-observed-prompts-${suffix}.jsonl`);
+  const run = makeRun(scenario, {
+    configPatch,
+    extraEnv: {
+      OMPS_STUB_COMMAND_LOG: commandLogFile,
+      OMPS_STUB_PROMPT_LOG: promptLogFile,
+    },
+  });
+  return {
+    ...run,
+    commands: () => commandLog(commandLogFile),
+    prompts: () => promptLog(promptLogFile),
+    cleanupLogs: () => {
+      rmSync(commandLogFile, { force: true });
+      rmSync(promptLogFile, { force: true });
+    },
+  };
 }
 
 async function waitFor(predicate, timeoutMs = 4000) {
@@ -603,6 +626,83 @@ test("a missing marker or an unchanged model base skips the migration compaction
   }
 });
 
+test("contact request stays pending until agent_settled publishes waiting", async () => {
+  const run = makeRun("contact-settle-delay");
+  try {
+    const pending = await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.responseText.includes("contact awaiting settle") ? state : undefined;
+    });
+    assert.deepEqual(pending.activeTools, {});
+    assert.equal(pending.request, undefined);
+    assert.equal(pending.waitingSeq, undefined);
+
+    const waiting = await waitForStatus(run, "waiting");
+    assert.equal(waiting.request.message, "choose a path");
+    assert.equal(waiting.waitingSeq, 1);
+  } finally {
+    await cleanup(run);
+  }
+});
+
+test("a non-steer compaction retry does not consume a pending contact request", async () => {
+  const run = makeRun("contact-then-compaction");
+  try {
+    const waiting = await waitForStatus(run, "waiting");
+    assert.equal(waiting.request.message, "choose a path");
+    assert.equal(waiting.waitingSeq, 1);
+    assert.equal(waiting.turnCount, 2);
+    assert.equal(waiting.compactionCount, 1);
+    assert.equal(waiting.responseText, "contact survived compaction");
+  } finally {
+    await cleanup(run);
+  }
+});
+
+test("a contact after a failed steer survives a non-steer compaction retry", async () => {
+  const run = makeObservedRun("contact-after-failed-steer");
+  try {
+    await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.turnCount === 1 ? state : undefined;
+    });
+    sendControl(run, { token: run.config.token, type: "steer", message: "fail before contact" });
+    const waiting = await waitForStatus(run, "waiting");
+    assert.equal(waiting.request.message, "contact after failed steer");
+    assert.equal(waiting.waitingSeq, 1);
+    assert.equal(waiting.turnCount, 2);
+    assert.equal(waiting.compactionCount, 1);
+    assert.match(run.output().stderr, /Steer control failed/);
+  } finally {
+    run.cleanupLogs();
+    await cleanup(run);
+  }
+});
+
+test("steer after a streaming contact boundary starts a new turn and completes", async () => {
+  const run = makePromptLoggedRun("contact-stream-steer");
+  try {
+    const boundary = await waitFor(() => {
+      const state = readState(run);
+      return state?.responseText.includes("contact returned") ? state : undefined;
+    });
+    assert.equal(boundary.status, "running");
+    assert.deepEqual(boundary.activeTools, {});
+    assert.equal(boundary.request, undefined);
+
+    sendControl(run, { token: run.config.token, type: "steer", message: "take the next path" });
+    const completed = await waitForStatus(run, "completed");
+    assert.equal(completed.output, "steered after contact: take the next path");
+    assert.equal(completed.turnCount, 2);
+    assert.equal(completed.waitingSeq, undefined);
+    assert.deepEqual(run.prompts(), [run.config.task, "take the next path"]);
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    run.cleanupLog();
+    await cleanup(run);
+  }
+});
+
 test("waiting request persists, legacy controls are rejected, and matching sequence reply continues", async () => {
   const run = makePromptLoggedRun("contact");
   const reply = "continue exactly";
@@ -706,6 +806,199 @@ test("interrupting a waiting run clears its persisted request", async () => {
     assert.equal(interrupted.request, undefined);
     assert.equal(await waitForExit(run), 0);
   } finally {
+    await cleanup(run);
+  }
+});
+
+test("runner ignores a legacy slash steer without damaging the run", async () => {
+  const run = makePromptLoggedRun("steer");
+  try {
+    await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.turnCount === 1 ? state : undefined;
+    });
+    sendControl(run, { token: run.config.token, type: "steer", message: "  /compact now" });
+    await waitFor(() => run.output().stderr.includes("Ignoring unsupported slash steer"));
+    assert.equal(readState(run).status, "running");
+    assert.deepEqual(run.prompts(), [run.config.task]);
+
+    sendControl(run, { token: run.config.token, type: "interrupt" });
+    await waitForStatus(run, "interrupted");
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    run.cleanupLog();
+    await cleanup(run);
+  }
+});
+
+test("steer submitted during settled metadata collection is not lost", async () => {
+  const run = makeObservedRun("steer-metadata");
+  try {
+    await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.responseText === "initial turn settled" &&
+        run.commands().includes("get_last_assistant_text") ? state : undefined;
+    });
+
+    sendControl(run, { token: run.config.token, type: "steer", message: "survive metadata" });
+    await waitFor(() => run.prompts().length === 2);
+    const completed = await waitForStatus(run, "completed");
+    assert.equal(completed.output, "steered after metadata: survive metadata");
+    assert.equal(completed.turnCount, 2);
+    assert.deepEqual(run.prompts(), [run.config.task, "survive metadata"]);
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    run.cleanupLogs();
+    await cleanup(run);
+  }
+});
+
+test("an acknowledged steer that is never consumed completes with the child output", async () => {
+  const run = makeObservedRun("steer-stranded");
+  try {
+    await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.turnCount === 1 ? state : undefined;
+    });
+    sendControl(run, { token: run.config.token, type: "steer", message: "lost at settle boundary" });
+    await waitFor(() => run.prompts().length === 2);
+    const completed = await waitForStatus(run, "completed", 4000);
+    assert.equal(completed.output, "initial output preserved");
+    assert.match(run.output().stderr, /Steer dropped without a child turn/);
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    run.cleanupLogs();
+    await cleanup(run);
+  }
+});
+
+test("an unconfirmed steer ACK releases settlement without killing completed child output", async () => {
+  const run = makeObservedRun("steer-timeout", {
+    configPatch: { steerResponseTimeoutMs: 75 },
+  });
+  try {
+    await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.turnCount === 1 ? state : undefined;
+    });
+    sendControl(run, { token: run.config.token, type: "steer", message: "timeout but preserve output" });
+    await waitFor(() => run.prompts().length === 2);
+    const completed = await waitForStatus(run, "completed", 4000);
+    assert.equal(completed.output, "timeout steer preserved output");
+    assert.match(run.output().stderr, /Steer delivery unconfirmed/);
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    run.cleanupLogs();
+    await cleanup(run);
+  }
+});
+
+test("steer timeout during child compaction stays running until the real turn completes", async () => {
+  const run = makeObservedRun("steer-compacting-timeout", {
+    configPatch: { steerResponseTimeoutMs: 75 },
+  });
+  try {
+    await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.turnCount === 1 ? state : undefined;
+    });
+    sendControl(run, { token: run.config.token, type: "steer", message: "compact before turn" });
+    await waitFor(() => run.output().stderr.includes("Steer delivery unconfirmed"));
+    assert.equal(readState(run).status, "running");
+    assert.deepEqual(run.prompts(), [run.config.task, "compact before turn"]);
+
+    const completed = await waitForStatus(run, "completed", 4000);
+    assert.equal(completed.output, "compacting steer complete");
+    assert.equal(completed.turnCount, 2);
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    run.cleanupLogs();
+    await cleanup(run);
+  }
+});
+
+test("one atomic steer prompt may span multiple turns and stale settled stays running while child streams", async () => {
+  const run = makeObservedRun("steer-streaming-queue");
+  try {
+    await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.turnCount === 1 ? state : undefined;
+    });
+    sendControl(run, { token: run.config.token, type: "steer", message: "continue through queue" });
+    await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.turnCount === 2 && state.responseText === "first queued turn"
+        ? state
+        : undefined;
+    });
+    assert.deepEqual(run.prompts(), [run.config.task, "continue through queue"]);
+
+    const completed = await waitForStatus(run, "completed", 4000);
+    assert.equal(completed.output, "streaming queue complete");
+    assert.equal(completed.turnCount, 3);
+    assert.deepEqual(run.prompts(), [run.config.task, "continue through queue"]);
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    run.cleanupLogs();
+    await cleanup(run);
+  }
+});
+
+test("a 1500 ms steer acknowledgement can start a healthy turn and complete", async () => {
+  const run = makeObservedRun("steer-slow-ack");
+  try {
+    await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.turnCount === 1 ? state : undefined;
+    });
+    sendControl(run, { token: run.config.token, type: "steer", message: "wait for acknowledgement" });
+    await waitFor(() => run.prompts().length === 2);
+    const completed = await waitForStatus(run, "completed", 4000);
+    assert.equal(completed.output, "slow steer: wait for acknowledgement");
+    assert.equal(completed.turnCount, 2);
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    run.cleanupLogs();
+    await cleanup(run);
+  }
+});
+
+test("consecutive steer controls are submitted serially and both turns finish before terminal", async () => {
+  const run = makeObservedRun("steer-multiple");
+  try {
+    await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.turnCount === 1 ? state : undefined;
+    });
+    sendControl(run, { token: run.config.token, type: "steer", message: "first direction" });
+    sendControl(run, { token: run.config.token, type: "steer", message: "second direction" });
+    await waitFor(() => run.prompts().length === 3);
+    const completed = await waitForStatus(run, "completed", 4000);
+    assert.equal(completed.output, "steer 2: second direction");
+    assert.equal(completed.turnCount, 3);
+    assert.deepEqual(run.prompts(), [run.config.task, "first direction", "second direction"]);
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    run.cleanupLogs();
+    await cleanup(run);
+  }
+});
+
+test("a hung atomic steer submission does not block a later interrupt", async () => {
+  const run = makeObservedRun("steer-interrupt");
+  try {
+    await waitFor(() => {
+      const state = readState(run);
+      return state?.status === "running" && state.turnCount === 1 ? state : undefined;
+    });
+    sendControl(run, { token: run.config.token, type: "steer", message: "hang before interrupt" });
+    await waitFor(() => run.prompts().length === 2);
+    sendControl(run, { token: run.config.token, type: "interrupt" });
+    const interrupted = await waitForStatus(run, "interrupted", 2500);
+    assert.match(interrupted.error, /Interrupted/);
+    assert.equal(await waitForExit(run), 0);
+  } finally {
+    run.cleanupLogs();
     await cleanup(run);
   }
 });

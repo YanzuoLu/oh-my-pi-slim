@@ -62,6 +62,8 @@ export interface DetachedLaunchConfig {
    * The runner compacts the reused child session once before its first prompt; nothing outside the runner reads it.
    */
   resumeCompactFrom?: string;
+  /** Internal test seam for the detached RPC steer acknowledgement deadline. Normal runtime launches omit it. */
+  steerResponseTimeoutMs?: number;
   piInvocation: PiInvocation;
   env: Record<string, string>;
   createdAt: string;
@@ -436,6 +438,8 @@ function normalizeDetachedLaunchConfig(value: unknown): DetachedLaunchConfig | u
     !isNonEmptyString(value.childSessionDir) ||
     (value.resumeSessionFile !== undefined && !isNonEmptyString(value.resumeSessionFile)) ||
     (value.resumeCompactFrom !== undefined && !isNonEmptyString(value.resumeCompactFrom)) ||
+    (value.steerResponseTimeoutMs !== undefined &&
+      (!Number.isInteger(value.steerResponseTimeoutMs) || value.steerResponseTimeoutMs <= 0)) ||
     !isRecord(value.piInvocation) ||
     !isNonEmptyString(value.piInvocation.command) ||
     !Array.isArray(value.piInvocation.args) || value.piInvocation.args.some((arg) => typeof arg !== "string") ||

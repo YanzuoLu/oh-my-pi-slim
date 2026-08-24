@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "1.0.5", "package version must be 1.0.5");
+check(packageJson.version === "1.0.6", "package version must be 1.0.6");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "1.0.5" && lock.packages?.[""]?.version === "1.0.5", "package-lock version must be 1.0.5");
+check(lock.version === "1.0.6" && lock.packages?.[""]?.version === "1.0.6", "package-lock version must be 1.0.6");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -572,7 +572,7 @@ hasNone(shutdownStatusHandler, ["setStatus("], "shutdown must not duplicate the 
 const presetStatusBody = extension.slice(extension.indexOf("export function presetStatusContent"), extension.indexOf("function isAnthropicOAuth"));
 hasNone(presetStatusBody, [".bold(", "theme.bold", "glyph", "Glyph"], "OMPS status plain accent-only rendering");
 check((json("package.json").version ?? "").trim().length > 0, "package.json must define a non-empty version for the OMPS status line");
-check(json("package.json").version === "1.0.5", "Preset-wide Fast status must ship in v1.0.5");
+check(json("package.json").version === "1.0.6", "Preset-wide Fast status must ship in v1.0.6");
 
 const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
 const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
@@ -1961,8 +1961,9 @@ hasAll(runFiles, [
   'GOAL_STATS_DIR_NAME = "omps-goal-stats"', "getGoalStatsRoot", "getGoalStatsSidecarPaths", "writeGoalStatsSidecar", "readGoalStatsSidecar",
   "ensurePrivateDirectory", "0o700", "0o600", "isSymbolicLink", "GoalRunStatsSidecar",
   "normalizeDetachedLaunchConfig", "legacyRunAbstract(value.task)", "value.abstract.trim()",
-  "resumeCompactFrom?: string;",
+  "resumeCompactFrom?: string;", "steerResponseTimeoutMs?: number;",
   "(value.resumeCompactFrom !== undefined && !isNonEmptyString(value.resumeCompactFrom)) ||",
+  "(!Number.isInteger(value.steerResponseTimeoutMs) || value.steerResponseTimeoutMs <= 0)",
   "Canonical predicate for newly written launch.json files", "normalized only by readLaunchConfig()",
 ], "detached run files");
 hasNone(runFiles, ["export function removeGoalStatsSidecar"], "Goal stats sidecars must not expose a clear-time deletion API");
@@ -1981,6 +1982,7 @@ hasAll(detachedRunner, [
   "updateContextTokens", "let tokenResetPending = false", "normalizeConfig", "legacyAbstract(value.task)",
   "keep this exactly aligned with subagent-core.ts legacyRunAbstract()",
   "(value.resumeCompactFrom === undefined || nonEmpty(value.resumeCompactFrom)) &&",
+  "Number.isInteger(value.steerResponseTimeoutMs) && value.steerResponseTimeoutMs > 0",
   "keep this exactly aligned with subagent-model-display.ts parseModelSpec()",
   "function sameModelSpecBase(left, right)",
 ], "detached runner");
@@ -2018,15 +2020,16 @@ check(
 hasNone(detachedRunner, ['event.type === "session_compact"'], "detached runner RPC compaction semantics");
 const contextTokensStart = detachedRunner.indexOf("function updateContextTokens(candidate)");
 const updateStatsStart = detachedRunner.indexOf("function updateStats(stats)", contextTokensStart);
-const collectMetadataStart = detachedRunner.indexOf("async function collectFinalMetadata()", updateStatsStart);
+const readFinalMetadataStart = detachedRunner.indexOf("async function readFinalMetadata()", updateStatsStart);
+const collectMetadataStart = detachedRunner.indexOf("async function collectFinalMetadata()", readFinalMetadataStart);
 const messageUpdateStart = detachedRunner.indexOf('if (event.type === "message_update")');
 const messageEndStart = detachedRunner.indexOf('if (event.type === "message_end")', messageUpdateStart);
 const toolStart = detachedRunner.indexOf('if (event.type === "tool_execution_start")', messageEndStart);
 const compactionStart = detachedRunner.indexOf('if (event.type === "compaction_end")', toolStart);
 const settledStart = detachedRunner.indexOf('if (event.type === "agent_settled")', compactionStart);
 const contextTokens = detachedRunner.slice(contextTokensStart, updateStatsStart);
-const updateStatsTokens = detachedRunner.slice(updateStatsStart, collectMetadataStart);
-const collectMetadata = detachedRunner.slice(collectMetadataStart, detachedRunner.indexOf("async function publishTerminal", collectMetadataStart));
+const updateStatsTokens = detachedRunner.slice(updateStatsStart, readFinalMetadataStart);
+const collectMetadata = detachedRunner.slice(readFinalMetadataStart, detachedRunner.indexOf("async function publishTerminal", collectMetadataStart));
 const messageUpdateTokens = detachedRunner.slice(messageUpdateStart, messageEndStart);
 const messageEndTokens = detachedRunner.slice(messageEndStart, toolStart);
 const compactionTokens = detachedRunner.slice(compactionStart, settledStart);
@@ -2040,7 +2043,7 @@ hasAll(updateStatsTokens, [
   "Number.isFinite(usage.tokens)", "usage.tokens > 0", "Number.isFinite(usage.contextWindow)", "usage.contextWindow > 0",
 ], "separate cumulative-provider and current-context stats paths");
 hasNone(updateStatsTokens, ["updateContextTokens(stats.tokens"], "provider totals must not replace context occupancy");
-hasAll(collectMetadata, ["client.getSessionStats()", "updateStats(stats)"], "final metadata context-token path");
+hasAll(collectMetadata, ["client.getSessionStats()", "updateStats(metadata.stats)"], "final metadata context-token path");
 hasAll(messageUpdateTokens, ["updateContextTokens(event.usage.totalTokens)", "patch.tokens = state.tokens"], "streaming current-context token path");
 hasNone(messageUpdateTokens, ["patch.tokens = event.usage.totalTokens"], "streaming current-context token path");
 hasAll(messageEndTokens, ["updateContextTokens(event.message.usage.totalTokens)", "state.providerTokens += providerUsageTokens(event.message.usage)", "state.tokens > 0"], "message-end context and cumulative-provider token paths");
