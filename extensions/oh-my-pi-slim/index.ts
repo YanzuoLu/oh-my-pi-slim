@@ -13,6 +13,13 @@ import { registerAskRuntime } from "./ask-runtime.js";
 import { AskTuiDriver } from "./ask-tui.js";
 import { cleanupLegacySubagentSetup, ensurePackageSetup } from "./bootstrap.js";
 import {
+  applyCacheRetentionForRequest,
+  CACHE_STATE_ENTRY_TYPE,
+  makeCacheState,
+  replayCacheState,
+  type CacheRetention,
+} from "./cache-retention.js";
+import {
   applyFastServiceTier,
   FAST_STATE_ENTRY_TYPE,
   isFastModeProvider,
@@ -295,16 +302,26 @@ export function presetFastModeEligible(preset: Preset | undefined): boolean {
   return preset !== undefined && Object.values(preset).some((role) => isFastModeProvider(role.provider));
 }
 
+/** Whether any of the active preset's seven roles uses the exact Anthropic provider. */
+export function presetCacheModeEligible(preset: Preset | undefined): boolean {
+  return preset !== undefined && Object.values(preset).some((role) => role.provider === "anthropic");
+}
+
 /** Footer status content for the active preset. Undefined clears the status slot. */
 export function presetStatusContent(
   theme: Pick<Theme, "fg">,
   presetName: string | undefined,
   fastEnabled?: boolean,
   fastEligible?: boolean,
+  cacheRetention?: CacheRetention,
+  cacheEligible?: boolean,
 ): string | undefined {
   if (presetName === undefined) return undefined;
   const fastStatus = fastEligible ? ` · Fast Mode ${fastEnabled ? "On" : "Off"}` : "";
-  return theme.fg("accent", `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})${fastStatus}`);
+  const cacheStatus = cacheEligible && cacheRetention
+    ? ` · Cache Mode ${cacheRetention === "long" ? "Long" : "Short"}`
+    : "";
+  return theme.fg("accent", `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})${fastStatus}${cacheStatus}`);
 }
 
 function isAnthropicOAuth(ctx: ExtensionContext): boolean {
@@ -339,11 +356,22 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   const loops = registerLoopRuntime(pi);
   const monitors = registerMonitorRuntime(pi);
   const subagents = registerSubagentRuntime(pi);
-  let fastEnabled = false;
+  let fastEnabled = true;
+  let cacheRetention: CacheRetention = "long";
   subagents.setFastModeResolver(() => fastEnabled);
+  subagents.setCacheRetentionResolver(() => cacheRetention);
   pi.on("before_provider_request", (event, ctx) => {
-    if (!fastEnabled) return;
-    return applyFastServiceTier(event.payload, ctx.model);
+    const model = ctx.model;
+    let payload = event.payload;
+    const fastPayload = fastEnabled ? applyFastServiceTier(payload, model) : undefined;
+    if (fastPayload) payload = fastPayload;
+    const cachePayload = applyCacheRetentionForRequest(
+      payload,
+      model,
+      cacheRetention,
+      () => model !== undefined && ctx.modelRegistry.isUsingOAuth(model),
+    );
+    return cachePayload ?? fastPayload;
   });
   // Read-only viewer: it owns no session state, writes nothing, and only reads cloned snapshots.
   const subagentViewer = createSubagentViewer({ snapshot: () => subagents.viewerSnapshot() });
@@ -428,7 +456,14 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     if (!ctx.hasUI) return;
     ctx.ui.setStatus(
       "oh-my-pi-slim",
-      presetStatusContent(ctx.ui.theme, active ? activePresetName : undefined, fastEnabled, presetFastModeEligible(activePreset)),
+      presetStatusContent(
+        ctx.ui.theme,
+        active ? activePresetName : undefined,
+        fastEnabled,
+        presetFastModeEligible(activePreset),
+        cacheRetention,
+        presetCacheModeEligible(activePreset),
+      ),
     );
   }
 
@@ -578,6 +613,26 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerCommand("cache", {
+    description: "Toggle Anthropic cache retention for this Pi session.",
+    handler: async (args, ctx) => {
+      if (args.trim()) {
+        report(ctx, "Usage: /cache", "warning");
+        return;
+      }
+      const next: CacheRetention = cacheRetention === "long" ? "short" : "long";
+      try {
+        pi.appendEntry(CACHE_STATE_ENTRY_TYPE, makeCacheState(next));
+      } catch (error) {
+        report(ctx, `Could not update Cache Mode: ${error instanceof Error ? error.message : String(error)}`, "error");
+        return;
+      }
+      cacheRetention = next;
+      updateStatus(ctx);
+      report(ctx, `Cache Mode ${next === "long" ? "Long" : "Short"} requested for this Pi session. Cache policy applies only to eligible Anthropic OAuth requests and does not guarantee a cache hit.`, "info");
+    },
+  });
+
   pi.registerCommand("preset", {
     description: "Switch the oh-my-pi-slim preset: /preset <name>",
     getArgumentCompletions: (argumentPrefix) => {
@@ -686,8 +741,10 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     notificationGate.clearWithoutDelivery();
     goal?.setDeliveryPaused(false);
     sessionCtx = ctx;
-    // Fast Mode is session-wide across every branch, so replay the full session entry log rather than the active branch.
-    fastEnabled = replayFastState(ctx.sessionManager.getEntries());
+    // Fast and Cache modes are session-wide across every branch, so replay the full entry log rather than the active branch.
+    const sessionEntries = ctx.sessionManager.getEntries();
+    fastEnabled = replayFastState(sessionEntries);
+    cacheRetention = replayCacheState(sessionEntries);
     active = false;
     activePresetName = undefined;
     activePreset = undefined;

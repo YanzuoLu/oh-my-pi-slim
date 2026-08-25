@@ -106,9 +106,9 @@ test("session replay uses the last valid exact custom entry across the full entr
   assert.equal(replayFastState([...entries, fastEntry({ version: 1, fast: false })]), false);
 });
 
-test("session replay defaults off and skips malformed latest entries without erasing valid state", () => {
-  assert.equal(replayFastState([]), false);
-  assert.equal(replayFastState([fastEntry({ version: 1, fast: "true" })]), false);
+test("session replay defaults on and skips malformed latest entries without erasing valid state", () => {
+  assert.equal(replayFastState([]), true);
+  assert.equal(replayFastState([fastEntry({ version: 1, fast: "true" })]), true);
   assert.equal(replayFastState([
     fastEntry({ version: 1, fast: true }),
     fastEntry({ version: 1, fast: false, extra: "invalid latest" }),
@@ -120,5 +120,5 @@ test("session replay defaults off and skips malformed latest entries without era
   assert.doesNotThrow(() => replayFastState([fastEntry({ version: 1, fast: true }), throwingEntry]));
   assert.equal(replayFastState([fastEntry({ version: 1, fast: true }), throwingEntry]), true);
   assert.doesNotThrow(() => replayFastState(undefined));
-  assert.equal(replayFastState(undefined), false);
+  assert.equal(replayFastState(undefined), true);
 });

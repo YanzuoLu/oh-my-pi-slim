@@ -258,10 +258,11 @@ completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠。tool output 折�
 | `/omps presets` | 列出 preset |
 | `/preset [name]` | 切换 preset；省略名称时列出 preset |
 | `/fast` | 切换当前 Pi session 的 Fast Mode，不接受任何参数 |
+| `/cache` | 在当前 Pi session 的 Long 与 Short Cache Mode 间切换，不接受任何参数 |
 
 ### Fast Mode
 
-Fast Mode 属于当前 Pi session，新 session 默认关闭。最近一次 `/fast` toggle 对整个 session 的全部 branch 生效，因此 tree navigation 不会改变状态。reload、进程重启与 session resume 都会从 session history 恢复状态。fork 会继承 Pi 为创建该 fork 而复制的 target path 上最后一条 Fast Mode 状态。使用 `--no-session` 时，状态只在当前进程内保留，进程重启后不会恢复。
+Fast Mode 属于当前 Pi session，新 session 默认开启。最近一次 `/fast` toggle 对整个 session 的全部 branch 生效，因此 tree navigation 不会改变状态。reload、进程重启与 session resume 都会从 session history 恢复状态。fork 会继承 Pi 为创建该 fork 而复制的 target path 上最后一条 Fast Mode 状态。使用 `--no-session` 时，状态只在当前进程内保留，进程重启后不会恢复。
 
 v1.0.0 写入 `oh-my-pi-slim.json` 顶层的 `fast` 字段现已被忽略，你可以手动删除该遗留字段。Fast Mode 仍与 preset 是否激活相互独立。
 
@@ -270,6 +271,20 @@ v1.0.0 写入 `oh-my-pi-slim.json` 顶层的 `fast` 字段现已被忽略，你�
 Fast Mode 作用于全部普通 agent request。仅当 provider 精确为 `openai` 或 `openai-codex`，且 payload model 与当前 Pi model 匹配时，才会请求 `service_tier: "priority"`。切换后的状态只由 future child `create` 与 `resume` launch 继承。running child 不会热切换。compaction 与 branch summary model call 仍使用 default tier。账户没有 priority 权限时 request 可能失败。后加载的 extension 可以再次覆盖 OMPS 修改后的 payload。Fast Mode 不承诺 priority capacity 一定获批，也不承诺 request 一定更快。
 
 由于注入的 tier 不会反映在估算中，Pi 的 Codex footer cost 可能低估 priority-tier cost 约 2–2.5 倍。
+
+### Cache Mode
+
+Cache Mode 属于当前 Pi session，新 session 默认使用 Long。裸 `/cache` 在 Long 与 Short 之间切换。最近一次 toggle 对全部 branch 生效。reload、进程重启与 session resume 会从 session history 恢复状态。fork 会继承复制到 target path 的最后一条 Cache Mode 状态。使用 `--no-session` 时，状态只在当前进程内保留，进程重启后不会恢复。
+
+Cache Mode 只处理普通 Claude request。provider 必须精确为 `anthropic`，API 必须精确为 `anthropic-messages`，payload model 必须与当前 Pi model 匹配，model 不得明确禁用 long cache retention，并且 Pi 必须报告正在使用 Anthropic OAuth。API key request、compatible endpoint、OpenAI 与 `openai-codex` payload 都保持原样。
+
+Long 只升级已有的合法 `{ type: "ephemeral" }` cache breakpoint，并通过 clone 添加 `ttl: "1h"`。Short 只删除这些 breakpoint 的 `ttl`，恢复隐式的五分钟 retention。处理范围包括已有的 top-level、system block、tool 与 message content marker，也包括 tool result content。变换采用 all-or-nothing。目标 surface 必须包含一到四个 marker，而且每个 marker 必须精确为 `{ type: "ephemeral" }`，或只额外包含值为 `"5m"` 或 `"1h"` 的合法 `ttl`。任一 marker malformed、marker 数为零或超过四个时，整个 payload 都保持原样。OMPS 不会创建 breakpoint，会保留全部无关字段，也不会原地修改 payload。后续 provider shaping 会保留这些字段。
+
+`PI_CACHE_RETENTION` 控制 Pi 的上游 marker policy。OMPS 不会设置它，也不会修改 `process.env`。当 `PI_CACHE_RETENTION=long` 时，Cache Short 会从 Pi 已有 marker 删除 `ttl`，恢复五分钟 retention。当 `PI_CACHE_RETENTION=none` 时，Pi 不提供 marker，因此 Cache Long 不会创建 marker，并会静默无效。provider payload hook 按顺序执行，所以 OMPS hook 之后的 writer 会覆盖前面的结果。
+
+只有 future child `create` 与 `resume` launch 会继承当前 Long 或 Short 的 OMPS 内部 snapshot。launch snapshot 不会重写 `PI_CACHE_RETENTION`，也不会修改运行中 parent process 的 `process.env`。running child 不会热切换。每个 child 都会再次执行完整的 Anthropic OAuth gate。在 Pi 当前实现下，compaction 与 branch summary model call 保持不变。OMPS 不主动 prewarm cache，也不复制 context-cache header、OAuth 处理或 transport 行为。更长 retention 可能增加 Anthropic cache write 成本，实际价格取决于当前 model 与账户。
+
+当 OMPS active 且 active preset 中任一 role 的 provider 精确为 `anthropic` 时，footer 会追加 `Cache Mode Long` 或 `Cache Mode Short`。该资格基于整个 preset，不依赖当前 Main model 或认证状态。混合 preset 会先显示 `Fast Mode On` 或 `Fast Mode Off`，再显示 Cache Mode。Cache status 只是请求的 session policy，不证明 OAuth 已启用，不证明 server 已接受 retention request，也不证明发生了 cache hit。footer 不会添加 Requested 字样。
 
 ## Runtime、UI 与持久化
 

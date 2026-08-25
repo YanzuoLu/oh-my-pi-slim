@@ -58,7 +58,7 @@ export function parseFastState(value: unknown): FastState | undefined {
 }
 
 export function replayFastState(entries: readonly unknown[]): boolean {
-  let fast = false;
+  let fast = true;
   try {
     if (!Array.isArray(entries)) return fast;
     for (const entry of entries) {

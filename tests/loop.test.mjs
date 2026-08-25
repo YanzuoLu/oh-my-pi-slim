@@ -17,6 +17,7 @@ const dependencyMap = {
   "./ask-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts", import.meta.url).href,
   "./ask-tui.js": new URL("../extensions/oh-my-pi-slim/ask-tui.ts", import.meta.url).href,
   "./bootstrap.js": new URL("../extensions/oh-my-pi-slim/bootstrap.ts", import.meta.url).href,
+  "./cache-retention.js": new URL("../extensions/oh-my-pi-slim/cache-retention.ts", import.meta.url).href,
   "./fast-mode.js": new URL("../extensions/oh-my-pi-slim/fast-mode.ts", import.meta.url).href,
   "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
   "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
@@ -1014,6 +1015,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.ok(main.commands.includes("goal"));
     assert.ok(main.commands.includes("loop"));
     assert.ok(main.commands.includes("fast"));
+    assert.ok(main.commands.includes("cache"));
     assert.equal(main.commands.includes("monitor"), false);
     assert.deepEqual(main.shortcuts, ["ctrl+shift+left", "ctrl+shift+right"], "main sessions register exactly the two viewer shortcuts");
     assert.ok(main.handlers.has("session_before_fork"));
@@ -1039,7 +1041,12 @@ test("main sessions register Ask and runtime tools while child sessions return b
     const sessionDir = join(fastAgentDir, "sessions");
     mkdirSync(sessionDir, { recursive: true });
     const notifications = [];
-    const makeCtx = (entries, sessionId) => ({
+    const makeCtx = (
+      entries,
+      sessionId,
+      model = { provider: "openai", api: "openai-responses", id: "gpt-main" },
+      usingOAuth = false,
+    ) => ({
       cwd: ROOT,
       mode: "rpc",
       hasUI: true,
@@ -1048,7 +1055,8 @@ test("main sessions register Ask and runtime tools while child sessions return b
         notify(message, level) { notifications.push({ message, level }); },
         setStatus() {},
       },
-      model: { provider: "openai", id: "gpt-main" },
+      model,
+      modelRegistry: { isUsingOAuth: (candidate) => usingOAuth && candidate === model },
       isProjectTrusted: () => true,
       sessionManager: {
         getEntries: () => entries,
@@ -1060,14 +1068,14 @@ test("main sessions register Ask and runtime tools while child sessions return b
     const fastCtx = makeCtx(sessionEntries, "fast-main-session");
     const sessionStart = main.handlers.get("session_start")[0];
     const providerHook = main.handlers.get("before_provider_request");
-    const providerResult = (runtime, ctx) => runtime.handlers.get("before_provider_request")[0](
-      { payload: { model: "gpt-main" } },
+    const providerResult = (runtime, ctx, payload = { model: ctx.model.id }) => runtime.handlers.get("before_provider_request")[0](
+      { payload },
       ctx,
     );
     assert.equal(providerHook.length, 1, "main unconditionally registers exactly one provider payload hook");
     await sessionStart({ reason: "startup" }, fastCtx);
     assert.equal(JSON.parse(readFileSync(legacyConfigPath, "utf8")).fast, true, "the legal v1.0.0 preset config keeps its legacy field untouched");
-    assert.equal(providerResult(main, fastCtx), undefined, "empty session entries stay off even when legacy agent-global config says fast true");
+    assert.equal(providerResult(main, fastCtx).service_tier, "priority", "empty session entries default Fast Mode on regardless of legacy agent-global config");
 
     const fastCommand = main.commandDefinitions.get("fast");
     const entriesBeforeUsage = sessionEntries.length;
@@ -1079,16 +1087,14 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.deepEqual(sessionEntries.at(-1), {
       type: "custom",
       customType: "oh-my-pi-slim:fast-state",
-      data: { version: 1, fast: true },
+      data: { version: 1, fast: false },
     });
-    assert.equal(providerResult(main, fastCtx).service_tier, "priority");
-    assert.match(notifications.at(-1).message, /Fast Mode enabled for this Pi session.*account permission.*may fail/);
+    assert.equal(providerResult(main, fastCtx), undefined);
+    assert.match(notifications.at(-1).message, /Fast Mode disabled for this Pi session.*account permission.*may fail/);
 
     await fastCommand.handler("", fastCtx);
-    assert.deepEqual(sessionEntries.at(-1).data, { version: 1, fast: false });
-    assert.equal(providerResult(main, fastCtx), undefined);
-    await fastCommand.handler("", fastCtx);
     assert.deepEqual(sessionEntries.at(-1).data, { version: 1, fast: true });
+    assert.equal(providerResult(main, fastCtx).service_tier, "priority");
 
     const appendEntry = main.pi.appendEntry;
     main.pi.appendEntry = () => { throw new Error("injected append failure"); };
@@ -1098,35 +1104,114 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.equal(providerResult(main, fastCtx).service_tier, "priority", "append failure does not change in-memory Fast Mode");
     main.pi.appendEntry = appendEntry;
 
+    const anthropicModel = {
+      provider: "anthropic",
+      api: "anthropic-messages",
+      id: "claude-main",
+      compat: { supportsLongCacheRetention: true },
+    };
+    const cacheCtx = makeCtx(sessionEntries, "cache-main-session", anthropicModel, true);
+    const cachePayload = (ttl) => ({
+      model: "claude-main",
+      messages: [{ role: "user", content: [{ type: "text", text: "hello", cache_control: {
+        type: "ephemeral",
+        ...(ttl ? { ttl } : {}),
+      } }] }],
+    });
+    assert.equal(
+      providerResult(main, cacheCtx, cachePayload()).messages[0].content[0].cache_control.ttl,
+      "1h",
+      "a new session defaults Cache Mode Long",
+    );
+
+    const cacheCommand = main.commandDefinitions.get("cache");
+    const entriesBeforeCacheUsage = sessionEntries.length;
+    await cacheCommand.handler("long", cacheCtx);
+    assert.equal(sessionEntries.length, entriesBeforeCacheUsage, "Cache Mode arguments never append session state");
+    assert.deepEqual(notifications.at(-1), { message: "Usage: /cache", level: "warning" });
+
+    await cacheCommand.handler("", cacheCtx);
+    assert.deepEqual(sessionEntries.at(-1), {
+      type: "custom",
+      customType: "oh-my-pi-slim:cache-state",
+      data: { version: 1, retention: "short" },
+    });
+    assert.deepEqual(
+      providerResult(main, cacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
+      { type: "ephemeral" },
+    );
+    assert.match(notifications.at(-1).message, /Cache Mode Short requested for this Pi session.*does not guarantee a cache hit/);
+
+    await cacheCommand.handler("", cacheCtx);
+    assert.deepEqual(sessionEntries.at(-1).data, { version: 1, retention: "long" });
+    assert.equal(providerResult(main, cacheCtx, cachePayload()).messages[0].content[0].cache_control.ttl, "1h");
+
+    main.pi.appendEntry = () => { throw new Error("injected cache append failure"); };
+    await cacheCommand.handler("", cacheCtx);
+    assert.equal(notifications.at(-1).level, "error");
+    assert.match(notifications.at(-1).message, /injected cache append failure/);
+    assert.equal(
+      providerResult(main, cacheCtx, cachePayload()).messages[0].content[0].cache_control.ttl,
+      "1h",
+      "append failure does not change in-memory Cache Mode",
+    );
+    main.pi.appendEntry = appendEntry;
+
     sessionEntries.push({
       type: "custom",
       customType: "oh-my-pi-slim:fast-state",
       data: { version: 1, fast: false, invalid: true },
+    }, {
+      type: "custom",
+      customType: "oh-my-pi-slim:cache-state",
+      data: { version: 1, retention: "short", invalid: true },
     });
     const reload = registrationHarness(sessionEntries);
     ohMyPiSlim(reload.pi);
     const reloadCtx = makeCtx(sessionEntries, "fast-main-session");
     await reload.handlers.get("session_start")[0]({ reason: "reload" }, reloadCtx);
-    assert.equal(providerResult(reload, reloadCtx).service_tier, "priority", "reload restores the last valid state from the same full entry log");
+    assert.equal(providerResult(reload, reloadCtx).service_tier, "priority", "reload restores the last valid Fast state from the same full entry log");
+    const reloadCacheCtx = makeCtx(sessionEntries, "cache-main-session", anthropicModel, true);
+    assert.equal(
+      providerResult(reload, reloadCacheCtx, cachePayload()).messages[0].content[0].cache_control.ttl,
+      "1h",
+      "reload restores the last valid Cache state from the same full entry log",
+    );
 
     for (const reason of ["resume", "fork"]) {
       const restored = registrationHarness(sessionEntries);
       ohMyPiSlim(restored.pi);
       const restoredCtx = makeCtx(sessionEntries, `fast-${reason}-session`);
       await restored.handlers.get("session_start")[0]({ reason }, restoredCtx);
-      assert.equal(providerResult(restored, restoredCtx).service_tier, "priority", `${reason} restores or inherits the copied session path state`);
+      assert.equal(providerResult(restored, restoredCtx).service_tier, "priority", `${reason} restores or inherits the copied Fast session path state`);
+      const restoredCacheCtx = makeCtx(sessionEntries, `cache-${reason}-session`, anthropicModel, true);
+      assert.equal(
+        providerResult(restored, restoredCacheCtx, cachePayload()).messages[0].content[0].cache_control.ttl,
+        "1h",
+        `${reason} restores or inherits the copied Cache session path state`,
+      );
     }
 
     const newSession = registrationHarness([]);
     ohMyPiSlim(newSession.pi);
     const newCtx = makeCtx(newSession.sessionEntries, "fast-new-session");
     await newSession.handlers.get("session_start")[0]({ reason: "new" }, newCtx);
-    assert.equal(providerResult(newSession, newCtx), undefined, "a new empty session defaults Fast Mode off");
+    assert.equal(providerResult(newSession, newCtx).service_tier, "priority", "a new empty session defaults Fast Mode on");
+    const newCacheCtx = makeCtx(newSession.sessionEntries, "cache-new-session", anthropicModel, true);
+    assert.equal(
+      providerResult(newSession, newCacheCtx, cachePayload()).messages[0].content[0].cache_control.ttl,
+      "1h",
+      "a new empty session defaults Cache Mode Long",
+    );
 
     const treeEntries = [{
       type: "custom",
       customType: "oh-my-pi-slim:fast-state",
       data: { version: 1, fast: true },
+    }, {
+      type: "custom",
+      customType: "oh-my-pi-slim:cache-state",
+      data: { version: 1, retention: "short" },
     }];
     const treeRuntime = registrationHarness(treeEntries);
     ohMyPiSlim(treeRuntime.pi);
@@ -1136,11 +1221,21 @@ test("main sessions register Ask and runtime tools while child sessions return b
       type: "custom",
       customType: "oh-my-pi-slim:fast-state",
       data: { version: 1, fast: false },
+    }, {
+      type: "custom",
+      customType: "oh-my-pi-slim:cache-state",
+      data: { version: 1, retention: "long" },
     });
     const entriesBeforeTree = treeEntries.length;
     await treeRuntime.handlers.get("session_tree")[0]({}, treeCtx);
-    assert.equal(treeEntries.length, entriesBeforeTree, "tree navigation never appends Fast Mode state");
+    assert.equal(treeEntries.length, entriesBeforeTree, "tree navigation never appends Fast or Cache Mode state");
     assert.equal(providerResult(treeRuntime, treeCtx).service_tier, "priority", "tree navigation never recomputes session-wide Fast Mode from a branch");
+    const treeCacheCtx = makeCtx(treeEntries, "cache-tree-session", anthropicModel, true);
+    assert.deepEqual(
+      providerResult(treeRuntime, treeCacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
+      { type: "ephemeral" },
+      "tree navigation never recomputes session-wide Cache Mode from a branch",
+    );
 
     await main.toolDefinitions.get("goal").execute("goal-create", {
       action: "create",

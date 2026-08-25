@@ -8,6 +8,11 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+  CACHE_RETENTION_ENV_VAR,
+  cacheRetentionEnvValue,
+  type CacheRetention,
+} from "./cache-retention.js";
 import { FAST_ENV_VAR, fastEnvValue } from "./fast-mode.js";
 import {
   SPECIALIST_NAMES,
@@ -96,6 +101,7 @@ interface AgentDefinition {
 type ModelResolver = (agent: SpecialistName) => string;
 type DenyResolver = (agent: SpecialistName) => string[];
 type FastModeResolver = () => boolean;
+type CacheRetentionResolver = () => CacheRetention;
 
 type TimerHandle = ReturnType<typeof setInterval>;
 
@@ -478,7 +484,8 @@ export class OmpsSubagentRuntime {
   private goalStatsRoot?: string;
   private modelResolver?: ModelResolver;
   private denyResolver?: DenyResolver;
-  private fastModeResolver: FastModeResolver = () => false;
+  private fastModeResolver: FastModeResolver = () => true;
+  private cacheRetentionResolver: CacheRetentionResolver = () => "long";
   private poller?: TimerHandle;
   private shuttingDown = false;
   /** Bumped by restore and shutdown so an in-flight interrupt never hands a result to a replaced session. */
@@ -516,8 +523,12 @@ export class OmpsSubagentRuntime {
     this.denyResolver = resolver;
   }
 
-  setFastModeResolver(resolver: FastModeResolver = () => false): void {
+  setFastModeResolver(resolver: FastModeResolver = () => true): void {
     this.fastModeResolver = resolver;
+  }
+
+  setCacheRetentionResolver(resolver: CacheRetentionResolver = () => "long"): void {
+    this.cacheRetentionResolver = resolver;
   }
 
   setNotificationDeliveryPaused(paused: boolean): void {
@@ -1391,6 +1402,7 @@ export class OmpsSubagentRuntime {
         PI_SUBAGENT_CHILD: "1",
         OMPS_SUBAGENT_CHILD: "1",
         [FAST_ENV_VAR]: fastEnvValue(this.fastModeResolver()),
+        [CACHE_RETENTION_ENV_VAR]: cacheRetentionEnvValue(this.cacheRetentionResolver()),
         OMPS_PARENT_RUN_ID: run.id,
         OMPS_RUN_ID: run.id,
       },
