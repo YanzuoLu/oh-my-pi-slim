@@ -118,6 +118,7 @@ type GoalTimerHandle = ReturnType<typeof setTimeout>;
 type GoalStateListener = (goal: PublicGoalState | null) => void;
 
 export interface GoalRuntimeOptions {
+  sendContinuationMessage?: ExtensionAPI["sendMessage"];
   nowMs?: () => number;
   randomKey?: () => string;
   defer?: (callback: () => void) => void;
@@ -440,6 +441,7 @@ export function retryDelayMs(attempt: number): number {
 
 export class GoalRuntime {
   private readonly pi: ExtensionAPI;
+  private readonly sendContinuationMessage: ExtensionAPI["sendMessage"];
   private readonly nowMs: () => number;
   private readonly randomKey: () => string;
   private readonly defer: (callback: () => void) => void;
@@ -479,6 +481,7 @@ export class GoalRuntime {
 
   constructor(pi: ExtensionAPI, options: GoalRuntimeOptions = {}) {
     this.pi = pi;
+    this.sendContinuationMessage = options.sendContinuationMessage ?? ((message, sendOptions) => this.pi.sendMessage(message, sendOptions));
     this.nowMs = options.nowMs ?? (() => Date.now());
     this.randomKey = options.randomKey ?? (() => randomUUID());
     this.defer = options.defer ?? ((callback) => setImmediate(callback));
@@ -1148,7 +1151,7 @@ export class GoalRuntime {
       }
       this.pendingAutoRunKey = pending.deliveryKey;
       try {
-        this.pi.sendMessage({
+        this.sendContinuationMessage({
           customType: GOAL_CONTINUATION_MESSAGE_TYPE,
           content: pending.content,
           display: true,

@@ -106,6 +106,7 @@ type CacheRetentionResolver = () => CacheRetention;
 type TimerHandle = ReturnType<typeof setInterval>;
 
 interface RuntimeOptions {
+  sendMessage?: ExtensionAPI["sendMessage"];
   now?: () => string;
   nowMs?: () => number;
   pollMs?: number;
@@ -438,6 +439,7 @@ if (JSON.stringify(publicSchemaKeys(subagentParameters)) !== JSON.stringify([...
 export class OmpsSubagentRuntime {
   readonly registry = new SubagentRegistry();
   private readonly pi: ExtensionAPI;
+  private readonly sendMessage: ExtensionAPI["sendMessage"];
   private readonly agents: Map<SpecialistName, AgentDefinition>;
   private readonly now: () => string;
   private readonly nowMs: () => number;
@@ -493,6 +495,7 @@ export class OmpsSubagentRuntime {
 
   constructor(pi: ExtensionAPI, options: RuntimeOptions = {}) {
     this.pi = pi;
+    this.sendMessage = options.sendMessage ?? ((message, sendOptions) => this.pi.sendMessage(message, sendOptions));
     this.agents = discoverPackageAgents();
     this.now = options.now ?? (() => new Date().toISOString());
     this.nowMs = options.nowMs ?? (() => Date.now());
@@ -965,7 +968,7 @@ export class OmpsSubagentRuntime {
     const request = run.request
       ? `\n\nRequest:\n${JSON.stringify(run.request, null, 2)}`
       : "";
-    this.pi.sendMessage(
+    this.sendMessage(
       {
         customType: SUBAGENT_NOTIFICATION_TYPE,
         content: `Subagent ${run.id} (${run.agent}) is ${delivery.event}.${request}${terminalResultTail(run)}`,

@@ -103,6 +103,7 @@ function createHarness(options = {}) {
     },
   };
   const runtime = new GoalRuntime(pi, {
+    sendContinuationMessage: options.sendContinuationMessage,
     nowMs: () => now,
     randomKey: () => (typeof options.randomKey === "function" ? options.randomKey() : options.randomKey ?? "instance-1"),
     defer: (callback) => deferred.push(callback),
@@ -402,6 +403,44 @@ test("continuation waits for the full safe gate, uses steer with acknowledgement
   harness.appendContinuation(continuation.message);
   assert.equal(harness.runtime.acknowledgeContinuationMessage({ role: "custom", ...continuation.message }), true);
   assert.equal(harness.runtime.goalView().continuationCount, 1);
+});
+
+test("continuation seam preserves automatic classification while Goal state messages stay on Pi", async () => {
+  const continuationLaunches = [];
+  let runtime;
+  const automatic = createHarness({
+    sendContinuationMessage(message, options) {
+      continuationLaunches.push({ message, options });
+      runtime.onAgentStart();
+    },
+  });
+  runtime = automatic.runtime;
+  await automatic.execute(createInput);
+  runtime.onAgentSettled(automatic.ctx);
+  automatic.flush();
+  assert.equal(continuationLaunches.length, 1);
+  assert.equal(continuationLaunches[0].message.customType, GOAL_CONTINUATION_MESSAGE_TYPE);
+  assert.deepEqual(continuationLaunches[0].options, { deliverAs: "steer", triggerTurn: true });
+  assert.equal(automatic.sent.some((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE), false);
+
+  runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop" }] });
+  automatic.setIdle(true);
+  runtime.onAgentSettled(automatic.ctx);
+  assert.equal(runtime.status().noProgressCount, 1, "pendingAutoRunKey is visible before the synchronous continuation sender starts the run");
+
+  const stateSeam = [];
+  const state = createHarness({
+    sendContinuationMessage(message, options) { stateSeam.push({ message, options }); },
+  });
+  await state.execute(createInput);
+  state.runtime.onAgentStart();
+  state.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
+  state.runtime.onAgentSettled(state.ctx);
+  assert.equal(stateSeam.length, 0, "automatic Goal state events do not use the continuation launch seam");
+  const stateMessage = state.sent.findLast((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE);
+  assert.ok(stateMessage);
+  assert.equal(stateMessage.message.details.event, "user_abort");
+  assert.deepEqual(stateMessage.options, { deliverAs: "steer", triggerTurn: false });
 });
 
 test("provider failures use unbounded frozen backoff, timer-safe activation, and success reset", async () => {

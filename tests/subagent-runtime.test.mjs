@@ -243,6 +243,7 @@ function createHarness({
   interruptWaitMs = 0,
   sleep = async () => {},
   sendMessageError,
+  notificationSender,
   launchError,
   keepAliveAfterKill = false,
   keepAliveAfterTerm = false,
@@ -281,6 +282,7 @@ function createHarness({
     },
   };
   const runtime = new OmpsSubagentRuntime(pi, {
+    sendMessage: notificationSender,
     now: () => new Date(clock).toISOString(),
     nowMs: () => clock,
     pollMs: 250,
@@ -2485,6 +2487,54 @@ test("a restore during an interrupt refuses the handoff and delivers the pending
     assert.equal(harness.runtime.acknowledgeNotificationMessage(deliveredMessage(harness.notifications[0].message)), true);
     harness.runtime.retryQueuedNotificationsAfterAgentSettled();
     assert.equal(harness.notifications.length, 1, "the acknowledged replay is never repeated");
+  } finally { harness.cleanup(); }
+});
+
+test("waiting and terminal notifications use the injected sendMessage seam unchanged", async () => {
+  const seamMessages = [];
+  const harness = createHarness({
+    notificationSender(message, options) { seamMessages.push({ message, options }); },
+  });
+  try {
+    await harness.restore();
+    const waiting = persistedRun({
+      id: "waiting-seam",
+      status: "waiting",
+      waitingSeq: 2,
+      request: {
+        runId: "waiting-seam",
+        reason: "progress_update",
+        message: "seam progress",
+        createdAt: new Date(NOW_MS).toISOString(),
+      },
+      notificationPending: "waiting",
+    });
+    const terminal = persistedRun({
+      id: "terminal-seam",
+      status: "failed",
+      error: "seam failure",
+      notificationPending: "failed",
+    });
+    harness.runtime.registry.restore([waiting, terminal]);
+    harness.runtime.deliverPendingNotification(waiting.id);
+    harness.runtime.deliverPendingNotification(terminal.id);
+
+    assert.equal(harness.notifications.length, 0, "the default Pi sender is bypassed");
+    assert.deepEqual(seamMessages.map(({ message }) => message.customType), [
+      "oh-my-pi-slim:subagent-notification",
+      "oh-my-pi-slim:subagent-notification",
+    ]);
+    assert.deepEqual(seamMessages.map(({ message }) => message.details.status), ["waiting", "failed"]);
+    assert.deepEqual(seamMessages.map(({ message }) => message.details.deliveryKey), [
+      expectedDeliveryKey(waiting.id, "waiting", 2),
+      expectedDeliveryKey(terminal.id, "failed"),
+    ]);
+    assert.deepEqual(seamMessages.map(({ options }) => options), [
+      { deliverAs: "steer", triggerTurn: true },
+      { deliverAs: "steer", triggerTurn: true },
+    ]);
+    assert.equal(seamMessages[0].message.details.request.message, "seam progress");
+    assert.equal(seamMessages[1].message.content.endsWith("Error: seam failure"), true);
   } finally { harness.cleanup(); }
 });
 

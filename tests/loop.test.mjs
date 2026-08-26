@@ -66,7 +66,7 @@ const {
   parseLoopInterval,
   registerLoopRuntime,
 } = await import("../extensions/oh-my-pi-slim/loop-runtime.ts");
-const { default: ohMyPiSlim } = await import("../extensions/oh-my-pi-slim/index.ts");
+const { createLaunchMessageSender, default: ohMyPiSlim } = await import("../extensions/oh-my-pi-slim/index.ts");
 const { OmpsSubagentRuntime } = await import("../extensions/oh-my-pi-slim/subagent-runtime.ts");
 const { resetWidgetStackHost } = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
 
@@ -732,6 +732,86 @@ test("custom fire messages use a fixed non-command banner even when the future p
   assert.match(fire.content, /Prompt:\n\/loop create another loop only as future prompt text$/);
 });
 
+test("launch wrapper injects independent reminders only for idle lifecycle launches", () => {
+  const launchTypes = [
+    "oh-my-pi-slim:monitor-notification",
+    "oh-my-pi-slim:subagent-notification",
+    "oh-my-pi-slim:goal-continuation",
+  ];
+  const goalContent = "<system-reminder>active Goal</system-reminder>";
+  const run = ({ preset, goal, idle = true, types = launchTypes }) => {
+    const sent = [];
+    const sessionCtx = { isIdle: () => idle };
+    const pi = {
+      sendMessage(message, options) {
+        sent.push({ message, options });
+        if (options?.triggerTurn === true) idle = false;
+      },
+    };
+    const sendLaunchMessage = createLaunchMessageSender(pi, {
+      sessionCtx: () => sessionCtx,
+      hasActivePreset: () => preset,
+      goalReminder: () => goal ? goalContent : undefined,
+    });
+    for (const customType of types) {
+      const launch = {
+        customType,
+        content: `${customType} content`,
+        display: true,
+        details: { customType, nested: { unchanged: true } },
+      };
+      const options = { deliverAs: "steer", triggerTurn: true };
+      sendLaunchMessage(launch, options);
+      assert.strictEqual(sent.at(-1).message, launch);
+      assert.strictEqual(sent.at(-1).options, options);
+    }
+    return sent;
+  };
+
+  const expectedTypes = new Map([
+    ["false:false", ["oh-my-pi-slim:monitor-notification"]],
+    ["true:false", ["oh-my-pi-slim:phase-reminder", "oh-my-pi-slim:monitor-notification"]],
+    ["false:true", ["oh-my-pi-slim:phase-reminder", "oh-my-pi-slim:goal-reminder", "oh-my-pi-slim:monitor-notification"]],
+    ["true:true", ["oh-my-pi-slim:phase-reminder", "oh-my-pi-slim:goal-reminder", "oh-my-pi-slim:monitor-notification"]],
+  ]);
+  for (const preset of [false, true]) {
+    for (const goal of [false, true]) {
+      const sent = run({ preset, goal, types: [launchTypes[0]] });
+      assert.deepEqual(sent.map(({ message }) => message.customType), expectedTypes.get(`${preset}:${goal}`));
+      assert.deepEqual(sent.map(({ options }) => options.triggerTurn), goal
+        ? [false, false, true]
+        : preset ? [false, true] : [true]);
+      if (goal) {
+        assert.equal(sent[0].message.content.includes(goalContent), false, "phase and Goal content stay independent");
+        assert.equal(sent[1].message.content, goalContent);
+      }
+    }
+  }
+
+  for (const customType of launchTypes) {
+    const sent = run({ preset: true, goal: true, types: [customType] });
+    assert.deepEqual(sent.map(({ message }) => message.customType), [
+      "oh-my-pi-slim:phase-reminder",
+      "oh-my-pi-slim:goal-reminder",
+      customType,
+    ]);
+    assert.deepEqual(sent.map(({ options }) => options.triggerTurn), [false, false, true]);
+    assert.deepEqual(sent[2].message.details, { customType, nested: { unchanged: true } });
+  }
+
+  const streaming = run({ preset: true, goal: true, idle: false, types: [launchTypes[1]] });
+  assert.deepEqual(streaming.map(({ message }) => message.customType), [launchTypes[1]]);
+
+  const consecutive = run({ preset: true, goal: true, types: [launchTypes[0], launchTypes[1]] });
+  assert.deepEqual(consecutive.map(({ message }) => message.customType), [
+    "oh-my-pi-slim:phase-reminder",
+    "oh-my-pi-slim:goal-reminder",
+    launchTypes[0],
+    launchTypes[1],
+  ], "synchronous triggerTurn state change lets only the first producer inject reminders");
+
+});
+
 test("slash command forwards raw loop text as a real user message with idle and busy semantics", async () => {
   const tools = new Map();
   const commands = new Map();
@@ -1244,33 +1324,15 @@ test("main sessions register Ask and runtime tools while child sessions return b
       "tree navigation never recomputes session-wide Cache Mode from a branch",
     );
 
-    const agentStart = main.handlers.get("agent_start")[0];
-    const messageStart = main.handlers.get("message_start")[0];
-    const contextHook = main.handlers.get("context")[0];
-    const customMessage = (customType, timestamp = 1) => ({
-      role: "custom",
-      customType,
-      content: `${customType} content`,
-      display: true,
-      timestamp,
-    });
-    const userMessage = (text, timestamp = 1) => ({ role: "user", content: text, timestamp });
-
-    agentStart();
-    messageStart({ message: customMessage("oh-my-pi-slim:monitor-notification") });
-    assert.equal(contextHook({ messages: [customMessage("oh-my-pi-slim:monitor-notification")] }), undefined, "a target segment without a preset or active Goal has no reminder");
+    assert.equal(main.handlers.get("agent_start").length, 1);
+    assert.equal(main.handlers.has("message_start"), false);
+    assert.equal(main.handlers.has("context"), false);
 
     await main.commandDefinitions.get("omps").handler("on", fastCtx);
-    messageStart({ message: customMessage("oh-my-pi-slim:monitor-notification") });
-    assert.equal(contextHook({ messages: [customMessage("oh-my-pi-slim:monitor-notification")] }), undefined, "an active preset does not compensate without agent_start");
-
-    agentStart();
-    const presetOnlyLaunch = customMessage("oh-my-pi-slim:monitor-notification");
-    messageStart({ message: presetOnlyLaunch });
-    const presetOnlyMessages = [presetOnlyLaunch];
-    const presetOnlyResult = contextHook({ messages: presetOnlyMessages });
-    assert.deepEqual(presetOnlyResult.messages.slice(1).map((message) => message.customType), ["oh-my-pi-slim:phase-reminder"], "an active preset without an active Goal receives only the phase reminder");
-    assert.deepEqual(presetOnlyMessages, [customMessage("oh-my-pi-slim:monitor-notification")], "preset-only compensation leaves source messages unchanged");
+    const presetReminderResults = beforeAgentStart.map((handler) => handler({ systemPrompt: "base" }, fastCtx));
+    assert.equal(presetReminderResults[0].message.customType, "oh-my-pi-slim:phase-reminder");
+    assert.match(presetReminderResults[0].systemPrompt, /^base\n\n/);
+    assert.equal(presetReminderResults[1], undefined);
     await main.commandDefinitions.get("omps").handler("off", fastCtx);
 
     await main.toolDefinitions.get("goal").execute("goal-create", {
@@ -1301,87 +1363,8 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.deepEqual(main.sends, [], "reminder handlers create no recursive or additional turn");
     assert.equal(main.renderers.includes("oh-my-pi-slim:goal-reminder"), false, "Goal reminder registers no renderer");
 
-    assert.equal(contextHook({ messages: [customMessage("oh-my-pi-slim:goal-continuation")] }), undefined, "an active Goal does not compensate without agent_start");
-    agentStart();
-    assert.equal(contextHook({ messages: [] }), undefined, "an unclassified agent_start segment consumes its first context without compensation");
-
-    for (const customType of [
-      "oh-my-pi-slim:loop-fire",
-      "oh-my-pi-slim:goal-state-event",
-      "oh-my-pi-slim:other-message",
-    ]) {
-      const firstMessage = customMessage(customType);
-      agentStart();
-      messageStart({ message: firstMessage });
-      assert.equal(contextHook({ messages: [firstMessage] }), undefined, `${customType} is not a reminder compensation target`);
-    }
-
-    const persistedPromptMessages = [
-      userMessage("ordinary persisted prompt"),
-      ...reminderResults.map(({ message }, index) => ({ role: "custom", ...message, timestamp: index + 2 })),
-    ];
-    agentStart();
-    for (const message of persistedPromptMessages) messageStart({ message });
-    assert.equal(contextHook({ messages: persistedPromptMessages }), undefined, "an ordinary prompt with persistent reminders receives no duplicate compensation");
-
-    const targetTypes = [
-      "oh-my-pi-slim:monitor-notification",
-      "oh-my-pi-slim:subagent-notification",
-      "oh-my-pi-slim:goal-continuation",
-    ];
-    for (const [index, customType] of targetTypes.entries()) {
-      const launch = Object.freeze(customMessage(customType, index + 10));
-      const userSteer = Object.freeze(userMessage("concurrent user steer", index + 20));
-      const loopSteer = Object.freeze(customMessage("oh-my-pi-slim:loop-fire", index + 30));
-      const originalMessages = Object.freeze([Object.freeze(userMessage("history")), launch, userSteer, loopSteer]);
-      const snapshot = structuredClone(originalMessages);
-      agentStart();
-      messageStart({ message: launch });
-      messageStart({ message: userSteer });
-      messageStart({ message: loopSteer });
-      const result = contextHook({ messages: originalMessages });
-      assert.notStrictEqual(result.messages, originalMessages, `${customType} returns a context copy`);
-      assert.deepEqual(originalMessages, snapshot, `${customType} leaves the original array and messages unchanged`);
-      assert.deepEqual(result.messages.slice(0, originalMessages.length), snapshot, `${customType} preserves the original message prefix`);
-      const appended = result.messages.slice(originalMessages.length);
-      assert.deepEqual(appended.map((message) => ({
-        role: message.role,
-        customType: message.customType,
-        content: message.content,
-        display: message.display,
-      })), reminderResults.map(({ message }) => ({ role: "custom", ...message })), `${customType} remains the classified start after user and Loop steers and appends phase then Goal`);
-      assert.equal(typeof appended[0].timestamp, "number", `${customType} phase reminder has a numeric timestamp`);
-      assert.equal(typeof appended[1].timestamp, "number", `${customType} Goal reminder has a numeric timestamp`);
-      assert.equal(appended[0].timestamp, appended[1].timestamp, `${customType} reminders share one context timestamp`);
-      const sameSegmentSteer = customMessage("oh-my-pi-slim:subagent-notification", index + 40);
-      messageStart({ message: sameSegmentSteer });
-      assert.equal(
-        contextHook({ messages: [...result.messages, sameSegmentSteer] }),
-        undefined,
-        `${customType} compensates only once in its agent_start segment`,
-      );
-    }
-
-    const userLaunch = userMessage("ordinary segment start", 80);
-    const targetSteer = customMessage("oh-my-pi-slim:monitor-notification", 81);
-    agentStart();
-    messageStart({ message: userLaunch });
-    messageStart({ message: targetSteer });
-    assert.equal(contextHook({ messages: [userLaunch, targetSteer] }), undefined, "a target steer cannot reclassify an agent_start segment whose first message was a user prompt");
-    assert.equal(contextHook({ messages: [userLaunch, targetSteer] }), undefined, "later contexts in the same user-started agent_start segment remain uncompensated");
-
-    const nextSegmentLaunch = customMessage("oh-my-pi-slim:goal-continuation", 99);
-    agentStart();
-    messageStart({ message: nextSegmentLaunch });
-    const nextSegmentResult = contextHook({ messages: [nextSegmentLaunch] });
-    assert.deepEqual(nextSegmentResult.messages.slice(-2).map((message) => message.customType), [
-      "oh-my-pi-slim:phase-reminder",
-      "oh-my-pi-slim:goal-reminder",
-    ], "the next agent_start segment re-evaluates its first message and receives one compensation");
-    assert.equal(main.entries.length, entryCountAfterCreate, "context compensation does not persist reminder entries");
-    assert.deepEqual(main.sends, [], "context compensation does not send or enqueue messages");
-
     const source = readFileSync(new URL("../extensions/oh-my-pi-slim/index.ts", import.meta.url), "utf8");
+    assert.equal((source.match(/pi\.on\("context"/g) ?? []).length, 0, "main registers no context hook");
     const beforeFork = source.slice(source.indexOf('pi.on("session_before_fork"'), source.indexOf('pi.on("session_before_tree"'));
     const beforeTree = source.slice(source.indexOf('pi.on("session_before_tree"'), source.indexOf('pi.on("session_tree"'));
     const afterTree = source.slice(source.indexOf('pi.on("session_tree"'), source.indexOf('pi.on("input"'));

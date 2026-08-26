@@ -213,6 +213,36 @@ test("stream decoding reconstructs UTF-8 and chunks, normalizes CR, sanitizes co
   assert.equal(harness.messages.length, 1, "EOF and close produce one terminal notification");
 });
 
+test("terminal notifications use the injected sendMessage seam without changing payload or options", async (t) => {
+  let child;
+  const seamCalls = [];
+  const harness = createHarness({
+    randomHex: () => "21212121",
+    spawn() { child = fakeChild(); return child; },
+    resolveShell: () => "/bin/bash",
+    sendMessage(message, options) { seamCalls.push({ message, options }); },
+  });
+  t.after(async () => { if (child.listenerCount("close")) closeChild(child); await harness.runtime.shutdown(); });
+
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "sender seam", command: "unused" });
+  child.stdout.write("terminal output\n");
+  closeChild(child, 0, null);
+  await wait();
+
+  assert.equal(harness.messages.length, 0, "the injected sender bypasses Pi sendMessage");
+  assert.equal(seamCalls.length, 1);
+  const sent = seamCalls[0];
+  const pending = [...harness.runtime.notifications.values()][0];
+  assert.ok(pending);
+  assert.equal(sent.message.customType, MONITOR_NOTIFICATION_TYPE);
+  assert.equal(sent.message.content, pending.content);
+  assert.equal(sent.message.display, true);
+  assert.deepEqual(sent.message.details, { ...pending.details, deliveryKey: pending.deliveryKey });
+  assert.equal(sent.message.details.deliveryKey, pending.deliveryKey);
+  assert.deepEqual(sent.options, { deliverAs: "steer", triggerTurn: true });
+  assert.equal(sent.message.details.status, "completed", "the seam receives a real terminal notification");
+});
+
 test("reverse status pagination returns chronological combined lines and never advances notification cursor", async (t) => {
   let child;
   const harness = createHarness({

@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "1.0.8", "package version must be 1.0.8");
+check(packageJson.version === "1.1.0", "package version must be 1.1.0");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "1.0.8" && lock.packages?.[""]?.version === "1.0.8", "package-lock version must be 1.0.8");
+check(lock.version === "1.1.0" && lock.packages?.[""]?.version === "1.1.0", "package-lock version must be 1.1.0");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -425,13 +425,18 @@ for (const [name, source] of [
 
 const functionStart = extension.indexOf("export default function ohMyPiSlim");
 const childGate = extension.indexOf('process.env.PI_SUBAGENT_CHILD === "1" || process.env.OMPS_SUBAGENT_CHILD === "1"', functionStart);
+const launchWrapperRegistration = extension.indexOf("const sendLaunchMessage = createLaunchMessageSender(pi", functionStart);
 const loopRegistration = extension.indexOf("registerLoopRuntime(pi)", functionStart);
-const monitorRegistration = extension.indexOf("registerMonitorRuntime(pi)", functionStart);
-const runtimeRegistration = extension.indexOf("registerSubagentRuntime(pi)", functionStart);
+const monitorRegistration = extension.indexOf("registerMonitorRuntime(pi", functionStart);
+const runtimeRegistration = extension.indexOf("registerSubagentRuntime(pi", functionStart);
 const fastResolverRegistration = extension.indexOf("subagents.setFastModeResolver(() => fastEnabled)", runtimeRegistration);
 const cacheResolverRegistration = extension.indexOf("subagents.setCacheRetentionResolver(() => cacheRetention)", runtimeRegistration);
 const mainPolicyHookRegistration = extension.indexOf('pi.on("before_provider_request"', runtimeRegistration);
-check(functionStart >= 0 && childGate > functionStart && childGate < loopRegistration && loopRegistration < monitorRegistration && monitorRegistration < runtimeRegistration, "main extension must return before Loop, Monitor, and subagent registration");
+check(
+  functionStart >= 0 && childGate > functionStart && childGate < launchWrapperRegistration &&
+  launchWrapperRegistration < loopRegistration && loopRegistration < monitorRegistration && monitorRegistration < runtimeRegistration,
+  "main extension must return before the launch wrapper and Loop, Monitor, and subagent registration",
+);
 check(
   runtimeRegistration < fastResolverRegistration && fastResolverRegistration < cacheResolverRegistration && cacheResolverRegistration < mainPolicyHookRegistration,
   "main Fast and Cache resolvers and provider hook must register only after the child early return and subagent runtime",
@@ -460,7 +465,11 @@ hasAll(extension, [
   "registerAskRuntime(pi)", "new AskTuiDriver(ctx.ui, { beforeOpen: () => subagentViewer.closeAsync() })",
   "bindAskDriver(ctx)", "bindAskDriver()",
   "registerGoalRuntime(pi", "asks.setGoalActiveResolver", "subagents.subscribeRunCreated", "goal?.onAgentSettled(ctx)",
-  "registerLoopRuntime(pi)", "registerMonitorRuntime(pi)",
+  "const sendLaunchMessage = createLaunchMessageSender(pi", "sessionCtx: () => sessionCtx",
+  "hasActivePreset: () => active && activePreset !== undefined && activePresetName !== undefined",
+  "goalReminder: () => goal?.phaseReminder()",
+  "registerLoopRuntime(pi)", "registerMonitorRuntime(pi, { sendMessage: sendLaunchMessage })",
+  "registerSubagentRuntime(pi, { sendMessage: sendLaunchMessage })", "sendContinuationMessage: sendLaunchMessage",
   "let fastEnabled = true", 'let cacheRetention: CacheRetention = "long"',
   "subagents.setFastModeResolver(() => fastEnabled)", "subagents.setCacheRetentionResolver(() => cacheRetention)",
   'pi.on("before_provider_request", (event, ctx) => {', "applyFastServiceTier(payload, model)",
@@ -476,6 +485,19 @@ hasAll(extension, [
   'goal?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)', "goal?.setUICtx(undefined)", "goal?.refreshFromBranch(ctx)",
   "monitors?.acknowledgeNotificationMessage(message)", "monitors?.retryQueuedNotificationsAfterAgentSettled()",
 ], "main extension contract");
+check((extension.match(/\bsendLaunchMessage\b/g) ?? []).length === 4, "launch wrapper must have one declaration and exactly three producer seams");
+const runtimeWiring = extension.slice(launchWrapperRegistration, extension.indexOf("let fastEnabled", runtimeRegistration));
+hasAll(runtimeWiring, [
+  "const loops = registerLoopRuntime(pi)",
+  "const monitors = registerMonitorRuntime(pi, { sendMessage: sendLaunchMessage })",
+  "const subagents = registerSubagentRuntime(pi, { sendMessage: sendLaunchMessage })",
+], "Loop exclusion and Monitor or Subagent launch sender wiring");
+hasNone(runtimeWiring.slice(runtimeWiring.indexOf("registerLoopRuntime"), runtimeWiring.indexOf("registerMonitorRuntime")), [
+  "sendLaunchMessage", "sendMessage:",
+], "Loop must not receive the lifecycle launch wrapper");
+const goalWiring = extension.slice(extension.indexOf("goal = registerGoalRuntime(pi"), extension.indexOf("asks.setGoalActiveResolver"));
+hasAll(goalWiring, ["sendContinuationMessage: sendLaunchMessage"], "Goal continuation launch sender wiring");
+hasNone(goalWiring, ["sendMessage: sendLaunchMessage"], "Goal must expose only its continuation-specific launch sender");
 hasAll(fastMode, [
   'export const FAST_ENV_VAR = "OMPS_FAST_MODE"',
   'export const FAST_STATE_ENTRY_TYPE = "oh-my-pi-slim:fast-state"', 'export const FAST_STATE_VERSION = 1',
@@ -633,7 +655,7 @@ hasNone(shutdownStatusHandler, ["setStatus("], "shutdown must not duplicate the 
 const presetStatusBody = extension.slice(extension.indexOf("export function presetStatusContent"), extension.indexOf("function isAnthropicOAuth"));
 hasNone(presetStatusBody, [".bold(", "theme.bold", "glyph", "Glyph", "Requested"], "OMPS status plain accent-only rendering without a Requested label");
 check((json("package.json").version ?? "").trim().length > 0, "package.json must define a non-empty version for the OMPS status line");
-check(json("package.json").version === "1.0.8", "Preset-wide Fast and Cache status must ship in v1.0.8");
+check(json("package.json").version === "1.1.0", "Preset-wide Fast and Cache status must ship in v1.1.0");
 
 const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
 const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
@@ -674,47 +696,46 @@ for (const [name, handler] of [
   ], `${name} must not clear, replay, or persist Fast or Cache Mode`);
 }
 const reminderConstructorsStart = extension.indexOf("const PHASE_REMINDER_MESSAGE_TYPE");
-const reminderConstructorsEnd = extension.indexOf("const RELOAD_PRESET_STORE_KEY");
-const reminderConstructors = extension.slice(reminderConstructorsStart, reminderConstructorsEnd);
-const contextWhitelist = reminderConstructors.slice(
-  reminderConstructors.indexOf("const CONTEXT_REMINDER_START_MESSAGE_TYPES"),
-  reminderConstructors.indexOf("interface ReminderMessage"),
-);
+const launchSenderStart = extension.indexOf("export function createLaunchMessageSender");
+const reminderConstructors = extension.slice(reminderConstructorsStart, launchSenderStart);
+const launchSenderEnd = extension.indexOf("const RELOAD_PRESET_STORE_KEY", launchSenderStart);
+const launchSender = extension.slice(launchSenderStart, launchSenderEnd);
 hasAll(reminderConstructors, [
   'const PHASE_REMINDER_MESSAGE_TYPE = "oh-my-pi-slim:phase-reminder"',
   "function makePhaseReminderMessage(): ReminderMessage", "customType: PHASE_REMINDER_MESSAGE_TYPE", "content: PHASE_REMINDER", "display: false",
   "function makeGoalReminderMessage(content: string): ReminderMessage", "customType: GOAL_REMINDER_MESSAGE_TYPE", "content,",
-  "function makeContextReminderMessage(message: ReminderMessage, timestamp: number)", 'role: "custom" as const', "...message", "timestamp",
 ], "shared phase and Goal reminder constructors");
-hasNone(reminderConstructors, ["sendMessage", "appendEntry", "registerMessageRenderer"], "reminder constructors must stay side-effect free");
+hasNone(reminderConstructors, [
+  "makeContextReminderMessage", "sendMessage", "appendEntry", "registerMessageRenderer", "timestamp", 'role: "custom"',
+], "reminder constructors stay side-effect free and create no temporary context messages");
+hasAll(launchSender, [
+  "export function createLaunchMessageSender(", 'pi: Pick<ExtensionAPI, "sendMessage">', '): ExtensionAPI["sendMessage"]',
+  "state.sessionCtx()?.isIdle() === true", "options?.triggerTurn === true", "const goalReminder = state.goalReminder()",
+  "state.hasActivePreset() || goalReminder", "pi.sendMessage(makePhaseReminderMessage(), { triggerTurn: false })",
+  "pi.sendMessage(makeGoalReminderMessage(goalReminder), { triggerTurn: false })", "pi.sendMessage(message, options)",
+], "idle launch wrapper sends phase, Goal, then the unchanged launch");
 check(
-  /new Set\(\[\s*MONITOR_NOTIFICATION_TYPE,\s*SUBAGENT_NOTIFICATION_TYPE,\s*GOAL_CONTINUATION_MESSAGE_TYPE,\s*\]\)/.test(contextWhitelist),
-  "context reminder whitelist must contain exactly Monitor, Subagent, and Goal continuation launch messages",
+  launchSender.indexOf("makePhaseReminderMessage()") < launchSender.indexOf("makeGoalReminderMessage(goalReminder)") &&
+  launchSender.indexOf("makeGoalReminderMessage(goalReminder)") < launchSender.indexOf("pi.sendMessage(message, options)"),
+  "idle launch wrapper must preserve phase, Goal, launch order",
 );
-// Loop fires are explicit user-scheduled prompts. They are not lifecycle notifications or Goal continuations.
-hasNone(contextWhitelist, ["LOOP_MESSAGE_TYPE", "GOAL_STATE_MESSAGE_TYPE", "GOAL_REMINDER_MESSAGE_TYPE", "PHASE_REMINDER_MESSAGE_TYPE"], "context reminder whitelist excludes user-scheduled Loop prompts and non-launch reminder or Goal state messages");
+hasNone(launchSender, [
+  'pi.on("context"', "sendUserMessage", "nextTurn", "synthetic", "content:", "appendEntry", "globalThis",
+], "launch wrapper must not use context, synthetic user turns, concatenated content, persistence, or global Pi state");
 
 const beforeAgentStartRegistrations = [...extension.matchAll(/pi\.on\("before_agent_start"/g)].map((match) => match.index);
 check(beforeAgentStartRegistrations.length === 2, `main extension must register exactly two before_agent_start handlers, found: ${beforeAgentStartRegistrations.length}`);
 const phaseReminderHandlerStart = beforeAgentStartRegistrations[0] ?? -1;
 const goalReminderHandlerStart = beforeAgentStartRegistrations[1] ?? -1;
 const agentStartHandlerStart = extension.indexOf('pi.on("agent_start"', Math.max(goalReminderHandlerStart, 0));
-const messageStartHandlerStart = extension.indexOf('pi.on("message_start"', Math.max(agentStartHandlerStart, 0));
-const contextHandlerStart = extension.indexOf('pi.on("context"', Math.max(messageStartHandlerStart, 0));
-const contextHandlerEnd = extension.indexOf('pi.on("agent_end"', Math.max(contextHandlerStart, 0));
+const agentEndHandlerStart = extension.indexOf('pi.on("agent_end"', Math.max(agentStartHandlerStart, 0));
 const phaseReminderHandler = extension.slice(phaseReminderHandlerStart, goalReminderHandlerStart);
 const goalReminderHandler = extension.slice(goalReminderHandlerStart, agentStartHandlerStart);
-const agentStartHandler = extension.slice(agentStartHandlerStart, messageStartHandlerStart);
-const messageStartHandler = extension.slice(messageStartHandlerStart, contextHandlerStart);
-const contextReminderHandler = extension.slice(contextHandlerStart, contextHandlerEnd);
+const agentStartHandler = extension.slice(agentStartHandlerStart, agentEndHandlerStart);
 check(
-  phaseReminderHandlerStart >= 0 &&
-  phaseReminderHandlerStart < goalReminderHandlerStart &&
-  goalReminderHandlerStart < agentStartHandlerStart &&
-  agentStartHandlerStart < messageStartHandlerStart &&
-  messageStartHandlerStart < contextHandlerStart &&
-  contextHandlerStart < contextHandlerEnd,
-  "reminder handler slice boundaries must exist in before_agent_start, agent_start, message_start, context, and agent_end order",
+  phaseReminderHandlerStart >= 0 && phaseReminderHandlerStart < goalReminderHandlerStart &&
+  goalReminderHandlerStart < agentStartHandlerStart && agentStartHandlerStart < agentEndHandlerStart,
+  "reminder handlers and Goal agent lifecycle boundaries must remain ordered",
 );
 check(
   /\}\);\s*pi\.on\("before_agent_start"/.test(extension.slice(phaseReminderHandlerStart, goalReminderHandlerStart + 32)),
@@ -743,69 +764,15 @@ check((extension.match(/"oh-my-pi-slim:phase-reminder"/g) ?? []).length === 1, "
 check(!extension.includes('goalReminder ? `${PHASE_REMINDER}\\n\\n${goalReminder}` : PHASE_REMINDER'), "phase and Goal reminder concatenation must be removed");
 hasAll(extension.slice(0, extension.indexOf("const EXTENSION_DIR")), ["GOAL_REMINDER_MESSAGE_TYPE"], "main extension Goal reminder constant import");
 
-check((extension.match(/pi\.on\("agent_start"/g) ?? []).length === 1, "main extension must register exactly one agent_start handler");
-check((extension.match(/pi\.on\("message_start"/g) ?? []).length === 1, "main extension must register exactly one message_start classifier");
-check((extension.match(/pi\.on\("context"/g) ?? []).length === 1, "main extension must register exactly one context reminder compensation handler");
-const reminderStateNames = ["contextReminderPending", "contextReminderStartClassified", "contextReminderTarget"];
-const reminderStateStart = extension.indexOf("let contextReminderPending = false");
-const reminderStateEnd = extension.indexOf("for (const [shortcut", Math.max(reminderStateStart, 0));
-check(
-  reminderStateStart >= 0 && reminderStateStart < reminderStateEnd && reminderStateEnd < agentStartHandlerStart,
-  "context reminder state declarations must form one bounded block before lifecycle handlers",
-);
-hasAll(extension.slice(reminderStateStart, reminderStateEnd), [
-  "let contextReminderPending = false", "let contextReminderStartClassified = false", "let contextReminderTarget = false",
-], "context reminder segment state declarations");
-const reminderStateOutside = [
-  extension.slice(0, Math.max(reminderStateStart, 0)),
-  extension.slice(Math.max(reminderStateEnd, 0), Math.max(agentStartHandlerStart, 0)),
-  extension.slice(Math.max(contextHandlerEnd, 0)),
-].join("\n");
-hasNone(reminderStateOutside, reminderStateNames, "context reminder state must remain scoped to its declaration block and agent_start through context lifecycle slice");
-check((extension.match(/\bcontextReminderPending\b/g) ?? []).length === 5, "context reminder pending latch must have one declaration and four lifecycle uses");
-check((extension.match(/\bcontextReminderStartClassified\b/g) ?? []).length === 4, "context reminder first-message state must have one declaration and three lifecycle uses");
-check((extension.match(/\bcontextReminderTarget\b/g) ?? []).length === 4, "context reminder target state must have one declaration and three lifecycle uses");
-hasAll(agentStartHandler, [
-  'pi.on("agent_start", () => {', "contextReminderPending = true", "contextReminderStartClassified = false", "contextReminderTarget = false",
-  "Retries and compaction start a new agent_start segment, so their first message is classified again.", "goal?.onAgentStart()",
-], "agent_start resets one-time reminder classification without changing Goal classification");
-check(
-  agentStartHandler.indexOf("contextReminderPending = true") < agentStartHandler.indexOf("contextReminderStartClassified = false") &&
-  agentStartHandler.indexOf("contextReminderStartClassified = false") < agentStartHandler.indexOf("contextReminderTarget = false") &&
-  agentStartHandler.indexOf("contextReminderTarget = false") < agentStartHandler.indexOf("goal?.onAgentStart()"),
-  "agent_start must reset all reminder segment state before retaining Goal startup classification",
-);
-hasAll(messageStartHandler, [
-  'pi.on("message_start", (event) => {', "if (!contextReminderPending || contextReminderStartClassified) return",
-  "contextReminderStartClassified = true", "const message = event.message",
-  'message.role === "custom"', "CONTEXT_REMINDER_START_MESSAGE_TYPES.has(message.customType)",
-], "message_start classifies only the first message in each agent_start segment");
-check(
-  messageStartHandler.indexOf("contextReminderStartClassified = true") < messageStartHandler.indexOf("const message = event.message") &&
-  messageStartHandler.indexOf("const message = event.message") < messageStartHandler.indexOf("contextReminderTarget ="),
-  "message_start must lock first-message ownership before recording target classification",
-);
-hasNone(messageStartHandler, ["event.messages", "sendMessage", "appendEntry", "goal?.", "contextReminderPending = false"], "message_start classification must not inspect context history or produce lifecycle side effects");
-hasAll(contextReminderHandler, [
-  'pi.on("context", (event) => {', "if (!contextReminderPending) return", "contextReminderPending = false", "if (!contextReminderTarget) return",
-  "const goalReminder = goal?.phaseReminder()",
-  "if ((!active || !activePreset || !activePresetName) && !goalReminder) return",
-  "const reminders = [makeContextReminderMessage(makePhaseReminderMessage(), timestamp)]",
-  "if (goalReminder) reminders.push(makeContextReminderMessage(makeGoalReminderMessage(goalReminder), timestamp))",
-  "return { messages: [...event.messages, ...reminders] }",
-], "first context consumes one compensation decision per agent_start segment");
-check(
-  contextReminderHandler.indexOf("contextReminderPending = false") < contextReminderHandler.indexOf("if (!contextReminderTarget) return"),
-  "the first context must consume the segment latch before applying first-message classification",
-);
-check(
-  contextReminderHandler.indexOf("makePhaseReminderMessage()") < contextReminderHandler.indexOf("makeGoalReminderMessage(goalReminder)"),
-  "context compensation must append phase before Goal",
-);
-hasNone(contextReminderHandler, [
-  ".at(-1)", "CONTEXT_REMINDER_START_MESSAGE_TYPES", "message_start", "sendMessage", "appendEntry", "registerMessageRenderer", "acknowledge",
-  "onAgentStart", "onAgentEnd", "push(...event.messages)", "event.messages.push",
-], "context reminder compensation must use the locked classification and copy messages with no persistence, delivery, acknowledgement, or Goal lifecycle side effects");
+check((extension.match(/pi\.on\("agent_start"/g) ?? []).length === 1, "main extension must register exactly one Goal agent_start handler");
+check((extension.match(/pi\.on\("message_start"/g) ?? []).length === 0, "main extension must register no message_start classifier");
+check((extension.match(/pi\.on\("context"/g) ?? []).length === 0, "main extension must register no context handler");
+hasNone(extension, [
+  "CONTEXT_REMINDER_START_MESSAGE_TYPES", "makeContextReminderMessage", "contextReminderPending",
+  "contextReminderStartClassified", "contextReminderTarget",
+], "temporary context reminder machinery must be absent");
+hasAll(agentStartHandler, ['pi.on("agent_start", () => {', "goal?.onAgentStart()"], "agent_start keeps Goal automatic-run classification");
+hasNone(agentStartHandler, ["contextReminder", "message_start", "context"], "agent_start contains no reminder classification latch");
 const messageEndHandler = extension.slice(extension.indexOf('pi.on("message_end"'), extension.indexOf('pi.on("tool_execution_start"'));
 hasNone(messageEndHandler, ["GOAL_REMINDER_MESSAGE_TYPE", "goal-reminder"], "Goal reminder must not enter message_end acknowledgement");
 check(!/registerMessageRenderer\(GOAL_REMINDER_MESSAGE_TYPE/.test(`${extension}\n${goalRuntime}`), "Goal reminder must not register a renderer");
@@ -863,6 +830,28 @@ hasAll(goalRuntime, [
   "Use Todo, Monitor, and Subagents when useful.", "If safe progress is blocked, call `goal pause` with a concrete reason.",
   "Call `goal complete` only with one evidence entry for every criterion.",
 ], "Goal durable core, cached UI, renderer registration, and continuation numbering contract");
+hasAll(goalRuntime, [
+  'sendContinuationMessage?: ExtensionAPI["sendMessage"]',
+  'private readonly sendContinuationMessage: ExtensionAPI["sendMessage"]',
+  "this.sendContinuationMessage = options.sendContinuationMessage ?? ((message, sendOptions) => this.pi.sendMessage(message, sendOptions))",
+], "Goal continuation-only sender seam with Pi default");
+check((goalRuntime.match(/this\.sendContinuationMessage\(/g) ?? []).length === 1, "Goal continuation sender must be called only by requestContinuation");
+const goalContinuationRequest = goalRuntime.slice(goalRuntime.indexOf("private requestContinuation("), goalRuntime.indexOf("private safeToDeliver("));
+hasAll(goalContinuationRequest, [
+  "this.pendingAutoRunKey = pending.deliveryKey", "try {", "this.sendContinuationMessage({",
+  "customType: GOAL_CONTINUATION_MESSAGE_TYPE", 'deliverAs: "steer"', "triggerTurn: true",
+  "this.pendingAutoRunKey = undefined",
+], "Goal continuation seam and automatic-run classification order");
+check(
+  goalContinuationRequest.indexOf("this.pendingAutoRunKey = pending.deliveryKey") < goalContinuationRequest.indexOf("this.sendContinuationMessage({"),
+  "Goal must classify the automatic run before synchronously sending its continuation launch",
+);
+const goalStateSender = goalRuntime.slice(goalRuntime.indexOf("private sendStateMessage("), goalRuntime.indexOf("private store("));
+hasAll(goalStateSender, ["this.pi.sendMessage({", "customType: GOAL_STATE_MESSAGE_TYPE", "triggerTurn: false"], "Goal state messages stay on direct Pi delivery");
+hasNone(goalStateSender, ["sendContinuationMessage"], "Goal state messages must not use the continuation launch sender");
+hasNone(goalRuntime.slice(0, goalRuntime.indexOf("private requestContinuation(")) + goalRuntime.slice(goalRuntime.indexOf("private safeToDeliver(")), [
+  "this.sendContinuationMessage(",
+], "Goal continuation seam must not affect state or other delivery paths");
 const goalAgentSettledBlock = goalRuntime.slice(goalRuntime.indexOf("onAgentSettled(ctx:"), goalRuntime.indexOf("async execute(inputValue:"));
 hasAll(goalAgentSettledBlock, [
   'final?.stopReason === "error" && !hostAbort',
@@ -1202,7 +1191,13 @@ const deliverNotificationStart = runtime.indexOf("private deliverPendingNotifica
 const deliverNotificationEnd = runtime.indexOf("private failRun", deliverNotificationStart);
 const sendNotification = runtime.slice(sendNotificationStart, deliverNotificationStart);
 const deliverNotification = runtime.slice(deliverNotificationStart, deliverNotificationEnd);
-hasAll(sendNotification, ['display: true', "deliveryKey: delivery.deliveryKey", 'deliverAs: "steer"', "triggerTurn: true"], "single steer notification message");
+hasAll(runtime, [
+  'sendMessage?: ExtensionAPI["sendMessage"]', 'private readonly sendMessage: ExtensionAPI["sendMessage"]',
+  "this.sendMessage = options.sendMessage ?? ((message, sendOptions) => this.pi.sendMessage(message, sendOptions))",
+], "Subagent notification sender seam with Pi default");
+check((runtime.match(/this\.sendMessage\(/g) ?? []).length === 1, "Subagent sendMessage seam must be called only by sendNotification");
+hasAll(sendNotification, ["this.sendMessage(", 'display: true', "deliveryKey: delivery.deliveryKey", 'deliverAs: "steer"', "triggerTurn: true"], "single steer notification message through the sender seam");
+hasNone(runtime.slice(0, sendNotificationStart) + runtime.slice(deliverNotificationStart), ["this.sendMessage("], "Subagent sender seam must not affect any path except notifications");
 hasAll(deliverNotification, ["notificationDeliveryPaused", "queuedNotifications.has", "queuedNotifications.add", "sendNotification", "queuedNotifications.delete"], "pending-until-message-end notification queue");
 hasNone(deliverNotification, ["notificationPending: undefined", "appendEntry"], "pending-until-message-end notification queue");
 const acknowledgeNotificationStart = runtime.indexOf("acknowledgeNotificationMessage(messageValue: unknown)");
@@ -1328,6 +1323,23 @@ hasAll(monitorRuntime, [
   "private buildUpdateNotification(", 'kind: "update"', "const state = this.operationalState(record, start, end, this.toolContentMaxBytes)", "combined: scan.lines",
   "lastOutputAt: record.lastOutputAt", "checkAfter: record.checkAfter",
 ], "Monitor runtime and visual wiring contract");
+hasAll(monitorRuntime, [
+  "type SendMessage = (", "sendMessage?: SendMessage", "private readonly sendMessage: SendMessage",
+  "this.sendMessage = options.sendMessage ?? ((message, sendOptions) => this.pi.sendMessage(message, sendOptions))",
+], "Monitor notification sender seam with Pi default");
+check((monitorRuntime.match(/this\.sendMessage\(/g) ?? []).length === 1, "Monitor sendMessage seam must be called exactly once in production source");
+const monitorFlushNotificationsStart = monitorRuntime.indexOf("private flushNotifications(): void");
+const monitorFlushNotificationsEnd = monitorRuntime.indexOf("private cancelNotifications(id: string)", monitorFlushNotificationsStart);
+const monitorFlushNotifications = monitorRuntime.slice(monitorFlushNotificationsStart, monitorFlushNotificationsEnd);
+hasAll(monitorFlushNotifications, [
+  "this.sendMessage({", "customType: MONITOR_NOTIFICATION_TYPE", "content: notification.content",
+  "details: { ...notification.details, deliveryKey: notification.deliveryKey }", 'deliverAs: "steer"', "triggerTurn: true",
+], "Monitor flushNotifications uses the sender seam without changing notification payload or options");
+hasNone(
+  monitorRuntime.slice(0, monitorFlushNotificationsStart) + monitorRuntime.slice(monitorFlushNotificationsEnd),
+  ["this.sendMessage("],
+  "Monitor sender seam must not be used outside flushNotifications",
+);
 hasNone(monitorRuntime, [
   "parseLoopInterval", "canonicalizeLoopInterval", "./loop-runtime.js",
   "silenceReminderCount", "nextCheckAt",

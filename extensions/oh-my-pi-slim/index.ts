@@ -63,11 +63,6 @@ const PHASE_REMINDER = `<system-reminder>
 !IMPORTANT! Scheduler workflow: First choose the lightest workflow that fits the work. If direct execution is justified, complete it and verify proportionately. Otherwise: plan lanes/dependencies → dispatch background specialists → continue non-overlapping work when available → await completion notifications → reconcile terminal results → verify. !END!
 </system-reminder>`;
 const PHASE_REMINDER_MESSAGE_TYPE = "oh-my-pi-slim:phase-reminder";
-const CONTEXT_REMINDER_START_MESSAGE_TYPES: ReadonlySet<string> = new Set([
-  MONITOR_NOTIFICATION_TYPE,
-  SUBAGENT_NOTIFICATION_TYPE,
-  GOAL_CONTINUATION_MESSAGE_TYPE,
-]);
 
 interface ReminderMessage {
   customType: string;
@@ -91,8 +86,24 @@ function makeGoalReminderMessage(content: string): ReminderMessage {
   };
 }
 
-function makeContextReminderMessage(message: ReminderMessage, timestamp: number) {
-  return { role: "custom" as const, ...message, timestamp };
+export function createLaunchMessageSender(
+  pi: Pick<ExtensionAPI, "sendMessage">,
+  state: {
+    sessionCtx: () => Pick<ExtensionContext, "isIdle"> | undefined;
+    hasActivePreset: () => boolean;
+    goalReminder: () => string | undefined;
+  },
+): ExtensionAPI["sendMessage"] {
+  return (message, options) => {
+    if (state.sessionCtx()?.isIdle() === true && options?.triggerTurn === true) {
+      const goalReminder = state.goalReminder();
+      if (state.hasActivePreset() || goalReminder) {
+        pi.sendMessage(makePhaseReminderMessage(), { triggerTurn: false });
+      }
+      if (goalReminder) pi.sendMessage(makeGoalReminderMessage(goalReminder), { triggerTurn: false });
+    }
+    pi.sendMessage(message, options);
+  };
 }
 
 const RELOAD_PRESET_STORE_KEY = "__ompsActivePresetForReload";
@@ -384,10 +395,20 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   // widgets publish, so a dead closure can never keep rendering rows for an unloaded extension.
   for (const id of OWNED_WIDGET_SECTIONS) widgetStackHost().publish(id, undefined);
 
+  let goal: GoalRuntime | undefined;
+  let active = false;
+  let activePresetName: string | undefined;
+  let activePreset: Preset | undefined;
+  let sessionCtx: ExtensionContext | undefined;
+  const sendLaunchMessage = createLaunchMessageSender(pi, {
+    sessionCtx: () => sessionCtx,
+    hasActivePreset: () => active && activePreset !== undefined && activePresetName !== undefined,
+    goalReminder: () => goal?.phaseReminder(),
+  });
   const asks = registerAskRuntime(pi);
   const loops = registerLoopRuntime(pi);
-  const monitors = registerMonitorRuntime(pi);
-  const subagents = registerSubagentRuntime(pi);
+  const monitors = registerMonitorRuntime(pi, { sendMessage: sendLaunchMessage });
+  const subagents = registerSubagentRuntime(pi, { sendMessage: sendLaunchMessage });
   let fastEnabled = true;
   let cacheRetention: CacheRetention = "long";
   subagents.setFastModeResolver(() => fastEnabled);
@@ -407,7 +428,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
   // Read-only viewer: it owns no session state, writes nothing, and only reads cloned snapshots.
   const subagentViewer = createSubagentViewer({ snapshot: () => subagents.viewerSnapshot() });
-  let goal: GoalRuntime | undefined;
   const notificationGate = new NotificationDeliveryPauseGate((paused) => {
     loops.setDeliveryPaused(paused);
     monitors?.setDeliveryPaused(paused);
@@ -422,18 +442,15 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     hasBlockingMonitors: () => monitors?.hasBlockingWork() ?? false,
     askWaitingCount: () => asks.waitingCount(),
     childStats: (runIds) => subagents.goalStats(runIds),
+    sendContinuationMessage: sendLaunchMessage,
   });
   asks.setGoalActiveResolver(() => goal?.isActive() ?? false);
   subagents.subscribeRunCreated((runId) => goal?.ownRun(runId));
   subagents.registry.subscribe(() => goal?.notePackageLifecycleChange());
   asks.subscribe(() => goal?.notePackageLifecycleChange());
   let monitorGoalUnsubscribe: (() => void) | undefined;
-  let active = false;
-  let activePresetName: string | undefined;
-  let activePreset: Preset | undefined;
   let originalModel: ExtensionContext["model"];
   let originalThinking: ThinkingLevel | undefined;
-  let sessionCtx: ExtensionContext | undefined;
   let sessionEpoch = 0;
   let pendingCheckpoint: {
     epoch: number;
@@ -442,9 +459,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     notificationGeneration: number;
   } | undefined;
   let treeNotificationHold: TreeNotificationHold | undefined;
-  let contextReminderPending = false;
-  let contextReminderStartClassified = false;
-  let contextReminderTarget = false;
 
   for (const [shortcut, direction] of [["ctrl+shift+left", -1], ["ctrl+shift+right", 1]] as const) {
     pi.registerShortcut(shortcut, {
@@ -940,30 +954,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_start", () => {
-    contextReminderPending = true;
-    contextReminderStartClassified = false;
-    contextReminderTarget = false;
-    // Retries and compaction start a new agent_start segment, so their first message is classified again.
     goal?.onAgentStart();
-  });
-
-  pi.on("message_start", (event) => {
-    if (!contextReminderPending || contextReminderStartClassified) return;
-    contextReminderStartClassified = true;
-    const message = event.message;
-    contextReminderTarget = message.role === "custom" && CONTEXT_REMINDER_START_MESSAGE_TYPES.has(message.customType);
-  });
-
-  pi.on("context", (event) => {
-    if (!contextReminderPending) return;
-    contextReminderPending = false;
-    if (!contextReminderTarget) return;
-    const goalReminder = goal?.phaseReminder();
-    if ((!active || !activePreset || !activePresetName) && !goalReminder) return;
-    const timestamp = Date.now();
-    const reminders = [makeContextReminderMessage(makePhaseReminderMessage(), timestamp)];
-    if (goalReminder) reminders.push(makeContextReminderMessage(makeGoalReminderMessage(goalReminder), timestamp));
-    return { messages: [...event.messages, ...reminders] };
   });
 
   pi.on("agent_end", (event) => {
