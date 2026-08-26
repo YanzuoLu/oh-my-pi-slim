@@ -1205,10 +1205,10 @@ test("main sessions register Ask and runtime tools while child sessions return b
         ...(ttl ? { ttl } : {}),
       } }] }],
     });
-    assert.equal(
-      providerResult(main, cacheCtx, cachePayload()).messages[0].content[0].cache_control.ttl,
-      "1h",
-      "a new session defaults Cache Mode Long",
+    assert.deepEqual(
+      providerResult(main, cacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
+      { type: "ephemeral" },
+      "a new session defaults Cache Mode Short",
     );
 
     const cacheCommand = main.commandDefinitions.get("cache");
@@ -1221,25 +1221,25 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.deepEqual(sessionEntries.at(-1), {
       type: "custom",
       customType: "oh-my-pi-slim:cache-state",
-      data: { version: 1, retention: "short" },
+      data: { version: 1, retention: "long" },
     });
+    assert.equal(providerResult(main, cacheCtx, cachePayload()).messages[0].content[0].cache_control.ttl, "1h");
+    assert.match(notifications.at(-1).message, /Cache Mode Long requested for this Pi session.*does not guarantee a cache hit/);
+
+    await cacheCommand.handler("", cacheCtx);
+    assert.deepEqual(sessionEntries.at(-1).data, { version: 1, retention: "short" });
     assert.deepEqual(
       providerResult(main, cacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
       { type: "ephemeral" },
     );
-    assert.match(notifications.at(-1).message, /Cache Mode Short requested for this Pi session.*does not guarantee a cache hit/);
-
-    await cacheCommand.handler("", cacheCtx);
-    assert.deepEqual(sessionEntries.at(-1).data, { version: 1, retention: "long" });
-    assert.equal(providerResult(main, cacheCtx, cachePayload()).messages[0].content[0].cache_control.ttl, "1h");
 
     main.pi.appendEntry = () => { throw new Error("injected cache append failure"); };
     await cacheCommand.handler("", cacheCtx);
     assert.equal(notifications.at(-1).level, "error");
     assert.match(notifications.at(-1).message, /injected cache append failure/);
-    assert.equal(
-      providerResult(main, cacheCtx, cachePayload()).messages[0].content[0].cache_control.ttl,
-      "1h",
+    assert.deepEqual(
+      providerResult(main, cacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
+      { type: "ephemeral" },
       "append failure does not change in-memory Cache Mode",
     );
     main.pi.appendEntry = appendEntry;
@@ -1259,9 +1259,9 @@ test("main sessions register Ask and runtime tools while child sessions return b
     await reload.handlers.get("session_start")[0]({ reason: "reload" }, reloadCtx);
     assert.equal(providerResult(reload, reloadCtx).service_tier, "priority", "reload restores the last valid Fast state from the same full entry log");
     const reloadCacheCtx = makeCtx(sessionEntries, "cache-main-session", anthropicModel, true);
-    assert.equal(
-      providerResult(reload, reloadCacheCtx, cachePayload()).messages[0].content[0].cache_control.ttl,
-      "1h",
+    assert.deepEqual(
+      providerResult(reload, reloadCacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
+      { type: "ephemeral" },
       "reload restores the last valid Cache state from the same full entry log",
     );
 
@@ -1272,9 +1272,9 @@ test("main sessions register Ask and runtime tools while child sessions return b
       await restored.handlers.get("session_start")[0]({ reason }, restoredCtx);
       assert.equal(providerResult(restored, restoredCtx).service_tier, "priority", `${reason} restores or inherits the copied Fast session path state`);
       const restoredCacheCtx = makeCtx(sessionEntries, `cache-${reason}-session`, anthropicModel, true);
-      assert.equal(
-        providerResult(restored, restoredCacheCtx, cachePayload()).messages[0].content[0].cache_control.ttl,
-        "1h",
+      assert.deepEqual(
+        providerResult(restored, restoredCacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
+        { type: "ephemeral" },
         `${reason} restores or inherits the copied Cache session path state`,
       );
     }
@@ -1285,10 +1285,10 @@ test("main sessions register Ask and runtime tools while child sessions return b
     await newSession.handlers.get("session_start")[0]({ reason: "new" }, newCtx);
     assert.equal(providerResult(newSession, newCtx).service_tier, "priority", "a new empty session defaults Fast Mode on");
     const newCacheCtx = makeCtx(newSession.sessionEntries, "cache-new-session", anthropicModel, true);
-    assert.equal(
-      providerResult(newSession, newCacheCtx, cachePayload()).messages[0].content[0].cache_control.ttl,
-      "1h",
-      "a new empty session defaults Cache Mode Long",
+    assert.deepEqual(
+      providerResult(newSession, newCacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
+      { type: "ephemeral" },
+      "a new empty session defaults Cache Mode Short",
     );
 
     const treeEntries = [{

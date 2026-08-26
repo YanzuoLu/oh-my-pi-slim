@@ -487,7 +487,7 @@ export class OmpsSubagentRuntime {
   private modelResolver?: ModelResolver;
   private denyResolver?: DenyResolver;
   private fastModeResolver: FastModeResolver = () => true;
-  private cacheRetentionResolver: CacheRetentionResolver = () => "long";
+  private cacheRetentionResolver: CacheRetentionResolver = () => "short";
   private poller?: TimerHandle;
   private shuttingDown = false;
   /** Bumped by restore and shutdown so an in-flight interrupt never hands a result to a replaced session. */
@@ -530,7 +530,7 @@ export class OmpsSubagentRuntime {
     this.fastModeResolver = resolver;
   }
 
-  setCacheRetentionResolver(resolver: CacheRetentionResolver = () => "long"): void {
+  setCacheRetentionResolver(resolver: CacheRetentionResolver = () => "short"): void {
     this.cacheRetentionResolver = resolver;
   }
 

@@ -17,7 +17,7 @@ import {
 import { applyFastServiceTier, FAST_ENV_VAR, fastEnabledFromEnv } from "./fast-mode.js";
 
 const FAST_MODE_ENABLED = fastEnabledFromEnv(process.env[FAST_ENV_VAR]);
-const CACHE_RETENTION = cacheRetentionFromEnv(process.env[CACHE_RETENTION_ENV_VAR]);
+const CACHE_RETENTION = cacheRetentionFromEnv(process.env[CACHE_RETENTION_ENV_VAR]) ?? "short";
 const REASONS = ["need_decision", "interview_request", "progress_update"] as const;
 
 export const contactSupervisorParameters = Type.Object({
@@ -40,23 +40,19 @@ export const contactSupervisorParameters = Type.Object({
 export default function childSupervisor(pi: ExtensionAPI): void {
   if (process.env.OMPS_SUBAGENT_CHILD !== "1" || process.env.PI_SUBAGENT_CHILD !== "1") return;
 
-  if (FAST_MODE_ENABLED || CACHE_RETENTION) {
-    pi.on("before_provider_request", (event, ctx) => {
-      const model = ctx.model;
-      let payload = event.payload;
-      const fastPayload = FAST_MODE_ENABLED ? applyFastServiceTier(payload, model) : undefined;
-      if (fastPayload) payload = fastPayload;
-      const cachePayload = CACHE_RETENTION
-        ? applyCacheRetentionForRequest(
-          payload,
-          model,
-          CACHE_RETENTION,
-          () => model !== undefined && ctx.modelRegistry.isUsingOAuth(model),
-        )
-        : undefined;
-      return cachePayload ?? fastPayload;
-    });
-  }
+  pi.on("before_provider_request", (event, ctx) => {
+    const model = ctx.model;
+    let payload = event.payload;
+    const fastPayload = FAST_MODE_ENABLED ? applyFastServiceTier(payload, model) : undefined;
+    if (fastPayload) payload = fastPayload;
+    const cachePayload = applyCacheRetentionForRequest(
+      payload,
+      model,
+      CACHE_RETENTION,
+      () => model !== undefined && ctx.modelRegistry.isUsingOAuth(model),
+    );
+    return cachePayload ?? fastPayload;
+  });
 
   let pendingCheckpoint: { cycle: number } | undefined;
   let checkpointCycle = 0;

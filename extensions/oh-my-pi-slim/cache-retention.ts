@@ -216,7 +216,7 @@ export function parseCacheState(value: unknown): CacheState | undefined {
 }
 
 export function replayCacheState(entries: readonly unknown[]): CacheRetention {
-  let retention: CacheRetention = "long";
+  let retention: CacheRetention = "short";
   try {
     if (!Array.isArray(entries)) return retention;
     for (const entry of entries) {

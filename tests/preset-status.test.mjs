@@ -54,7 +54,7 @@ function makeUniformPreset(provider) {
   return makePreset(provider, Object.fromEntries(ROLES.slice(1).map((role) => [role, { provider }])));
 }
 
-function status(fastEnabled, preset, cacheRetention = "long") {
+function status(fastEnabled, preset, cacheRetention = "short") {
   return presetStatusContent(
     theme,
     presetName,
@@ -84,7 +84,7 @@ test("Main can be non-OpenAI while any OpenAI specialist qualifies the active pr
   }
   assert.equal(
     status(true, makePreset("anthropic", { observer: { provider: "openai-codex" } })),
-    `<accent>${baseStatus} · Fast Mode On · Cache Mode Long</accent>`,
+    `<accent>${baseStatus} · OpenAI Fast Mode: on · Anthropic Cache Mode: short</accent>`,
   );
 });
 
@@ -111,25 +111,25 @@ test("all non-OpenAI providers and case mismatches do not qualify the active pre
 
 test("mixed preset status renders Fast before Cache for every session toggle combination", () => {
   const mixedPreset = makePreset("anthropic", { librarian: { provider: "openai" } });
-  assert.equal(status(true, mixedPreset, "long"), `<accent>${baseStatus} · Fast Mode On · Cache Mode Long</accent>`);
-  assert.equal(status(false, mixedPreset, "long"), `<accent>${baseStatus} · Fast Mode Off · Cache Mode Long</accent>`);
-  assert.equal(status(true, mixedPreset, "short"), `<accent>${baseStatus} · Fast Mode On · Cache Mode Short</accent>`);
-  assert.equal(status(false, mixedPreset, "short"), `<accent>${baseStatus} · Fast Mode Off · Cache Mode Short</accent>`);
+  assert.equal(status(true, mixedPreset, "long"), `<accent>${baseStatus} · OpenAI Fast Mode: on · Anthropic Cache Mode: long</accent>`);
+  assert.equal(status(false, mixedPreset, "long"), `<accent>${baseStatus} · OpenAI Fast Mode: off · Anthropic Cache Mode: long</accent>`);
+  assert.equal(status(true, mixedPreset, "short"), `<accent>${baseStatus} · OpenAI Fast Mode: on · Anthropic Cache Mode: short</accent>`);
+  assert.equal(status(false, mixedPreset, "short"), `<accent>${baseStatus} · OpenAI Fast Mode: off · Anthropic Cache Mode: short</accent>`);
   assert.doesNotMatch(status(true, mixedPreset, "long"), /Requested/);
 });
 
 test("single-provider and unrelated presets show only their preset-wide eligible suffixes", () => {
-  assert.equal(status(true, makeUniformPreset("openai")), `<accent>${baseStatus} · Fast Mode On</accent>`);
-  assert.equal(status(false, makeUniformPreset("openai-codex")), `<accent>${baseStatus} · Fast Mode Off</accent>`);
-  assert.equal(status(true, makeUniformPreset("anthropic"), "long"), `<accent>${baseStatus} · Cache Mode Long</accent>`);
-  assert.equal(status(true, makeUniformPreset("anthropic"), "short"), `<accent>${baseStatus} · Cache Mode Short</accent>`);
+  assert.equal(status(true, makeUniformPreset("openai")), `<accent>${baseStatus} · OpenAI Fast Mode: on</accent>`);
+  assert.equal(status(false, makeUniformPreset("openai-codex")), `<accent>${baseStatus} · OpenAI Fast Mode: off</accent>`);
+  assert.equal(status(true, makeUniformPreset("anthropic"), "long"), `<accent>${baseStatus} · Anthropic Cache Mode: long</accent>`);
+  assert.equal(status(true, makeUniformPreset("anthropic"), "short"), `<accent>${baseStatus} · Anthropic Cache Mode: short</accent>`);
   assert.equal(status(true, makeUniformPreset("google")), `<accent>${baseStatus}</accent>`);
 });
 
 test("a manually selected Main cannot change suffix eligibility from the active preset", () => {
   const allAnthropic = makeUniformPreset("anthropic");
   const allGoogle = makeUniformPreset("google");
-  assert.equal(status(true, allAnthropic), `<accent>${baseStatus} · Cache Mode Long</accent>`);
+  assert.equal(status(true, allAnthropic), `<accent>${baseStatus} · Anthropic Cache Mode: short</accent>`);
   assert.equal(status(false, allGoogle), `<accent>${baseStatus}</accent>`);
   assert.equal(presetStatusContent(theme, presetName), `<accent>${baseStatus}</accent>`, "the existing two-argument call stays suffix-free");
 });
@@ -149,8 +149,8 @@ test("the complete status line is rendered in one accent span", () => {
     },
   };
   const content = presetStatusContent(trackingTheme, presetName, true, true, "long", true);
-  assert.equal(content, `<accent>${baseStatus} · Fast Mode On · Cache Mode Long</accent>`);
-  assert.deepEqual(calls, [{ role: "accent", text: `${baseStatus} · Fast Mode On · Cache Mode Long` }]);
+  assert.equal(content, `<accent>${baseStatus} · OpenAI Fast Mode: on · Anthropic Cache Mode: long</accent>`);
+  assert.deepEqual(calls, [{ role: "accent", text: `${baseStatus} · OpenAI Fast Mode: on · Anthropic Cache Mode: long` }]);
   assert.equal(content.match(/<accent>/g)?.length, 1);
   assert.equal(content.match(/<\/accent>/g)?.length, 1);
 });

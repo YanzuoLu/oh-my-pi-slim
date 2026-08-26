@@ -95,7 +95,13 @@ export class SubagentWidget {
   }
 
   private ensureTimer(): void {
-    this.widgetInterval ??= this.setIntervalFn(() => this.update(), 80);
+    this.widgetInterval ??= this.setIntervalFn(() => this.tick(), 80);
+  }
+
+  private tick(): void {
+    if (!this.uiCtx) return;
+    this.widgetFrame += 1;
+    this.update();
   }
 
   /** Removes this widget's own section; the host clears the aggregate only when the last one leaves. */
@@ -123,7 +129,6 @@ export class SubagentWidget {
     }
 
     if (state.hasActive) this.ensureTimer();
-    this.widgetFrame += 1;
     if (!this.published) {
       this.published = true;
       widgetStackHost().publish(AGENTS_SECTION_ID, this.section);

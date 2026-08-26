@@ -303,8 +303,8 @@ test("Cache state maker and parser enforce exact version-1 short or long data", 
   assert.equal(parseCacheState(throwing), undefined);
 });
 
-test("Cache session replay defaults Long and uses the last valid full-log entry", () => {
-  assert.equal(replayCacheState([]), "long");
+test("Cache session replay defaults Short and uses the last valid full-log entry", () => {
+  assert.equal(replayCacheState([]), "short");
   const entries = [
     cacheEntry({ version: 1, retention: "short" }),
     { type: "message", customType: CACHE_STATE_ENTRY_TYPE, data: { version: 1, retention: "long" } },
@@ -315,10 +315,10 @@ test("Cache session replay defaults Long and uses the last valid full-log entry"
   ];
   assert.equal(replayCacheState(entries), "long");
   assert.equal(replayCacheState([...entries, cacheEntry({ version: 1, retention: "short" })]), "short");
-  assert.equal(replayCacheState([cacheEntry({ version: 1, retention: "invalid" })]), "long");
+  assert.equal(replayCacheState([cacheEntry({ version: 1, retention: "invalid" })]), "short");
 
   const throwingEntry = new Proxy({}, { get() { throw new Error("broken entry"); } });
   assert.doesNotThrow(() => replayCacheState([cacheEntry({ version: 1, retention: "short" }), throwingEntry]));
   assert.equal(replayCacheState([cacheEntry({ version: 1, retention: "short" }), throwingEntry]), "short");
-  assert.equal(replayCacheState(undefined), "long");
+  assert.equal(replayCacheState(undefined), "short");
 });

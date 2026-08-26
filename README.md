@@ -266,7 +266,7 @@ Fast Mode belongs to the current Pi session and defaults to on for a new session
 
 The top-level `fast` field used by v1.0.0 in `oh-my-pi-slim.json` is ignored. You may remove that legacy field manually. Fast Mode remains independent of preset activation.
 
-When OMPS is active and the active preset contains at least one role whose provider is exactly `openai` or `openai-codex`, the existing OMPS status appends `Fast Mode On` or `Fast Mode Off`. A preset whose seven roles all use other providers shows no Fast Mode suffix, even if Main is switched manually to OpenAI. This suffix reflects only the session toggle. It does not report the current Main provider. It does not prove that the server accepted priority service.
+When OMPS is active and the active preset contains at least one role whose provider is exactly `openai` or `openai-codex`, the existing OMPS status appends `OpenAI Fast Mode: on` or `OpenAI Fast Mode: off`. A preset whose seven roles all use other providers shows no OpenAI Fast Mode suffix, even if Main is switched manually to OpenAI. This suffix reflects only the session toggle. It does not report the current Main provider. It does not prove that the server accepted priority service.
 
 Fast Mode affects all ordinary agent requests whose provider is exactly `openai` or `openai-codex` and whose payload model matches the active Pi model. It requests `service_tier: "priority"`. A toggle is inherited only by future child `create` and `resume` launches. Running children do not hot-switch. Compaction and branch-summary model calls keep their default service tier. An account without priority access may see requests fail. A later-loaded extension can override the payload after OMPS. Fast Mode does not promise that priority capacity will be granted or that a request will complete faster.
 
@@ -274,7 +274,7 @@ Pi's Codex footer cost can underestimate priority-tier cost by roughly 2–2.5x 
 
 ### Cache Mode
 
-Cache Mode belongs to the current Pi session and defaults to Long for a new session. Bare `/cache` toggles between Long and Short. The latest toggle applies across every branch. Reload, process restart, and session resume recover it from session history. A fork inherits the last Cache Mode state on the target path copied into the fork. With `--no-session`, the state lasts only for the current process and cannot survive a restart.
+Cache Mode belongs to the current Pi session and defaults to Short for a new session. Bare `/cache` toggles between Long and Short. The latest toggle applies across every branch. Reload, process restart, and session resume recover it from session history. A fork inherits the last Cache Mode state on the target path copied into the fork. With `--no-session`, the state lasts only for the current process and cannot survive a restart.
 
 Cache Mode handles only ordinary Claude requests where the provider is exactly `anthropic`, the API is exactly `anthropic-messages`, the payload model matches the active Pi model, the model does not explicitly disable long cache retention, and Pi reports Anthropic OAuth authentication. API-key requests, compatible endpoints, OpenAI, and `openai-codex` payloads are unchanged.
 
@@ -284,7 +284,7 @@ Long upgrades only existing legal `{ type: "ephemeral" }` cache breakpoints by c
 
 Only future child `create` and `resume` launches inherit the current Long or Short OMPS-internal snapshot. The launch snapshot does not rewrite `PI_CACHE_RETENTION` or mutate the running parent process's `process.env`. Running children do not hot-switch. Each child applies the complete Anthropic OAuth gate again. Compaction and branch-summary model calls remain unchanged under Pi's current implementation. OMPS does not prewarm caches and does not copy context-cache headers, OAuth handling, or transport behavior. Longer retention can increase Anthropic cache-write cost, and current pricing depends on the model and account.
 
-When OMPS is active and any role in the active preset uses provider exactly `anthropic`, the footer appends `Cache Mode Long` or `Cache Mode Short`. This eligibility is preset-wide and does not depend on the current Main model or authentication. A mixed preset renders `Fast Mode On` or `Fast Mode Off` before Cache Mode. Cache status is only the requested session policy. It does not prove that OAuth is active, that the server accepted the retention request, or that a cache hit occurred. The footer intentionally does not add the word Requested.
+When OMPS is active and any role in the active preset uses provider exactly `anthropic`, the footer appends `Anthropic Cache Mode: long` or `Anthropic Cache Mode: short`. This eligibility is preset-wide and does not depend on the current Main model or authentication. A mixed preset renders `OpenAI Fast Mode: on` or `OpenAI Fast Mode: off` before Anthropic Cache Mode. Cache status is only the requested session policy. It does not prove that OAuth is active, that the server accepted the retention request, or that a cache hit occurred. The footer intentionally does not add the word Requested.
 
 ## Runtime, UI, and persistence
 

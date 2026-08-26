@@ -46,6 +46,7 @@ const {
 beforeEach(() => resetWidgetStackHost());
 const {
   MAX_SUBAGENT_WIDGET_LINES,
+  SUBAGENT_WIDGET_SPINNER,
   formatWidgetModel,
   renderActiveRunLines,
   renderFinishedRunLine,
@@ -700,11 +701,12 @@ test("SubagentWidget reads Pi's live expansion state on every render without re-
   assert.doesNotMatch(legacyComponent.render().join("\n"), /to expand/);
 });
 
-test("widget registers its callback once, ticks at 80ms, then requests render", () => {
+test("manual and runtime-style updates refresh without advancing the spinner frame", () => {
   let runs = [run({ status: "running" })];
   const intervals = [];
   const cleared = [];
   const widgetCalls = [];
+  let component;
   let renders = 0;
   const widget = new SubagentWidget(() => runs, {
     setInterval(callback, ms) { intervals.push({ callback, ms, token: Symbol("timer") }); return intervals.at(-1).token; },
@@ -714,9 +716,10 @@ test("widget registers its callback once, ticks at 80ms, then requests render", 
   const ui = {
     setWidget(key, content, options) {
       widgetCalls.push({ key, content, options });
-      if (typeof content === "function") content(tui, theme);
+      if (typeof content === "function") component = content(tui, theme);
     },
   };
+  const runningGlyph = () => /^[├└]─ (\S+)/.exec(component.render().find((line) => line.includes("[run-1]")))?.[1];
   widget.setUICtx(ui);
   widget.update();
   assert.equal(intervals.length, 1);
@@ -724,11 +727,23 @@ test("widget registers its callback once, ticks at 80ms, then requests render", 
   assert.equal(widgetCalls.length, 1);
   assert.equal(widgetCalls[0].key, WIDGET_STACK_KEY, "Agents joins the one aggregate widget instead of owning a key");
   assert.deepEqual(widgetCalls[0].options, { placement: "aboveEditor" });
+  assert.equal(runningGlyph(), SUBAGENT_WIDGET_SPINNER[0]);
+
+  for (let update = 0; update < 5; update += 1) widget.update();
+  assert.equal(runningGlyph(), SUBAGENT_WIDGET_SPINNER[0], "consecutive manual updates keep the current glyph");
+  assert.equal(renders, 5, "every manual update still requests a render");
 
   intervals[0].callback();
-  widget.update();
+  assert.equal(runningGlyph(), SUBAGENT_WIDGET_SPINNER[1], "one 80ms callback advances exactly one frame");
+  assert.equal(renders, 6);
+
+  for (let update = 0; update < 5; update += 1) {
+    runs = [run({ status: "running", activity: { turnCount: update } })];
+    widget.update();
+  }
+  assert.equal(runningGlyph(), SUBAGENT_WIDGET_SPINNER[1], "runtime-style activity updates cannot accelerate the spinner");
   assert.equal(widgetCalls.length, 1, "the factory must not be replaced on later updates");
-  assert.equal(renders, 2);
+  assert.equal(renders, 11);
 
   runs = [run({ status: "completed" })];
   widget.update();
@@ -740,6 +755,45 @@ test("widget registers its callback once, ticks at 80ms, then requests render", 
   widget.update();
   assert.equal(widgetCalls.at(-1).content, undefined, "clearing every retained run removes the widget");
   assert.equal(cleared.length, 1);
+});
+
+test("one timer tick advances one shared frame regardless of active run counts", () => {
+  const runs = [
+    run({ id: "run-a", status: "running" }),
+    run({ id: "run-b", status: "running" }),
+    run({ id: "wait-a", status: "waiting" }),
+    run({ id: "wait-b", status: "waiting" }),
+    run({ id: "start-a", status: "starting" }),
+    run({ id: "start-b", status: "starting" }),
+  ];
+  const intervals = [];
+  let component;
+  const widget = new SubagentWidget(() => runs, {
+    setInterval(callback, ms) { intervals.push({ callback, ms }); return "timer"; },
+    clearInterval() {},
+  });
+  const tui = { terminal: { columns: 200 }, requestRender() {} };
+  widget.setUICtx({
+    setWidget(_key, content) {
+      if (typeof content === "function") component = content(tui, theme);
+    },
+  });
+  const glyph = (id) => /^[├└]─ (\S+)/.exec(component.render().find((line) => line.includes(`[${id}]`)))?.[1];
+
+  widget.update();
+  assert.equal(intervals.length, 1);
+  assert.deepEqual([glyph("run-a"), glyph("run-b")], [SUBAGENT_WIDGET_SPINNER[0], SUBAGENT_WIDGET_SPINNER[0]]);
+  assert.deepEqual([glyph("wait-a"), glyph("wait-b")], ["!", "!"]);
+  assert.deepEqual([glyph("start-a"), glyph("start-b")], ["◦", "◦"]);
+
+  intervals[0].callback();
+  assert.deepEqual(
+    [glyph("run-a"), glyph("run-b")],
+    [SUBAGENT_WIDGET_SPINNER[1], SUBAGENT_WIDGET_SPINNER[1]],
+    "multiple running rows share the same single-frame advance",
+  );
+  assert.deepEqual([glyph("wait-a"), glyph("wait-b")], ["!", "!"], "waiting rows stay static");
+  assert.deepEqual([glyph("start-a"), glyph("start-b")], ["◦", "◦"], "starting rows stay static");
 });
 
 test("terminal runs never drop or linger out and dispose clears widget and timer", () => {

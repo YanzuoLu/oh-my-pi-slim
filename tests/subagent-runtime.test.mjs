@@ -707,7 +707,7 @@ test("child checkpoint ignores pending/contact batches and resumes only matching
   }
 });
 
-test("child Fast and Cache hooks use explicit snapshots after the child early return", async () => {
+test("child Fast and Cache hooks use snapshots and a Short fallback after the child early return", async () => {
   const previous = {
     fast: process.env.OMPS_FAST_MODE,
     cache: process.env.OMPS_CACHE_RETENTION,
@@ -741,7 +741,32 @@ test("child Fast and Cache hooks use explicit snapshots after the child early re
   try {
     for (const value of [undefined, "0", "true"]) {
       const handlers = await load(value, undefined);
-      assert.equal(handlers.has("before_provider_request"), false, `child Fast value ${String(value)} stays default tier`);
+      assert.equal(handlers.get("before_provider_request").length, 1);
+      assert.equal(
+        handlers.get("before_provider_request")[0](
+          { payload: { model: "gpt-child-default", service_tier: "default" } },
+          { model: { provider: "openai-codex", id: "gpt-child-default" } },
+        ),
+        undefined,
+        `child Fast value ${String(value)} stays default tier`,
+      );
+      const model = {
+        provider: "anthropic",
+        api: "anthropic-messages",
+        id: "claude-child-default",
+        compat: { supportsLongCacheRetention: true },
+      };
+      const result = handlers.get("before_provider_request")[0]({
+        payload: {
+          model: "claude-child-default",
+          messages: [{ role: "user", content: [{
+            type: "text",
+            text: "child default",
+            cache_control: { type: "ephemeral", ttl: "1h" },
+          }] }],
+        },
+      }, { model, modelRegistry: { isUsingOAuth: () => true } });
+      assert.deepEqual(result.messages[0].content[0].cache_control, { type: "ephemeral" }, "missing Cache env defaults child snapshots to Short");
       assert.equal(handlers.has("session_start"), true, "ordinary child runtime still registers");
     }
     const enabled = await load("1", undefined);
@@ -1422,7 +1447,7 @@ test("create writes secure detached config, journals once, launches, and returns
     assert.deepEqual(config.deniedTools, []);
     assert.equal(config.env.OMPS_PARENT_RUN_ID, id);
     assert.equal(config.env.OMPS_FAST_MODE, "1", "children inherit an explicit default-on Fast snapshot");
-    assert.equal(config.env.OMPS_CACHE_RETENTION, "long", "children inherit an explicit default-Long Cache snapshot");
+    assert.equal(config.env.OMPS_CACHE_RETENTION, "short", "children inherit an explicit default-Short Cache snapshot");
     const identity = JSON.parse(readFileSync(harness.paths(id).identityFile, "utf8"));
     assert.deepEqual(identity, {
       v: 1,

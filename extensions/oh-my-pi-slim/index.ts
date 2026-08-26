@@ -360,9 +360,9 @@ export function presetStatusContent(
   cacheEligible?: boolean,
 ): string | undefined {
   if (presetName === undefined) return undefined;
-  const fastStatus = fastEligible ? ` · Fast Mode ${fastEnabled ? "On" : "Off"}` : "";
+  const fastStatus = fastEligible ? ` · OpenAI Fast Mode: ${fastEnabled ? "on" : "off"}` : "";
   const cacheStatus = cacheEligible && cacheRetention
-    ? ` · Cache Mode ${cacheRetention === "long" ? "Long" : "Short"}`
+    ? ` · Anthropic Cache Mode: ${cacheRetention}`
     : "";
   return theme.fg("accent", `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})${fastStatus}${cacheStatus}`);
 }
@@ -410,7 +410,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   const monitors = registerMonitorRuntime(pi, { sendMessage: sendLaunchMessage });
   const subagents = registerSubagentRuntime(pi, { sendMessage: sendLaunchMessage });
   let fastEnabled = true;
-  let cacheRetention: CacheRetention = "long";
+  let cacheRetention: CacheRetention = "short";
   subagents.setFastModeResolver(() => fastEnabled);
   subagents.setCacheRetentionResolver(() => cacheRetention);
   pi.on("before_provider_request", (event, ctx) => {
