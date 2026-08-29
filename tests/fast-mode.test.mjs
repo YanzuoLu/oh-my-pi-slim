@@ -5,11 +5,13 @@ const {
   FAST_ENV_VAR,
   FAST_STATE_ENTRY_TYPE,
   FAST_STATE_VERSION,
+  ULTRAFAST_MODEL_ID,
   applyFastServiceTier,
-  fastEnabledFromEnv,
   fastEnvValue,
+  fastTierFromEnv,
   isFastModeProvider,
   makeFastState,
+  nextFastTier,
   parseFastState,
   replayFastState,
 } = await import("../extensions/oh-my-pi-slim/fast-mode.ts");
@@ -23,12 +25,27 @@ function fastEntry(data, overrides = {}) {
   };
 }
 
-test("Fast Mode environment encoding accepts exactly the enabled child snapshot", () => {
+test("Fast tiers cycle exactly and invalid next input closes to fast", () => {
+  assert.equal(nextFastTier("off"), "fast");
+  assert.equal(nextFastTier("fast"), "ultrafast");
+  assert.equal(nextFastTier("ultrafast"), "off");
+  for (const invalid of [undefined, null, "", "on", "priority", 1, true, {}]) {
+    assert.equal(nextFastTier(invalid), "fast");
+  }
+});
+
+test("Fast Mode environment encoding writes three tiers and decoding preserves old parent compatibility", () => {
   assert.equal(FAST_ENV_VAR, "OMPS_FAST_MODE");
-  assert.equal(fastEnvValue(true), "1");
-  assert.equal(fastEnvValue(false), "0");
-  assert.equal(fastEnabledFromEnv("1"), true);
-  for (const value of [undefined, "", "0", "true", 1, true]) assert.equal(fastEnabledFromEnv(value), false);
+  for (const tier of ["off", "fast", "ultrafast"]) {
+    assert.equal(fastEnvValue(tier), tier);
+    assert.equal(fastTierFromEnv(tier), tier);
+  }
+  assert.equal(fastTierFromEnv("0"), "off");
+  assert.equal(fastTierFromEnv("1"), "fast");
+  for (const value of [undefined, "", "true", "on", "2", 0, 1, true]) {
+    assert.equal(fastTierFromEnv(value), undefined);
+    assert.equal(fastEnvValue(value), "off", "invalid encoder input fails closed without writing a legacy value");
+  }
 });
 
 test("provider eligibility accepts only the exact OpenAI provider names", () => {
@@ -38,55 +55,62 @@ test("provider eligibility accepts only the exact OpenAI provider names", () => 
   }
 });
 
-test("service tier injection reuses provider eligibility and requires the exact payload model without mutation", () => {
+test("service tier matrix is immutable and ultrafast uses the maximum supported OpenAI tier", () => {
+  assert.equal(ULTRAFAST_MODEL_ID, "gpt-5.6-sol");
   assert.match(applyFastServiceTier.toString(), /isFastModeProvider\(model\.provider\)/);
   for (const provider of ["openai", "openai-codex"]) {
-    const payload = { model: "gpt-exact", service_tier: "default", nested: { kept: true } };
-    const result = applyFastServiceTier(payload, { provider, id: "gpt-exact" });
-    assert.deepEqual(result, { model: "gpt-exact", service_tier: "priority", nested: payload.nested });
-    assert.notEqual(result, payload);
-    assert.equal(payload.service_tier, "default");
+    for (const [tier, id, expected] of [
+      ["off", "gpt-other", undefined],
+      ["fast", "gpt-other", "priority"],
+      ["ultrafast", "gpt-other", "priority"],
+      ["fast", ULTRAFAST_MODEL_ID, "priority"],
+      ["ultrafast", ULTRAFAST_MODEL_ID, "ultrafast"],
+    ]) {
+      const payload = { model: id, service_tier: "default", nested: { kept: true } };
+      const result = applyFastServiceTier(payload, { provider, id }, tier);
+      if (expected === undefined) assert.equal(result, undefined);
+      else {
+        assert.deepEqual(result, { model: id, service_tier: expected, nested: payload.nested });
+        assert.notEqual(result, payload);
+      }
+      assert.equal(payload.service_tier, "default");
+    }
   }
 
-  const payload = { model: "gpt-exact", service_tier: "default" };
-  for (const [candidate, model] of [
-    [payload, { provider: "anthropic", id: "gpt-exact" }],
-    [payload, { provider: "OpenAI", id: "gpt-exact" }],
-    [payload, { provider: "openai", id: "other" }],
-    [{ model: 7 }, { provider: "openai", id: "7" }],
-    [[], { provider: "openai", id: "gpt-exact" }],
-    [null, { provider: "openai", id: "gpt-exact" }],
-  ]) assert.equal(applyFastServiceTier(candidate, model), undefined);
-  assert.deepEqual(payload, { model: "gpt-exact", service_tier: "default" });
+  const payload = { model: ULTRAFAST_MODEL_ID, service_tier: "default" };
+  for (const [candidate, model, tier] of [
+    [payload, { provider: "anthropic", id: ULTRAFAST_MODEL_ID }, "ultrafast"],
+    [payload, { provider: "OpenAI", id: ULTRAFAST_MODEL_ID }, "ultrafast"],
+    [payload, { provider: "openai", id: "other" }, "ultrafast"],
+    [{ model: 7 }, { provider: "openai", id: "7" }, "fast"],
+    [[], { provider: "openai", id: ULTRAFAST_MODEL_ID }, "fast"],
+    [null, { provider: "openai", id: ULTRAFAST_MODEL_ID }, "fast"],
+    [payload, { provider: "openai", id: ULTRAFAST_MODEL_ID }, "priority"],
+  ]) assert.equal(applyFastServiceTier(candidate, model, tier), undefined);
+  assert.deepEqual(payload, { model: ULTRAFAST_MODEL_ID, service_tier: "default" });
 
   const throwing = Object.create(null, { model: { get() { throw new Error("getter failure"); } } });
-  assert.doesNotThrow(() => applyFastServiceTier(throwing, { provider: "openai", id: "gpt-exact" }));
-  assert.equal(applyFastServiceTier(throwing, { provider: "openai", id: "gpt-exact" }), undefined);
+  assert.doesNotThrow(() => applyFastServiceTier(throwing, { provider: "openai", id: ULTRAFAST_MODEL_ID }, "ultrafast"));
+  assert.equal(applyFastServiceTier(throwing, { provider: "openai", id: ULTRAFAST_MODEL_ID }, "ultrafast"), undefined);
 });
 
-test("Fast state maker and parser enforce exact version-1 boolean data", () => {
+test("Fast state writer emits exact version-2 tier data and parser strictly migrates version 1", () => {
   assert.equal(FAST_STATE_ENTRY_TYPE, "oh-my-pi-slim:fast-state");
-  assert.equal(FAST_STATE_VERSION, 1);
-  assert.deepEqual(makeFastState(true), { version: FAST_STATE_VERSION, fast: true });
-  assert.deepEqual(makeFastState(false), { version: 1, fast: false });
-  assert.deepEqual(parseFastState({ fast: true, version: 1 }), { version: 1, fast: true });
-  assert.deepEqual(parseFastState(Object.assign(Object.create(null), { version: 1, fast: false })), { version: 1, fast: false });
-  const symbolExtra = { version: 1, fast: true, [Symbol("extra")]: false };
-  const hiddenExtra = Object.defineProperty({ version: 1, fast: true }, "extra", { value: false });
+  assert.equal(FAST_STATE_VERSION, 2);
+  for (const tier of ["off", "fast", "ultrafast"]) {
+    assert.deepEqual(makeFastState(tier), { version: 2, tier });
+    assert.deepEqual(parseFastState({ tier, version: 2 }), { version: 2, tier });
+  }
+  assert.deepEqual(parseFastState({ version: 1, fast: true }), { version: 2, tier: "fast" });
+  assert.deepEqual(parseFastState(Object.assign(Object.create(null), { version: 1, fast: false })), { version: 2, tier: "off" });
 
+  const symbolExtra = { version: 2, tier: "fast", [Symbol("extra")]: false };
+  const hiddenExtra = Object.defineProperty({ version: 1, fast: true }, "extra", { value: false });
   for (const invalid of [
-    undefined,
-    null,
-    [],
-    true,
-    {},
-    { version: 1 },
-    { fast: true },
-    { version: 2, fast: true },
-    { version: 1, fast: "true" },
-    { version: 1, fast: true, extra: false },
-    symbolExtra,
-    hiddenExtra,
+    undefined, null, [], true, {}, { version: 2 }, { tier: "fast" },
+    { version: 2, tier: "priority" }, { version: 2, tier: "fast", extra: false },
+    { version: 1 }, { version: 1, tier: "fast" }, { version: 1, fast: "true" },
+    { version: 1, fast: true, extra: false }, { version: 3, tier: "fast" }, symbolExtra, hiddenExtra,
   ]) assert.equal(parseFastState(invalid), undefined);
 
   const throwing = new Proxy({}, { ownKeys() { throw new Error("broken keys"); } });
@@ -94,31 +118,62 @@ test("Fast state maker and parser enforce exact version-1 boolean data", () => {
   assert.equal(parseFastState(throwing), undefined);
 });
 
-test("session replay uses the last valid exact custom entry across the full entry log", () => {
-  const entries = [
-    fastEntry({ version: 1, fast: false }),
-    { type: "message", customType: FAST_STATE_ENTRY_TYPE, data: { version: 1, fast: true } },
-    fastEntry({ version: 1, fast: true }, { customType: "other-extension:fast-state" }),
-    fastEntry({ version: 1, fast: true }),
-    { type: "custom", customType: "branch-local-state", data: { branch: "other" } },
-  ];
-  assert.equal(replayFastState(entries), true);
-  assert.equal(replayFastState([...entries, fastEntry({ version: 1, fast: false })]), false);
+test("Fast state parser snapshots unstable version, tier, and fast getters exactly once", () => {
+  let versionReads = 0;
+  const unstableVersion = {
+    get version() { versionReads += 1; return versionReads === 1 ? 2 : 1; },
+    tier: "ultrafast",
+  };
+  assert.deepEqual(parseFastState(unstableVersion), { version: 2, tier: "ultrafast" });
+  assert.equal(versionReads, 1);
+
+  let tierReads = 0;
+  const unstableTier = {
+    version: 2,
+    get tier() { tierReads += 1; return tierReads === 1 ? "fast" : "invalid"; },
+  };
+  assert.deepEqual(parseFastState(unstableTier), { version: 2, tier: "fast" });
+  assert.equal(tierReads, 1);
+
+  let fastReads = 0;
+  const unstableFast = {
+    version: 1,
+    get fast() { fastReads += 1; return fastReads === 1; },
+  };
+  assert.deepEqual(parseFastState(unstableFast), { version: 2, tier: "fast" });
+  assert.equal(fastReads, 1);
 });
 
-test("session replay defaults on and skips malformed latest entries without erasing valid state", () => {
-  assert.equal(replayFastState([]), true);
-  assert.equal(replayFastState([fastEntry({ version: 1, fast: "true" })]), true);
+test("session replay traverses mixed v1 and v2 once in time order with last-valid-wins", () => {
+  const v1ThenV2 = [fastEntry({ version: 1, fast: false }), fastEntry({ version: 2, tier: "ultrafast" })];
+  const v2ThenV1 = [fastEntry({ version: 2, tier: "ultrafast" }), fastEntry({ version: 1, fast: true })];
+  assert.equal(replayFastState(v1ThenV2), "ultrafast");
+  assert.equal(replayFastState(v2ThenV1), "fast");
+  assert.equal(v1ThenV2.length, 2, "replay does not append a migration entry");
+
+  const entries = [
+    fastEntry({ version: 1, fast: false }),
+    { type: "message", customType: FAST_STATE_ENTRY_TYPE, data: { version: 2, tier: "ultrafast" } },
+    fastEntry({ version: 2, tier: "fast" }, { customType: "other-extension:fast-state" }),
+    fastEntry({ version: 2, tier: "off" }),
+    fastEntry({ version: 2, tier: "ultrafast", extra: true }),
+  ];
+  assert.equal(replayFastState(entries), "off");
+});
+
+test("session replay defaults off and skips malformed latest entries without erasing valid state", () => {
+  assert.equal(replayFastState([]), "off");
+  assert.equal(replayFastState([fastEntry({ version: 2, tier: "priority" })]), "off");
   assert.equal(replayFastState([
-    fastEntry({ version: 1, fast: true }),
-    fastEntry({ version: 1, fast: false, extra: "invalid latest" }),
-    fastEntry({ version: 2, fast: false }),
+    fastEntry({ version: 1, fast: false }),
+    fastEntry({ version: 2, tier: "ultrafast" }),
+    fastEntry({ version: 2, tier: "off", extra: "invalid latest" }),
     fastEntry(null),
-  ]), true, "an invalid latest candidate falls back to the last valid session state");
+  ]), "ultrafast", "an invalid latest candidate falls back to the last valid session state");
 
   const throwingEntry = new Proxy({}, { get() { throw new Error("broken entry"); } });
-  assert.doesNotThrow(() => replayFastState([fastEntry({ version: 1, fast: true }), throwingEntry]));
-  assert.equal(replayFastState([fastEntry({ version: 1, fast: true }), throwingEntry]), true);
+  assert.doesNotThrow(() => replayFastState([fastEntry({ version: 2, tier: "off" }), throwingEntry]));
+  assert.equal(replayFastState([fastEntry({ version: 2, tier: "off" }), throwingEntry]), "off");
   assert.doesNotThrow(() => replayFastState(undefined));
-  assert.equal(replayFastState(undefined), true);
+  assert.equal(replayFastState(undefined), "off");
 });

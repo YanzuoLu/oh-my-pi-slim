@@ -18,9 +18,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import test, { beforeEach } from "node:test";
-
-const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
-const piRoot = dirname(dirname(piEntry));
+import { piRoot } from "./fixtures/pi-install.mjs";
 const dependencyMap = {
   "@earendil-works/pi-ai": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-ai/dist/index.js`).href,
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
@@ -769,17 +767,37 @@ test("child Fast and Cache hooks use snapshots and a Short fallback after the ch
       assert.deepEqual(result.messages[0].content[0].cache_control, { type: "ephemeral" }, "missing Cache env defaults child snapshots to Short");
       assert.equal(handlers.has("session_start"), true, "ordinary child runtime still registers");
     }
-    const enabled = await load("1", undefined);
-    assert.equal(enabled.get("before_provider_request").length, 1);
-    const payload = { model: "gpt-child", service_tier: "default" };
+    for (const value of ["1", "fast"]) {
+      const enabled = await load(value, undefined);
+      assert.equal(enabled.get("before_provider_request").length, 1);
+      const payload = { model: "gpt-child", service_tier: "default" };
+      assert.deepEqual(
+        enabled.get("before_provider_request")[0](
+          { payload },
+          { model: { provider: "openai-codex", id: "gpt-child" } },
+        ),
+        { model: "gpt-child", service_tier: "priority" },
+      );
+      assert.equal(payload.service_tier, "default");
+    }
+
+    const ultrafast = await load("ultrafast", undefined);
+    const ultrafastHook = ultrafast.get("before_provider_request")[0];
     assert.deepEqual(
-      enabled.get("before_provider_request")[0](
-        { payload },
-        { model: { provider: "openai-codex", id: "gpt-child" } },
+      ultrafastHook(
+        { payload: { model: "gpt-5.6-sol", service_tier: "default" } },
+        { model: { provider: "openai", id: "gpt-5.6-sol" } },
+      ),
+      { model: "gpt-5.6-sol", service_tier: "ultrafast" },
+    );
+    assert.deepEqual(
+      ultrafastHook(
+        { payload: { model: "gpt-child", service_tier: "default" } },
+        { model: { provider: "openai", id: "gpt-child" } },
       ),
       { model: "gpt-child", service_tier: "priority" },
+      "ultrafast child snapshots downgrade non-Sol requests to priority",
     );
-    assert.equal(payload.service_tier, "default");
 
     for (const retention of ["short", "long"]) {
       const cacheHandlers = await load("0", retention);
@@ -1446,7 +1464,7 @@ test("create writes secure detached config, journals once, launches, and returns
     assert.equal(config.piInvocation.args.includes("--extension"), true);
     assert.deepEqual(config.deniedTools, []);
     assert.equal(config.env.OMPS_PARENT_RUN_ID, id);
-    assert.equal(config.env.OMPS_FAST_MODE, "1", "children inherit an explicit default-on Fast snapshot");
+    assert.equal(config.env.OMPS_FAST_MODE, "off", "children inherit an explicit default-off snapshot");
     assert.equal(config.env.OMPS_CACHE_RETENTION, "short", "children inherit an explicit default-Short Cache snapshot");
     const identity = JSON.parse(readFileSync(harness.paths(id).identityFile, "utf8"));
     assert.deepEqual(identity, {
@@ -1469,39 +1487,40 @@ test("create and resume snapshot Fast and Cache policies while running children 
   process.env.OMPS_CACHE_RETENTION = "stale-cache";
   try {
     await harness.restore();
-    harness.runtime.setFastModeResolver(() => false);
+    harness.runtime.setFastModeResolver(() => "off");
     harness.runtime.setCacheRetentionResolver(() => "short");
     const createdOffShort = await createRun(harness, { abstract: "off short create", task: "off short" });
     const offShortConfig = readConfig(harness, createdOffShort.details.run.id);
-    assert.equal(offShortConfig.env.OMPS_FAST_MODE, "0");
+    assert.equal(offShortConfig.env.OMPS_FAST_MODE, "off");
     assert.equal(offShortConfig.env.OMPS_CACHE_RETENTION, "short");
 
-    harness.runtime.setFastModeResolver(() => true);
+    harness.runtime.setFastModeResolver(() => "ultrafast");
     harness.runtime.setCacheRetentionResolver(() => "long");
     const createdOnLong = await createRun(harness, { abstract: "on long create", task: "on long" });
     const onLongConfig = readConfig(harness, createdOnLong.details.run.id);
-    assert.equal(onLongConfig.env.OMPS_FAST_MODE, "1");
+    assert.equal(onLongConfig.env.OMPS_FAST_MODE, "ultrafast");
     assert.equal(onLongConfig.env.OMPS_CACHE_RETENTION, "long");
-    assert.equal(readConfig(harness, createdOffShort.details.run.id).env.OMPS_CACHE_RETENTION, "short", "running children do not hot-switch");
+    assert.equal(readConfig(harness, createdOffShort.details.run.id).env.OMPS_FAST_MODE, "off", "running children do not hot-switch Fast tiers");
+    assert.equal(readConfig(harness, createdOffShort.details.run.id).env.OMPS_CACHE_RETENTION, "short", "running children do not hot-switch Cache retention");
 
-    const resumeWith = async (sourceId, enabled, retention) => {
+    const resumeWith = async (sourceId, tier, retention) => {
       const sessionFile = join(harness.tempDir, `${sourceId}.jsonl`);
       writeFileSync(sessionFile, "session");
       harness.runtime.registry.add(persistedRun({ id: sourceId, status: "completed", sessionFile }));
       harness.runtime.setModelResolver(() => "provider/model:high");
       harness.runtime.setDenyResolver(() => []);
-      harness.runtime.setFastModeResolver(() => enabled);
+      harness.runtime.setFastModeResolver(() => tier);
       harness.runtime.setCacheRetentionResolver(() => retention);
       const resumed = await harness.tools.get("subagent").execute(`resume-${sourceId}`, {
         action: "resume", id: sourceId, abstract: `resume ${sourceId}`, message: "continue",
       });
       return readConfig(harness, resumed.details.run.id).env;
     };
-    const resumedOffShort = await resumeWith("source-off-short", false, "short");
-    assert.equal(resumedOffShort.OMPS_FAST_MODE, "0");
+    const resumedOffShort = await resumeWith("source-off-short", "off", "short");
+    assert.equal(resumedOffShort.OMPS_FAST_MODE, "off");
     assert.equal(resumedOffShort.OMPS_CACHE_RETENTION, "short");
-    const resumedOnLong = await resumeWith("source-on-long", true, "long");
-    assert.equal(resumedOnLong.OMPS_FAST_MODE, "1");
+    const resumedOnLong = await resumeWith("source-on-long", "fast", "long");
+    assert.equal(resumedOnLong.OMPS_FAST_MODE, "fast");
     assert.equal(resumedOnLong.OMPS_CACHE_RETENTION, "long");
   } finally {
     if (previousFast === undefined) delete process.env.OMPS_FAST_MODE;

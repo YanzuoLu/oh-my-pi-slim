@@ -1,13 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test, { beforeEach } from "node:test";
-
-const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
-const piRoot = dirname(dirname(piEntry));
+import { piRoot } from "./fixtures/pi-install.mjs";
 const dependencyMap = {
   "@earendil-works/pi-ai": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-ai/dist/index.js`).href,
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
@@ -1162,7 +1159,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.equal(providerHook.length, 1, "main unconditionally registers exactly one provider payload hook");
     await sessionStart({ reason: "startup" }, fastCtx);
     assert.equal(JSON.parse(readFileSync(legacyConfigPath, "utf8")).fast, true, "the legal v1.0.0 preset config keeps its legacy field untouched");
-    assert.equal(providerResult(main, fastCtx).service_tier, "priority", "empty session entries default Fast Mode on regardless of legacy agent-global config");
+    assert.equal(providerResult(main, fastCtx), undefined, "empty session entries default Fast Mode off regardless of legacy agent-global config");
 
     const fastCommand = main.commandDefinitions.get("fast");
     const entriesBeforeUsage = sessionEntries.length;
@@ -1174,21 +1171,29 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.deepEqual(sessionEntries.at(-1), {
       type: "custom",
       customType: "oh-my-pi-slim:fast-state",
-      data: { version: 1, fast: false },
+      data: { version: 2, tier: "fast" },
     });
-    assert.equal(providerResult(main, fastCtx), undefined);
-    assert.match(notifications.at(-1).message, /Fast Mode disabled for this Pi session.*account permission.*may fail/);
+    assert.equal(providerResult(main, fastCtx).service_tier, "priority", "the first command enters fast");
 
     await fastCommand.handler("", fastCtx);
-    assert.deepEqual(sessionEntries.at(-1).data, { version: 1, fast: true });
-    assert.equal(providerResult(main, fastCtx).service_tier, "priority");
+    assert.deepEqual(sessionEntries.at(-1).data, { version: 2, tier: "ultrafast" });
+    assert.equal(providerResult(main, fastCtx).service_tier, "priority", "ultrafast downgrades non-Sol requests to priority");
+    const solCtx = makeCtx(sessionEntries, "fast-sol-session", {
+      provider: "openai", api: "openai-responses", id: "gpt-5.6-sol",
+    });
+    assert.equal(providerResult(main, solCtx).service_tier, "ultrafast");
+    assert.match(notifications.at(-1).message, /Fast Mode is now ultrafast.*account permission.*pricing/);
+
+    await fastCommand.handler("", fastCtx);
+    assert.deepEqual(sessionEntries.at(-1).data, { version: 2, tier: "off" });
+    assert.equal(providerResult(main, fastCtx), undefined);
 
     const appendEntry = main.pi.appendEntry;
     main.pi.appendEntry = () => { throw new Error("injected append failure"); };
     await fastCommand.handler("", fastCtx);
     assert.equal(notifications.at(-1).level, "error");
     assert.match(notifications.at(-1).message, /injected append failure/);
-    assert.equal(providerResult(main, fastCtx).service_tier, "priority", "append failure does not change in-memory Fast Mode");
+    assert.equal(providerResult(main, fastCtx), undefined, "append failure does not change in-memory Fast Mode");
     main.pi.appendEntry = appendEntry;
 
     const anthropicModel = {
@@ -1247,7 +1252,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
     sessionEntries.push({
       type: "custom",
       customType: "oh-my-pi-slim:fast-state",
-      data: { version: 1, fast: false, invalid: true },
+      data: { version: 2, tier: "off", invalid: true },
     }, {
       type: "custom",
       customType: "oh-my-pi-slim:cache-state",
@@ -1257,7 +1262,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
     ohMyPiSlim(reload.pi);
     const reloadCtx = makeCtx(sessionEntries, "fast-main-session");
     await reload.handlers.get("session_start")[0]({ reason: "reload" }, reloadCtx);
-    assert.equal(providerResult(reload, reloadCtx).service_tier, "priority", "reload restores the last valid Fast state from the same full entry log");
+    assert.equal(providerResult(reload, reloadCtx), undefined, "reload restores the last valid Fast state from the same full entry log");
     const reloadCacheCtx = makeCtx(sessionEntries, "cache-main-session", anthropicModel, true);
     assert.deepEqual(
       providerResult(reload, reloadCacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
@@ -1270,7 +1275,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
       ohMyPiSlim(restored.pi);
       const restoredCtx = makeCtx(sessionEntries, `fast-${reason}-session`);
       await restored.handlers.get("session_start")[0]({ reason }, restoredCtx);
-      assert.equal(providerResult(restored, restoredCtx).service_tier, "priority", `${reason} restores or inherits the copied Fast session path state`);
+      assert.equal(providerResult(restored, restoredCtx), undefined, `${reason} restores or inherits the copied Fast session path state`);
       const restoredCacheCtx = makeCtx(sessionEntries, `cache-${reason}-session`, anthropicModel, true);
       assert.deepEqual(
         providerResult(restored, restoredCacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
@@ -1283,7 +1288,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
     ohMyPiSlim(newSession.pi);
     const newCtx = makeCtx(newSession.sessionEntries, "fast-new-session");
     await newSession.handlers.get("session_start")[0]({ reason: "new" }, newCtx);
-    assert.equal(providerResult(newSession, newCtx).service_tier, "priority", "a new empty session defaults Fast Mode on");
+    assert.equal(providerResult(newSession, newCtx), undefined, "a new empty session defaults Fast Mode off");
     const newCacheCtx = makeCtx(newSession.sessionEntries, "cache-new-session", anthropicModel, true);
     assert.deepEqual(
       providerResult(newSession, newCacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,

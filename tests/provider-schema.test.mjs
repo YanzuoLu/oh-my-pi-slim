@@ -1,13 +1,8 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { registerHooks } from "node:module";
-import { realpathSync } from "node:fs";
-import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import test, { beforeEach } from "node:test";
-
-const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
-const piRoot = dirname(dirname(piEntry));
+import { piRoot } from "./fixtures/pi-install.mjs";
 const moduleUrls = {
   codingAgent: pathToFileURL(`${piRoot}/dist/index.js`).href,
   piAi: pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-ai/dist/index.js`).href,

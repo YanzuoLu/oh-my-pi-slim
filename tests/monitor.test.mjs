@@ -5,19 +5,15 @@ import {
   existsSync,
   openSync as nativeOpenSync,
   readSync as nativeReadSync,
-  realpathSync,
   renameSync as nativeRenameSync,
   writeSync as nativeWriteSync,
 } from "node:fs";
 import { registerHooks } from "node:module";
 import { dirname } from "node:path";
 import { PassThrough } from "node:stream";
-import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import test, { beforeEach } from "node:test";
-
-const piEntry = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
-const piRoot = dirname(dirname(piEntry));
+import { piRoot } from "./fixtures/pi-install.mjs";
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === "@earendil-works/pi-coding-agent") return { url: pathToFileURL(`${piRoot}/dist/index.js`).href, shortCircuit: true };

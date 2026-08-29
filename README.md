@@ -257,20 +257,22 @@ Provider, model, and thinking level are independently configurable per role. Aut
 | `/omps status` | Show activation state |
 | `/omps presets` | List presets |
 | `/preset [name]` | Switch preset; omit the name to list presets |
-| `/fast` | Toggle Fast Mode for the current Pi session; arguments are not accepted |
+| `/fast` | Cycle Fast Mode through Fast, Ultrafast, and Off for the current Pi session; arguments are not accepted |
 | `/cache` | Toggle Cache Mode between Long and Short for the current Pi session; arguments are not accepted |
 
 ### Fast Mode
 
-Fast Mode belongs to the current Pi session and defaults to on for a new session. The latest `/fast` toggle applies to the whole session across every branch, so tree navigation does not change it. Reload, process restart, and session resume recover it from the session history. A fork inherits the last Fast Mode state on the target path that Pi copies into the fork. With `--no-session`, the state lasts only for the current process and cannot survive a restart.
+Fast Mode belongs to the current Pi session and defaults to `off` for a new session. Bare `/fast` cycles `off → fast → ultrafast → off`, so the first command in a new session changes `off` to `fast`. The latest tier applies to the whole session across every branch, so tree navigation does not change it. Reload, process restart, and session resume recover it from the session history. A fork inherits the last Fast Mode state on the target path that Pi copies into the fork. With `--no-session`, Fast Mode starts at `off`, lasts only for the current process, and cannot survive a restart.
 
-The top-level `fast` field used by v1.0.0 in `oh-my-pi-slim.json` is ignored. You may remove that legacy field manually. Fast Mode remains independent of preset activation.
+New OMPS releases can read Fast Mode state written by earlier releases. An old enabled state maps to `fast`, while an old disabled state maps to `off`. Old OMPS releases cannot read the new three-state format and fall back to their own default Fast state. The top-level `fast` field used by v1.0.0 in `oh-my-pi-slim.json` is still ignored and may be removed manually. Fast Mode remains independent of preset activation.
 
-When OMPS is active and the active preset contains at least one role whose provider is exactly `openai` or `openai-codex`, the existing OMPS status appends `OpenAI Fast Mode: on` or `OpenAI Fast Mode: off`. A preset whose seven roles all use other providers shows no OpenAI Fast Mode suffix, even if Main is switched manually to OpenAI. This suffix reflects only the session toggle. It does not report the current Main provider. It does not prove that the server accepted priority service.
+When OMPS is active and the active preset contains at least one role whose provider is exactly `openai` or `openai-codex`, the existing OMPS status appends exactly `OpenAI Fast Mode: off`, `OpenAI Fast Mode: fast`, or `OpenAI Fast Mode: ultrafast`. A preset whose seven roles all use other providers shows no OpenAI Fast Mode suffix, even if Main is switched manually to OpenAI. This footer is only the requested session policy. It does not report the current Main provider or prove that the server accepted a service tier.
 
-Fast Mode affects all ordinary agent requests whose provider is exactly `openai` or `openai-codex` and whose payload model matches the active Pi model. It requests `service_tier: "priority"`. A toggle is inherited only by future child `create` and `resume` launches. Running children do not hot-switch. Compaction and branch-summary model calls keep their default service tier. An account without priority access may see requests fail. A later-loaded extension can override the payload after OMPS. Fast Mode does not promise that priority capacity will be granted or that a request will complete faster.
+`fast` affects ordinary agent requests whose provider is exactly `openai` or `openai-codex` and whose payload model matches the active Pi model. It requests `service_tier: "priority"`. `ultrafast` requests `service_tier: "ultrafast"` when those same exact gates pass and the model ID is exactly `gpt-5.6-sol`. Other eligible OpenAI models automatically downgrade at request time to `service_tier: "priority"` without changing the persisted session tier or footer, which continue to show `ultrafast`. In a mixed preset, Sol roles therefore request `ultrafast` while other OpenAI roles request `priority`. A preset containing Sol can use the same session-wide three-state cycle regardless of the current Main model or current request. `off` leaves requests unchanged.
 
-Pi's Codex footer cost can underestimate priority-tier cost by roughly 2–2.5x because the injected tier is not reflected in its estimate.
+Only future child `create` and `resume` launches inherit the current three-state snapshot. Running children do not hot-switch, and Main does not mutate `process.env`. Compaction and branch-summary model calls keep their default service tier. Ultrafast is a limited preview. Its permissions, pricing, availability, and server-side fallback behavior have not been publicly specified. Priority access also depends on account permission and may fail. A later-loaded extension can override the payload after OMPS. Neither Fast tier promises capacity or faster completion.
+
+Pi's internal cost estimate does not recognize `ultrafast`, and its existing `priority` estimate may also be incomplete. Displayed cost can therefore differ from provider billing.
 
 ### Cache Mode
 
@@ -284,7 +286,7 @@ Long upgrades only existing legal `{ type: "ephemeral" }` cache breakpoints by c
 
 Only future child `create` and `resume` launches inherit the current Long or Short OMPS-internal snapshot. The launch snapshot does not rewrite `PI_CACHE_RETENTION` or mutate the running parent process's `process.env`. Running children do not hot-switch. Each child applies the complete Anthropic OAuth gate again. Compaction and branch-summary model calls remain unchanged under Pi's current implementation. OMPS does not prewarm caches and does not copy context-cache headers, OAuth handling, or transport behavior. Longer retention can increase Anthropic cache-write cost, and current pricing depends on the model and account.
 
-When OMPS is active and any role in the active preset uses provider exactly `anthropic`, the footer appends `Anthropic Cache Mode: long` or `Anthropic Cache Mode: short`. This eligibility is preset-wide and does not depend on the current Main model or authentication. A mixed preset renders `OpenAI Fast Mode: on` or `OpenAI Fast Mode: off` before Anthropic Cache Mode. Cache status is only the requested session policy. It does not prove that OAuth is active, that the server accepted the retention request, or that a cache hit occurred. The footer intentionally does not add the word Requested.
+When OMPS is active and any role in the active preset uses provider exactly `anthropic`, the footer appends `Anthropic Cache Mode: long` or `Anthropic Cache Mode: short`. This eligibility is preset-wide and does not depend on the current Main model or authentication. A mixed preset renders `OpenAI Fast Mode: off`, `OpenAI Fast Mode: fast`, or `OpenAI Fast Mode: ultrafast` before Anthropic Cache Mode. Cache status is only the requested session policy. It does not prove that OAuth is active, that the server accepted the retention request, or that a cache hit occurred. The footer intentionally does not add the word Requested.
 
 ## Runtime, UI, and persistence
 

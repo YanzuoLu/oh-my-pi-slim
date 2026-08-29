@@ -14,9 +14,9 @@ import {
   CACHE_RETENTION_ENV_VAR,
   cacheRetentionFromEnv,
 } from "./cache-retention.js";
-import { applyFastServiceTier, FAST_ENV_VAR, fastEnabledFromEnv } from "./fast-mode.js";
+import { applyFastServiceTier, FAST_ENV_VAR, fastTierFromEnv } from "./fast-mode.js";
 
-const FAST_MODE_ENABLED = fastEnabledFromEnv(process.env[FAST_ENV_VAR]);
+const FAST_TIER = fastTierFromEnv(process.env[FAST_ENV_VAR]) ?? "off";
 const CACHE_RETENTION = cacheRetentionFromEnv(process.env[CACHE_RETENTION_ENV_VAR]) ?? "short";
 const REASONS = ["need_decision", "interview_request", "progress_update"] as const;
 
@@ -43,7 +43,7 @@ export default function childSupervisor(pi: ExtensionAPI): void {
   pi.on("before_provider_request", (event, ctx) => {
     const model = ctx.model;
     let payload = event.payload;
-    const fastPayload = FAST_MODE_ENABLED ? applyFastServiceTier(payload, model) : undefined;
+    const fastPayload = applyFastServiceTier(payload, model, FAST_TIER);
     if (fastPayload) payload = fastPayload;
     const cachePayload = applyCacheRetentionForRequest(
       payload,
