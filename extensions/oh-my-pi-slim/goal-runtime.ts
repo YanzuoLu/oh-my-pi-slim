@@ -102,11 +102,23 @@ interface PendingContinuation {
   content: string;
 }
 
+interface DeliveryCandidate {
+  instanceKey: string;
+  generation: number;
+  externalInputGeneration: number;
+  sessionEpoch: number;
+  sessionId: string;
+  branchLeafId: string | null;
+  branchEntryIds: string[];
+  branchPolicy: "exact" | "descendant";
+}
+
 interface LogicalRun {
   automatic: boolean;
   toolCalls: number;
   activitySerial: number;
   externalInputGeneration: number;
+  deliveryCandidate?: DeliveryCandidate;
 }
 
 interface FinalAssistant {
@@ -508,7 +520,7 @@ export class GoalRuntime {
       name: "goal",
       label: "Goal",
       executionMode: "sequential",
-      description: "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a paused, completed, or cancelled Goal. It rejects active and retry_wait Goals until the user agrees to pause or cancel. Actions return the current Goal state and whether it changed.",
+      description: "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal only when Goal continuation is immediately safe to deliver. Otherwise, blockers keep the Goal active for later reevaluation. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a paused, completed, or cancelled Goal. It rejects active and retry_wait Goals until the user agrees to pause or cancel. Actions return the current Goal state and whether it changed.",
       promptSnippet: "Manage the branch-local Goal.",
       promptGuidelines: [
         "Call `goal create` only for a user message beginning with `/goal`.",
@@ -672,6 +684,7 @@ export class GoalRuntime {
     if (paused || this.shuttingDown) return;
     this.flushStateMessages();
     this.reevaluateRetry();
+    if (this.isActive() && this.ctx) this.requestContinuation(this.ctx);
   }
 
   phaseReminder(): string | undefined {
@@ -708,6 +721,7 @@ export class GoalRuntime {
     this.activitySerial += 1;
     this.refreshUI();
     this.reevaluateRetry();
+    if (this.isActive() && this.ctx) this.requestContinuation(this.ctx);
   }
 
   reevaluateAfterHostOperation(ctx: ExtensionContext): void {
@@ -720,7 +734,7 @@ export class GoalRuntime {
     this.hostAbortPending = true;
   }
 
-  onAgentStart(): void {
+  onAgentStart(ctx: ExtensionContext): void {
     if (this.logicalRun) return;
     const automatic = Boolean(this.pendingAutoRunKey);
     this.logicalRun = {
@@ -728,6 +742,7 @@ export class GoalRuntime {
       toolCalls: 0,
       activitySerial: this.activitySerial,
       externalInputGeneration: this.externalInputGeneration,
+      deliveryCandidate: this.captureDeliveryCandidate(ctx, "descendant"),
     };
     this.pendingAutoRunKey = undefined;
     this.finalAssistant = undefined;
@@ -780,7 +795,10 @@ export class GoalRuntime {
       return;
     }
     if (status === "active" && final?.stopReason === "aborted" && !hostAbort && !this.shuttingDown) {
-      this.pauseAutomatically("user_abort", "user_abort");
+      const safeToPause = run?.deliveryCandidate !== undefined && this.safeToDeliver(run.deliveryCandidate, ctx);
+      this.invalidatePendingContinuation();
+      if (safeToPause) this.pauseAutomatically("user_abort", "user_abort");
+      else if (options.suppressContinuation !== true) this.requestContinuation(ctx);
       return;
     }
     if (final && final.stopReason !== "error" && final.stopReason !== "aborted" &&
@@ -1105,7 +1123,8 @@ export class GoalRuntime {
   private reevaluateRetry(): void {
     const ctx = this.ctx;
     if (!ctx || !this.retryDue || !this.snapshot || this.snapshot.goal.status !== "retry_wait") return;
-    if (!this.safeToDeliver(ctx, this.snapshot.instanceKey, this.snapshot.generation, this.externalInputGeneration, undefined)) return;
+    const candidate = this.captureDeliveryCandidate(ctx, "exact");
+    if (!candidate || !this.safeToDeliver(candidate, ctx)) return;
     this.retryDue = false;
     const next = cloneSnapshot(this.snapshot);
     next.generation += 1;
@@ -1119,30 +1138,37 @@ export class GoalRuntime {
 
   private requestContinuation(ctx: ExtensionContext): void {
     if (!this.snapshot || this.snapshot.goal.status !== "active" || this.shuttingDown) return;
-    const snapshot = this.snapshot;
-    const epoch = this.sessionEpoch;
+    const candidate = this.captureDeliveryCandidate(ctx, "exact");
+    if (!candidate) return;
     const deferredEpoch = this.deferredEpoch;
-    const sessionId = ctx.sessionManager.getSessionId();
-    const branchLeafId = ctx.sessionManager.getLeafId();
-    const externalGeneration = this.externalInputGeneration;
-    const requestKey = JSON.stringify([snapshot.instanceKey, snapshot.generation, epoch, deferredEpoch, sessionId, branchLeafId, externalGeneration]);
+    const requestKey = JSON.stringify([
+      candidate.instanceKey,
+      candidate.generation,
+      candidate.sessionEpoch,
+      deferredEpoch,
+      candidate.sessionId,
+      candidate.branchLeafId,
+      candidate.branchEntryIds,
+      candidate.branchPolicy,
+      candidate.externalInputGeneration,
+    ]);
     if (this.pendingContinuationRequestKey === requestKey) return;
     this.pendingContinuationRequestKey = requestKey;
     this.defer(() => {
       if (this.pendingContinuationRequestKey === requestKey) this.pendingContinuationRequestKey = undefined;
-      if (deferredEpoch !== this.deferredEpoch || !this.safeToDeliver(ctx, snapshot.instanceKey, snapshot.generation, externalGeneration, branchLeafId)) return;
+      if (deferredEpoch !== this.deferredEpoch || !this.safeToDeliver(candidate, ctx)) return;
       const current = this.snapshot as GoalSnapshot;
       let pending = this.pendingContinuation;
       if (!pending || pending.instanceKey !== current.instanceKey || pending.generation !== current.generation ||
-          pending.sessionEpoch !== epoch || pending.sessionId !== sessionId) {
+          pending.sessionEpoch !== candidate.sessionEpoch || pending.sessionId !== candidate.sessionId) {
         const deliveryKey = `${current.instanceKey}:${current.generation}:${++this.deliverySequence}`;
         pending = {
           instanceKey: current.instanceKey,
           generation: current.generation,
-          sessionEpoch: epoch,
-          sessionId,
-          branchLeafId,
-          externalInputGeneration: externalGeneration,
+          sessionEpoch: candidate.sessionEpoch,
+          sessionId: candidate.sessionId,
+          branchLeafId: candidate.branchLeafId,
+          externalInputGeneration: candidate.externalInputGeneration,
           deliveryKey,
           continuationNumber: this.cachedContinuationCount + 1,
           content: goalContinuationContent(current.goal),
@@ -1168,23 +1194,59 @@ export class GoalRuntime {
     });
   }
 
-  private safeToDeliver(
+  private captureDeliveryCandidate(
     ctx: ExtensionContext,
-    instanceKey: string,
-    generation: number,
-    externalGeneration: number,
-    branchLeafId: string | null | undefined,
-  ): boolean {
-    if (this.shuttingDown || this.sessionEpoch < 1 || this.ctx !== ctx) return false;
-    if (!this.snapshot || this.snapshot.goal.status !== "active" && this.snapshot.goal.status !== "retry_wait") return false;
-    if (this.snapshot.instanceKey !== instanceKey || this.snapshot.generation !== generation) return false;
-    if (ctx.sessionManager.getSessionId() !== this.ctx.sessionManager.getSessionId()) return false;
-    if (branchLeafId !== undefined && ctx.sessionManager.getLeafId() !== branchLeafId) return false;
-    if (this.externalInputGeneration !== externalGeneration) return false;
+    branchPolicy: DeliveryCandidate["branchPolicy"],
+  ): DeliveryCandidate | undefined {
+    const snapshot = this.snapshot;
+    if (!snapshot || snapshot.goal.status !== "active" && snapshot.goal.status !== "retry_wait") return;
+    return {
+      instanceKey: snapshot.instanceKey,
+      generation: snapshot.generation,
+      externalInputGeneration: this.externalInputGeneration,
+      sessionEpoch: this.sessionEpoch,
+      sessionId: ctx.sessionManager.getSessionId(),
+      branchLeafId: ctx.sessionManager.getLeafId(),
+      branchEntryIds: ctx.sessionManager.getBranch().map((entry) => entry.id),
+      branchPolicy,
+    };
+  }
+
+  private completeIdle(ctx: ExtensionContext): boolean {
     if (this.hasPendingCheckpoint() || this.deliveryPaused || this.isNotificationDeliveryPaused()) return false;
-    if (this.hasActiveSubagents() || this.hasPendingSubagentNotifications() || this.hasBlockingMonitors() || this.askWaitingCount() > 0) return false;
-    if (!ctx.isIdle() || ctx.hasPendingMessages()) return false;
+    if (this.hasActiveSubagents() || this.hasPendingSubagentNotifications() || this.hasBlockingMonitors()) return false;
+    if (this.askWaitingCount() !== 0 || !ctx.isIdle() || ctx.hasPendingMessages()) return false;
     return true;
+  }
+
+  private branchMatchesCandidate(candidate: DeliveryCandidate, currentCtx: ExtensionContext): boolean {
+    const currentEntryIds = currentCtx.sessionManager.getBranch().map((entry) => entry.id);
+    const currentLeafId = currentCtx.sessionManager.getLeafId();
+    if ((currentEntryIds.at(-1) ?? null) !== currentLeafId) return false;
+    if (candidate.branchPolicy === "exact") {
+      return currentLeafId === candidate.branchLeafId &&
+        currentEntryIds.length === candidate.branchEntryIds.length &&
+        candidate.branchEntryIds.every((id, index) => currentEntryIds[index] === id);
+    }
+    return currentEntryIds.length >= candidate.branchEntryIds.length &&
+      candidate.branchEntryIds.every((id, index) => currentEntryIds[index] === id);
+  }
+
+  private safeToDeliver(candidate: DeliveryCandidate, currentCtx: ExtensionContext): boolean {
+    if (this.shuttingDown || candidate.sessionEpoch < 1 || this.sessionEpoch !== candidate.sessionEpoch) return false;
+    if (!this.snapshot || this.snapshot.goal.status !== "active" && this.snapshot.goal.status !== "retry_wait") return false;
+    if (this.snapshot.instanceKey !== candidate.instanceKey || this.snapshot.generation !== candidate.generation) return false;
+    if (currentCtx.sessionManager.getSessionId() !== candidate.sessionId) return false;
+    if (!this.branchMatchesCandidate(candidate, currentCtx)) return false;
+    if (this.externalInputGeneration !== candidate.externalInputGeneration) return false;
+    return this.completeIdle(currentCtx);
+  }
+
+  private invalidatePendingContinuation(): void {
+    this.deferredEpoch += 1;
+    this.pendingContinuation = undefined;
+    this.pendingContinuationRequestKey = undefined;
+    this.pendingAutoRunKey = undefined;
   }
 
   private emitStateEvent(event: GoalAutomaticEvent, reason: string): void {

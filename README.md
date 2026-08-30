@@ -215,7 +215,7 @@ Manages one branch-local durable Goal with explicit criteria and evidence.
 | `cancel` | Cancel with a reason |
 | `clear` | Remove a paused, completed, or cancelled Goal from the branch |
 
-A Goal is durable on its branch. Reload, session resume, fork, and tree restoration restore unfinished work as paused; it never silently resumes. Provider failures retry automatically, repeated no-progress runs pause the Goal, and user aborts pause instead of cancelling. Completion requires exactly one non-empty evidence item for each criterion.
+A Goal is durable on its branch. Reload, session resume, fork, and tree restoration restore unfinished work as paused; it never silently resumes. Provider failures retry automatically, and repeated no-progress runs pause the Goal. A user abort pauses only when Goal continuation is immediately safe to deliver. If any continuation gate is blocked, the Goal remains active for later scheduler reevaluation. Completion requires exactly one non-empty evidence item for each criterion.
 
 Autonomous continuation waits until blocking work is gone, including active or waiting subagents, Monitor work and pending terminal delivery, and a waiting Ask dialog. Use `status`, `pause`, `resume`, or `cancel` to stay in control.
 

@@ -215,7 +215,7 @@ Ask 仅 main 可用，并要求交互式 UI。JSON 与 print mode 不提供该�
 | `cancel` | 带 reason 取消 |
 | `clear` | 从 branch 上移除 paused、completed 或 cancelled Goal |
 
-Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree restore 会把未完成 Goal 恢复为 paused，绝不会静默继续。provider failure 会自动重试，重复无进展会暂停 Goal，用户 abort 也会暂停而不是取消。完成时，每条 criterion 必须精确对应一条非空 evidence。
+Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree restore 会把未完成 Goal 恢复为 paused，绝不会静默继续。provider failure 会自动重试，重复无进展会暂停 Goal。只有 Goal continuation 此刻可以安全交付时，用户 abort 才会暂停 Goal。任一 continuation gate 被阻塞时，Goal 会保持 active，等待 scheduler 后续重新评估。完成时，每条 criterion 必须精确对应一条非空 evidence。
 
 自主 continuation 会等待阻塞工作消失，包括 active 或 waiting subagent、Monitor 工作与 pending terminal delivery，以及 waiting Ask dialog。你可以随时用 `status`、`pause`、`resume` 或 `cancel` 控制推进。
 

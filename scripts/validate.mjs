@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "1.1.3", "package version must be 1.1.3");
+check(packageJson.version === "1.1.4", "package version must be 1.1.4");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "1.1.3" && lock.packages?.[""]?.version === "1.1.3", "package-lock version must be 1.1.3");
+check(lock.version === "1.1.4" && lock.packages?.[""]?.version === "1.1.4", "package-lock version must be 1.1.4");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -679,7 +679,7 @@ hasNone(shutdownStatusHandler, ["setStatus("], "shutdown must not duplicate the 
 const presetStatusBody = extension.slice(extension.indexOf("export function presetStatusContent"), extension.indexOf("function isAnthropicOAuth"));
 hasNone(presetStatusBody, [".bold(", "theme.bold", "glyph", "Glyph", "Requested"], "OMPS status plain accent-only rendering without a Requested label");
 check((json("package.json").version ?? "").trim().length > 0, "package.json must define a non-empty version for the OMPS status line");
-check(json("package.json").version === "1.1.3", "Per-monitor aggregated notification lanes must ship in v1.1.3");
+check(json("package.json").version === "1.1.4", "Goal abort continuation gating must ship in v1.1.4");
 
 const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
 const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
@@ -795,7 +795,7 @@ hasNone(extension, [
   "CONTEXT_REMINDER_START_MESSAGE_TYPES", "makeContextReminderMessage", "contextReminderPending",
   "contextReminderStartClassified", "contextReminderTarget",
 ], "temporary context reminder machinery must be absent");
-hasAll(agentStartHandler, ['pi.on("agent_start", () => {', "goal?.onAgentStart()"], "agent_start keeps Goal automatic-run classification");
+hasAll(agentStartHandler, ['pi.on("agent_start", (_event, ctx) => {', "goal?.onAgentStart(ctx)"], "agent_start captures the Goal delivery candidate from the real lifecycle context");
 hasNone(agentStartHandler, ["contextReminder", "message_start", "context"], "agent_start contains no reminder classification latch");
 const messageEndHandler = extension.slice(extension.indexOf('pi.on("message_end"'), extension.indexOf('pi.on("tool_execution_start"'));
 hasNone(messageEndHandler, ["GOAL_REMINDER_MESSAGE_TYPE", "goal-reminder"], "Goal reminder must not enter message_end acknowledgement");
@@ -862,10 +862,13 @@ hasAll(goalRuntime, [
 check((goalRuntime.match(/this\.sendContinuationMessage\(/g) ?? []).length === 1, "Goal continuation sender must be called only by requestContinuation");
 const goalContinuationRequest = goalRuntime.slice(goalRuntime.indexOf("private requestContinuation("), goalRuntime.indexOf("private safeToDeliver("));
 hasAll(goalContinuationRequest, [
-  "this.pendingAutoRunKey = pending.deliveryKey", "try {", "this.sendContinuationMessage({",
+  'this.captureDeliveryCandidate(ctx, "exact")', "candidate.branchEntryIds", "candidate.branchPolicy",
+  "this.safeToDeliver(candidate, ctx)", "this.pendingAutoRunKey = pending.deliveryKey", "try {", "this.sendContinuationMessage({",
   "customType: GOAL_CONTINUATION_MESSAGE_TYPE", 'deliverAs: "steer"', "triggerTurn: true",
   "this.pendingAutoRunKey = undefined",
-], "Goal continuation seam and automatic-run classification order");
+], "Goal continuation seam keeps exact captured branch identity and automatic-run classification order");
+const goalRetryReevaluation = goalRuntime.slice(goalRuntime.indexOf("private reevaluateRetry("), goalRuntime.indexOf("private requestContinuation("));
+hasAll(goalRetryReevaluation, ['this.captureDeliveryCandidate(ctx, "exact")', "this.safeToDeliver(candidate, ctx)"], "Goal retry reevaluation uses the same exact delivery candidate gate");
 check(
   goalContinuationRequest.indexOf("this.pendingAutoRunKey = pending.deliveryKey") < goalContinuationRequest.indexOf("this.sendContinuationMessage({"),
   "Goal must classify the automatic run before synchronously sending its continuation launch",
@@ -876,11 +879,61 @@ hasNone(goalStateSender, ["sendContinuationMessage"], "Goal state messages must 
 hasNone(goalRuntime.slice(0, goalRuntime.indexOf("private requestContinuation(")) + goalRuntime.slice(goalRuntime.indexOf("private safeToDeliver(")), [
   "this.sendContinuationMessage(",
 ], "Goal continuation seam must not affect state or other delivery paths");
+const goalAgentStartBlock = goalRuntime.slice(goalRuntime.indexOf("onAgentStart(ctx:"), goalRuntime.indexOf("onAgentEnd(event:"));
+hasAll(goalAgentStartBlock, [
+  "onAgentStart(ctx: ExtensionContext)", 'deliveryCandidate: this.captureDeliveryCandidate(ctx, "descendant")',
+  "externalInputGeneration: this.externalInputGeneration", "this.pendingAutoRunKey = undefined",
+], "Goal agent_start captures the real run delivery candidate while preserving automatic classification");
 const goalAgentSettledBlock = goalRuntime.slice(goalRuntime.indexOf("onAgentSettled(ctx:"), goalRuntime.indexOf("async execute(inputValue:"));
 hasAll(goalAgentSettledBlock, [
   'final?.stopReason === "error" && !hostAbort',
   'final?.stopReason === "aborted" && !hostAbort',
-], "Goal host-abort gates for provider errors and aborted runs");
+  "run?.deliveryCandidate !== undefined", "this.safeToDeliver(run.deliveryCandidate, ctx)",
+  "this.invalidatePendingContinuation();", 'if (safeToPause) this.pauseAutomatically("user_abort", "user_abort")',
+  "else if (options.suppressContinuation !== true) this.requestContinuation(ctx);", "return;",
+], "Goal host-abort gates and captured-candidate user-abort semantics");
+hasNone(goalAgentSettledBlock, [
+  "captureDeliveryCandidate(ctx)", "ctx.sessionManager.getLeafId()", "ctx.sessionManager.getSessionId()",
+], "Goal user-abort settle must not manufacture a current delivery candidate");
+const goalCandidateBlock = goalRuntime.slice(goalRuntime.indexOf("interface DeliveryCandidate"), goalRuntime.indexOf("interface FinalAssistant"));
+hasAll(goalCandidateBlock, [
+  "instanceKey: string", "generation: number", "externalInputGeneration: number", "sessionEpoch: number", "sessionId: string",
+  "branchLeafId: string | null", "branchEntryIds: string[]", 'branchPolicy: "exact" | "descendant"', "deliveryCandidate?: DeliveryCandidate",
+], "Goal logical runs retain stable delivery identity and an explicit branch policy");
+hasNone(goalCandidateBlock, ["ctx: ExtensionContext", "candidate.ctx"], "Goal delivery candidates must never retain ephemeral Pi context objects");
+const goalCaptureCandidateBlock = goalRuntime.slice(goalRuntime.indexOf("private captureDeliveryCandidate("), goalRuntime.indexOf("private completeIdle("));
+hasAll(goalCaptureCandidateBlock, [
+  "ctx: ExtensionContext", 'branchPolicy: DeliveryCandidate["branchPolicy"]', "snapshot.instanceKey", "snapshot.generation", "this.externalInputGeneration",
+  "this.sessionEpoch", "ctx.sessionManager.getSessionId()", "ctx.sessionManager.getLeafId()", "ctx.sessionManager.getBranch().map((entry) => entry.id)",
+], "Goal delivery candidates capture stable snapshot, runtime, session, and full branch-lineage identity");
+hasNone(goalCaptureCandidateBlock, ["ctx,"], "Goal candidate payload must not retain the event context object");
+const goalCompleteIdleBlock = goalRuntime.slice(goalRuntime.indexOf("private completeIdle("), goalRuntime.indexOf("private branchMatchesCandidate("));
+hasAll(goalCompleteIdleBlock, [
+  "this.hasPendingCheckpoint()", "this.deliveryPaused", "this.isNotificationDeliveryPaused()",
+  "this.hasActiveSubagents()", "this.hasPendingSubagentNotifications()", "this.hasBlockingMonitors()",
+  "this.askWaitingCount() !== 0", "!ctx.isIdle()", "ctx.hasPendingMessages()", "return true;",
+], "Goal complete-idle gate includes every runtime delivery blocker");
+hasNone(goalCompleteIdleBlock, ["Loop", "Todo", "instanceKey", "generation", "externalGeneration", "branchLeafId"], "Goal complete-idle gate excludes scheduler state and delivery identity");
+check((goalRuntime.match(/private completeIdle\(/g) ?? []).length === 1, "Goal runtime must define exactly one complete-idle helper");
+const goalBranchMatchBlock = goalRuntime.slice(goalRuntime.indexOf("private branchMatchesCandidate("), goalRuntime.indexOf("private safeToDeliver("));
+hasAll(goalBranchMatchBlock, [
+  "currentCtx.sessionManager.getBranch().map((entry) => entry.id)", "currentCtx.sessionManager.getLeafId()",
+  'candidate.branchPolicy === "exact"', "currentLeafId === candidate.branchLeafId",
+  "currentEntryIds.length === candidate.branchEntryIds.length", "currentEntryIds.length >= candidate.branchEntryIds.length",
+  "candidate.branchEntryIds.every((id, index) => currentEntryIds[index] === id)",
+], "Goal branch policy requires exact deferred delivery and full-prefix abort lineage");
+const goalSafeDeliveryBlock = goalRuntime.slice(goalRuntime.indexOf("private safeToDeliver("), goalRuntime.indexOf("private invalidatePendingContinuation("));
+hasAll(goalSafeDeliveryBlock, [
+  "candidate: DeliveryCandidate", "currentCtx: ExtensionContext", "this.shuttingDown", "candidate.sessionEpoch < 1", "this.sessionEpoch !== candidate.sessionEpoch",
+  'this.snapshot.goal.status !== "active"', 'this.snapshot.goal.status !== "retry_wait"',
+  "this.snapshot.instanceKey !== candidate.instanceKey", "this.snapshot.generation !== candidate.generation",
+  "currentCtx.sessionManager.getSessionId() !== candidate.sessionId", "!this.branchMatchesCandidate(candidate, currentCtx)",
+  "this.externalInputGeneration !== candidate.externalInputGeneration", "return this.completeIdle(currentCtx);",
+], "Goal safe delivery validates stable identity against the current event context before the shared idle gate");
+hasNone(goalSafeDeliveryBlock, ["this.ctx !==", "candidate.ctx", "this.ctx ==="], "Goal safe delivery must not compare ephemeral Pi context object references");
+check((goalRuntime.match(/this\.safeToDeliver\(/g) ?? []).length === 3, "Goal retry, continuation, and user abort must share exactly one safe-delivery predicate");
+const goalLifecycleReevaluation = goalRuntime.slice(goalRuntime.indexOf("setDeliveryPaused(paused:"), goalRuntime.indexOf("reevaluateAfterHostOperation(ctx:"));
+check((goalLifecycleReevaluation.match(/if \(this\.isActive\(\) && this\.ctx\) this\.requestContinuation\(this\.ctx\);/g) ?? []).length === 2, "Goal delivery and package lifecycle releases must naturally reschedule active continuation");
 hasNone(goalRuntime, ["\"Rules:\"", '"- Pursue this Goal now."', '"- Make concrete progress in this run."'], "Goal frozen model text rewrite boundary");
 hasNone(goalRuntime, ["registerEntryRenderer", "registerShortcut", "goalId", "revision", "action: \"list\""], "Goal public-ID and action boundary");
 hasAll(goalWidget, [
@@ -1005,7 +1058,7 @@ const goalGuidelinesEnd = goalRuntime.indexOf("      ],", goalGuidelinesStart);
 const goalToolMetadata = goalRuntime.slice(goalToolStart, goalGuidelinesEnd);
 const goalDescription = propertyString(goalToolMetadata, "description", "Goal tool metadata");
 const goalPromptSnippet = propertyString(goalToolMetadata, "promptSnippet", "Goal tool metadata");
-check(goalDescription === "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a paused, completed, or cancelled Goal. It rejects active and retry_wait Goals until the user agrees to pause or cancel. Actions return the current Goal state and whether it changed.", "Goal description must match the reviewed contract");
+check(goalDescription === "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal only when Goal continuation is immediately safe to deliver. Otherwise, blockers keep the Goal active for later reevaluation. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a paused, completed, or cancelled Goal. It rejects active and retry_wait Goals until the user agrees to pause or cancel. Actions return the current Goal state and whether it changed.", "Goal description must match the reviewed contract");
 check(goalPromptSnippet === "Manage the branch-local Goal.", "Goal promptSnippet must match the reviewed contract");
 checkSteBlock(goalDescription, "Goal description");
 checkSteBlock(goalPromptSnippet, "Goal promptSnippet");
@@ -3100,9 +3153,20 @@ hasAll(goalTests, [
   "Goal schema is a strict portable object", "create, modify, terminal replacement", "status and repeated pause or resume no-ops", "retry-success cleanup is internally guarded", "snapshot replay is strict",
   "Goal reminder type and model-facing text", 'GOAL_REMINDER_MESSAGE_TYPE, "oh-my-pi-slim:goal-reminder"',
   'runtime.status().status, "retry_wait"', 'runtime.phaseReminder(), undefined',
-  "continuation waits for the full safe gate", "provider failures use unbounded frozen backoff",
+  "continuation waits for the full safe gate", "deferred continuation requires the exact captured branch until delivery", "provider failures use unbounded frozen backoff",
   'test("host abort with provider error preserves active Goal without retry state, events, entries, or timer", async () => {',
-  "user abort pauses, host abort does not", "no-progress counts only automatic continuation runs", "ownership and Goal view stats",
+  "user abort pauses only when the complete Goal delivery gate is idle",
+  "distinct Pi event contexts with stable delivery identity still allow user-abort pause",
+  "distinct Pi event contexts allow normal branch descendants",
+  "distinct Pi event contexts reject changed session, ancestor branch, or divergent branch",
+  "agent-start identity becomes stale when external input arrives before an aborted settle",
+  "agent-start identity becomes stale when Goal generation changes before an aborted settle",
+  "aborted settle without an agent-start delivery candidate does not pause",
+  "every Goal delivery blocker suppresses user-abort pause without state, event, or timer writes",
+  "package lifecycle releases naturally reschedule suppressed user aborts",
+  "Goal delivery release naturally reschedules a suppressed user abort",
+  "suppressed user abort preserves no-progress and invalidates old continuation before lifecycle reevaluation",
+  "host abort does not pause and no-progress counts only automatic continuation runs", "ownership and Goal view stats",
   "slash command resends a real user message", "continuationNumber", "refreshUI()",
   "clear is a no-op with no Goal and never appends a tombstone",
   "clear erases a paused, completed, or cancelled Goal through a null tombstone",
@@ -3110,7 +3174,7 @@ hasAll(goalTests, [
   "replay and stats treat only an exact null payload as an erasure",
   "restoring a cleared branch yields no Goal and writes nothing new",
   "clear notifies subscribers and the widget with a null Goal without an automatic state message",
-  "clearing a paused Goal drops deferred continuation work and queued state notifications",
+  "clearing a paused Goal drops deferred continuation work",
   "a Goal created after a clear is a fresh instance whose stats exclude the cleared Goal",
 ], "Goal focused durable state, lifecycle, gate, retry, abort, ownership, stats, numbering, clear, and registration tests");
 hasAll(goalUiTests, [
@@ -3222,7 +3286,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "case-sensitive literal matching", "`stop` preserves the terminal record and retained log", "does not send another terminal notification", "available until `delete` or `clear`",
         "`checkAfter` is required on `create`", "a silence reminder asks you to call `monitor status`", "`lastOutputAt`",
         "one to four questions", "single-select", "multi-select", "custom responses", "previews", "unavailable while a Goal is active",
-        "branch-local durable Goal", "restore unfinished work as paused", "Provider failures retry automatically", "user aborts pause instead of cancelling", "one non-empty evidence item for each criterion",
+        "branch-local durable Goal", "restore unfinished work as paused", "Provider failures retry automatically", "A user abort pauses only when Goal continuation is immediately safe to deliver", "If any continuation gate is blocked, the Goal remains active", "one non-empty evidence item for each criterion",
         "active or waiting subagents", "Monitor work", "waiting Ask dialog",
         "two independent hidden reminders in order", "phase reminder comes first", "only while the Goal is `active`",
         "`retry_wait`, `paused`, `completed`, and `cancelled` Goals receive no Goal reminder", "on the next agent prompt",
@@ -3290,7 +3354,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "区分大小写的 literal match", "`stop` 会保留 terminal record 与 retained log", "不会再发送另一条 terminal notification", "一直保留到 `delete` 或 `clear`",
         "`checkAfter` 在 `create` 时必填", "就会收到一条 silence reminder", "`lastOutputAt`",
         "一到四个 question", "single-select", "multi-select", "custom response", "preview", "Goal active 时不可用",
-        "branch-local durable Goal", "恢复为 paused", "provider failure 会自动重试", "用户 abort 也会暂停而不是取消", "每条 criterion 必须精确对应一条非空 evidence",
+        "branch-local durable Goal", "恢复为 paused", "provider failure 会自动重试", "只有 Goal continuation 此刻可以安全交付时，用户 abort 才会暂停 Goal", "任一 continuation gate 被阻塞时，Goal 会保持 active", "每条 criterion 必须精确对应一条非空 evidence",
         "active 或 waiting subagent", "Monitor 工作", "waiting Ask dialog",
         "两条独立的 hidden reminder", "phase reminder 在前", "只有 Goal 为 `active` 时",
         "`retry_wait`、`paused`、`completed` 与 `cancelled` Goal 都不会收到 Goal reminder", "下一次 agent prompt",

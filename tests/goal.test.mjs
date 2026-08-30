@@ -111,6 +111,7 @@ function createHarness(options = {}) {
     hasPendingCheckpoint: () => options.pendingCheckpoint?.() ?? false,
     isNotificationDeliveryPaused: () => options.notificationPaused?.() ?? false,
     hasActiveSubagents: () => options.activeSubagents?.() ?? false,
+    hasPendingSubagentNotifications: () => options.pendingSubagentNotifications?.() ?? false,
     hasBlockingMonitors: () => options.blockingMonitors?.() ?? false,
     askWaitingCount: () => options.askWaiting?.() ?? 0,
     childStats: options.childStats,
@@ -140,6 +141,18 @@ function createHarness(options = {}) {
       };
       branch.push(entry);
       leaf = entry.id;
+    },
+  };
+}
+
+function eventContext(ctx, overrides = {}) {
+  return {
+    ...ctx,
+    sessionManager: {
+      ...ctx.sessionManager,
+      getBranch: () => overrides.branch ?? ctx.sessionManager.getBranch(),
+      getSessionId: () => overrides.sessionId ?? ctx.sessionManager.getSessionId(),
+      getLeafId: () => "leafId" in overrides ? overrides.leafId : ctx.sessionManager.getLeafId(),
     },
   };
 }
@@ -174,7 +187,7 @@ test("Goal schema is a strict portable object with isolated public actions", asy
   const harness = createHarness();
   const tool = harness.tools.get("goal");
   assert.equal(tool.executionMode, "sequential");
-  assert.equal(tool.description, "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal instead of cancelling it. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a paused, completed, or cancelled Goal. It rejects active and retry_wait Goals until the user agrees to pause or cancel. Actions return the current Goal state and whether it changed.");
+  assert.equal(tool.description, "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal only when Goal continuation is immediately safe to deliver. Otherwise, blockers keep the Goal active for later reevaluation. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a paused, completed, or cancelled Goal. It rejects active and retry_wait Goals until the user agrees to pause or cancel. Actions return the current Goal state and whether it changed.");
   assert.equal(tool.promptSnippet, "Manage the branch-local Goal.");
   assert.deepEqual(tool.promptGuidelines, [
     "Call `goal create` only for a user message beginning with `/goal`.",
@@ -353,7 +366,7 @@ test("Goal reminder type and model-facing text use exact independent blocks", as
 
   const retrying = createHarness();
   await retrying.execute(createInput);
-  retrying.runtime.onAgentStart();
+  retrying.runtime.onAgentStart(retrying.ctx);
   retrying.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "error", errorMessage: "rate limited" }] });
   retrying.runtime.onAgentSettled(retrying.ctx);
   assert.equal(retrying.runtime.status().status, "retry_wait");
@@ -400,13 +413,26 @@ test("continuation waits for the full safe gate, uses steer with acknowledgement
   assert.equal(harness.runtime.goalView().continuationCount, 1);
 });
 
+test("deferred continuation requires the exact captured branch until delivery", async () => {
+  const harness = createHarness();
+  await harness.execute(createInput);
+  harness.runtime.onAgentSettled(harness.ctx);
+  harness.appendMessage({ role: "assistant", content: [], stopReason: "stop" });
+  harness.flush();
+  assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE), false);
+
+  harness.runtime.onAgentSettled(harness.ctx);
+  harness.flush();
+  assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE).length, 1);
+});
+
 test("continuation seam preserves automatic classification while Goal state messages stay on Pi", async () => {
   const continuationLaunches = [];
   let runtime;
   const automatic = createHarness({
     sendContinuationMessage(message, options) {
       continuationLaunches.push({ message, options });
-      runtime.onAgentStart();
+      runtime.onAgentStart(automatic.ctx);
     },
   });
   runtime = automatic.runtime;
@@ -428,7 +454,7 @@ test("continuation seam preserves automatic classification while Goal state mess
     sendContinuationMessage(message, options) { stateSeam.push({ message, options }); },
   });
   await state.execute(createInput);
-  state.runtime.onAgentStart();
+  state.runtime.onAgentStart(state.ctx);
   state.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
   state.runtime.onAgentSettled(state.ctx);
   assert.equal(stateSeam.length, 0, "automatic Goal state events do not use the continuation launch seam");
@@ -441,7 +467,7 @@ test("continuation seam preserves automatic classification while Goal state mess
 test("provider failures use unbounded frozen backoff, timer-safe activation, and success reset", async () => {
   const harness = createHarness();
   await harness.execute(createInput);
-  harness.runtime.onAgentStart();
+  harness.runtime.onAgentStart(harness.ctx);
   harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "error", errorMessage: "rate limited" }] });
   harness.runtime.onAgentSettled(harness.ctx);
   assert.equal(harness.runtime.status().status, "retry_wait");
@@ -459,7 +485,7 @@ test("provider failures use unbounded frozen backoff, timer-safe activation, and
   const continuation = harness.sent.findLast((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE);
   harness.appendContinuation(continuation.message);
   harness.runtime.acknowledgeContinuationMessage({ role: "custom", ...continuation.message });
-  harness.runtime.onAgentStart();
+  harness.runtime.onAgentStart(harness.ctx);
   harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", usage: {} }] });
   harness.setIdle(true);
   harness.runtime.onAgentSettled(harness.ctx);
@@ -475,7 +501,7 @@ test("host abort with provider error preserves active Goal without retry state, 
   const stateEntriesBefore = harness.branch.filter((entry) => entry.customType === GOAL_STATE_ENTRY_TYPE).length;
   const branchEntriesBefore = harness.branch.length;
 
-  harness.runtime.onAgentStart();
+  harness.runtime.onAgentStart(harness.ctx);
   harness.runtime.markHostAbort();
   harness.runtime.onAgentEnd({
     messages: [{ role: "assistant", stopReason: "error", errorMessage: "This operation was aborted" }],
@@ -491,18 +517,252 @@ test("host abort with provider error preserves active Goal without retry state, 
   assert.equal(harness.timers.length, 0);
 });
 
-test("user abort pauses, host abort does not, and no-progress counts only automatic continuation runs", async () => {
-  const userAbort = createHarness();
-  await userAbort.execute(createInput);
-  userAbort.runtime.onAgentStart();
-  userAbort.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
-  userAbort.runtime.onAgentSettled(userAbort.ctx);
-  assert.equal(userAbort.runtime.status().status, "paused");
-  assert.equal(userAbort.runtime.status().pauseReason, "user_abort");
+test("user abort pauses only when the complete Goal delivery gate is idle", async () => {
+  const harness = createHarness();
+  await harness.execute(createInput);
+  harness.runtime.onAgentStart(harness.ctx);
+  harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
+  harness.runtime.onAgentSettled(harness.ctx);
+  assert.equal(harness.runtime.status().status, "paused");
+  assert.equal(harness.runtime.status().pauseReason, "user_abort");
+  assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE).length, 1);
+  assert.equal(harness.timers.length, 0);
+});
 
+test("distinct Pi event contexts with stable delivery identity still allow user-abort pause", async () => {
+  const harness = createHarness();
+  await harness.execute(createInput);
+  const startCtx = eventContext(harness.ctx);
+  const settledCtx = eventContext(harness.ctx);
+  assert.notEqual(startCtx, settledCtx);
+
+  harness.runtime.onAgentStart(startCtx);
+  harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
+  harness.runtime.onAgentSettled(settledCtx);
+
+  assert.equal(harness.runtime.status().status, "paused");
+  assert.equal(harness.runtime.status().pauseReason, "user_abort");
+});
+
+test("distinct Pi event contexts allow normal branch descendants", async () => {
+  const harness = createHarness();
+  await harness.execute(createInput);
+  const startCtx = eventContext(harness.ctx);
+  harness.runtime.onAgentStart(startCtx);
+  harness.appendMessage({ role: "assistant", content: [], stopReason: "toolUse" });
+  harness.appendMessage({ role: "toolResult", content: [] });
+  const settledCtx = eventContext(harness.ctx);
+
+  harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
+  harness.runtime.onAgentSettled(settledCtx);
+
+  assert.equal(harness.runtime.status().status, "paused");
+  assert.equal(harness.runtime.status().pauseReason, "user_abort");
+});
+
+test("distinct Pi event contexts reject changed session, ancestor branch, or divergent branch", async () => {
+  for (const mismatch of [
+    { name: "session", overrides: { sessionId: "session-2" } },
+    { name: "ancestor", overrides: { branch: [], leafId: null } },
+    {
+      name: "divergent",
+      overrides: { branch: [{ type: "message", id: "fork-1", parentId: null, message: { role: "user", content: "fork" } }], leafId: "fork-1" },
+    },
+  ]) {
+    const harness = createHarness();
+    await harness.execute(createInput);
+    const startCtx = eventContext(harness.ctx);
+    const settledCtx = eventContext(harness.ctx, mismatch.overrides);
+    const entries = goalStateEntries(harness.branch).length;
+
+    harness.runtime.onAgentStart(startCtx);
+    harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
+    harness.runtime.onAgentSettled(settledCtx);
+
+    assert.equal(harness.runtime.status().status, "active", mismatch.name);
+    assert.equal(goalStateEntries(harness.branch).length, entries, mismatch.name);
+    assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE), false, mismatch.name);
+  }
+});
+
+test("agent-start identity becomes stale when external input arrives before an aborted settle", async () => {
+  const harness = createHarness();
+  await harness.execute(createInput);
+  const startCtx = eventContext(harness.ctx);
+  const settledCtx = eventContext(harness.ctx);
+  harness.runtime.onAgentStart(startCtx);
+  harness.runtime.onExternalUserInput();
+  const entries = goalStateEntries(harness.branch).length;
+
+  harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
+  harness.runtime.onAgentSettled(settledCtx);
+
+  assert.equal(harness.runtime.status().status, "active");
+  assert.equal(harness.runtime.status().pauseReason, null);
+  assert.equal(harness.runtime.status().noProgressCount, 0);
+  assert.equal(goalStateEntries(harness.branch).length, entries);
+  assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE), false);
+  assert.equal(harness.timers.length, 0);
+  harness.flush();
+  assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE).length, 1);
+});
+
+test("agent-start identity becomes stale when Goal generation changes before an aborted settle", async () => {
+  const harness = createHarness();
+  await harness.execute(createInput);
+  const startCtx = eventContext(harness.ctx);
+  harness.runtime.onAgentStart(startCtx);
+  harness.runtime.ownRun("child-created-during-run");
+  const entries = goalStateEntries(harness.branch).length;
+
+  harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
+  harness.runtime.onAgentSettled(eventContext(harness.ctx));
+
+  assert.equal(harness.runtime.status().status, "active");
+  assert.equal(harness.runtime.status().pauseReason, null);
+  assert.equal(goalStateEntries(harness.branch).length, entries);
+  assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE), false);
+  assert.equal(harness.timers.length, 0);
+});
+
+test("aborted settle without an agent-start delivery candidate does not pause", async () => {
+  const harness = createHarness();
+  await harness.execute(createInput);
+  harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
+  harness.runtime.onAgentSettled(harness.ctx);
+  assert.equal(harness.runtime.status().status, "active");
+  assert.equal(harness.runtime.status().pauseReason, null);
+  assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE), false);
+});
+
+test("every Goal delivery blocker suppresses user-abort pause without state, event, or timer writes", async () => {
+  const cases = [
+    { name: "ctx non-idle", prepare: (harness) => harness.setIdle(false) },
+    { name: "pending messages", prepare: (harness) => harness.setPending(true) },
+    { name: "pending checkpoint", options: { pendingCheckpoint: () => true } },
+    { name: "Goal delivery pause", prepare: (harness) => harness.runtime.setDeliveryPaused(true) },
+    { name: "notification delivery pause", options: { notificationPaused: () => true } },
+    { name: "active subagent", options: { activeSubagents: () => true } },
+    { name: "pending subagent notification", options: { pendingSubagentNotifications: () => true } },
+    { name: "blocking monitor", options: { blockingMonitors: () => true } },
+    { name: "waiting Ask", options: { askWaiting: () => 1 } },
+  ];
+
+  for (const blocker of cases) {
+    const harness = createHarness(blocker.options);
+    await harness.execute(createInput);
+    blocker.prepare?.(harness);
+    const entries = goalStateEntries(harness.branch).length;
+    const events = harness.sent.filter((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE).length;
+
+    harness.runtime.onAgentStart(harness.ctx);
+    harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
+    harness.runtime.onAgentSettled(harness.ctx);
+
+    assert.equal(harness.runtime.status().status, "active", blocker.name);
+    assert.equal(harness.runtime.status().pauseReason, null, blocker.name);
+    assert.equal(harness.runtime.status().noProgressCount, 0, blocker.name);
+    assert.equal(goalStateEntries(harness.branch).length, entries, blocker.name);
+    assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE).length, events, blocker.name);
+    assert.equal(harness.timers.length, 0, blocker.name);
+    harness.flush();
+    assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE), false, blocker.name);
+  }
+});
+
+test("package lifecycle releases naturally reschedule suppressed user aborts", async () => {
+  const cases = [
+    { name: "active subagent", options: (blocked) => ({ activeSubagents: () => blocked.value }) },
+    { name: "pending subagent notification", options: (blocked) => ({ pendingSubagentNotifications: () => blocked.value }) },
+    { name: "blocking monitor", options: (blocked) => ({ blockingMonitors: () => blocked.value }) },
+    { name: "waiting Ask", options: (blocked) => ({ askWaiting: () => blocked.value ? 1 : 0 }) },
+  ];
+
+  for (const blocker of cases) {
+    const blocked = { value: false };
+    const harness = createHarness(blocker.options(blocked));
+    await harness.execute(createInput);
+    harness.runtime.onAgentSettled(harness.ctx);
+    harness.flush();
+    const oldContinuation = harness.sent.findLast((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE);
+
+    harness.runtime.onAgentStart(harness.ctx);
+    blocked.value = true;
+    harness.setIdle(true);
+    harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
+    harness.runtime.onAgentSettled(harness.ctx);
+    assert.equal(harness.runtime.status().status, "active", blocker.name);
+    harness.flush();
+    assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE).length, 1, blocker.name);
+
+    blocked.value = false;
+    harness.runtime.notePackageLifecycleChange();
+    harness.flush();
+    const resumed = harness.sent.findLast((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE);
+    assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE).length, 2, blocker.name);
+    assert.notEqual(resumed.message.details.deliveryKey, oldContinuation.message.details.deliveryKey, blocker.name);
+  }
+});
+
+test("Goal delivery release naturally reschedules a suppressed user abort", async () => {
+  const harness = createHarness();
+  await harness.execute(createInput);
+  harness.runtime.onAgentStart(harness.ctx);
+  harness.runtime.setDeliveryPaused(true);
+  harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
+  harness.runtime.onAgentSettled(harness.ctx);
+  assert.equal(harness.runtime.status().status, "active");
+  harness.flush();
+  assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE), false);
+
+  harness.runtime.setDeliveryPaused(false);
+  harness.flush();
+  assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE).length, 1);
+});
+
+test("suppressed user abort preserves no-progress and invalidates old continuation before lifecycle reevaluation", async () => {
+  let activeSubagents = false;
+  const harness = createHarness({ activeSubagents: () => activeSubagents });
+  await harness.execute(createInput);
+
+  harness.runtime.onAgentSettled(harness.ctx);
+  harness.flush();
+  harness.runtime.onAgentStart(harness.ctx);
+  harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop" }] });
+  harness.setIdle(true);
+  harness.runtime.onAgentSettled(harness.ctx);
+  assert.equal(harness.runtime.status().noProgressCount, 1);
+  harness.flush();
+  const oldContinuation = harness.sent.findLast((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE);
+
+  harness.runtime.onAgentStart(harness.ctx);
+  activeSubagents = true;
+  harness.setIdle(true);
+  const entries = goalStateEntries(harness.branch).length;
+  harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
+  harness.runtime.onAgentSettled(harness.ctx);
+  assert.equal(harness.runtime.status().status, "active");
+  assert.equal(harness.runtime.status().noProgressCount, 1);
+  assert.equal(goalStateEntries(harness.branch).length, entries);
+  assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE), false);
+  assert.equal(harness.timers.length, 0);
+  harness.flush();
+  assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE).length, 2);
+
+  activeSubagents = false;
+  harness.runtime.notePackageLifecycleChange();
+  harness.flush();
+  const resumedContinuation = harness.sent.findLast((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE);
+  assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE).length, 3);
+  assert.notEqual(resumedContinuation.message.details.deliveryKey, oldContinuation.message.details.deliveryKey);
+  assert.equal(harness.runtime.status().status, "active");
+  assert.equal(harness.runtime.status().noProgressCount, 1);
+});
+
+test("host abort does not pause and no-progress counts only automatic continuation runs", async () => {
   const hostAbort = createHarness();
   await hostAbort.execute(createInput);
-  hostAbort.runtime.onAgentStart();
+  hostAbort.runtime.onAgentStart(hostAbort.ctx);
   hostAbort.runtime.markHostAbort();
   hostAbort.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
   hostAbort.runtime.onAgentSettled(hostAbort.ctx, { suppressContinuation: true });
@@ -517,7 +777,7 @@ test("user abort pauses, host abort does not, and no-progress counts only automa
     const continuation = stalled.sent.findLast((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE);
     stalled.appendContinuation(continuation.message);
     stalled.runtime.acknowledgeContinuationMessage({ role: "custom", ...continuation.message });
-    stalled.runtime.onAgentStart();
+    stalled.runtime.onAgentStart(stalled.ctx);
     stalled.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop" }] });
     stalled.setIdle(true);
     stalled.runtime.onAgentSettled(stalled.ctx);
@@ -643,7 +903,7 @@ test("clear rejects active and retry_wait Goals without state changes or timer c
 
   const retrying = createHarness();
   await retrying.execute(createInput);
-  retrying.runtime.onAgentStart();
+  retrying.runtime.onAgentStart(retrying.ctx);
   retrying.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "error", errorMessage: "rate limited" }] });
   retrying.setIdle(false);
   retrying.runtime.onAgentSettled(retrying.ctx);
@@ -754,21 +1014,13 @@ test("clear notifies subscribers and the widget with a null Goal without an auto
   unsubscribe();
 });
 
-test("clearing a paused Goal drops deferred continuation work and queued state notifications", async () => {
-  let notificationPaused = true;
-  const harness = createHarness({ notificationPaused: () => notificationPaused });
+test("clearing a paused Goal drops deferred continuation work", async () => {
+  const harness = createHarness();
   await harness.execute(createInput);
-  harness.setIdle(true);
   harness.runtime.onAgentSettled(harness.ctx);
   assert.equal(harness.deferred.length, 1);
 
-  harness.runtime.onAgentStart();
-  harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
-  harness.runtime.onAgentSettled(harness.ctx);
-  assert.equal(harness.runtime.status().status, "paused");
-  assert.equal(harness.runtime.status().pauseReason, "user_abort");
-  assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE), false);
-
+  await harness.execute({ action: "pause", reason: "blocked" });
   await harness.execute({ action: "clear" });
 
   // The deferred continuation captured before the pause must expire instead of steering a dead Goal.
@@ -776,13 +1028,9 @@ test("clearing a paused Goal drops deferred continuation work and queued state n
   while (harness.deferred.length > 0) harness.flush();
   assert.equal(harness.sent.length, sentBefore);
   assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE), false);
-
-  notificationPaused = false;
-  harness.runtime.setDeliveryPaused(false);
-  assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE), false);
   assert.equal(harness.runtime.status(), null);
 
-  harness.runtime.onAgentStart();
+  harness.runtime.onAgentStart(harness.ctx);
   harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop" }] });
   harness.runtime.onAgentSettled(harness.ctx);
   assert.equal(harness.runtime.status(), null);

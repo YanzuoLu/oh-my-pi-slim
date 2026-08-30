@@ -955,8 +955,8 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     return { message: makeGoalReminderMessage(goalReminder) };
   });
 
-  pi.on("agent_start", () => {
-    goal?.onAgentStart();
+  pi.on("agent_start", (_event, ctx) => {
+    goal?.onAgentStart(ctx);
   });
 
   pi.on("agent_end", (event) => {
