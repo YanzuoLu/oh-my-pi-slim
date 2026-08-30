@@ -286,6 +286,7 @@ test("matcher batches repeat matches, aggregate keywords, cap lines, rate-limit 
   assert.deepEqual(messages[0].message.details.matched.sort(), ["A", "B"]);
   assert.equal(messages[0].message.details.lines.length, 100);
   assert.equal(messages[0].message.details.omitted, 6);
+  assert.equal(ack(runtime, messages[0]), true);
   children[0].stdout.write("A again\n");
   await wait(5);
   children[1].stdout.write("X suppressed\n");
@@ -350,10 +351,206 @@ test("notification gate, acknowledgement, retry, terminal blocker, retention, an
   assert.equal(existsSync(created.details.monitor.logPath), true, "terminal logs remain until delete");
   await execute({ action: "delete", id: "33333333" });
   assert.equal(existsSync(created.details.monitor.logPath), false);
-  assert.equal(runtime.hasBlockingWork(), true, "delete cannot retract a notification already handed to Pi");
-  assert.equal(ack(runtime, terminal), true);
-  assert.equal(runtime.hasBlockingWork(), false);
+  assert.equal(runtime.hasBlockingWork(), false, "delete removes terminal delivery tracking and Goal blocking immediately");
+  runtime.retryQueuedNotificationsAfterAgentSettled();
+  assert.equal(sent.length, 2, "agent-settled never revives a deleted monitor notification");
+  assert.equal(ack(runtime, terminal), false, "a delayed ACK for the removed lane is stale");
   await assert.rejects(execute({ action: "status", id: "33333333" }), /was not found/);
+});
+
+test("each monitor lane aggregates while paused or in flight and ACK sends exactly one pending update", async (t) => {
+  const children = [];
+  const harness = createHarness({
+    randomHex: (() => { const ids = ["35353535", "36363636"]; return () => ids.shift(); })(),
+    spawn() { const child = fakeChild(35000 + children.length); children.push(child); return child; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 2,
+  });
+  t.after(async () => harness.runtime.shutdown());
+  harness.runtime.setDeliveryPaused(true);
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "lane one", command: "unused", notifyOn: ["hit", "warn"] });
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "lane two", command: "unused", notifyOn: ["hit"] });
+
+  children[0].stdout.write("hit one\n");
+  await wait(5);
+  children[0].stdout.write("warn two\n");
+  await wait(5);
+  harness.runtime.setDeliveryPaused(false);
+  assert.equal(harness.messages.length, 1);
+  const first = harness.messages[0];
+  assert.deepEqual(first.message.details.matched, ["hit", "warn"]);
+  assert.deepEqual(first.message.details.lines.map((line) => line.seq), [1, 2]);
+
+  children[0].stdout.write("hit three\n");
+  await wait(5);
+  children[0].stdout.write("warn four\n");
+  await wait(5);
+  assert.equal(harness.messages.length, 1, "one monitor keeps a single pending aggregate behind its in-flight copy");
+
+  children[1].stdout.write("hit independent\n");
+  await wait(5);
+  assert.equal(harness.messages.length, 2, "another monitor lane is never blocked by the first monitor's ACK");
+  harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+  assert.equal(harness.messages.length, 2, "agent-settled never resends either successful in-flight delivery");
+
+  assert.equal(harness.runtime.acknowledgeNotificationMessage({
+    role: "custom",
+    customType: MONITOR_NOTIFICATION_TYPE,
+    details: { deliveryKey: `${first.message.details.deliveryKey}:stale` },
+  }), false);
+  assert.equal(ack(harness.runtime, first), true);
+  assert.equal(harness.messages.length, 3, "ACK releases exactly one aggregate for that monitor");
+  assert.deepEqual(harness.messages[2].message.details.lines.map((line) => line.seq), [3, 4]);
+  assert.equal(new Set(harness.messages[2].message.details.lines.map((line) => line.seq)).size, 2);
+  assert.equal(ack(harness.runtime, first), false, "duplicate ACKs are stale");
+
+  closeChild(children[0]);
+  closeChild(children[1]);
+});
+
+test("a synchronous matcher send failure returns to pending and merges later output without seq loss", async (t) => {
+  let child;
+  let attempts = 0;
+  const delivered = [];
+  const harness = createHarness({
+    randomHex: () => "37373737",
+    spawn() { child = fakeChild(); return child; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 2,
+    sendMessage(message, options) {
+      attempts += 1;
+      if (attempts === 1) throw new Error("Pi queue busy");
+      delivered.push({ message, options });
+    },
+  });
+  t.after(async () => harness.runtime.shutdown());
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "retry aggregate", command: "unused", notifyOn: ["hit"] });
+  child.stdout.write("hit one\n");
+  await wait(5);
+  assert.equal(attempts, 1);
+  assert.equal(delivered.length, 0);
+  child.stdout.write("hit two\n");
+  await wait(5);
+  assert.equal(attempts, 2);
+  assert.equal(delivered.length, 1);
+  assert.deepEqual(delivered[0].message.details.lines.map((line) => line.seq), [1, 2]);
+  assert.equal(delivered[0].message.details.omitted, 0);
+  assert.equal((await harness.execute({ action: "status", id: "37373737" })).details.monitor.notificationCount, 1);
+  harness.runtime.retryQueuedNotificationsAfterAgentSettled();
+  assert.equal(delivered.length, 1);
+  closeChild(child);
+});
+
+test("matcher and per-monitor summary aggregates retain latest silence and recovery removes only that component", async (t) => {
+  const matcher = silenceHarness({ matcherBatchMs: 2 });
+  t.after(async () => matcher.runtime.shutdown());
+  matcher.runtime.setDeliveryPaused(true);
+  await matcher.execute({ action: "create", abstract: "matcher silence", command: "unused", checkAfter: "10s", notifyOn: ["hit"] });
+  matcher.children[0].stdout.write("hit matcher\n");
+  await wait();
+  matcher.advance(2);
+  matcher.advance(9_998);
+  const matcherPending = matcher.runtime.notificationLanes.get("00000001").pending;
+  assert.equal(matcherPending.kind, "matcher");
+  assert.equal(matcherPending.silenceForMs, 10_000);
+  matcher.runtime.setDeliveryPaused(false);
+  assert.equal(matcher.messages.length, 1);
+  assert.deepEqual(matcher.messages[0].message.details.matched, ["hit"]);
+  assert.equal(matcher.messages[0].message.details.silentFor, "10s");
+  assert.match(matcher.messages[0].message.content, /Silence: no output for 10s/);
+  closeChild(matcher.children[0]);
+  matcher.flush();
+
+  const summary = silenceHarness({ matcherBatchMs: 2, rateLimitCount: 0, rateLimitWindowMs: 20_001 });
+  t.after(async () => summary.runtime.shutdown());
+  summary.runtime.setDeliveryPaused(true);
+  await summary.execute({ action: "create", abstract: "summary silence", command: "unused", checkAfter: "10s", notifyOn: ["hit"] });
+  summary.children[0].stdout.write("hit suppressed\n");
+  await wait();
+  summary.advance(2);
+  summary.advance(9_998);
+  const summaryLane = summary.runtime.notificationLanes.get("00000001");
+  assert.equal(summaryLane.pending.kind, "summary");
+  assert.equal(summaryLane.pending.suppressedLines, 1);
+  assert.equal(summaryLane.pending.silenceForMs, 10_000);
+  assert.equal("suppressedWindows" in summary.runtime, false, "the lane is the only per-monitor pending store");
+  summary.runtime.setDeliveryPaused(false);
+  assert.equal(summary.messages.length, 0, "pure suppression remains deferred until its rate window is ready");
+  summary.advance(10_000);
+  assert.equal(summary.messages.length, 0);
+  summary.advance(3);
+  assert.equal(summary.messages.length, 1);
+  assert.equal(summary.messages[0].message.details.kind, "summary");
+  assert.equal(summary.messages[0].message.details.silentFor, "20s");
+  assert.match(summary.messages[0].message.content, /also produced no output for 20s/);
+  closeChild(summary.children[0]);
+  summary.flush();
+
+  const recovered = silenceHarness({ matcherBatchMs: 2 });
+  t.after(async () => recovered.runtime.shutdown());
+  recovered.runtime.setDeliveryPaused(true);
+  await recovered.execute({ action: "create", abstract: "recovered aggregate", command: "unused", checkAfter: "10s", notifyOn: ["hit"] });
+  recovered.children[0].stdout.write("hit before silence\n");
+  await wait();
+  recovered.advance(2);
+  recovered.advance(9_998);
+  assert.equal(recovered.runtime.notificationLanes.get("00000001").pending.silenceForMs, 10_000);
+  recovered.children[0].stdout.write("output recovered\n");
+  await wait();
+  assert.equal(recovered.runtime.notificationLanes.get("00000001").pending.silenceForMs, undefined);
+  recovered.runtime.setDeliveryPaused(false);
+  assert.equal(recovered.messages.length, 1);
+  assert.equal("silentFor" in recovered.messages[0].message.details, false);
+  assert.doesNotMatch(recovered.messages[0].message.content, /Silence:/);
+  closeChild(recovered.children[0]);
+  recovered.flush();
+});
+
+test("terminal send failure retries on its internal timer and delete before retry prevents revival", async (t) => {
+  let child;
+  let attempts = 0;
+  const delivered = [];
+  const retrying = createHarness({
+    randomHex: () => "38383838",
+    spawn() { child = fakeChild(); return child; },
+    resolveShell: () => "/bin/bash",
+    sendMessage(message, options) {
+      attempts += 1;
+      if (attempts === 1) throw new Error("queue busy");
+      delivered.push({ message, options });
+    },
+  });
+  t.after(async () => retrying.runtime.shutdown());
+  await retrying.execute({ action: "create", checkAfter: "10m", abstract: "terminal retry", command: "unused" });
+  closeChild(child, 2, null);
+  await wait();
+  assert.equal(attempts, 1);
+  assert.equal(retrying.runtime.hasBlockingWork(), true);
+  await wait(120);
+  assert.equal(attempts, 2, "terminal retries without new output or agent-settled");
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].message.details.status, "failed");
+  assert.equal(ack(retrying.runtime, delivered[0]), true);
+  assert.equal(retrying.runtime.hasBlockingWork(), false);
+
+  let removedChild;
+  let removedAttempts = 0;
+  const removed = createHarness({
+    randomHex: () => "39393939",
+    spawn() { removedChild = fakeChild(); return removedChild; },
+    resolveShell: () => "/bin/bash",
+    sendMessage() { removedAttempts += 1; throw new Error("queue busy"); },
+  });
+  t.after(async () => removed.runtime.shutdown());
+  await removed.execute({ action: "create", checkAfter: "10m", abstract: "delete retry", command: "unused" });
+  closeChild(removedChild, 2, null);
+  await wait();
+  assert.equal(removedAttempts, 1);
+  await removed.execute({ action: "delete", id: "39393939" });
+  await wait(120);
+  removed.runtime.retryQueuedNotificationsAfterAgentSettled();
+  assert.equal(removedAttempts, 1, "retry timer and agent-settled cannot revive a deleted lane");
+  assert.equal(removed.runtime.hasBlockingWork(), false);
 });
 
 test("delete cancels terminal and matcher notifications that are still gated", async (t) => {
@@ -484,28 +681,55 @@ test("stop uses a fixed latest-100 scan window even when retained logLines is ve
   assert.deepEqual(running.details.monitor.combined.map((line) => line.text), Array.from({ length: 100 }, (_, index) => `running-${index + 200}`));
 });
 
-test("stop preserves an already queued matcher update while suppressing only its terminal update", async (t) => {
-  let child;
-  const harness = createHarness({
-    randomHex: () => "45555545",
-    spawn() { child = fakeChild(45554); return child; },
+test("stop drops mutable pending while preserving only an already handed copy", async (t) => {
+  let pendingChild;
+  const pending = silenceHarness({
+    matcherBatchMs: 2,
+    rateLimitCount: 1,
+    rateLimitWindowMs: 60_000,
+    spawn() { pendingChild = fakeChild(45554); return pendingChild; },
+    killGroup(_pid, signal) { if (signal === "SIGTERM") closeChild(pendingChild, null, "SIGTERM"); },
+  });
+  t.after(async () => pending.runtime.shutdown());
+  pending.runtime.setDeliveryPaused(true);
+  await pending.execute({ action: "create", checkAfter: "10s", abstract: "queued", command: "unused", notifyOn: ["hit"] });
+  pendingChild.stdout.write("hit matcher\n");
+  await wait();
+  pending.advance(2);
+  pendingChild.stdout.write("hit suppressed\n");
+  await wait();
+  pending.advance(2);
+  pending.advance(9_998);
+  const mutable = pending.runtime.notificationLanes.get("00000001").pending;
+  assert.equal(mutable.kind, "matcher");
+  assert.equal(mutable.suppressedBatches, 1);
+  assert.equal(mutable.silenceForMs, 10_000);
+  const stoppedPending = await pending.execute({ action: "stop", id: "00000001" });
+  assert.equal(stoppedPending.details.outcome, "stopped");
+  pending.runtime.setDeliveryPaused(false);
+  pending.runtime.retryQueuedNotificationsAfterAgentSettled();
+  assert.equal(pending.messages.length, 0, "stop drops every mutable matcher, silence, or summary component");
+
+  let handedChild;
+  const handed = createHarness({
+    randomHex: () => "45555546",
+    spawn() { handedChild = fakeChild(45555); return handedChild; },
     resolveShell: () => "/bin/bash",
     matcherBatchMs: 1,
-    killGroup(_pid, signal) { if (signal === "SIGTERM") closeChild(child, null, "SIGTERM"); },
+    killGroup(_pid, signal) { if (signal === "SIGTERM") closeChild(handedChild, null, "SIGTERM"); },
   });
-  t.after(async () => harness.runtime.shutdown());
-  harness.runtime.setDeliveryPaused(true);
-  await harness.execute({ action: "create", checkAfter: "10m", abstract: "queued", command: "unused", notifyOn: ["hit"] });
-  child.stdout.write("hit queued\n");
+  t.after(async () => handed.runtime.shutdown());
+  await handed.execute({ action: "create", checkAfter: "10m", abstract: "handed", command: "unused", notifyOn: ["hit"] });
+  handedChild.stdout.write("hit handed\n");
   await wait(5);
-  const stopped = await harness.execute({ action: "stop", id: "45555545" });
-  assert.equal(stopped.details.outcome, "stopped");
-  assert.equal(harness.messages.length, 0);
-  harness.runtime.setDeliveryPaused(false);
-  assert.equal(harness.messages.length, 1);
-  assert.equal(harness.messages[0].message.details.status, "running", "the queued matcher keeps its original notification state");
-  assert.deepEqual(harness.messages[0].message.details.lines.map((line) => line.text), ["hit queued"]);
-  assert.equal(harness.messages.some((sent) => sent.message.details.status === "killed"), false);
+  assert.equal(handed.messages.length, 1);
+  const handedCopy = handed.messages[0];
+  const stoppedHanded = await handed.execute({ action: "stop", id: "45555546" });
+  assert.equal(stoppedHanded.details.outcome, "stopped");
+  handed.runtime.retryQueuedNotificationsAfterAgentSettled();
+  assert.equal(handed.messages.length, 1, "the immutable copy handed to Pi remains visible at most once");
+  assert.equal(ack(handed.runtime, handedCopy), true);
+  assert.equal(handed.messages.length, 1, "ACK after stop never releases a terminal or old running pending copy");
 });
 
 test("an unconfirmed stop force-fails and quiesces every resource without deleting retained state", async (t) => {
@@ -604,9 +828,8 @@ test("terminal delete and clear report log removal failures but still remove rec
   assert.equal(cleared.details.warnings.length, 1);
   assert.match(cleared.details.warnings[0], /50474747.*rm denied/);
   assert.deepEqual(harness.runtime.list(), []);
-  assert.equal(harness.runtime.hasBlockingWork(), true, "in-flight terminal notifications survive delete and clear");
-  for (const sent of harness.messages) assert.equal(ack(harness.runtime, sent), true);
-  assert.equal(harness.runtime.hasBlockingWork(), false);
+  assert.equal(harness.runtime.hasBlockingWork(), false, "delete and clear remove their terminal lanes from Goal blocking");
+  for (const sent of harness.messages) assert.equal(ack(harness.runtime, sent), false, "late ACKs cannot revive removed lanes");
 });
 
 test("matcher delivery uses the bounded recent-line ring without reading the JSONL file", async (t) => {
@@ -687,6 +910,7 @@ test("matcher and terminal payloads include abstract and stay within content and
   assert.equal(matcher.details.truncated, true);
   assert.ok(matcher.details.omitted > 0);
   assert.match(matcher.content, /\n\[truncated: omitted \d+ lines and\/or shortened oversized lines; use monitor status\]$/);
+  assert.equal(ack(harness.runtime, harness.messages[0]), true);
 
   for (let index = 0; index < 150; index += 1) child.stdout.write(`MATCH-tail-${index}\n`);
   closeChild(child);
@@ -746,6 +970,8 @@ test("matcher and terminal notifications share one incremental update contract t
   child.stdout.write("after\nhit two\n");
   closeChild(child, 0, null);
   await wait();
+  assert.equal(harness.messages.length, 1, "terminal waits behind the immutable matcher delivery");
+  assert.equal(ack(harness.runtime, harness.messages[0]), true);
   assert.equal(harness.messages.length, 2);
   const terminal = harness.messages[1].message;
   assert.deepEqual(Object.keys(terminal.details), shape);
@@ -789,6 +1015,7 @@ test("terminal updates report completed, failed, and killed while matcher update
     await wait(5);
     assert.equal(harness.messages[0].message.details.status, "running");
     assert.deepEqual(harness.messages[0].message.details.matched, ["hit"]);
+    assert.equal(ack(harness.runtime, harness.messages[0]), true);
     closeChild(child, code, signal);
     await wait();
     const terminal = harness.messages.at(-1).message;
@@ -841,6 +1068,7 @@ test("zero incremental lines stay legal and never replay retained history", asyn
   child.stdout.write("hit now\n");
   await wait(5);
   assert.equal(harness.messages.length, 1);
+  assert.equal(ack(harness.runtime, harness.messages[0]), true);
   closeChild(child, 0, null);
   await wait();
   const terminal = harness.messages[1].message;
@@ -939,6 +1167,36 @@ test("a rate-limited summary counts suppressed matched lines instead of all supp
   assert.deepEqual(summary.monitors.map((monitor) => monitor.id), [suppressed.details.monitor.id]);
   assert.equal(summary.monitors[0].suppressedBatches, 1);
   assert.equal(summary.monitors[0].suppressedLines, 3, "suppressedLines counts matched lines, not ordinary output");
+});
+
+test("terminal absorbs a gated per-monitor suppression aggregate with unique ordered seqs", async (t) => {
+  let child;
+  const harness = createHarness({
+    randomHex: () => "70707070",
+    spawn() { child = fakeChild(); return child; },
+    resolveShell: () => "/bin/bash",
+    matcherBatchMs: 2,
+    rateLimitCount: 0,
+    rateLimitWindowMs: 5,
+  });
+  t.after(async () => harness.runtime.shutdown());
+  harness.runtime.setDeliveryPaused(true);
+  await harness.execute({ action: "create", checkAfter: "10m", abstract: "suppressed terminal", command: "unused", notifyOn: ["hit"] });
+  child.stdout.write("hit early\nnoise\nhit late\n");
+  await wait(12);
+  closeChild(child, 2, null);
+  await wait();
+  harness.runtime.setDeliveryPaused(false);
+  assert.equal(harness.messages.length, 1);
+  const terminal = harness.messages[0].message.details;
+  assert.equal(terminal.status, "failed");
+  assert.deepEqual(terminal.matched, ["hit"]);
+  assert.equal(terminal.suppressedBatches, 1);
+  assert.equal(terminal.suppressedLines, 2);
+  const seqs = terminal.lines.map((line) => line.seq);
+  assert.deepEqual(seqs, [1, 2, 3]);
+  assert.equal(new Set(seqs).size, seqs.length);
+  assert.equal(terminal.omitted, 0);
 });
 
 test("a completed close stays status-only while a failed close adds a bounded diagnostic tail", async (t) => {
@@ -1057,9 +1315,12 @@ test("matches already delivered by a matcher batch never repeat in a later faile
   await wait(5);
   child.stdout.write("noise two\nhit two\n");
   await wait(5);
-  assert.equal(harness.messages.length, 2);
+  assert.equal(harness.messages.length, 1);
   assert.deepEqual(harness.messages[0].message.details.lines.map((line) => line.text), ["hit one"]);
+  assert.equal(ack(harness.runtime, harness.messages[0]), true);
+  assert.equal(harness.messages.length, 2);
   assert.deepEqual(harness.messages[1].message.details.lines.map((line) => line.text), ["hit two"], "a second batch never resends the first match");
+  assert.equal(ack(harness.runtime, harness.messages[1]), true);
   closeChild(child, 1, null);
   await wait();
   const terminal = harness.messages.at(-1).message.details;
@@ -1142,7 +1403,7 @@ test("write, rename, and rollover reopen failures stay inside stream listeners a
   }
 });
 
-test("deleting one monitor rebuilds a gated global rate summary for the remaining monitors", async (t) => {
+test("deleting one monitor drops only its gated per-monitor rate summary", async (t) => {
   const children = [];
   const harness = createHarness({
     randomHex: (() => { const ids = ["54545454", "55545454"]; return () => ids.shift(); })(),
@@ -1458,14 +1719,16 @@ test("a silent monitor reminds once per checkAfter interval with accumulated sil
   harness.advance(10_000);
   assert.equal(harness.silences().length, 2, "an unacknowledged reminder never stacks a second delivery");
   harness.runtime.retryQueuedNotificationsAfterAgentSettled();
-  assert.equal(harness.silences().length, 3);
-  const retried = harness.silences()[2].message;
-  assert.equal(retried.details.deliveryKey, second.details.deliveryKey, "the in-place update keeps one delivery key");
-  assert.equal(retried.details.silentFor, "30s");
-  assert.equal(retried.details.silentForMs, 30_000);
+  assert.equal(harness.silences().length, 2, "agent-settled never resends an immutable in-flight reminder");
+  assert.equal(ack(harness.runtime, harness.silences()[1]), true);
+  assert.equal(harness.silences().length, 3, "ACK advances the lane to its one latest pending reminder");
+  const latest = harness.silences()[2].message;
+  assert.notEqual(latest.details.deliveryKey, second.details.deliveryKey);
+  assert.equal(latest.details.silentFor, "30s");
+  assert.equal(latest.details.silentForMs, 30_000);
 
   const status = (await harness.execute({ action: "status", id: "00000001" })).details.monitor;
-  assert.equal(status.notificationCount, 2, "a safely retried reminder still counts once");
+  assert.equal(status.notificationCount, 3, "notificationCount tracks each logical delivery first handed to Pi");
   assert.equal(status.matchedCount, 0);
   assert.ok(harness.created.every((timer) => timer.unrefs >= 1), "every silence timer is unref'd");
   closeChild(harness.children[0]);
@@ -1572,12 +1835,12 @@ test("a gated or failing delivery keeps exactly one silence reminder that update
   failing.advance(10_000);
   assert.equal(attempts, 1);
   assert.equal(failing.messages.length, 0);
-  failing.advance(10_000);
-  assert.equal(attempts, 2, "a failed send stays retryable and never duplicates the queue entry");
+  failing.advance(100);
+  assert.equal(attempts, 2, "the controlled retry timer delivers without waiting for another monitor event");
   assert.equal(failing.silences().length, 1);
-  assert.equal(failing.silences()[0].message.details.silentFor, "20s");
+  assert.equal(failing.silences()[0].message.details.silentFor, "10s");
   failing.runtime.retryQueuedNotificationsAfterAgentSettled();
-  assert.equal(failing.silences().length, 2);
+  assert.equal(failing.silences().length, 1, "agent-settled does not resend the successfully delivered retry");
   assert.equal((await failing.execute({ action: "status", id: "00000001" })).details.monitor.notificationCount, 1, "one logical reminder counts once");
   closeChild(failing.children[0]);
   failing.flush();
@@ -1608,7 +1871,9 @@ test("recovered output retires a queued or in-flight reminder so agent-settled r
   inFlight.runtime.retryQueuedNotificationsAfterAgentSettled();
   assert.equal(inFlight.silences().length, 1, "a delivered but unacknowledged reminder is not replayed once output returns");
   inFlight.advance(10_000);
-  assert.equal(inFlight.silences().length, 2, "silence after recovery starts a fresh reminder");
+  assert.equal(inFlight.silences().length, 1, "fresh silence remains the one pending aggregate behind the old in-flight copy");
+  assert.equal(ack(inFlight.runtime, inFlight.silences()[0]), true);
+  assert.equal(inFlight.silences().length, 2);
   assert.equal(inFlight.silences()[1].message.details.silentFor, "10s");
   assert.notEqual(inFlight.silences()[1].message.details.deliveryKey, inFlight.silences()[0].message.details.deliveryKey);
   closeChild(inFlight.children[0]);
@@ -1630,6 +1895,7 @@ test("silence reminders never move the incremental position or consume the match
   harness.children[0].stdout.write("hit line\n");
   await wait();
   harness.advance(5_000);
+  assert.equal(ack(harness.runtime, harness.silences()[1]), true, "the old silence ACK releases the higher-priority matcher aggregate");
   const matcher = harness.messages.find((sent) => sent.message.details.kind === "update");
   assert.deepEqual(matcher.message.details.lines.map((line) => line.text), ["hit line"], "reminders never advance the delivered position");
   assert.deepEqual(matcher.message.details.matched, ["hit"], "reminders never consume the matcher rate-limit window");
@@ -1637,6 +1903,7 @@ test("silence reminders never move the incremental position or consume the match
   closeChild(harness.children[0]);
   await wait();
   harness.flush();
+  assert.equal(ack(harness.runtime, matcher), true);
   const terminal = harness.messages.at(-1).message;
   assert.equal(terminal.details.kind, "update");
   assert.equal(terminal.details.status, "completed");
@@ -1656,6 +1923,8 @@ test("terminal, delete, and shutdown clear the silence timer, drop the reminder,
   assert.equal(terminal.silences().length, 0, "the terminal update supersedes the queued reminder");
   assert.equal(terminal.messages.length, 1);
   assert.equal(terminal.messages[0].message.details.kind, "update");
+  assert.equal(terminal.messages[0].message.details.silentFor, "10s", "terminal absorbs the pending silence component");
+  assert.match(terminal.messages[0].message.content, /Silence: no output for 10s/);
   assert.equal(terminal.runtime.hasBlockingWork(), true, "only the terminal delivery blocks completion");
   assert.equal(ack(terminal.runtime, terminal.messages[0]), true);
   assert.equal(terminal.runtime.hasBlockingWork(), false, "silence reminders never add blocking work of their own");

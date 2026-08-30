@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "1.1.2", "package version must be 1.1.2");
+check(packageJson.version === "1.1.3", "package version must be 1.1.3");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "1.1.2" && lock.packages?.[""]?.version === "1.1.2", "package-lock version must be 1.1.2");
+check(lock.version === "1.1.3" && lock.packages?.[""]?.version === "1.1.3", "package-lock version must be 1.1.3");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -679,7 +679,7 @@ hasNone(shutdownStatusHandler, ["setStatus("], "shutdown must not duplicate the 
 const presetStatusBody = extension.slice(extension.indexOf("export function presetStatusContent"), extension.indexOf("function isAnthropicOAuth"));
 hasNone(presetStatusBody, [".bold(", "theme.bold", "glyph", "Glyph", "Requested"], "OMPS status plain accent-only rendering without a Requested label");
 check((json("package.json").version ?? "").trim().length > 0, "package.json must define a non-empty version for the OMPS status line");
-check(json("package.json").version === "1.1.2", "Three-tier Fast Mode must ship in v1.1.2");
+check(json("package.json").version === "1.1.3", "Per-monitor aggregated notification lanes must ship in v1.1.3");
 
 const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
 const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
@@ -1331,20 +1331,22 @@ hasAll(monitorRuntime, [
   'export type MonitorNotificationKind = "matcher" | "silence" | "summary" | "terminal"',
   "export const monitorParameters = Type.Object({", "}, { additionalProperties: false });",
   'executionMode: "sequential"', 'name: "monitor"', 'spawnFn(shell, ["-lc", command]',
-  'stdio: ["ignore", "pipe", "pipe"]', 'detached: true', "child.unref()", "StringDecoder", "notificationCursor",
-  "const NOTIFICATION_LINE_CAP = 100", "const TERMINAL_DIAGNOSTIC_TAIL_LINES = 20",
+  'stdio: ["ignore", "pipe", "pipe"]', 'detached: true', "child.unref()", "StringDecoder", "managedCursor", "handedCursor",
+  "const NOTIFICATION_LINE_CAP = 100", "const TERMINAL_DIAGNOSTIC_TAIL_LINES = 20", "const NOTIFICATION_RETRY_DELAY_MS = 100",
   "pendingMatchLines: MonitorCombinedLine[]", "pendingMatchTotal: number",
+  "interface NotificationAggregate", "interface FrozenNotification", "interface NotificationLane",
   "private pendingMatchPayload(record: MonitorRecord): NotificationLines", "private terminalPayload(record: MonitorRecord): NotificationLines",
   "hasRunning(): boolean", "hasBlockingWork(): boolean", "Reserved for Goal", "setDeliveryPaused(paused: boolean)",
   "acknowledgeNotificationMessage", "retryQueuedNotificationsAfterAgentSettled", 'deliverAs: "steer", triggerTurn: true',
   "finalKillWaitMs", "forceTerminal(record", "trySignal(record", "safeGroupAlive(record", "try", "finally",
   "recentLines", "scanLogTail", "STATUS_SCAN_CHUNK", "renameSync(tempPath, record.logPath)",
   "returned", "omitted", "truncated", "notificationContentMaxBytes", "notificationDetailsMaxBytes", "toolContentMaxBytes",
-  "truncatedBytes", "bytes]", "summaryItems", "buildSummaryNotification", "isAbsolute(shell)", "SIGTERM", "SIGKILL",
+  "truncatedBytes", "bytes]", "buildSummaryNotification", "isAbsolute(shell)", "SIGTERM", "SIGKILL",
   "droppedBytes", "droppedLines", "MONITOR_NOTIFICATION_TYPE",
   "registerMessageRenderer(MONITOR_NOTIFICATION_TYPE, renderMonitorNotification)", "renderCall: renderMonitorCall", "renderResult: renderMonitorResult",
   "setUICtx(ui: ExtensionUIContext | undefined)", "refreshUI(): void", "this.widget.handleChange(change)", "this.widget.dispose()",
   "private buildUpdateNotification(", 'kind: "update"', "const state = this.operationalState(record, start, end, this.toolContentMaxBytes)", "combined: scan.lines",
+  "private notificationRetryTimer?: TimerHandle", "this.clearTimeoutFn(this.notificationRetryTimer)", "this.notificationRetryTimer = undefined",
   "lastOutputAt: record.lastOutputAt", "checkAfter: record.checkAfter",
 ], "Monitor runtime and visual wiring contract");
 hasAll(monitorRuntime, [
@@ -1356,14 +1358,34 @@ const monitorFlushNotificationsStart = monitorRuntime.indexOf("private flushNoti
 const monitorFlushNotificationsEnd = monitorRuntime.indexOf("private cancelNotifications(id: string)", monitorFlushNotificationsStart);
 const monitorFlushNotifications = monitorRuntime.slice(monitorFlushNotificationsStart, monitorFlushNotificationsEnd);
 hasAll(monitorFlushNotifications, [
-  "this.sendMessage({", "customType: MONITOR_NOTIFICATION_TYPE", "content: notification.content",
+  "private flushMonitorLane(id: string)", "if (!lane?.pending || lane.inFlight || !record) return", "this.freezeNotification(record, lane.pending)",
+  "lane.pending = undefined", "lane.inFlight = notification", "this.sendMessage({", "customType: MONITOR_NOTIFICATION_TYPE", "content: notification.content",
   "details: { ...notification.details, deliveryKey: notification.deliveryKey }", 'deliverAs: "steer"', "triggerTurn: true",
-], "Monitor flushNotifications uses the sender seam without changing notification payload or options");
+  "this.notifications.set(notification.deliveryKey, notification)", "record.notificationCount += 1",
+  "lane.pending = lane.pending ? this.mergeAggregates(aggregate, lane.pending) : this.cloneAggregate(aggregate)",
+  "private scheduleNotificationRetry(): void", "this.notificationRetryTimer = this.setTimeoutFn", "NOTIFICATION_RETRY_DELAY_MS",
+  "if (this.deliveryPaused || this.shuttingDown) return", "this.flushNotifications()",
+], "Monitor per-lane freeze, successful handoff, count, synchronous-send rollback, and controlled retry contract");
 hasNone(
   monitorRuntime.slice(0, monitorFlushNotificationsStart) + monitorRuntime.slice(monitorFlushNotificationsEnd),
   ["this.sendMessage("],
-  "Monitor sender seam must not be used outside flushNotifications",
+  "Monitor sender seam must not be used outside the lane flush",
 );
+const monitorAcknowledge = monitorRuntime.slice(
+  monitorRuntime.indexOf("acknowledgeNotificationMessage(messageValue: unknown)"),
+  monitorRuntime.indexOf("retryQueuedNotificationsAfterAgentSettled(): void"),
+);
+hasAll(monitorAcknowledge, [
+  "const notification = this.notifications.get(deliveryKey)", "if (!notification) return false",
+  "lane?.inFlight?.deliveryKey !== deliveryKey", "lane.inFlight = undefined", "this.notifications.delete(deliveryKey)",
+  "this.flushMonitorLane(notification.monitorId)",
+], "Monitor ACK must exactly match and advance only the current per-monitor in-flight delivery");
+const monitorRetry = monitorRuntime.slice(
+  monitorRuntime.indexOf("retryQueuedNotificationsAfterAgentSettled(): void"),
+  monitorRuntime.indexOf("list(): MonitorListItem[]"),
+);
+hasAll(monitorRetry, ["if (this.shuttingDown) return", "this.flushNotifications()"], "Monitor agent-settled retries pending aggregates only");
+hasNone(monitorRetry, ["inFlight = false", "this.notifications.delete", "deliveryKey"], "Monitor agent-settled must never replay or rewrite a successful in-flight delivery");
 hasNone(monitorRuntime, [
   "parseLoopInterval", "canonicalizeLoopInterval", "./loop-runtime.js",
   "silenceReminderCount", "nextCheckAt",
@@ -1376,7 +1398,7 @@ hasAll(monitorStopDispatch, [
   "this.stopping.set(record.id, pending)", "this.stopping.delete(record.id)",
 ], "Monitor stop must share one synchronous ownership promise per record");
 hasAll(monitorStopRunning, [
-  "record.stopOwned = true", "this.cancelSilence(record)", "this.cancelMatchTimer(record)",
+  "record.stopOwned = true", "this.cancelSilence(record)", "this.cancelMatchTimer(record)", "this.dropMutableNotificationState(record)",
   'this.trySignal(record, "SIGTERM", "stop TERM")', "await this.waitForRecord(record, this.deleteGraceMs",
   'this.trySignal(record, "SIGKILL", "stop KILL")', "await this.waitForRecord(record, this.finalKillWaitMs",
   "this.forceTerminal(record, warning)", "return this.stopResult(record, true, \"unconfirmed\", warning)",
@@ -1403,6 +1425,16 @@ check(
   "Monitor clear must preflight every running record before any terminal record is removed",
 );
 hasNone(monitorDeleteClear, ["this.stop(record)", "this.stopRunning(record)", "Promise.all"], "Monitor delete and clear must never stop running records implicitly");
+hasAll(monitorDeleteClear, ["this.cancelNotifications(record.id)", "this.records.delete(record.id)"], "Monitor delete and clear must drop pending and in-flight tracking before removed records can block Goal again");
+const monitorCancelNotifications = monitorRuntime.slice(
+  monitorRuntime.indexOf("private cancelNotifications(id: string)"),
+  monitorRuntime.indexOf("private cancelMatchTimer(record: MonitorRecord)"),
+);
+hasAll(monitorCancelNotifications, [
+  "if (lane?.inFlight) this.notifications.delete(lane.inFlight.deliveryKey)", "this.notificationLanes.delete(id)",
+  "private dropMutableNotificationState(record: MonitorRecord)", "lane.pending = undefined", "record.matchKeywords.clear()", "this.clearPendingMatches(record)",
+], "Monitor deletion cancels the whole lane while stop drops only mutable notification state");
+hasNone(monitorRuntime, ["suppressedWindows", "SuppressedWindow", "flushRateSummary", "takeSuppression"], "Monitor must keep no second per-monitor suppression store");
 const monitorCheckAfterParser = monitorRuntime.slice(
   monitorRuntime.indexOf("export function canonicalizeMonitorCheckAfter"),
   monitorRuntime.indexOf("function formatSilenceDuration"),
@@ -1430,7 +1462,7 @@ const monitorSilenceBlock = monitorRuntime.slice(
 );
 hasAll(monitorSilenceBlock, [
   "record.lastActivityMs = now", "record.lastOutputAt = new Date(now).toISOString()", "this.cancelSilenceReminder(record)",
-  "if (deliveryKey !== undefined) this.notifications.delete(deliveryKey)",
+  "pending.silenceForMs === undefined", "pending.silenceForMs = undefined", 'if (pending.kind === "silence") lane.pending = undefined', "this.pruneNotificationLane(record.id, lane)",
   "record.silenceToken += 1", "const token = record.silenceToken + 1",
   "const delay = Math.min(Math.max(0, delayMs), record.checkAfterMs)",
   "(timer as { unref?: () => void }).unref?.()",
@@ -1448,21 +1480,19 @@ hasNone(monitorSilenceBlock, [
   "notificationCursor", "buildUpdateNotification", "sentMatcherAt", "rateLimitCount",
 ], "Monitor silence scheduling must not touch the incremental cursor or the matcher rate window");
 const monitorSilenceBuilder = monitorRuntime.slice(
-  monitorRuntime.indexOf("private buildSilenceNotification(record: MonitorRecord"),
-  monitorRuntime.indexOf("private queueNotification(record: MonitorRecord"),
+  monitorRuntime.indexOf("private silenceDetails(record: MonitorRecord"),
+  monitorRuntime.indexOf("private freezeNotification(record: MonitorRecord"),
 );
 hasAll(monitorSilenceBuilder, [
-  'kind: "silence"', 'status: "running"', "checkAfter: record.checkAfter", "silentFor,", "silentForMs: silentForRoundedMs",
-  "lastOutputAt: record.lastOutputAt",
+  'kind: "silence"', 'status: "running"', "checkAfter: record.checkAfter", "silentFor: formatSilenceDuration(silentForRoundedMs)",
+  "silentForMs: silentForRoundedMs", "lastOutputAt: record.lastOutputAt",
   "Math.max(0, Math.floor(silentForMs / 1_000)) * 1_000",
-  "has produced no stdout or stderr output for ${silentFor}.",
+  "has produced no stdout or stderr output for ${silence.silentFor}.",
   "Call monitor status with id ${record.id} now to check the current state of this monitor.",
-  "const pending = pendingKey === undefined ? undefined : this.notifications.get(pendingKey)",
-  "pending.content = built.content", "pending.details = built.details",
-  'record.pendingSilenceKey = this.queueNotification(record, "silence", built.content, built.details)',
-], "Monitor silence reminder payload and single in-place queue entry");
+  "Only the latest pending silence reminder is retained", 'this.queueAggregate(record, {', 'kind: "silence"', "silenceForMs",
+], "Monitor silence payload and latest optional aggregate component contract");
 hasNone(monitorSilenceBuilder, [
-  "buildUpdateNotification", "notificationCursor", "fitNotificationLines", "lines", "operationalState(",
+  "buildUpdateNotification", "notificationCursor", "fitNotificationLines", "operationalState(",
 ], "Monitor silence reminder must never reuse the incremental update payload");
 for (const [label, block] of [
   ["stop", monitorRuntime.slice(monitorRuntime.indexOf("private async stopRunning(record: MonitorRecord"), monitorRuntime.indexOf("private finishObservedStop(record: MonitorRecord"))],
@@ -1479,25 +1509,27 @@ hasAll(monitorCreateCommit, [
   "this.records.delete(id)", 'this.trySignal(record, "SIGKILL", "create silence rollback KILL")',
 ], "Monitor silence timer activates only after the record is committed and rolls back the child on failure");
 hasNone(monitorRuntime, ["registerCommand", "registerShortcut", "setWidget", "notify(", "nohup parser", "readFileSync", "writeFileSync", "partialLineMaxChars"], "Monitor delegated visual boundary");
-check((monitorRuntime.match(/buildUpdateNotification\(/g) ?? []).length === 3, "Monitor matcher and terminal notifications must share exactly one payload builder and two call sites");
+check((monitorRuntime.match(/buildUpdateNotification\(/g) ?? []).length === 2, "Monitor matcher and terminal aggregates must share one payload builder and one freeze call site");
 const monitorUpdateBuilder = monitorRuntime.slice(
   monitorRuntime.indexOf("private buildUpdateNotification("),
-  monitorRuntime.indexOf("private finalize(record: MonitorRecord)"),
+  monitorRuntime.indexOf("private aggregateFromPayload("),
 );
 hasAll(monitorUpdateBuilder, [
-  'const terminal = record.status !== "running"',
+  'const terminal = aggregate.kind === "terminal"', "const matched = [...aggregate.matched].sort()",
   "this.fitNotificationLines(record, payload, (lines, omitted, truncated)",
-  "`Monitor ${record.id} (${abstract}) status ${record.status}.`",
+  '`Monitor ${record.id} (${abstract}) status ${terminal ? record.status : "running"}.`',
   '`Matched: ${matched.join(", ")}.`',
   '`Exit code: ${exitCode ?? "null"}; signal: ${signal ?? "null"}; error: ${error ?? "null"}.`',
   "const exitCode = terminal ? record.exitCode : null",
   "const signal = terminal ? record.signal : null",
   "const error = terminal && record.error !== null ? boundedText(record.error, RESPONSE_TEXT_MAX).text : null",
-  "matched: [...matched]",
+  "matched,", "aggregate.suppressedBatches", "details.suppressedLines = aggregate.suppressedLines",
+  "aggregate.silenceForMs", "this.silenceDetails(record, aggregate.silenceForMs)", "Object.assign(details, silence)",
+  "Silence: no output for ${silence.silentFor}; checkAfter ${silence.checkAfter}.",
   "exitCode,\n        signal,\n        error,",
   "[truncated: omitted ${omitted} lines and/or shortened oversized lines; use monitor status]",
   "lines,\n        omitted,\n        truncated,",
-], "Monitor unified incremental update payload builder");
+], "Monitor unified aggregated incremental update payload builder");
 hasNone(monitorUpdateBuilder, [
   "operationalState(", "scanLogTail(", "logPath", "combined", "command", "cwd", "pid",
 ], "unified update payload must never embed full operational state");
@@ -1525,7 +1557,7 @@ hasAll(monitorMatchPayloads, [
   "record.pendingMatchTotal = 0",
   "const matches = this.pendingMatchPayload(record)",
   'if (record.status === "completed") return matches;',
-  "const tail = this.notificationLines(record, record.notificationCursor, TERMINAL_DIAGNOSTIC_TAIL_LINES)",
+  "const tail = this.notificationLines(record, record.handedCursor, TERMINAL_DIAGNOSTIC_TAIL_LINES)",
   "const merged = new Map<number, MonitorCombinedLine>()",
   "for (const line of [...matches.lines, ...tail.lines]) merged.set(line.seq, line)",
   "const lines = [...merged.values()].sort((left, right) => left.seq - right.seq)",
@@ -1539,33 +1571,39 @@ const monitorMatcherFlush = monitorRuntime.slice(
   monitorRuntime.indexOf("private expireRateWindow()"),
 );
 hasAll(monitorMatcherFlush, [
-  "const payload = this.pendingMatchPayload(record)",
-  "this.clearPendingMatches(record)",
-  "record.notificationCursor = latest",
-  "suppressed.lines += payload.totalNew",
-  "this.buildUpdateNotification(record, keywords, payload)",
-  'this.queueNotification(record, "matcher", fitted.content, fitted.details)',
-], "Monitor matcher batch delivers matched lines only while the cursor still passes every new line");
+  "const payload = this.pendingMatchPayload(record)", "this.expireRateWindow()",
+  'this.aggregateFromPayload(record.id, "summary", keywords, payload)', "aggregate.suppressedBatches = 1",
+  "aggregate.suppressedLines = payload.totalNew", "aggregate.coveredThrough = latest", "aggregate.readyAtMs = this.rateSummaryReadyAt()",
+  'this.aggregateFromPayload(record.id, "matcher", keywords, payload)', "this.queueAggregate(record, aggregate)",
+  "record.matchKeywords.clear()", "this.clearPendingMatches(record)", "record.managedCursor = latest",
+], "Monitor matcher batch atomically incorporates ordinary or deferred suppression aggregates before advancing the managed cursor");
 hasNone(monitorMatcherFlush, [
   'kind: "matcher"', "fitNotificationLines", "operationalState(", "this.notificationLines(", "recentLines",
 ], "Monitor matcher batch must not keep a second payload template or replay unmatched lines");
+const monitorRateScheduler = monitorRuntime.slice(
+  monitorRuntime.indexOf("private expireRateWindow()"),
+  monitorRuntime.indexOf("private buildSummaryNotification("),
+);
+hasAll(monitorRateScheduler, [
+  "private rateSummaryReadyAt(): number", "private scheduleRateSummary(): void", "lane.pending?.readyAtMs",
+  "lane.pending.readyAtMs <= now", "lane.pending.readyAtMs = undefined", "this.flushNotifications()", "this.scheduleRateSummary()",
+], "Monitor rate summary scheduler marks lane-owned suppression ready without owning another pending payload");
 const monitorFinalize = monitorRuntime.slice(
   monitorRuntime.indexOf("private finishTerminal(record: MonitorRecord)"),
   monitorRuntime.indexOf("private resolveTerminalOnce(record: MonitorRecord"),
 );
 hasAll(monitorFinalize, [
-  "const matched = [...record.matchKeywords]",
-  "record.matchKeywords.clear()",
-  "const payload = this.terminalPayload(record)",
-  "this.clearPendingMatches(record)",
-  "record.notificationCursor = record.nextSeq - 1",
-  "this.buildUpdateNotification(record, matched, payload)",
+  "const matched = [...record.matchKeywords]", "const payload = this.terminalPayload(record)",
+  "record.matchKeywords.clear()", "this.clearPendingMatches(record)", "const latest = record.nextSeq - 1", "record.managedCursor = latest",
   'if (!record.stopOwned && record.generation === this.generation && !this.shuttingDown) {',
-  'this.queueNotification(record, "terminal", fitted.content, fitted.details)',
-], "Monitor terminal close reuses the unified builder and reports the literals its pending matches hit");
+  "const pendingSilenceForMs = this.notificationLanes.get(record.id)?.pending?.silenceForMs",
+  'this.aggregateFromPayload(record.id, "terminal", matched, payload)', "terminal.coveredThrough = record.nextSeq - 1",
+  "terminal.silenceForMs = pendingSilenceForMs", 'if (record.status !== "completed") terminal.diagnosticFromSeq = record.handedCursor',
+  "this.queueAggregate(record, terminal)",
+], "Monitor terminal close merges pending matcher, suppression, silence, and diagnostics into the per-monitor lane");
 hasNone(monitorFinalize, [
   "operationalState(record, 0, 100, 36 * 1024)", "operationalState(", "scanLogTail(", 'kind: "terminal"', "fitNotificationLines",
-  "this.notificationLines(record, record.notificationCursor, 100)",
+  "this.notificationLines(record, record.managedCursor, 100)",
   "this.buildUpdateNotification(record, [], payload)",
 ], "Monitor terminal close must not scan the retained log, replay unmatched history, or drop its pending literals");
 check(
@@ -2968,7 +3006,7 @@ hasAll(monitorTests, [
   "bounded recent-line ring without reading the JSONL file",
   "status scans JSONL from the tail in chunks",
   "write, rename, and rollover reopen failures",
-  "deleting one monitor rebuilds a gated global rate summary",
+  "deleting one monitor drops only its gated per-monitor rate summary",
   "partial-line truncation reports dropped UTF-8 bytes",
   "matcher and terminal payloads include abstract",
   "hasBlockingWork()",
@@ -2987,10 +3025,20 @@ hasAll(monitorTests, [
   "monitor status stays the only full retained state and log entry point",
   "stop owns terminal delivery, sends TERM then KILL, preserves the real killed state, and retains logs",
   "stop reports raced and already-terminal outcomes and folds pending matches into its complete state once",
-  "stop preserves an already queued matcher update while suppressing only its terminal update",
+  "stop drops mutable pending while preserving only an already handed copy",
   "an unconfirmed stop force-fails and quiesces every resource without deleting retained state",
   "running delete and clear reject with zero mutation, then terminal clear removes every record",
   "terminal delete and clear report log removal failures but still remove records",
+  "each monitor lane aggregates while paused or in flight and ACK sends exactly one pending update",
+  "another monitor lane is never blocked by the first monitor's ACK",
+  "duplicate ACKs are stale", "agent-settled never resends either successful in-flight delivery",
+  "a synchronous matcher send failure returns to pending and merges later output without seq loss",
+  "matcher and per-monitor summary aggregates retain latest silence and recovery removes only that component",
+  "the lane is the only per-monitor pending store", "terminal absorbs the pending silence component",
+  "terminal send failure retries on its internal timer and delete before retry prevents revival",
+  "retry timer and agent-settled cannot revive a deleted lane",
+  "terminal absorbs a gated per-monitor suppression aggregate with unique ordered seqs",
+  "delete removes terminal delivery tracking and Goal blocking immediately", "a delayed ACK for the removed lane is stale",
   "shutdown waits for an owned stop before scanning and never sends duplicate TERM or KILL",
 ], "Monitor focused process, logging, delivery, payload, stop ownership, and Goal-reservation tests");
 const monitorUiTests = read("tests/monitor-ui.test.mjs");

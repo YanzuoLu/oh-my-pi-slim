@@ -141,7 +141,6 @@ interface MonitorRecord {
   lastActivityMs: number;
   silenceTimer?: TimerHandle;
   silenceToken: number;
-  pendingSilenceKey?: string;
   notifyOn: string[];
   matchedCount: number;
   notificationCount: number;
@@ -153,7 +152,8 @@ interface MonitorRecord {
   droppedBytes: number;
   droppedLines: number;
   nextSeq: number;
-  notificationCursor: number;
+  managedCursor: number;
+  handedCursor: number;
   recentLines: MonitorCombinedLine[];
   pendingMatchLines: MonitorCombinedLine[];
   pendingMatchTotal: number;
@@ -181,16 +181,32 @@ interface SummaryItem {
   suppressedLines: number;
 }
 
-interface PendingNotification {
+interface NotificationAggregate {
+  monitorId: string;
+  kind: MonitorNotificationKind;
+  matched: Set<string>;
+  lines: Map<number, MonitorCombinedLine>;
+  totalLines: number;
+  suppressedBatches: number;
+  suppressedLines: number;
+  silenceForMs?: number;
+  coveredThrough?: number;
+  diagnosticFromSeq?: number;
+  readyAtMs?: number;
+}
+
+interface FrozenNotification {
   deliveryKey: string;
-  monitorIds: Set<string>;
+  monitorId: string;
   kind: MonitorNotificationKind;
   content: string;
-  details: Record<string, unknown>;
-  summaryItems?: SummaryItem[];
-  inFlight: boolean;
-  counted: boolean;
+  details: Readonly<Record<string, unknown>>;
   generation: number;
+}
+
+interface NotificationLane {
+  pending?: NotificationAggregate;
+  inFlight?: FrozenNotification;
 }
 
 interface MonitorFs {
@@ -275,6 +291,7 @@ const DEFAULT_PARTIAL_MAX = 64 * 1024;
 const DEFAULT_RECENT_LINES = 100;
 const NOTIFICATION_LINE_CAP = 100;
 const TERMINAL_DIAGNOSTIC_TAIL_LINES = 20;
+const NOTIFICATION_RETRY_DELAY_MS = 100;
 const DEFAULT_NOTIFICATION_CONTENT_MAX = 50 * 1024;
 const DEFAULT_NOTIFICATION_DETAILS_MAX = 96 * 1024;
 const DEFAULT_TOOL_CONTENT_MAX = 50 * 1024;
@@ -519,17 +536,18 @@ export class MonitorRuntime {
   private readonly fs: MonitorFs;
   private readonly records = new Map<string, MonitorRecord>();
   private readonly stopping = new Map<string, Promise<ReturnType<typeof toolText>>>();
-  private readonly notifications = new Map<string, PendingNotification>();
+  private readonly notifications = new Map<string, FrozenNotification>();
+  private readonly notificationLanes = new Map<string, NotificationLane>();
   private readonly subscribers = new Set<(change: MonitorStateChange) => void>();
   private readonly widget: MonitorWidget;
   private widgetUnsubscribe?: () => void;
   private readonly sentMatcherAt: number[] = [];
-  private readonly suppressedWindows = new Map<string, { batches: number; lines: number }>();
   private logRoot?: string;
   private generation = 0;
   private deliveryPaused = false;
   private shuttingDown = false;
   private summaryTimer?: TimerHandle;
+  private notificationRetryTimer?: TimerHandle;
   private notificationSequence = 0;
   private shutdownPromise?: Promise<void>;
 
@@ -616,11 +634,11 @@ export class MonitorRuntime {
     return [...this.records.values()].some((record) => record.status === "running");
   }
 
-  /** Reserved for Goal: running monitors and unacknowledged terminal delivery both block completion. */
+  /** Reserved for Goal: running monitors and tracked terminal delivery both block completion. */
   hasBlockingWork(): boolean {
     if (this.hasRunning()) return true;
-    for (const notification of this.notifications.values()) {
-      if (notification.kind === "terminal") return true;
+    for (const lane of this.notificationLanes.values()) {
+      if (lane.pending?.kind === "terminal" || lane.inFlight?.kind === "terminal") return true;
     }
     return false;
   }
@@ -631,20 +649,27 @@ export class MonitorRuntime {
     if (!paused && !this.shuttingDown) this.flushNotifications();
   }
 
-  /** Acknowledgement is accepted only for the private delivery key observed in the current runtime/session. */
+  /** Acknowledgement advances only the monitor lane whose current immutable delivery key matches exactly. */
   acknowledgeNotificationMessage(messageValue: unknown): boolean {
     const message = eventMessage(messageValue);
     if (message?.role !== "custom" || message.customType !== MONITOR_NOTIFICATION_TYPE) return false;
     const details = optionalRecord(message.details);
     const deliveryKey = details?.deliveryKey;
     if (typeof deliveryKey !== "string") return false;
-    return this.notifications.delete(deliveryKey);
+    const notification = this.notifications.get(deliveryKey);
+    if (!notification) return false;
+    const lane = this.notificationLanes.get(notification.monitorId);
+    if (lane?.inFlight?.deliveryKey !== deliveryKey) return false;
+    lane.inFlight = undefined;
+    this.notifications.delete(deliveryKey);
+    this.pruneNotificationLane(notification.monitorId, lane);
+    this.flushMonitorLane(notification.monitorId);
+    return true;
   }
 
-  /** Agent-settled retry keeps the same private delivery key and remains scoped to this runtime/session. */
+  /** Agent-settled may retry pending work, but a delivery already handed to Pi remains immutable until ACK. */
   retryQueuedNotificationsAfterAgentSettled(): void {
     if (this.shuttingDown) return;
-    for (const notification of this.notifications.values()) notification.inFlight = false;
     this.flushNotifications();
   }
 
@@ -744,9 +769,13 @@ export class MonitorRuntime {
       if (this.summaryTimer !== undefined) {
         try { this.clearTimeoutFn(this.summaryTimer); } catch { /* cleanup continues */ }
       }
+      if (this.notificationRetryTimer !== undefined) {
+        try { this.clearTimeoutFn(this.notificationRetryTimer); } catch { /* cleanup continues */ }
+      }
       this.summaryTimer = undefined;
+      this.notificationRetryTimer = undefined;
       this.notifications.clear();
-      this.suppressedWindows.clear();
+      this.notificationLanes.clear();
       this.sentMatcherAt.length = 0;
       for (const record of this.records.values()) this.quiesceRecord(record);
       this.records.clear();
@@ -837,7 +866,8 @@ export class MonitorRuntime {
       droppedBytes: 0,
       droppedLines: 0,
       nextSeq: 1,
-      notificationCursor: 0,
+      managedCursor: 0,
+      handedCursor: 0,
       recentLines: [],
       pendingMatchLines: [],
       pendingMatchTotal: 0,
@@ -925,6 +955,7 @@ export class MonitorRuntime {
     record.terminating = true;
     this.cancelSilence(record);
     this.cancelMatchTimer(record);
+    this.dropMutableNotificationState(record);
     this.trySignal(record, "SIGTERM", "stop TERM");
     try {
       await this.waitForRecord(record, this.deleteGraceMs, "stop TERM wait");
@@ -1394,32 +1425,31 @@ export class MonitorRuntime {
     (record.matchTimer as { unref?: () => void }).unref?.();
   }
 
-  /**
-   * A matcher batch delivers only the new lines that matched a `notifyOn` literal, while the cursor still
-   * advances past every new line so ordinary output stays behind `monitor status` instead of being replayed.
-   */
+  /** A batch becomes managed only after all matching lines or their omission count enter its monitor lane. */
   private flushMatcherBatch(record: MonitorRecord): void {
-    if (record.generation !== this.generation || record.terminating || record.matchKeywords.size === 0) return;
+    if (this.records.get(record.id) !== record || record.generation !== this.generation || record.terminating || record.matchKeywords.size === 0) return;
     const keywords = [...record.matchKeywords];
-    record.matchKeywords.clear();
     const latest = record.nextSeq - 1;
     const payload = this.pendingMatchPayload(record);
-    this.clearPendingMatches(record);
-    record.notificationCursor = latest;
     this.expireRateWindow();
     if (this.sentMatcherAt.length >= this.rateLimitCount) {
+      const aggregate = this.aggregateFromPayload(record.id, "summary", keywords, payload);
+      aggregate.suppressedBatches = 1;
+      aggregate.suppressedLines = payload.totalNew;
+      aggregate.coveredThrough = latest;
+      aggregate.readyAtMs = this.rateSummaryReadyAt();
+      this.queueAggregate(record, aggregate);
       record.suppressedCount += 1;
-      const suppressed = this.suppressedWindows.get(record.id) ?? { batches: 0, lines: 0 };
-      suppressed.batches += 1;
-      suppressed.lines += payload.totalNew;
-      this.suppressedWindows.set(record.id, suppressed);
-      this.scheduleRateSummary();
       this.emit({ type: "updated", reason: "notification", id: record.id, status: record.status });
-      return;
+    } else {
+      this.sentMatcherAt.push(this.nowMs());
+      const aggregate = this.aggregateFromPayload(record.id, "matcher", keywords, payload);
+      aggregate.coveredThrough = latest;
+      this.queueAggregate(record, aggregate);
     }
-    this.sentMatcherAt.push(this.nowMs());
-    const fitted = this.buildUpdateNotification(record, keywords, payload);
-    this.queueNotification(record, "matcher", fitted.content, fitted.details);
+    record.matchKeywords.clear();
+    this.clearPendingMatches(record);
+    record.managedCursor = latest;
   }
 
   private expireRateWindow(): void {
@@ -1427,57 +1457,37 @@ export class MonitorRuntime {
     while (this.sentMatcherAt.length > 0 && this.sentMatcherAt[0] <= cutoff) this.sentMatcherAt.shift();
   }
 
+  private rateSummaryReadyAt(): number {
+    return (this.sentMatcherAt[0] ?? this.nowMs()) + this.rateLimitWindowMs;
+  }
+
   private scheduleRateSummary(): void {
-    if (this.summaryTimer !== undefined) return;
-    const oldest = this.sentMatcherAt[0] ?? this.nowMs();
-    const delay = Math.max(0, oldest + this.rateLimitWindowMs - this.nowMs());
+    if (this.summaryTimer !== undefined || this.shuttingDown) return;
+    let nextReadyAt: number | undefined;
+    for (const lane of this.notificationLanes.values()) {
+      const readyAt = lane.pending?.readyAtMs;
+      if (readyAt !== undefined && (nextReadyAt === undefined || readyAt < nextReadyAt)) nextReadyAt = readyAt;
+    }
+    if (nextReadyAt === undefined) return;
     this.summaryTimer = this.setTimeoutFn(() => {
       this.summaryTimer = undefined;
-      this.flushRateSummary();
-    }, delay);
+      const now = this.nowMs();
+      for (const lane of this.notificationLanes.values()) {
+        if (lane.pending?.readyAtMs !== undefined && lane.pending.readyAtMs <= now) lane.pending.readyAtMs = undefined;
+      }
+      this.flushNotifications();
+      this.scheduleRateSummary();
+    }, Math.max(0, nextReadyAt - this.nowMs()));
     (this.summaryTimer as { unref?: () => void }).unref?.();
   }
 
-  private flushRateSummary(): void {
-    this.expireRateWindow();
-    const summaries = [...this.suppressedWindows.entries()]
-      .map(([id, suppressed]) => {
-        const record = this.records.get(id);
-        return record ? {
-          id,
-          abstract: record.abstract,
-          status: record.status,
-          suppressedBatches: suppressed.batches,
-          suppressedLines: suppressed.lines,
-        } : undefined;
-      })
-      .filter((value): value is SummaryItem => value !== undefined);
-    this.suppressedWindows.clear();
-    if (summaries.length === 0 || this.shuttingDown) return;
-    const built = this.buildSummaryNotification(summaries);
-    this.enqueueNotification({
-      monitorIds: new Set(summaries.map((summary) => summary.id)),
-      kind: "summary",
-      content: built.content,
-      details: built.details,
-      summaryItems: summaries,
-    });
-  }
-
-  private buildSummaryNotification(items: SummaryItem[]): { content: string; details: Record<string, unknown> } {
-    const visible: SummaryItem[] = [];
-    for (const item of items) {
-      const candidate = [...visible, { ...item, abstract: boundedText(item.abstract, RESPONSE_TEXT_MAX).text }];
-      const omittedMonitors = items.length - candidate.length;
-      const content = `Monitor matcher notifications were rate-limited. ${candidate.map((entry) => `${entry.id} (${entry.abstract}): ${entry.suppressedBatches} batches and ${entry.suppressedLines} lines`).join("; ")}.${omittedMonitors > 0 ? ` ${omittedMonitors} monitors omitted.` : ""} Use monitor status.`;
-      const details = { kind: "summary", monitors: candidate, omittedMonitors, truncated: omittedMonitors > 0 };
-      if (Buffer.byteLength(content) > this.notificationContentMaxBytes || jsonBytes(details) > this.notificationDetailsMaxBytes - 512) break;
-      visible.push(candidate.at(-1) as SummaryItem);
-    }
-    const omittedMonitors = items.length - visible.length;
+  private buildSummaryNotification(record: MonitorRecord, item: SummaryItem, aggregate: NotificationAggregate): { content: string; details: Record<string, unknown> } {
+    const visible = { ...item, abstract: boundedText(item.abstract, RESPONSE_TEXT_MAX).text };
+    const silence = aggregate.silenceForMs === undefined ? undefined : this.silenceDetails(record, aggregate.silenceForMs);
+    const silenceText = silence ? ` It has also produced no output for ${silence.silentFor}.` : "";
     return {
-      content: `Monitor matcher notifications were rate-limited. ${visible.map((entry) => `${entry.id} (${entry.abstract}): ${entry.suppressedBatches} batches and ${entry.suppressedLines} lines`).join("; ")}.${omittedMonitors > 0 ? ` ${omittedMonitors} monitors omitted.` : ""} Use monitor status.`,
-      details: { kind: "summary", monitors: visible, omittedMonitors, truncated: omittedMonitors > 0 },
+      content: `Monitor matcher notifications were rate-limited. ${visible.id} (${visible.abstract}): ${visible.suppressedBatches} batches and ${visible.suppressedLines} lines.${silenceText} Use monitor status.`,
+      details: { kind: "summary", monitors: [visible], omittedMonitors: 0, truncated: false, ...silence },
     };
   }
 
@@ -1493,15 +1503,11 @@ export class MonitorRuntime {
     record.pendingMatchTotal = 0;
   }
 
-  /**
-   * Terminal payloads never replay ordinary retained output: a completed command carries only the matched
-   * lines no notification delivered yet, while failed and killed add a bounded recent diagnostic tail.
-   * Both sources merge by sequence number, so a pending match older than the tail still arrives exactly once.
-   */
+  /** Terminal diagnostics cover output not yet successfully handed to Pi. */
   private terminalPayload(record: MonitorRecord): NotificationLines {
     const matches = this.pendingMatchPayload(record);
     if (record.status === "completed") return matches;
-    const tail = this.notificationLines(record, record.notificationCursor, TERMINAL_DIAGNOSTIC_TAIL_LINES);
+    const tail = this.notificationLines(record, record.handedCursor, TERMINAL_DIAGNOSTIC_TAIL_LINES);
     const merged = new Map<number, MonitorCombinedLine>();
     for (const line of [...matches.lines, ...tail.lines]) merged.set(line.seq, line);
     const lines = [...merged.values()].sort((left, right) => left.seq - right.seq);
@@ -1527,7 +1533,7 @@ export class MonitorRuntime {
     let lines = payload.lines.map((line) => ({ ...line, text: boundedText(line.text, 16 * 1024).text }));
     let textTruncated = lines.some((line, index) => line.text !== payload.lines[index]?.text);
     while (true) {
-      const omitted = payload.totalNew - lines.length;
+      const omitted = Math.max(0, payload.totalNew - lines.length);
       const built = build(lines, omitted, payload.truncated || textTruncated || omitted > 0);
       if (Buffer.byteLength(built.content) <= this.notificationContentMaxBytes && jsonBytes(built.details) <= this.notificationDetailsMaxBytes - 512) return built;
       if (lines.length === 0) return build([], payload.totalNew, true);
@@ -1536,33 +1542,38 @@ export class MonitorRuntime {
     }
   }
 
-  /**
-   * Single payload builder for every running matcher batch and every terminal close.
-   * Each update states the monitor's current status and carries only the lines its caller
-   * selected from the undelivered range, while full retained state stays behind `monitor status`.
-   */
+  /** Every matcher and terminal aggregate uses the same bounded incremental update shape. */
   private buildUpdateNotification(
     record: MonitorRecord,
-    matched: string[],
-    payload: NotificationLines,
+    aggregate: NotificationAggregate,
   ): { content: string; details: Record<string, unknown> } {
-    const terminal = record.status !== "running";
+    const terminal = aggregate.kind === "terminal";
+    const matched = [...aggregate.matched].sort();
+    const payload: NotificationLines = {
+      lines: [...aggregate.lines.values()].sort((left, right) => left.seq - right.seq),
+      totalNew: aggregate.totalLines,
+      omitted: Math.max(0, aggregate.totalLines - aggregate.lines.size),
+      truncated: aggregate.totalLines > aggregate.lines.size,
+    };
     return this.fitNotificationLines(record, payload, (lines, omitted, truncated) => {
       const abstract = boundedText(record.abstract, RESPONSE_TEXT_MAX).text;
       const exitCode = terminal ? record.exitCode : null;
       const signal = terminal ? record.signal : null;
       const error = terminal && record.error !== null ? boundedText(record.error, RESPONSE_TEXT_MAX).text : null;
-      const heading = [`Monitor ${record.id} (${abstract}) status ${record.status}.`];
+      const heading = [`Monitor ${record.id} (${abstract}) status ${terminal ? record.status : "running"}.`];
       if (matched.length > 0) heading.push(`Matched: ${matched.join(", ")}.`);
+      if (aggregate.suppressedBatches > 0) heading.push(`Rate limited: ${aggregate.suppressedBatches} batches and ${aggregate.suppressedLines} lines.`);
+      const silence = aggregate.silenceForMs === undefined ? undefined : this.silenceDetails(record, aggregate.silenceForMs);
+      if (silence) heading.push(`Silence: no output for ${silence.silentFor}; checkAfter ${silence.checkAfter}.`);
       if (terminal) heading.push(`Exit code: ${exitCode ?? "null"}; signal: ${signal ?? "null"}; error: ${error ?? "null"}.`);
       const truncation = truncated ? `\n[truncated: omitted ${omitted} lines and/or shortened oversized lines; use monitor status]` : "";
       const content = [...heading, ...lines.map((line) => `[${line.stream}] ${line.text}`)].join("\n") + truncation;
-      const details = {
+      const details: Record<string, unknown> = {
         id: record.id,
         abstract,
         kind: "update",
-        status: record.status,
-        matched: [...matched],
+        status: terminal ? record.status : "running",
+        matched,
         exitCode,
         signal,
         error,
@@ -1570,8 +1581,76 @@ export class MonitorRuntime {
         omitted,
         truncated,
       };
+      if (aggregate.suppressedBatches > 0) {
+        details.suppressedBatches = aggregate.suppressedBatches;
+        details.suppressedLines = aggregate.suppressedLines;
+      }
+      if (silence) Object.assign(details, silence);
       return { content, details };
     });
+  }
+
+  private aggregateFromPayload(
+    monitorId: string,
+    kind: "matcher" | "summary" | "terminal",
+    matched: string[],
+    payload: NotificationLines,
+  ): NotificationAggregate {
+    return {
+      monitorId,
+      kind,
+      matched: new Set(matched),
+      lines: new Map(payload.lines.map((line) => [line.seq, { ...line }])),
+      totalLines: payload.totalNew,
+      suppressedBatches: 0,
+      suppressedLines: 0,
+    };
+  }
+
+  private cloneAggregate(aggregate: NotificationAggregate): NotificationAggregate {
+    return {
+      ...aggregate,
+      matched: new Set(aggregate.matched),
+      lines: new Map([...aggregate.lines].map(([seq, line]) => [seq, { ...line }])),
+    };
+  }
+
+  private mergeAggregates(current: NotificationAggregate | undefined, incoming: NotificationAggregate): NotificationAggregate {
+    if (!current) return this.cloneAggregate(incoming);
+    const priorities: Record<MonitorNotificationKind, number> = { silence: 1, summary: 2, matcher: 3, terminal: 4 };
+    const kind = priorities[incoming.kind] >= priorities[current.kind] ? incoming.kind : current.kind;
+    const lines = new Map(current.lines);
+    let overlap = 0;
+    for (const [seq, line] of incoming.lines) {
+      if (lines.has(seq)) overlap += 1;
+      lines.set(seq, { ...line });
+    }
+    const ordered = [...lines.values()].sort((left, right) => left.seq - right.seq);
+    const visible = ordered.slice(-NOTIFICATION_LINE_CAP);
+    const terminal = incoming.kind === "terminal" && incoming.diagnosticFromSeq !== undefined
+      ? incoming
+      : current.kind === "terminal"
+        ? current
+        : incoming.kind === "terminal"
+          ? incoming
+          : undefined;
+    const totalLines = terminal?.diagnosticFromSeq !== undefined
+      ? Math.max(visible.length, terminal.totalLines)
+      : Math.max(visible.length, current.totalLines + incoming.totalLines - overlap);
+    const readyTimes = [current.readyAtMs, incoming.readyAtMs].filter((value): value is number => value !== undefined);
+    return {
+      monitorId: current.monitorId,
+      kind,
+      matched: new Set([...current.matched, ...incoming.matched]),
+      lines: new Map(visible.map((line) => [line.seq, line])),
+      totalLines,
+      suppressedBatches: current.suppressedBatches + incoming.suppressedBatches,
+      suppressedLines: current.suppressedLines + incoming.suppressedLines,
+      silenceForMs: incoming.silenceForMs ?? current.silenceForMs,
+      coveredThrough: Math.max(current.coveredThrough ?? 0, incoming.coveredThrough ?? 0) || undefined,
+      diagnosticFromSeq: terminal?.diagnosticFromSeq,
+      readyAtMs: kind === "summary" && readyTimes.length > 0 ? Math.min(...readyTimes) : undefined,
+    };
   }
 
   private finalize(record: MonitorRecord): void {
@@ -1601,19 +1680,24 @@ export class MonitorRuntime {
   }
 
   private finishTerminal(record: MonitorRecord): void {
+    const pendingSilenceForMs = this.notificationLanes.get(record.id)?.pending?.silenceForMs;
     this.cancelSilence(record);
     this.cancelMatchTimer(record);
     const matched = [...record.matchKeywords];
-    record.matchKeywords.clear();
     const payload = this.terminalPayload(record);
+    record.matchKeywords.clear();
     this.clearPendingMatches(record);
-    record.notificationCursor = record.nextSeq - 1;
+    const latest = record.nextSeq - 1;
     this.quiesceRecord(record);
     this.emit({ type: "updated", reason: "lifecycle", id: record.id, status: record.status });
     if (!record.stopOwned && record.generation === this.generation && !this.shuttingDown) {
-      const fitted = this.buildUpdateNotification(record, matched, payload);
-      this.queueNotification(record, "terminal", fitted.content, fitted.details);
+      const terminal = this.aggregateFromPayload(record.id, "terminal", matched, payload);
+      terminal.coveredThrough = record.nextSeq - 1;
+      terminal.silenceForMs = pendingSilenceForMs;
+      if (record.status !== "completed") terminal.diagnosticFromSeq = record.handedCursor;
+      this.queueAggregate(record, terminal);
     }
+    record.managedCursor = latest;
   }
 
   private resolveTerminalOnce(record: MonitorRecord): void {
@@ -1622,16 +1706,26 @@ export class MonitorRuntime {
     record.resolveTerminal();
   }
 
-  /**
-   * Silence reminders are their own kind: they never reuse the incremental update payload, never move the
-   * delivered notification position, and never consume the matcher rate-limit window.
-   */
+  private silenceDetails(record: MonitorRecord, silentForMs: number): {
+    checkAfter: string;
+    silentFor: string;
+    silentForMs: number;
+    lastOutputAt: string | null;
+  } {
+    const silentForRoundedMs = Math.max(0, Math.floor(silentForMs / 1_000)) * 1_000;
+    return {
+      checkAfter: record.checkAfter,
+      silentFor: formatSilenceDuration(silentForRoundedMs),
+      silentForMs: silentForRoundedMs,
+      lastOutputAt: record.lastOutputAt,
+    };
+  }
+
   private buildSilenceNotification(record: MonitorRecord, silentForMs: number): { content: string; details: Record<string, unknown> } {
     const abstract = boundedText(record.abstract, RESPONSE_TEXT_MAX).text;
-    const silentForRoundedMs = Math.max(0, Math.floor(silentForMs / 1_000)) * 1_000;
-    const silentFor = formatSilenceDuration(silentForRoundedMs);
+    const silence = this.silenceDetails(record, silentForMs);
     const content = [
-      `Monitor ${record.id} (${abstract}) has produced no stdout or stderr output for ${silentFor}.`,
+      `Monitor ${record.id} (${abstract}) has produced no stdout or stderr output for ${silence.silentFor}.`,
       `Its checkAfter threshold is ${record.checkAfter} and it is still running.`,
       `Call monitor status with id ${record.id} now to check the current state of this monitor.`,
     ].join(" ");
@@ -1640,87 +1734,131 @@ export class MonitorRuntime {
       id: record.id,
       abstract,
       status: "running",
-      checkAfter: record.checkAfter,
-      silentFor,
-      silentForMs: silentForRoundedMs,
-      lastOutputAt: record.lastOutputAt,
+      ...silence,
     };
     return { content, details };
   }
 
-  /** At most one silence reminder per monitor stays queued: later intervals update the same delivery in place. */
+  /** Only the latest pending silence reminder is retained; an immutable in-flight copy is never rewritten. */
   private notifySilence(record: MonitorRecord, silentForMs: number): void {
     if (record.generation !== this.generation || this.shuttingDown) return;
-    const built = this.buildSilenceNotification(record, silentForMs);
-    const pendingKey = record.pendingSilenceKey;
-    const pending = pendingKey === undefined ? undefined : this.notifications.get(pendingKey);
-    if (pending) {
-      pending.content = built.content;
-      pending.details = built.details;
-      this.flushNotifications();
-      return;
-    }
-    record.pendingSilenceKey = this.queueNotification(record, "silence", built.content, built.details);
+    this.queueAggregate(record, {
+      monitorId: record.id,
+      kind: "silence",
+      matched: new Set(),
+      lines: new Map(),
+      totalLines: 0,
+      suppressedBatches: 0,
+      suppressedLines: 0,
+      silenceForMs: silentForMs,
+    });
   }
 
-  private queueNotification(record: MonitorRecord, kind: MonitorNotificationKind, content: string, details: Record<string, unknown>): string {
-    return this.enqueueNotification({ monitorIds: new Set([record.id]), kind, content, details });
+  private queueAggregate(record: MonitorRecord, aggregate: NotificationAggregate): void {
+    if (this.records.get(record.id) !== record || record.generation !== this.generation) return;
+    const lane = this.notificationLanes.get(record.id) ?? {};
+    lane.pending = this.mergeAggregates(lane.pending, aggregate);
+    this.notificationLanes.set(record.id, lane);
+    this.flushMonitorLane(record.id);
+    this.scheduleRateSummary();
   }
 
-  private enqueueNotification(input: Omit<PendingNotification, "deliveryKey" | "inFlight" | "counted" | "generation">): string {
+  private freezeNotification(record: MonitorRecord, aggregate: NotificationAggregate): FrozenNotification {
     const deliveryKey = `oh-my-pi-slim:monitor:${this.generation}:${++this.notificationSequence}:${randomBytes(8).toString("hex")}`;
-    const notification: PendingNotification = { ...input, deliveryKey, inFlight: false, counted: false, generation: this.generation };
-    this.notifications.set(deliveryKey, notification);
-    this.flushNotifications();
-    return deliveryKey;
+    const built = aggregate.kind === "silence"
+      ? this.buildSilenceNotification(record, aggregate.silenceForMs ?? 0)
+      : aggregate.kind === "summary"
+        ? this.buildSummaryNotification(record, {
+          id: record.id,
+          abstract: record.abstract,
+          status: record.status,
+          suppressedBatches: aggregate.suppressedBatches,
+          suppressedLines: aggregate.suppressedLines,
+        }, aggregate)
+        : this.buildUpdateNotification(record, aggregate);
+    return Object.freeze({
+      deliveryKey,
+      monitorId: record.id,
+      kind: aggregate.kind,
+      content: built.content,
+      details: Object.freeze({ ...built.details }),
+      generation: this.generation,
+    });
   }
 
   private flushNotifications(): void {
     if (this.deliveryPaused || this.shuttingDown) return;
-    for (const notification of this.notifications.values()) {
-      if (notification.inFlight || notification.generation !== this.generation) continue;
-      notification.inFlight = true;
-      try {
-        this.sendMessage({
-          customType: MONITOR_NOTIFICATION_TYPE,
-          content: notification.content,
-          display: true,
-          details: { ...notification.details, deliveryKey: notification.deliveryKey },
-        }, { deliverAs: "steer", triggerTurn: true });
-        if (!notification.counted) {
-          notification.counted = true;
-          for (const id of notification.monitorIds) {
-            const record = this.records.get(id);
-            if (record) {
-              record.notificationCount += 1;
-              this.emit({ type: "updated", reason: "notification", id: record.id, status: record.status });
-            }
-          }
-        }
-      } catch {
-        notification.inFlight = false;
+    for (const id of this.notificationLanes.keys()) this.flushMonitorLane(id);
+  }
+
+  private flushMonitorLane(id: string): void {
+    if (this.deliveryPaused || this.shuttingDown) return;
+    const lane = this.notificationLanes.get(id);
+    const record = this.records.get(id);
+    if (!lane?.pending || lane.inFlight || !record) return;
+    if (lane.pending.readyAtMs !== undefined) {
+      if (lane.pending.readyAtMs > this.nowMs()) {
+        this.scheduleRateSummary();
+        return;
       }
+      lane.pending.readyAtMs = undefined;
+    }
+    let notification: FrozenNotification;
+    try {
+      notification = this.freezeNotification(record, lane.pending);
+    } catch {
+      this.scheduleNotificationRetry();
+      return;
+    }
+    const aggregate = lane.pending;
+    lane.pending = undefined;
+    lane.inFlight = notification;
+    try {
+      this.sendMessage({
+        customType: MONITOR_NOTIFICATION_TYPE,
+        content: notification.content,
+        display: true,
+        details: { ...notification.details, deliveryKey: notification.deliveryKey },
+      }, { deliverAs: "steer", triggerTurn: true });
+      this.notifications.set(notification.deliveryKey, notification);
+      record.handedCursor = Math.max(record.handedCursor, aggregate.coveredThrough ?? 0);
+      record.notificationCount += 1;
+      this.emit({ type: "updated", reason: "notification", id: record.id, status: record.status });
+    } catch {
+      if (lane.inFlight === notification) lane.inFlight = undefined;
+      lane.pending = lane.pending ? this.mergeAggregates(aggregate, lane.pending) : this.cloneAggregate(aggregate);
+      this.scheduleNotificationRetry();
     }
   }
 
+  private scheduleNotificationRetry(): void {
+    if (this.notificationRetryTimer !== undefined || this.shuttingDown) return;
+    this.notificationRetryTimer = this.setTimeoutFn(() => {
+      this.notificationRetryTimer = undefined;
+      if (this.deliveryPaused || this.shuttingDown) return;
+      this.flushNotifications();
+    }, NOTIFICATION_RETRY_DELAY_MS);
+    (this.notificationRetryTimer as { unref?: () => void }).unref?.();
+  }
+
+  private pruneNotificationLane(id: string, lane: NotificationLane): void {
+    if (!lane.pending && !lane.inFlight) this.notificationLanes.delete(id);
+  }
+
   private cancelNotifications(id: string): void {
-    for (const [key, notification] of this.notifications) {
-      if (!notification.monitorIds.has(id) || notification.inFlight) continue;
-      if (notification.kind !== "summary" || !notification.summaryItems) {
-        this.notifications.delete(key);
-        continue;
-      }
-      notification.summaryItems = notification.summaryItems.filter((item) => item.id !== id);
-      if (notification.summaryItems.length === 0) {
-        this.notifications.delete(key);
-        continue;
-      }
-      const rebuilt = this.buildSummaryNotification(notification.summaryItems);
-      notification.monitorIds = new Set(notification.summaryItems.map((item) => item.id));
-      notification.content = rebuilt.content;
-      notification.details = rebuilt.details;
+    const lane = this.notificationLanes.get(id);
+    if (lane?.inFlight) this.notifications.delete(lane.inFlight.deliveryKey);
+    this.notificationLanes.delete(id);
+  }
+
+  private dropMutableNotificationState(record: MonitorRecord): void {
+    const lane = this.notificationLanes.get(record.id);
+    if (lane) {
+      lane.pending = undefined;
+      this.pruneNotificationLane(record.id, lane);
     }
-    this.suppressedWindows.delete(id);
+    record.matchKeywords.clear();
+    this.clearPendingMatches(record);
   }
 
   private cancelMatchTimer(record: MonitorRecord): void {
@@ -1738,11 +1876,14 @@ export class MonitorRuntime {
     this.cancelSilenceReminder(record);
   }
 
-  /** Recovered output retires the queued reminder even in flight, so agent-settled retry never replays a stale silence. */
+  /** Recovered output removes the silence component from any mutable aggregate; an in-flight copy remains ACK-owned. */
   private cancelSilenceReminder(record: MonitorRecord): void {
-    const deliveryKey = record.pendingSilenceKey;
-    record.pendingSilenceKey = undefined;
-    if (deliveryKey !== undefined) this.notifications.delete(deliveryKey);
+    const lane = this.notificationLanes.get(record.id);
+    const pending = lane?.pending;
+    if (!lane || !pending || pending.silenceForMs === undefined) return;
+    pending.silenceForMs = undefined;
+    if (pending.kind === "silence") lane.pending = undefined;
+    this.pruneNotificationLane(record.id, lane);
   }
 
   private cancelSilenceTimer(record: MonitorRecord): void {

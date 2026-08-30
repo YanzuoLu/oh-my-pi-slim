@@ -292,7 +292,8 @@ Long 只升级已有的合法 `{ type: "ephemeral" }` cache breakpoint，并通�
 
 - compaction 与 tree operation 期间，package notification 会安全排队，之后正常交付，不丢失用户可见结果。
 - package tool row 与 notification 使用 Ctrl+O 切换 collapsed/expanded；展开只改变显示，不改变工具数据或持久化状态。
-- Monitor notification 是增量的：每条都标明当前状态并只展示新增输出，因此 `monitor status` 始终是读取完整 retained state 与日志的唯一入口。
+- Monitor notification 是增量的。每个 Monitor 都有一条独立 delivery lane，其中最多保留一条已交给 Pi 的不可变 notification，以及其后一个可变 aggregate。匹配输出、限流计数与最新 silence 状态会按 Monitor 聚合，并在 Pi 确认前一副本后推进，而 `monitor status` 始终是读取完整 retained state 与日志的唯一入口。
+- 删除或清空 Monitor 会立即丢弃其 queued aggregate 与 delivery tracking。已经交给 Pi 的副本最多仍可能显示一次，但 OMPS 不会重试，晚到确认也会被忽略。
 - 前台 TUI 为 retained subagent、Todo、Loop、Monitor 与 active Goal 提供紧凑 widget；RPC session 不注册这些 widget。
 - subagent、Todo 与 Monitor widget 跟随与 tool row 相同的 Ctrl+O 状态：collapsed 隐藏已结束的行，并在标题末尾追加使用当前配置键位的 dim 提示；expanded 显示完整内容。Loop 与 Goal widget 始终显示完整内容。
 - Subagent、Todo 与 Goal 会按各自 session 或 branch 范围恢复。尤其是成功执行的 subagent `clear` 在 reload 后仍保持清空。
