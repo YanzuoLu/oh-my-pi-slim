@@ -30,8 +30,7 @@ const PACKAGE_JSON_URL = new URL("../package.json", import.meta.url);
 const PACKAGE_VERSION = JSON.parse(readFileSync(PACKAGE_JSON_URL, "utf8")).version;
 const INDEX_URL = new URL("../extensions/oh-my-pi-slim/index.ts", import.meta.url);
 
-const { presetCacheModeEligible, presetFastModeEligible, presetStatusContent } = await import(INDEX_URL.href);
-const { applyFastServiceTier } = await import("../extensions/oh-my-pi-slim/fast-mode.ts");
+const { presetCacheModeEligible, presetStatusContent } = await import(INDEX_URL.href);
 
 const ROLES = ["orchestrator", "explorer", "librarian", "oracle", "designer", "fixer", "observer"];
 const theme = { fg: (role, text) => `<${role}>${text}</${role}>` };
@@ -51,39 +50,9 @@ function makeUniformPreset(provider) {
   return makePreset(provider, Object.fromEntries(ROLES.slice(1).map((role) => [role, { provider }])));
 }
 
-function status(fastTier, preset, cacheRetention = "short") {
-  return presetStatusContent(
-    theme,
-    presetName,
-    fastTier,
-    presetFastModeEligible(preset),
-    cacheRetention,
-    presetCacheModeEligible(preset),
-  );
+function status(preset, cacheRetention = "short") {
+  return presetStatusContent(theme, presetName, cacheRetention, presetCacheModeEligible(preset));
 }
-
-test("active preset eligibility checks all seven roles and accepts both exact OpenAI providers", () => {
-  const allNonOpenAI = makePreset();
-  assert.deepEqual(Object.keys(allNonOpenAI), ROLES);
-  assert.equal(presetFastModeEligible(allNonOpenAI), false);
-
-  for (const provider of ["openai", "openai-codex"]) {
-    assert.equal(presetFastModeEligible(makePreset("anthropic", { designer: { provider } })), true);
-    assert.equal(presetFastModeEligible(makePreset(provider)), true);
-  }
-});
-
-test("Main can be non-OpenAI while any OpenAI specialist qualifies the active preset", () => {
-  for (const role of ROLES.slice(1)) {
-    const preset = makePreset("anthropic", { [role]: { provider: "openai" } });
-    assert.equal(preset.orchestrator.provider, "anthropic");
-    assert.equal(presetFastModeEligible(preset), true, `${role} must qualify the preset`);
-  }
-  assert.equal(
-    status("fast", makePreset("anthropic", { observer: { provider: "openai-codex" } })),
-    `<accent>${baseStatus} · OpenAI Fast Mode: fast · Anthropic Cache Mode: short</accent>`,
-  );
-});
 
 test("active preset Cache eligibility checks all seven roles for exact anthropic", () => {
   assert.equal(presetCacheModeEligible(makeUniformPreset("openai")), false);
@@ -98,77 +67,25 @@ test("active preset Cache eligibility checks all seven roles for exact anthropic
   assert.equal(presetCacheModeEligible(undefined), false);
 });
 
-test("all non-OpenAI providers and case mismatches do not qualify the active preset", () => {
-  assert.equal(presetFastModeEligible(makePreset()), false);
-  for (const provider of ["OpenAI", "OPENAI", "openai-Codex", "OPENAI-CODEX", ""]) {
-    assert.equal(presetFastModeEligible(makePreset("anthropic", { explorer: { provider } })), false);
-  }
-  assert.equal(presetFastModeEligible(undefined), false);
-});
-
-test("mixed Sol and other OpenAI preset keeps ultrafast status while requests use maximum supported tiers", () => {
-  const mixedPreset = makePreset("anthropic", {
-    explorer: { provider: "openai", model: "gpt-5.6-sol" },
-    librarian: { provider: "openai-codex", model: "gpt-other" },
-  });
-  assert.deepEqual(
-    applyFastServiceTier(
-      { model: mixedPreset.explorer.model, service_tier: "default" },
-      { provider: mixedPreset.explorer.provider, id: mixedPreset.explorer.model },
-      "ultrafast",
-    ),
-    { model: "gpt-5.6-sol", service_tier: "ultrafast" },
-  );
-  assert.deepEqual(
-    applyFastServiceTier(
-      { model: mixedPreset.librarian.model, service_tier: "default" },
-      { provider: mixedPreset.librarian.provider, id: mixedPreset.librarian.model },
-      "ultrafast",
-    ),
-    { model: "gpt-other", service_tier: "priority" },
-  );
-  assert.equal(status("ultrafast", mixedPreset), `<accent>${baseStatus} · OpenAI Fast Mode: ultrafast · Anthropic Cache Mode: short</accent>`);
-
-  for (const tier of ["off", "fast", "ultrafast"]) {
-    for (const retention of ["short", "long"]) {
-      assert.equal(
-        status(tier, mixedPreset, retention),
-        `<accent>${baseStatus} · OpenAI Fast Mode: ${tier} · Anthropic Cache Mode: ${retention}</accent>`,
-      );
-    }
-  }
-  assert.doesNotMatch(status("fast", mixedPreset, "long"), /Requested/);
-});
-
-test("single-provider and unrelated presets show only their preset-wide eligible suffixes", () => {
-  assert.equal(status("fast", makeUniformPreset("openai")), `<accent>${baseStatus} · OpenAI Fast Mode: fast</accent>`);
-  assert.equal(status("off", makeUniformPreset("openai-codex")), `<accent>${baseStatus} · OpenAI Fast Mode: off</accent>`);
-  assert.equal(status("ultrafast", makeUniformPreset("openai")), `<accent>${baseStatus} · OpenAI Fast Mode: ultrafast</accent>`);
-  assert.equal(status("fast", makeUniformPreset("anthropic"), "long"), `<accent>${baseStatus} · Anthropic Cache Mode: long</accent>`);
-  assert.equal(status("fast", makeUniformPreset("anthropic"), "short"), `<accent>${baseStatus} · Anthropic Cache Mode: short</accent>`);
-  assert.equal(status("fast", makeUniformPreset("google")), `<accent>${baseStatus}</accent>`);
+test("eligible and unrelated presets show the correct preset-wide Cache suffix", () => {
+  assert.equal(status(makeUniformPreset("anthropic"), "long"), `<accent>${baseStatus} · Anthropic Cache Mode: long</accent>`);
+  assert.equal(status(makeUniformPreset("anthropic"), "short"), `<accent>${baseStatus} · Anthropic Cache Mode: short</accent>`);
+  assert.equal(status(makeUniformPreset("openai")), `<accent>${baseStatus}</accent>`);
+  assert.equal(status(makeUniformPreset("google")), `<accent>${baseStatus}</accent>`);
 });
 
 test("a manually selected Main cannot change suffix eligibility from the active preset", () => {
   const allAnthropic = makeUniformPreset("anthropic");
   const allGoogle = makeUniformPreset("google");
-  assert.equal(status("fast", allAnthropic), `<accent>${baseStatus} · Anthropic Cache Mode: short</accent>`);
-  assert.equal(status("off", allGoogle), `<accent>${baseStatus}</accent>`);
+  assert.equal(status(allAnthropic), `<accent>${baseStatus} · Anthropic Cache Mode: short</accent>`);
+  assert.equal(status(allGoogle), `<accent>${baseStatus}</accent>`);
   assert.equal(presetStatusContent(theme, presetName), `<accent>${baseStatus}</accent>`, "the existing two-argument call stays suffix-free");
 });
 
-test("eligible Fast status without a tier omits only the Fast suffix", () => {
-  assert.equal(
-    presetStatusContent(theme, presetName, undefined, true, "long", true),
-    `<accent>${baseStatus} · Anthropic Cache Mode: long</accent>`,
-  );
-  assert.equal(presetStatusContent(theme, presetName, undefined, true), `<accent>${baseStatus}</accent>`);
-});
-
-test("inactive OMPS status clears the same footer slot regardless of Fast or Cache eligibility", () => {
+test("inactive OMPS status clears the shared footer slot", () => {
   assert.equal(presetStatusContent(theme, undefined), undefined);
-  assert.equal(presetStatusContent(theme, undefined, "fast", true, "long", true), undefined);
-  assert.equal(presetStatusContent(theme, undefined, "off", true, "short", true), undefined);
+  assert.equal(presetStatusContent(theme, undefined, "long", true), undefined);
+  assert.equal(presetStatusContent(theme, undefined, "short", true), undefined);
 });
 
 test("the complete status line is rendered in one accent span", () => {
@@ -179,9 +96,9 @@ test("the complete status line is rendered in one accent span", () => {
       return `<${role}>${text}</${role}>`;
     },
   };
-  const content = presetStatusContent(trackingTheme, presetName, "fast", true, "long", true);
-  assert.equal(content, `<accent>${baseStatus} · OpenAI Fast Mode: fast · Anthropic Cache Mode: long</accent>`);
-  assert.deepEqual(calls, [{ role: "accent", text: `${baseStatus} · OpenAI Fast Mode: fast · Anthropic Cache Mode: long` }]);
+  const content = presetStatusContent(trackingTheme, presetName, "long", true);
+  assert.equal(content, `<accent>${baseStatus} · Anthropic Cache Mode: long</accent>`);
+  assert.deepEqual(calls, [{ role: "accent", text: `${baseStatus} · Anthropic Cache Mode: long` }]);
   assert.equal(content.match(/<accent>/g)?.length, 1);
   assert.equal(content.match(/<\/accent>/g)?.length, 1);
 });
@@ -197,18 +114,16 @@ test("OMPS status version tracks package metadata instead of a checked-in litera
   assert.equal(presetStatusContent(theme, "any_preset"), `<accent>OMPS Preset: any_preset (v${PACKAGE_VERSION})</accent>`);
 });
 
-test("status source uses active preset eligibility and refreshes every required lifecycle", () => {
+test("status source uses active preset Cache eligibility and refreshes every required lifecycle", () => {
   const source = readFileSync(INDEX_URL, "utf8");
   const statusKeys = [...source.matchAll(/setStatus\(\s*"([^"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(statusKeys, ["oh-my-pi-slim"], "updateStatus owns the only status write and existing key");
-  assert.match(source, /Object\.values\(preset\)\.some\(\(role\) => isFastModeProvider\(role\.provider\)\)/);
   assert.match(source, /Object\.values\(preset\)\.some\(\(role\) => role\.provider === "anthropic"\)/);
-  assert.match(source, /presetFastModeEligible\(activePreset\)/);
   assert.match(source, /cacheRetention,\s*presetCacheModeEligible\(activePreset\)/);
   assert.doesNotMatch(source, /`orchestrator\$\{/);
 
   const activateBlock = source.slice(source.indexOf("async function activate"), source.indexOf("async function deactivate"));
-  const deactivateBlock = source.slice(source.indexOf("async function deactivate"), source.indexOf('pi.registerCommand("fast"'));
+  const deactivateBlock = source.slice(source.indexOf("async function deactivate"), source.indexOf('pi.registerCommand("cache"'));
   const sessionStartBlock = source.slice(source.indexOf('pi.on("session_start"'), source.indexOf('pi.on("session_before_switch"'));
   const sessionTreeBlock = source.slice(source.indexOf('pi.on("session_tree"'), source.indexOf('pi.on("input"'));
   const shutdownBlock = source.slice(source.indexOf('pi.on("session_shutdown"'));
@@ -247,27 +162,15 @@ test("status has no model_select handler because current Main model and authenti
   assert.doesNotMatch(updateStatusBlock, /ctx\.model/);
 });
 
-test("successful Fast and Cache toggles refresh only after append and assignment", () => {
+test("successful Cache toggle refreshes only after append and assignment", () => {
   const source = readFileSync(INDEX_URL, "utf8");
-  const block = source.slice(source.indexOf('pi.registerCommand("fast"'), source.indexOf('pi.registerCommand("cache"'));
-  const appendIndex = block.indexOf("pi.appendEntry(FAST_STATE_ENTRY_TYPE, makeFastState(next))");
-  const assignIndex = block.indexOf("fastTier = next");
-  const refreshIndex = block.indexOf("updateStatus(ctx)");
-  assert.ok(appendIndex >= 0 && appendIndex < assignIndex && assignIndex < refreshIndex);
-  assert.equal(block.match(/updateStatus\(ctx\)/g)?.length, 1);
-
-  const usageBlock = block.slice(block.indexOf("if (args.trim())"), block.indexOf("const next = nextFastTier(fastTier)"));
-  const failureBlock = block.slice(block.indexOf("} catch (error) {"), assignIndex);
-  assert.doesNotMatch(usageBlock, /updateStatus\(/, "Fast Usage does not refresh status");
-  assert.doesNotMatch(failureBlock, /updateStatus\(/, "Fast append failure does not refresh status");
-
   const cacheBlock = source.slice(source.indexOf('pi.registerCommand("cache"'), source.indexOf('pi.registerCommand("preset"'));
-  const cacheAppendIndex = cacheBlock.indexOf("pi.appendEntry(CACHE_STATE_ENTRY_TYPE, makeCacheState(next))");
-  const cacheAssignIndex = cacheBlock.indexOf("cacheRetention = next");
-  const cacheRefreshIndex = cacheBlock.indexOf("updateStatus(ctx)");
-  assert.ok(cacheAppendIndex >= 0 && cacheAppendIndex < cacheAssignIndex && cacheAssignIndex < cacheRefreshIndex);
+  const appendIndex = cacheBlock.indexOf("pi.appendEntry(CACHE_STATE_ENTRY_TYPE, makeCacheState(next))");
+  const assignIndex = cacheBlock.indexOf("cacheRetention = next");
+  const refreshIndex = cacheBlock.indexOf("updateStatus(ctx)");
+  assert.ok(appendIndex >= 0 && appendIndex < assignIndex && assignIndex < refreshIndex);
   assert.equal(cacheBlock.match(/updateStatus\(ctx\)/g)?.length, 1);
   assert.match(cacheBlock, /report\(ctx, "Usage: \/cache", "warning"\)/);
   assert.doesNotMatch(cacheBlock.slice(cacheBlock.indexOf("if (args.trim())"), cacheBlock.indexOf("const next")), /updateStatus\(/);
-  assert.doesNotMatch(cacheBlock.slice(cacheBlock.indexOf("} catch (error) {"), cacheAssignIndex), /updateStatus\(/);
+  assert.doesNotMatch(cacheBlock.slice(cacheBlock.indexOf("} catch (error) {"), assignIndex), /updateStatus\(/);
 });

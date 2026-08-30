@@ -29,7 +29,6 @@ const dependencyMap = {
   "./ask-tui.js": new URL("../extensions/oh-my-pi-slim/ask-tui.ts", import.meta.url).href,
   "./bootstrap.js": new URL("../extensions/oh-my-pi-slim/bootstrap.ts", import.meta.url).href,
   "./cache-retention.js": new URL("../extensions/oh-my-pi-slim/cache-retention.ts", import.meta.url).href,
-  "./fast-mode.js": new URL("../extensions/oh-my-pi-slim/fast-mode.ts", import.meta.url).href,
   "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
   "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
   "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
@@ -705,16 +704,13 @@ test("child checkpoint ignores pending/contact batches and resumes only matching
   }
 });
 
-test("child Fast and Cache hooks use snapshots and a Short fallback after the child early return", async () => {
+test("child Cache hook uses a retention snapshot and Short fallback after the child early return", async () => {
   const previous = {
-    fast: process.env.OMPS_FAST_MODE,
     cache: process.env.OMPS_CACHE_RETENTION,
     ompsChild: process.env.OMPS_SUBAGENT_CHILD,
     piChild: process.env.PI_SUBAGENT_CHILD,
   };
-  const load = async (fast, cache, child = true) => {
-    if (fast === undefined) delete process.env.OMPS_FAST_MODE;
-    else process.env.OMPS_FAST_MODE = fast;
+  const load = async (cache, child = true) => {
     if (cache === undefined) delete process.env.OMPS_CACHE_RETENTION;
     else process.env.OMPS_CACHE_RETENTION = cache;
     if (child) {
@@ -737,70 +733,29 @@ test("child Fast and Cache hooks use snapshots and a Short fallback after the ch
     return handlers;
   };
   try {
-    for (const value of [undefined, "0", "true"]) {
-      const handlers = await load(value, undefined);
-      assert.equal(handlers.get("before_provider_request").length, 1);
-      assert.equal(
-        handlers.get("before_provider_request")[0](
-          { payload: { model: "gpt-child-default", service_tier: "default" } },
-          { model: { provider: "openai-codex", id: "gpt-child-default" } },
-        ),
-        undefined,
-        `child Fast value ${String(value)} stays default tier`,
-      );
-      const model = {
-        provider: "anthropic",
-        api: "anthropic-messages",
-        id: "claude-child-default",
-        compat: { supportsLongCacheRetention: true },
-      };
-      const result = handlers.get("before_provider_request")[0]({
-        payload: {
-          model: "claude-child-default",
-          messages: [{ role: "user", content: [{
-            type: "text",
-            text: "child default",
-            cache_control: { type: "ephemeral", ttl: "1h" },
-          }] }],
-        },
-      }, { model, modelRegistry: { isUsingOAuth: () => true } });
-      assert.deepEqual(result.messages[0].content[0].cache_control, { type: "ephemeral" }, "missing Cache env defaults child snapshots to Short");
-      assert.equal(handlers.has("session_start"), true, "ordinary child runtime still registers");
-    }
-    for (const value of ["1", "fast"]) {
-      const enabled = await load(value, undefined);
-      assert.equal(enabled.get("before_provider_request").length, 1);
-      const payload = { model: "gpt-child", service_tier: "default" };
-      assert.deepEqual(
-        enabled.get("before_provider_request")[0](
-          { payload },
-          { model: { provider: "openai-codex", id: "gpt-child" } },
-        ),
-        { model: "gpt-child", service_tier: "priority" },
-      );
-      assert.equal(payload.service_tier, "default");
-    }
-
-    const ultrafast = await load("ultrafast", undefined);
-    const ultrafastHook = ultrafast.get("before_provider_request")[0];
-    assert.deepEqual(
-      ultrafastHook(
-        { payload: { model: "gpt-5.6-sol", service_tier: "default" } },
-        { model: { provider: "openai", id: "gpt-5.6-sol" } },
-      ),
-      { model: "gpt-5.6-sol", service_tier: "ultrafast" },
-    );
-    assert.deepEqual(
-      ultrafastHook(
-        { payload: { model: "gpt-child", service_tier: "default" } },
-        { model: { provider: "openai", id: "gpt-child" } },
-      ),
-      { model: "gpt-child", service_tier: "priority" },
-      "ultrafast child snapshots downgrade non-Sol requests to priority",
-    );
+    const defaults = await load(undefined);
+    assert.equal(defaults.get("before_provider_request").length, 1);
+    const defaultModel = {
+      provider: "anthropic",
+      api: "anthropic-messages",
+      id: "claude-child-default",
+      compat: { supportsLongCacheRetention: true },
+    };
+    const defaultResult = defaults.get("before_provider_request")[0]({
+      payload: {
+        model: "claude-child-default",
+        messages: [{ role: "user", content: [{
+          type: "text",
+          text: "child default",
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        }] }],
+      },
+    }, { model: defaultModel, modelRegistry: { isUsingOAuth: () => true } });
+    assert.deepEqual(defaultResult.messages[0].content[0].cache_control, { type: "ephemeral" });
+    assert.equal(defaults.has("session_start"), true, "ordinary child runtime still registers");
 
     for (const retention of ["short", "long"]) {
-      const cacheHandlers = await load("0", retention);
+      const cacheHandlers = await load(retention);
       assert.equal(cacheHandlers.get("before_provider_request").length, 1);
       const model = {
         provider: "anthropic",
@@ -841,11 +796,9 @@ test("child Fast and Cache hooks use snapshots and a Short fallback after the ch
       );
     }
 
-    const mainEarlyPath = await load("1", "long", false);
+    const mainEarlyPath = await load("long", false);
     assert.deepEqual([...mainEarlyPath.keys()], [], "a non-child process registers none of the child hooks");
   } finally {
-    if (previous.fast === undefined) delete process.env.OMPS_FAST_MODE;
-    else process.env.OMPS_FAST_MODE = previous.fast;
     if (previous.cache === undefined) delete process.env.OMPS_CACHE_RETENTION;
     else process.env.OMPS_CACHE_RETENTION = previous.cache;
     if (previous.ompsChild === undefined) delete process.env.OMPS_SUBAGENT_CHILD;
@@ -900,16 +853,11 @@ test("old presets inherit observer from explorer and explicit observer config is
       deny: { observer: ["ask_user_question"] },
     }));
     const config = parseConfigFile(configFile);
-    assert.equal("fast" in config, false, "preset parsing returns no Fast Mode runtime state");
     assert.deepEqual(config.presets.legacy.observer, oldPreset.explorer);
     assert.equal(config.observerFallbackPresets.has("legacy"), true);
     assert.deepEqual(config.presets.explicit.observer, role("vision", "observer", "xhigh"));
     assert.equal(config.observerFallbackPresets.has("explicit"), false);
     assert.deepEqual(config.deny.observer, ["ask_user_question"]);
-    for (const legacyFast of [true, false, "true", 1, null, { stale: true }]) {
-      writeFileSync(configFile, JSON.stringify({ fast: legacyFast, presets: { legacy: oldPreset } }));
-      assert.equal("fast" in parseConfigFile(configFile), false, "arbitrary v1.0.0 fast fields are ignored");
-    }
     assert.equal(supportsImageInput({ input: ["text", "image"] }), true);
     assert.equal(supportsImageInput({ input: ["text"] }), false);
   } finally { rmSync(tempDir, { recursive: true, force: true }); }
@@ -1464,7 +1412,6 @@ test("create writes secure detached config, journals once, launches, and returns
     assert.equal(config.piInvocation.args.includes("--extension"), true);
     assert.deepEqual(config.deniedTools, []);
     assert.equal(config.env.OMPS_PARENT_RUN_ID, id);
-    assert.equal(config.env.OMPS_FAST_MODE, "off", "children inherit an explicit default-off snapshot");
     assert.equal(config.env.OMPS_CACHE_RETENTION, "short", "children inherit an explicit default-Short Cache snapshot");
     const identity = JSON.parse(readFileSync(harness.paths(id).identityFile, "utf8"));
     assert.deepEqual(identity, {
@@ -1479,52 +1426,44 @@ test("create writes secure detached config, journals once, launches, and returns
   } finally { harness.cleanup(); }
 });
 
-test("create and resume snapshot Fast and Cache policies while running children stay unchanged", async () => {
+test("create and resume snapshot Cache policy while running children stay unchanged", async () => {
   const harness = createHarness();
-  const previousFast = process.env.OMPS_FAST_MODE;
   const previousCache = process.env.OMPS_CACHE_RETENTION;
-  process.env.OMPS_FAST_MODE = "stale-fast";
   process.env.OMPS_CACHE_RETENTION = "stale-cache";
   try {
     await harness.restore();
-    harness.runtime.setFastModeResolver(() => "off");
     harness.runtime.setCacheRetentionResolver(() => "short");
-    const createdOffShort = await createRun(harness, { abstract: "off short create", task: "off short" });
-    const offShortConfig = readConfig(harness, createdOffShort.details.run.id);
-    assert.equal(offShortConfig.env.OMPS_FAST_MODE, "off");
-    assert.equal(offShortConfig.env.OMPS_CACHE_RETENTION, "short");
+    const createdShort = await createRun(harness, { abstract: "short create", task: "short" });
+    const shortConfig = readConfig(harness, createdShort.details.run.id);
+    assert.equal(shortConfig.env.OMPS_CACHE_RETENTION, "short");
 
-    harness.runtime.setFastModeResolver(() => "ultrafast");
     harness.runtime.setCacheRetentionResolver(() => "long");
-    const createdOnLong = await createRun(harness, { abstract: "on long create", task: "on long" });
-    const onLongConfig = readConfig(harness, createdOnLong.details.run.id);
-    assert.equal(onLongConfig.env.OMPS_FAST_MODE, "ultrafast");
-    assert.equal(onLongConfig.env.OMPS_CACHE_RETENTION, "long");
-    assert.equal(readConfig(harness, createdOffShort.details.run.id).env.OMPS_FAST_MODE, "off", "running children do not hot-switch Fast tiers");
-    assert.equal(readConfig(harness, createdOffShort.details.run.id).env.OMPS_CACHE_RETENTION, "short", "running children do not hot-switch Cache retention");
+    const createdLong = await createRun(harness, { abstract: "long create", task: "long" });
+    const longConfig = readConfig(harness, createdLong.details.run.id);
+    assert.equal(longConfig.env.OMPS_CACHE_RETENTION, "long");
+    assert.equal(
+      readConfig(harness, createdShort.details.run.id).env.OMPS_CACHE_RETENTION,
+      "short",
+      "running children do not hot-switch Cache retention",
+    );
 
-    const resumeWith = async (sourceId, tier, retention) => {
+    const resumeWith = async (sourceId, retention) => {
       const sessionFile = join(harness.tempDir, `${sourceId}.jsonl`);
       writeFileSync(sessionFile, "session");
       harness.runtime.registry.add(persistedRun({ id: sourceId, status: "completed", sessionFile }));
       harness.runtime.setModelResolver(() => "provider/model:high");
       harness.runtime.setDenyResolver(() => []);
-      harness.runtime.setFastModeResolver(() => tier);
       harness.runtime.setCacheRetentionResolver(() => retention);
       const resumed = await harness.tools.get("subagent").execute(`resume-${sourceId}`, {
         action: "resume", id: sourceId, abstract: `resume ${sourceId}`, message: "continue",
       });
       return readConfig(harness, resumed.details.run.id).env;
     };
-    const resumedOffShort = await resumeWith("source-off-short", "off", "short");
-    assert.equal(resumedOffShort.OMPS_FAST_MODE, "off");
-    assert.equal(resumedOffShort.OMPS_CACHE_RETENTION, "short");
-    const resumedOnLong = await resumeWith("source-on-long", "fast", "long");
-    assert.equal(resumedOnLong.OMPS_FAST_MODE, "fast");
-    assert.equal(resumedOnLong.OMPS_CACHE_RETENTION, "long");
+    const resumedShort = await resumeWith("source-short", "short");
+    assert.equal(resumedShort.OMPS_CACHE_RETENTION, "short");
+    const resumedLong = await resumeWith("source-long", "long");
+    assert.equal(resumedLong.OMPS_CACHE_RETENTION, "long");
   } finally {
-    if (previousFast === undefined) delete process.env.OMPS_FAST_MODE;
-    else process.env.OMPS_FAST_MODE = previousFast;
     if (previousCache === undefined) delete process.env.OMPS_CACHE_RETENTION;
     else process.env.OMPS_CACHE_RETENTION = previousCache;
     harness.cleanup();

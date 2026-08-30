@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "1.1.4", "package version must be 1.1.4");
+check(packageJson.version === "1.1.5", "package version must be 1.1.5");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "1.1.4" && lock.packages?.[""]?.version === "1.1.4", "package-lock version must be 1.1.4");
+check(lock.version === "1.1.5" && lock.packages?.[""]?.version === "1.1.5", "package-lock version must be 1.1.5");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -193,7 +193,6 @@ const loopWidget = read("extensions/oh-my-pi-slim/loop-widget.ts");
 const loopTranscriptRenderer = read("extensions/oh-my-pi-slim/loop-transcript-renderer.ts");
 const checkpoint = read("extensions/oh-my-pi-slim/subagent-checkpoint.ts");
 const cacheRetention = read("extensions/oh-my-pi-slim/cache-retention.ts");
-const fastMode = read("extensions/oh-my-pi-slim/fast-mode.ts");
 const runtime = read("extensions/oh-my-pi-slim/subagent-runtime.ts");
 const core = read("extensions/oh-my-pi-slim/subagent-core.ts");
 const child = read("extensions/oh-my-pi-slim/child-supervisor.ts");
@@ -207,18 +206,6 @@ const todoCore = read("extensions/todo/core.ts");
 const todoWidget = read("extensions/todo/widget.ts");
 const semanticGlyph = read("extensions/oh-my-pi-slim/semantic-glyph.ts");
 const widgetExpansion = read("extensions/oh-my-pi-slim/widget-expansion.ts");
-const extensionsRoot = join(ROOT, "extensions");
-const ultrafastModelOwners = readdirSync(extensionsRoot, { recursive: true, withFileTypes: true })
-  .filter((entry) => entry.isFile() && /\.(?:ts|mjs)$/.test(entry.name))
-  .map((entry) => join(entry.parentPath, entry.name))
-  .filter((path) => readFileSync(path, "utf8").includes("gpt-5.6-sol"))
-  .map((path) => path.slice(extensionsRoot.length + 1))
-  .sort();
-check(
-  JSON.stringify(ultrafastModelOwners) === JSON.stringify(["oh-my-pi-slim/fast-mode.ts"]) &&
-  (fastMode.match(/gpt-5\.6-sol/g) ?? []).length === 1,
-  `gpt-5.6-sol must occur exactly once in extension production source and only in fast-mode.ts, found: ${ultrafastModelOwners.join(", ")}`,
-);
 const widgetStack = read("extensions/oh-my-pi-slim/widget-stack.ts");
 const widgetStackHost = read("extensions/oh-my-pi-slim/widget-stack-host.ts");
 const subagentWidget = read("extensions/oh-my-pi-slim/subagent-widget.ts");
@@ -441,7 +428,6 @@ const launchWrapperRegistration = extension.indexOf("const sendLaunchMessage = c
 const loopRegistration = extension.indexOf("registerLoopRuntime(pi)", functionStart);
 const monitorRegistration = extension.indexOf("registerMonitorRuntime(pi", functionStart);
 const runtimeRegistration = extension.indexOf("registerSubagentRuntime(pi", functionStart);
-const fastResolverRegistration = extension.indexOf("subagents.setFastModeResolver(() => fastTier)", runtimeRegistration);
 const cacheResolverRegistration = extension.indexOf("subagents.setCacheRetentionResolver(() => cacheRetention)", runtimeRegistration);
 const mainPolicyHookRegistration = extension.indexOf('pi.on("before_provider_request"', runtimeRegistration);
 check(
@@ -450,8 +436,8 @@ check(
   "main extension must return before the launch wrapper and Loop, Monitor, and subagent registration",
 );
 check(
-  runtimeRegistration < fastResolverRegistration && fastResolverRegistration < cacheResolverRegistration && cacheResolverRegistration < mainPolicyHookRegistration,
-  "main Fast and Cache resolvers and provider hook must register only after the child early return and subagent runtime",
+  runtimeRegistration < cacheResolverRegistration && cacheResolverRegistration < mainPolicyHookRegistration,
+  "main Cache resolver and provider hook must register only after the child early return and subagent runtime",
 );
 hasAll(extension, [
   "assertNoLegacyBackend(pi)",
@@ -482,12 +468,10 @@ hasAll(extension, [
   "goalReminder: () => goal?.phaseReminder()",
   "registerLoopRuntime(pi)", "registerMonitorRuntime(pi, { sendMessage: sendLaunchMessage })",
   "registerSubagentRuntime(pi, { sendMessage: sendLaunchMessage })", "sendContinuationMessage: sendLaunchMessage",
-  'let fastTier: FastTier = "off"', 'let cacheRetention: CacheRetention = "short"',
-  "subagents.setFastModeResolver(() => fastTier)", "subagents.setCacheRetentionResolver(() => cacheRetention)",
-  'pi.on("before_provider_request", (event, ctx) => {', "applyFastServiceTier(payload, model, fastTier)",
-  "applyCacheRetentionForRequest(", "ctx.modelRegistry.isUsingOAuth(model)", "return cachePayload ?? fastPayload",
-  'pi.registerCommand("fast"', 'report(ctx, "Usage: /fast", "warning")',
-  "const next = nextFastTier(fastTier)", "pi.appendEntry(FAST_STATE_ENTRY_TYPE, makeFastState(next))", "fastTier = next",
+  'let cacheRetention: CacheRetention = "short"',
+  "subagents.setCacheRetentionResolver(() => cacheRetention)",
+  'pi.on("before_provider_request", (event, ctx) => {', "applyCacheRetentionForRequest(",
+  "ctx.modelRegistry.isUsingOAuth(model)",
   'pi.registerCommand("cache"', 'report(ctx, "Usage: /cache", "warning")',
   'cacheRetention === "long" ? "short" : "long"', "pi.appendEntry(CACHE_STATE_ENTRY_TYPE, makeCacheState(next))", "cacheRetention = next",
   "treeNotificationHold", "releaseTreeNotificationHoldDeferred", "subagents.restore(ctx, notificationGate.isPaused())",
@@ -498,7 +482,7 @@ hasAll(extension, [
   "monitors?.acknowledgeNotificationMessage(message)", "monitors?.retryQueuedNotificationsAfterAgentSettled()",
 ], "main extension contract");
 check((extension.match(/\bsendLaunchMessage\b/g) ?? []).length === 4, "launch wrapper must have one declaration and exactly three producer seams");
-const runtimeWiring = extension.slice(launchWrapperRegistration, extension.indexOf("let fastTier", runtimeRegistration));
+const runtimeWiring = extension.slice(launchWrapperRegistration, extension.indexOf("let cacheRetention", runtimeRegistration));
 hasAll(runtimeWiring, [
   "const loops = registerLoopRuntime(pi)",
   "const monitors = registerMonitorRuntime(pi, { sendMessage: sendLaunchMessage })",
@@ -510,40 +494,6 @@ hasNone(runtimeWiring.slice(runtimeWiring.indexOf("registerLoopRuntime"), runtim
 const goalWiring = extension.slice(extension.indexOf("goal = registerGoalRuntime(pi"), extension.indexOf("asks.setGoalActiveResolver"));
 hasAll(goalWiring, ["sendContinuationMessage: sendLaunchMessage"], "Goal continuation launch sender wiring");
 hasNone(goalWiring, ["sendMessage: sendLaunchMessage"], "Goal must expose only its continuation-specific launch sender");
-hasAll(fastMode, [
-  'export const FAST_ENV_VAR = "OMPS_FAST_MODE"',
-  'export const FAST_STATE_ENTRY_TYPE = "oh-my-pi-slim:fast-state"', 'export const FAST_STATE_VERSION = 2',
-  'export const ULTRAFAST_MODEL_ID = "gpt-5.6-sol"', 'export type FastTier = "off" | "fast" | "ultrafast"',
-  'export interface FastState {', 'version: typeof FAST_STATE_VERSION;', 'tier: FastTier;',
-  "export function nextFastTier(tier: FastTier): FastTier", 'if (tier === "off") return "fast"',
-  'if (tier === "fast") return "ultrafast"', 'if (tier === "ultrafast") return "off"', 'return "fast"',
-  "export function fastEnvValue(tier: unknown): FastTier", 'return isFastTier(tier) ? tier : "off"',
-  "export function fastTierFromEnv(value: unknown): FastTier | undefined", 'if (value === "0") return "off"', 'if (value === "1") return "fast"',
-  "export function isFastModeProvider(provider: unknown): boolean",
-  'return provider === "openai" || provider === "openai-codex"',
-  "export function applyFastServiceTier", 'tier !== "fast" && tier !== "ultrafast"',
-  "if (!isFastModeProvider(model.provider)) return", 'payload.model !== model.id',
-  'tier === "ultrafast" && model.id === ULTRAFAST_MODEL_ID ? "ultrafast" : "priority"',
-  "return { ...payload, service_tier: serviceTier }",
-  "export function makeFastState(tier: FastTier): FastState", "return { version: FAST_STATE_VERSION, tier }",
-  "export function parseFastState(value: unknown): FastState | undefined", "const keys = Reflect.ownKeys(value)",
-  "const version = value.version", "const tier = value.tier", "const fast = value.fast",
-  'version === FAST_STATE_VERSION', 'version === 1', 'typeof fast !== "boolean"',
-  'tier: fast ? "fast" : "off"',
-  "export function replayFastState(entries: readonly unknown[]): FastTier", 'let tier: FastTier = "off"',
-  'entry.type !== "custom" || entry.customType !== FAST_STATE_ENTRY_TYPE', "const state = parseFastState(entry.data)",
-], "Fast Mode three-tier payload, strict v1/v2 replay, and child environment module");
-const parseFastStateBlock = fastMode.slice(fastMode.indexOf("export function parseFastState"), fastMode.indexOf("export function replayFastState"));
-for (const property of ["version", "tier", "fast"]) {
-  check(
-    (parseFastStateBlock.match(new RegExp(`value\\.${property}\\b`, "g")) ?? []).length === 1,
-    `parseFastState must snapshot value.${property} exactly once`,
-  );
-}
-hasNone(fastMode, [
-  'from "node:', "readFile", "writeFile", "openSync", "rename", "unlink", "chmod", "fsync", "randomUUID",
-  "atomicWriteJson", "process.env[", "process.env.", "FastFlagRead", "FastModeWriteIO", "readFastFlag", "writeFastFlag",
-], "Fast Mode module has no config IO, process state, or mutable singleton");
 hasAll(cacheRetention, [
   'export const CACHE_RETENTION_ENV_VAR = "OMPS_CACHE_RETENTION"',
   'export const CACHE_STATE_ENTRY_TYPE = "oh-my-pi-slim:cache-state"', "export const CACHE_STATE_VERSION = 1",
@@ -568,34 +518,13 @@ hasAll(cacheRetention, [
   'entry.type !== "custom" || entry.customType !== CACHE_STATE_ENTRY_TYPE',
 ], "Cache retention pure payload, OAuth gate, child snapshot, and session-entry module");
 hasNone(cacheRetention, [
-  'from "node:', "readFile", "writeFile", "process.env", "service_tier", "headers", "authorization", "prewarm",
+  'from "node:', "readFile", "writeFile", "process.env", "headers", "authorization", "prewarm",
   "setStatus", "appendEntry", "sendMessage", "sendUserMessage",
 ], "Cache retention module has no IO, transport, active prewarm, status, or session mutation");
 check(!/(?:process\.env\.[A-Za-z0-9_]+|process\.env\[[^\]]+\])\s*=(?!=)/.test(extension), "main extension must never write process.env");
-check((extension.match(/pi\.on\("before_provider_request"/g) ?? []).length === 1, "main extension must unconditionally register exactly one combined Fast and Cache provider hook");
-check((extension.match(/pi\.registerCommand\("fast"/g) ?? []).length === 1, "main extension must register only one bare Fast Mode command");
+check((extension.match(/pi\.on\("before_provider_request"/g) ?? []).length === 1, "main extension must unconditionally register exactly one Cache provider hook");
 check((extension.match(/pi\.registerCommand\("cache"/g) ?? []).length === 1, "main extension must register only one bare Cache Mode command");
-check((extension.match(/(?:let fastTier: FastTier|fastTier)\s*=(?!=)/g) ?? []).length === 3, "Fast Mode must have exactly three assignments: default-off initialization, command commit, and session replay");
 check((extension.match(/(?:let cacheRetention: CacheRetention|cacheRetention)\s*=(?!=)/g) ?? []).length === 3, "Cache Mode must have exactly three assignments: default-Short initialization, toggle commit, and session replay");
-const fastCommandBlock = extension.slice(extension.indexOf('pi.registerCommand("fast"'), extension.indexOf('pi.registerCommand("cache"'));
-hasAll(fastCommandBlock, ['description: "Cycle OpenAI Fast Mode for this Pi session."'], "Fast Mode three-tier session command description");
-hasNone(fastCommandBlock, [
-  'setStatus(', 'process.env', 'action === "on"', 'action === "off"', '"status"', "getArgumentCompletions",
-  "readFastFlag", "writeFastFlag", "getAgentDir", "CONFIG_FILE",
-], "Fast Mode command has no parameters, config IO, environment writes, or independent status write");
-check(
-  fastCommandBlock.indexOf("pi.appendEntry(FAST_STATE_ENTRY_TYPE, makeFastState(next))") < fastCommandBlock.indexOf("fastTier = next"),
-  "Fast Mode command must append hidden session state before changing in-memory state",
-);
-check(
-  fastCommandBlock.indexOf("fastTier = next") < fastCommandBlock.indexOf("updateStatus(ctx)"),
-  "Fast Mode command must refresh the shared OMPS status after committing the session toggle",
-);
-check((fastCommandBlock.match(/updateStatus\(ctx\)/g) ?? []).length === 1, "Fast Mode success path must refresh status exactly once");
-const fastUsageBlock = fastCommandBlock.slice(fastCommandBlock.indexOf("if (args.trim())"), fastCommandBlock.indexOf("const next = nextFastTier(fastTier)"));
-const fastFailureBlock = fastCommandBlock.slice(fastCommandBlock.indexOf("} catch (error) {"), fastCommandBlock.indexOf("fastTier = next"));
-hasNone(fastUsageBlock, ["updateStatus("], "Fast Mode Usage path must not refresh status");
-hasNone(fastFailureBlock, ["updateStatus("], "Fast Mode append failure path must not refresh status");
 const cacheCommandBlock = extension.slice(extension.indexOf('pi.registerCommand("cache"'), extension.indexOf('pi.registerCommand("preset"'));
 hasAll(cacheCommandBlock, [
   'description: "Toggle Anthropic cache retention for this Pi session."', 'report(ctx, "Usage: /cache", "warning")',
@@ -616,15 +545,11 @@ const cacheUsageBlock = cacheCommandBlock.slice(cacheCommandBlock.indexOf("if (a
 const cacheFailureBlock = cacheCommandBlock.slice(cacheCommandBlock.indexOf("} catch (error) {"), cacheCommandBlock.indexOf("cacheRetention = next"));
 hasNone(cacheUsageBlock, ["updateStatus("], "Cache Mode Usage path must not refresh status");
 hasNone(cacheFailureBlock, ["updateStatus("], "Cache Mode append failure path must not refresh status");
-check(
-  !extension.includes("object.fast") && !extension.slice(extension.indexOf("interface PresetConfig"), extension.indexOf("interface TreeNotificationHold")).includes("fast:"),
-  "preset config parsing must ignore every legacy Fast Mode field",
-);
-check(!/register(?:Message|Entry)Renderer\((?:FAST_STATE_ENTRY_TYPE|CACHE_STATE_ENTRY_TYPE)/.test(extension), "Fast and Cache states must rely on Pi's native hidden custom entries");
+check(!/register(?:Message|Entry)Renderer\(CACHE_STATE_ENTRY_TYPE/.test(extension), "Cache state must rely on Pi's native hidden custom entries");
 check(
   extension.includes("subagents.setModelResolver();\n    subagents.setDenyResolver();") &&
-  !extension.includes("subagents.setFastModeResolver();") && !extension.includes("subagents.setCacheRetentionResolver();"),
-  "preset deactivation and session resolver reset must leave Fast and Cache resolvers installed",
+  !extension.includes("subagents.setCacheRetentionResolver();"),
+  "preset deactivation and session resolver reset must leave the Cache resolver installed",
 );
 check(
   extension.includes("!IMPORTANT! Scheduler workflow: First choose the lightest workflow that fits the work. If direct execution is justified, complete it and verify proportionately. Otherwise: plan lanes/dependencies → dispatch background specialists → continue non-overlapping work when available → await completion notifications → reconcile terminal results → verify. !END!"),
@@ -637,18 +562,15 @@ hasAll(extension, [
   'const PACKAGE_VERSION = readPackageVersion(join(PACKAGE_ROOT, "package.json"))',
   "function readPackageVersion(path: string): string",
   "return nonEmptyString((raw as Record<string, unknown>).version, `${path}.version`)",
-  "export function presetFastModeEligible(preset: Preset | undefined): boolean",
-  "Object.values(preset).some((role) => isFastModeProvider(role.provider))",
   "export function presetCacheModeEligible(preset: Preset | undefined): boolean",
   'Object.values(preset).some((role) => role.provider === "anthropic")',
   "export function presetStatusContent(",
-  'theme: Pick<Theme, "fg">', "presetName: string | undefined", "fastTier?: FastTier", "fastEligible?: boolean",
+  'theme: Pick<Theme, "fg">', "presetName: string | undefined",
   "cacheRetention?: CacheRetention", "cacheEligible?: boolean", "if (presetName === undefined) return undefined",
-  'const fastStatus = fastEligible && fastTier ? ` · OpenAI Fast Mode: ${fastTier}` : ""',
   'Anthropic Cache Mode: ${cacheRetention}',
-  'return theme.fg("accent", `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})${fastStatus}${cacheStatus}`)',
-  "presetFastModeEligible(activePreset)", "cacheRetention", "presetCacheModeEligible(activePreset)",
-], "main extension preset-wide Fast and Cache status line contract");
+  'return theme.fg("accent", `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})${cacheStatus}`)',
+  "cacheRetention", "presetCacheModeEligible(activePreset)",
+], "main extension preset-wide Cache status line contract");
 hasNone(extension, [
   "`orchestrator${",
   "orchestrator:${",
@@ -679,7 +601,7 @@ hasNone(shutdownStatusHandler, ["setStatus("], "shutdown must not duplicate the 
 const presetStatusBody = extension.slice(extension.indexOf("export function presetStatusContent"), extension.indexOf("function isAnthropicOAuth"));
 hasNone(presetStatusBody, [".bold(", "theme.bold", "glyph", "Glyph", "Requested"], "OMPS status plain accent-only rendering without a Requested label");
 check((json("package.json").version ?? "").trim().length > 0, "package.json must define a non-empty version for the OMPS status line");
-check(json("package.json").version === "1.1.4", "Goal abort continuation gating must ship in v1.1.4");
+check(json("package.json").version === "1.1.5", "Goal abort continuation gating must remain shipped in v1.1.5");
 
 const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
 const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
@@ -693,31 +615,28 @@ const beforeForkHandler = extension.slice(beforeForkStart, beforeTreeStart);
 const beforeTreeHandler = extension.slice(beforeTreeStart, sessionTreeStart);
 const sessionTreeHandler = extension.slice(sessionTreeStart, inputStart);
 hasAll(sessionStartHandler, [
-  "Fast and Cache modes are session-wide across every branch", "full entry log rather than the active branch",
-  "const sessionEntries = ctx.sessionManager.getEntries()", "fastTier = replayFastState(sessionEntries)",
-  "cacheRetention = replayCacheState(sessionEntries)",
-], "session_start Fast and Cache full-session replay contract");
+  "Cache Mode is session-wide across every branch", "full entry log rather than the active branch",
+  "cacheRetention = replayCacheState(ctx.sessionManager.getEntries())",
+], "session_start Cache full-session replay contract");
 check(
   /catch \(error\) \{[\s\S]*?report\(ctx,[\s\S]*?updateStatus\(ctx\);\s*return;/.test(sessionStartHandler),
   "session_start setup failure must clear stale OMPS status before returning",
 );
-check((extension.match(/sessionManager\.getEntries\(\)/g) ?? []).length === 1, "Fast and Cache modes must share one getEntries replay in session_start");
+check((extension.match(/sessionManager\.getEntries\(\)/g) ?? []).length === 1, "Cache Mode must replay one full entry log in session_start");
 hasNone(sessionStartHandler, ["getBranch", "getAgentDir", "CONFIG_FILE", "readFileSync"], "session_start policy replay must not read branch-local or agent-global config state");
 check(
-  sessionStartHandler.indexOf("fastTier = replayFastState(sessionEntries)") < sessionStartHandler.indexOf("try {") &&
-  sessionStartHandler.indexOf("cacheRetention = replayCacheState(sessionEntries)") < sessionStartHandler.indexOf("try {") &&
-  sessionStartHandler.indexOf("cacheRetention = replayCacheState(sessionEntries)") < sessionStartHandler.indexOf("assertNoLegacyBackend(pi)") &&
-  sessionStartHandler.indexOf("cacheRetention = replayCacheState(sessionEntries)") < sessionStartHandler.indexOf("ensurePackageSetup(PACKAGE_ROOT)"),
-  "session Fast and Cache replay must not depend on bootstrap or legacy-backend setup",
+  sessionStartHandler.indexOf("cacheRetention = replayCacheState(ctx.sessionManager.getEntries())") < sessionStartHandler.indexOf("try {") &&
+  sessionStartHandler.indexOf("cacheRetention = replayCacheState(ctx.sessionManager.getEntries())") < sessionStartHandler.indexOf("assertNoLegacyBackend(pi)") &&
+  sessionStartHandler.indexOf("cacheRetention = replayCacheState(ctx.sessionManager.getEntries())") < sessionStartHandler.indexOf("ensurePackageSetup(PACKAGE_ROOT)"),
+  "session Cache replay must not depend on bootstrap setup",
 );
 for (const [name, handler] of [
   ["session_before_switch", beforeSwitchHandler], ["session_before_fork", beforeForkHandler],
   ["session_before_tree", beforeTreeHandler], ["session_tree", sessionTreeHandler],
 ]) {
   hasNone(handler, [
-    "replayFastState", "makeFastState", "FAST_STATE_ENTRY_TYPE", "fastTier =",
     "replayCacheState", "makeCacheState", "CACHE_STATE_ENTRY_TYPE", "cacheRetention =", 'appendEntry(',
-  ], `${name} must not clear, replay, or persist Fast or Cache Mode`);
+  ], `${name} must not clear, replay, or persist Cache Mode`);
 }
 const reminderConstructorsStart = extension.indexOf("const PHASE_REMINDER_MESSAGE_TYPE");
 const launchSenderStart = extension.indexOf("export function createLaunchMessageSender");
@@ -2161,19 +2080,14 @@ hasAll(core, [
 hasNone(core, [...REMOVED_CAPABILITIES, "SUPERVISOR_ACTIONS", "SUPERVISOR_PUBLIC_FIELDS", "pending(): SupervisorRequest", "replyTo"], "runtime core");
 check(/SUBAGENT_ACTIONS = \[\s*"create",\s*"list",\s*"status",\s*"interrupt",\s*"steer",\s*"resume",\s*"reply",\s*"delete",\s*"clear",\s*\] as const/.test(core), "SUBAGENT_ACTIONS must keep the exact unified action order");
 hasAll(runtime, [
-  "type FastModeResolver = () => FastTier", 'private fastModeResolver: FastModeResolver = () => "off"',
-  'setFastModeResolver(resolver: FastModeResolver = () => "off")',
   "type CacheRetentionResolver = () => CacheRetention", 'private cacheRetentionResolver: CacheRetentionResolver = () => "short"',
   'setCacheRetentionResolver(resolver: CacheRetentionResolver = () => "short")',
-  "[FAST_ENV_VAR]: fastEnvValue(this.fastModeResolver())",
   "[CACHE_RETENTION_ENV_VAR]: cacheRetentionEnvValue(this.cacheRetentionResolver())",
-], "subagent Fast and Cache launch snapshot resolvers");
-check((runtime.match(/\[FAST_ENV_VAR\]: fastEnvValue\(this\.fastModeResolver\(\)\)/g) ?? []).length === 1, "create and resume must share one explicit Fast child environment snapshot in buildLaunchConfig");
+], "subagent Cache launch snapshot resolver");
 check((runtime.match(/\[CACHE_RETENTION_ENV_VAR\]: cacheRetentionEnvValue\(this\.cacheRetentionResolver\(\)\)/g) ?? []).length === 1, "create and resume must share one explicit Cache retention child environment snapshot in buildLaunchConfig");
 hasNone(runtime, [
-  "delete this.fastModeResolver", "this.fastModeResolver = undefined",
   "delete this.cacheRetentionResolver", "this.cacheRetentionResolver = undefined",
-], "subagent deactivate and shutdown keep Fast and Cache resolvers");
+], "subagent deactivate and shutdown keep the Cache resolver");
 
 hasAll(checkpoint, [
   "export const CHECKPOINT_RESUME_TEXT", "export function completedToolBatch",
@@ -2201,18 +2115,16 @@ hasAll(child, [
   "pendingCheckpoint = undefined",
 ], "child supervisor extension");
 hasAll(child, [
-  'const FAST_TIER = fastTierFromEnv(process.env[FAST_ENV_VAR]) ?? "off"',
   'const CACHE_RETENTION = cacheRetentionFromEnv(process.env[CACHE_RETENTION_ENV_VAR]) ?? "short"',
-  'pi.on("before_provider_request", (event, ctx) => {',
-  "applyFastServiceTier(payload, model, FAST_TIER)", "applyCacheRetentionForRequest(",
-  "ctx.modelRegistry.isUsingOAuth(model)", "return cachePayload ?? fastPayload",
-], "child Fast and Cache snapshot hook");
+  'pi.on("before_provider_request", (event, ctx) => {', "applyCacheRetentionForRequest(",
+  "ctx.modelRegistry.isUsingOAuth(model)",
+], "child Cache snapshot hook");
 const childFunctionStart = child.indexOf("export default function childSupervisor");
 const childEarlyReturn = child.indexOf('process.env.OMPS_SUBAGENT_CHILD !== "1"', childFunctionStart);
-const childFastHook = child.indexOf('pi.on("before_provider_request"', childFunctionStart);
+const childCacheHook = child.indexOf('pi.on("before_provider_request"', childFunctionStart);
 const childToolRegistration = child.indexOf("pi.registerTool", childFunctionStart);
-check(childFunctionStart < childEarlyReturn && childEarlyReturn < childFastHook && childFastHook < childToolRegistration, "child Fast and Cache hook must remain behind the child early return and ahead of ordinary child logic");
-check((child.match(/pi\.on\("before_provider_request"/g) ?? []).length === 1, "child supervisor must define exactly one combined provider hook");
+check(childFunctionStart < childEarlyReturn && childEarlyReturn < childCacheHook && childCacheHook < childToolRegistration, "child Cache hook must remain behind the child early return and ahead of ordinary child logic");
+check((child.match(/pi\.on\("before_provider_request"/g) ?? []).length === 1, "child supervisor must define exactly one Cache provider hook");
 const contactSchemaStart = child.indexOf("export const contactSupervisorParameters");
 const contactSchemaEnd = child.indexOf("export default function childSupervisor", contactSchemaStart);
 const contactSchema = child.slice(contactSchemaStart, contactSchemaEnd);
@@ -2369,17 +2281,12 @@ hasAll(read("tests/fixtures/stub-pi-rpc.mjs"), [
 ], "RPC fixture compaction scenarios, event injection, and command ordering");
 const subagentRuntimeTests = read("tests/subagent-runtime.test.mjs");
 hasAll(subagentRuntimeTests, [
-  "create and resume snapshot Fast and Cache policies while running children stay unchanged",
-  'offShortConfig.env.OMPS_FAST_MODE, "off"', 'onLongConfig.env.OMPS_FAST_MODE, "ultrafast"',
-  'offShortConfig.env.OMPS_CACHE_RETENTION, "short"', 'onLongConfig.env.OMPS_CACHE_RETENTION, "long"',
-  "running children do not hot-switch", "children inherit an explicit default-off snapshot", "children inherit an explicit default-Short Cache snapshot",
-  "child Fast and Cache hooks use snapshots and a Short fallback after the child early return",
-  "ultrafast child snapshots downgrade non-Sol requests to priority", "service_tier: \"priority\"" ,
-  'for (const value of [undefined, "0", "true"])', "missing Cache env defaults child snapshots to Short",
+  'env.OMPS_CACHE_RETENTION, "short"', 'env.OMPS_CACHE_RETENTION, "long"',
+  "running children do not hot-switch", "children inherit an explicit default-Short Cache snapshot",
+  "child Cache hook uses a retention snapshot and Short fallback after the child early return",
   "a non-child process registers none of the child hooks",
-  "API key", "child repeats the model compatibility gate", "preset parsing returns no Fast Mode runtime state", "arbitrary v1.0.0 fast fields are ignored",
-  'for (const legacyFast of [true, false, "true", 1, null, { stale: true }])',
-], "Fast and Cache legacy-config, child launch inheritance, OAuth gate, and registration-boundary tests");
+  "API key", "child repeats the model compatibility gate",
+], "Cache child launch inheritance, OAuth gate, and registration-boundary tests");
 hasAll(subagentRuntimeTests, [
   "Goal stats sidecars enforce private paths", "Goal stats capture writes only actual changes", "Goal stats sidecars preserve completed owned-run aggregates across branch restore",
   "getGoalStatsSidecarPaths", "writeGoalStatsSidecar", "readGoalStatsSidecar", "run-directory GC never deletes session-owned Goal stats sidecars",
@@ -2782,24 +2689,6 @@ hasNone(todoExtension, ['"Action"', "operationCounts", 'theme.bold(`todo · ${ac
 check(existsSync(join(ROOT, "tests/todo.test.mjs")), "Todo contract tests must exist");
 check(existsSync(join(ROOT, "tests/provider-schema.test.mjs")), "provider schema compatibility tests must exist");
 check(existsSync(join(ROOT, "tests/loop.test.mjs")), "Loop core contract tests must exist");
-check(existsSync(join(ROOT, "tests/fast-mode.test.mjs")), "Fast Mode pure session-state contract tests must exist");
-const fastModeTests = read("tests/fast-mode.test.mjs");
-hasAll(fastModeTests, [
-  "Fast tiers cycle exactly and invalid next input closes to fast",
-  "Fast Mode environment encoding writes three tiers and decoding preserves old parent compatibility",
-  "provider eligibility accepts only the exact OpenAI provider names",
-  "service tier matrix is immutable and ultrafast uses the maximum supported OpenAI tier",
-  "isFastModeProvider(provider)", "isFastModeProvider\\(model\\.provider\\)",
-  "Fast state writer emits exact version-2 tier data and parser strictly migrates version 1",
-  "Fast state parser snapshots unstable version, tier, and fast getters exactly once",
-  "versionReads, 1", "tierReads, 1", "fastReads, 1",
-  "session replay traverses mixed v1 and v2 once in time order with last-valid-wins",
-  "session replay defaults off and skips malformed latest entries without erasing valid state",
-  'FAST_STATE_ENTRY_TYPE, "oh-my-pi-slim:fast-state"', "assert.equal(FAST_STATE_VERSION, 2)",
-  'fastTierFromEnv("0")', 'fastTierFromEnv("1")', 'fastTierFromEnv(value)',
-  '"gpt-5.6-sol"', '"priority"', '"ultrafast"', "broken entry",
-], "Fast Mode cycle, model gate, environment compatibility, strict v1/v2 replay, and fail-closed tests");
-hasNone(fastModeTests, ["node:fs", "node:crypto", "readFastFlag", "writeFastFlag", "FastModeWriteIO"], "Fast Mode tests must not retain config IO seams");
 check(existsSync(join(ROOT, "tests/cache-retention.test.mjs")), "Cache retention pure contract tests must exist");
 const cacheRetentionTests = read("tests/cache-retention.test.mjs");
 hasAll(cacheRetentionTests, [
@@ -2823,25 +2712,9 @@ hasNone(cacheRetentionTests, ["node:fs", "process.env", "setStatus", "appendEntr
 check(existsSync(join(ROOT, "tests/preset-status.test.mjs")), "OMPS preset status contract tests must exist");
 const presetStatusTests = read("tests/preset-status.test.mjs");
 hasAll(presetStatusTests, [
-  "active preset eligibility checks all seven roles and accepts both exact OpenAI providers", 'for (const provider of ["openai", "openai-codex"])',
-  "Main can be non-OpenAI while any OpenAI specialist qualifies the active preset",
-  "active preset Cache eligibility checks all seven roles for exact anthropic",
-  "all non-OpenAI providers and case mismatches do not qualify the active preset",
-  "mixed Sol and other OpenAI preset keeps ultrafast status while requests use maximum supported tiers",
-  "gpt-5.6-sol", "gpt-other", 'service_tier: "ultrafast"', 'service_tier: "priority"',
-  "single-provider and unrelated presets show only their preset-wide eligible suffixes",
-  "a manually selected Main cannot change suffix eligibility from the active preset",
-  "eligible Fast status without a tier omits only the Fast suffix",
-  "presetStatusContent(theme, presetName, undefined, true", "inactive OMPS status clears the same footer slot", "the existing two-argument call stays suffix-free",
-  "the complete status line is rendered in one accent span", "OMPS status version tracks package metadata",
-  "OpenAI Fast Mode: fast · Anthropic Cache Mode: short", "OpenAI Fast Mode: ${tier} · Anthropic Cache Mode: ${retention}", "OpenAI Fast Mode: ultrafast",
-  "status source uses active preset eligibility and refreshes every required lifecycle",
-  "preset switch updates active preset before status and omps off clears it",
-  "status has no model_select handler because current Main model and authentication are irrelevant",
-  "successful Fast and Cache toggles refresh only after append and assignment",
-  "Usage: \\/cache", "Fast append failure does not refresh status",
-  "a failed session restore clears the stale footer before returning", "session_shutdown",
-], "OMPS active-preset Fast and Cache status rendering and source contract tests");
+  "presetCacheModeEligible", "Anthropic Cache Mode", "cacheRetention",
+  "Usage: \\/cache", "session_shutdown",
+], "OMPS active-preset Cache status rendering and source contract tests");
 check(existsSync(join(ROOT, "tests/loop-ui.test.mjs")), "Loop visual contract tests must exist");
 check(existsSync(join(ROOT, "tests/goal-ui.test.mjs")), "Goal visual contract tests must exist");
 check(existsSync(join(ROOT, "tests/monitor-ui.test.mjs")), "Monitor visual contract tests must exist");
@@ -2943,24 +2816,15 @@ hasAll(loopUiTests, [
 const loopCoreTests = read("tests/loop.test.mjs");
 hasAll(loopCoreTests, [
   "main unconditionally registers exactly one provider payload hook",
-  "the legal v1.0.0 preset config keeps its legacy field untouched",
-  "empty session entries default Fast Mode off regardless of legacy agent-global config",
-  'JSON.parse(readFileSync(join(ROOT, "config/oh-my-pi-slim.example.json")',
-  "Fast Mode arguments never append session state", 'customType: "oh-my-pi-slim:fast-state"',
-  'tier: "fast"', 'tier: "ultrafast"', 'tier: "off"', "the first command enters fast",
-  "ultrafast downgrades non-Sol requests to priority", "Fast Mode is now ultrafast", "append failure does not change in-memory Fast Mode",
   "Cache Mode arguments never append session state", 'customType: "oh-my-pi-slim:cache-state"',
   "Cache Mode Long requested for this Pi session", "append failure does not change in-memory Cache Mode",
-  "reload restores the last valid Fast state from the same full entry log",
   "reload restores the last valid Cache state from the same full entry log", 'for (const reason of ["resume", "fork"])',
-  "restores or inherits the copied Fast session path state", "restores or inherits the copied Cache session path state",
-  "a new empty session defaults Fast Mode off", "a new empty session defaults Cache Mode Short",
-  "tree navigation never appends Fast or Cache Mode state",
-  "tree navigation never recomputes session-wide Fast Mode from a branch",
+  "restores or inherits the copied Cache session path state",
+  "a new empty session defaults Cache Mode Short",
   "tree navigation never recomputes session-wide Cache Mode from a branch",
-  'assert.ok(main.commands.includes("fast"))', 'assert.ok(main.commands.includes("cache"))',
-  "injected append failure", "injected cache append failure",
-], "Fast and Cache main hook, commands, session lifecycle, tree invariance, and append atomicity tests");
+  'assert.ok(main.commands.includes("cache"))',
+  "injected cache append failure",
+], "Cache main hook, command, session lifecycle, tree invariance, and append atomicity tests");
 hasAll(loopCoreTests, [
   "synchronous injected timeout callbacks activate after commit", "scheduler failures preserve active modify and paused resume atomicity",
   "scheduler unavailable", "tree abort waits for shutdown completion", "abort cannot release delivery before subagent shutdown completes",
@@ -3230,7 +3094,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "## Highlights", "## Six specialists", "## Requirements and package management", "### Requirements", "### Install",
         "### Migrate from external Ask and Process packages", "### Update", "### Remove", "## Tool availability", "## Main tools",
         "### `subagent`", "### `todo`", "### `loop`", "### `monitor`", "### `ask_user_question`", "### `goal`",
-        "## `/loop` and `/goal`", "## Presets and configuration", "### Fast Mode", "### Cache Mode", "## Runtime, UI, and persistence",
+        "## `/loop` and `/goal`", "## Presets and configuration", "### Cache Mode", "## Runtime, UI, and persistence",
         "### Subagent viewer", "## Deliberate scope",
         "## Development", "## License",
       ]
@@ -3238,7 +3102,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "## 核心特性", "## 六个 specialist", "## 要求与包管理", "### 要求", "### 安装",
         "### 从外部 Ask 与 Process package 迁移", "### 更新", "### 移除", "## 工具可用性", "## Main 工具",
         "### `subagent`", "### `todo`", "### `loop`", "### `monitor`", "### `ask_user_question`", "### `goal`",
-        "## `/loop` 与 `/goal`", "## Preset 与配置", "### Fast Mode", "### Cache Mode", "## Runtime、UI 与持久化",
+        "## `/loop` 与 `/goal`", "## Preset 与配置", "### Cache Mode", "## Runtime、UI 与持久化",
         "### Subagent viewer", "## 有意限制",
         "## 开发", "## License",
       ];
@@ -3301,20 +3165,6 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "retained terminal runs are policy-hidden", "existing Ctrl+O expand hint is present",
         "keeps only the complete Ctrl+O hint", "omits both hints", "expanded Agents heading shows neither hint",
         "successful subagent `clear` remains clear after reload",
-        "current Pi session", "defaults to `off` for a new session", "`off → fast → ultrafast → off`", "first command in a new session changes `off` to `fast`",
-        "whole session across every branch", "tree navigation does not change it", "Reload, process restart, and session resume recover it from the session history",
-        "fork inherits the last Fast Mode state", "target path that Pi copies into the fork",
-        "With `--no-session`", "Fast Mode starts at `off`", "lasts only for the current process", "cannot survive a restart",
-        "New OMPS releases can read Fast Mode state written by earlier releases", "old enabled state maps to `fast`", "old disabled state maps to `off`",
-        "Old OMPS releases cannot read the new three-state format", "fall back to their own default Fast state", "top-level `fast` field used by v1.0.0", "still ignored",
-        "When OMPS is active", "active preset contains at least one role whose provider is exactly `openai` or `openai-codex`", "existing OMPS status appends exactly",
-        "`OpenAI Fast Mode: off`", "`OpenAI Fast Mode: fast`", "`OpenAI Fast Mode: ultrafast`", "footer is only the requested session policy",
-        "provider is exactly `openai` or `openai-codex`", "payload model matches the active Pi model", '`service_tier: "priority"`',
-        '`service_tier: "ultrafast"`', "model ID is exactly `gpt-5.6-sol`", "automatically downgrade at request time", "without changing the persisted session tier or footer",
-        "Sol roles therefore request `ultrafast` while other OpenAI roles request `priority`", "regardless of the current Main model or current request", "`off` leaves requests unchanged",
-        "future child `create` and `resume` launches", "Running children do not hot-switch", "Main does not mutate `process.env`",
-        "Compaction and branch-summary model calls keep their default service tier", "limited preview", "permissions, pricing, availability, and server-side fallback behavior have not been publicly specified",
-        "Pi's internal cost estimate does not recognize `ultrafast`", "existing `priority` estimate may also be incomplete",
         "Cache Mode belongs to the current Pi session", "defaults to Short for a new session", "Bare `/cache` toggles between Long and Short",
         "latest toggle applies across every branch", "session resume recover it from session history", "fork inherits the last Cache Mode state",
         "provider is exactly `anthropic`", "API is exactly `anthropic-messages`", "payload model matches the active Pi model",
@@ -3333,7 +3183,7 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "under Pi's current implementation", "Compaction and branch-summary model calls remain unchanged", "does not prewarm caches",
         "does not copy context-cache headers, OAuth handling, or transport behavior", "increase Anthropic cache-write cost",
         "any role in the active preset uses provider exactly `anthropic`", "`Anthropic Cache Mode: long` or `Anthropic Cache Mode: short`",
-        "preset-wide", "does not depend on the current Main model or authentication", "`OpenAI Fast Mode: ultrafast` before Anthropic Cache Mode",
+        "preset-wide", "does not depend on the current Main model or authentication",
         "requested session policy", "does not prove that OAuth is active", "server accepted the retention request", "cache hit occurred",
         "does not add the word Requested",
       ]
@@ -3369,20 +3219,6 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "固定的 `ctrl+shift+←/→ viewer` 提示", "先只保留完整的 Ctrl+O 提示", "两条提示都省略",
         "Agents heading 展开时不显示任何提示",
         "subagent `clear` 在 reload 后仍保持清空",
-        "属于当前 Pi session", "新 session 默认是 `off`", "`off → fast → ultrafast → off`", "第一次命令会从 `off` 切到 `fast`",
-        "整个 session 的全部 branch", "tree navigation 不会改变状态", "reload、进程重启与 session resume", "从 session history 恢复状态",
-        "fork 会继承", "复制的 target path 上最后一条 Fast Mode 状态",
-        "使用 `--no-session`", "Fast Mode 从 `off` 开始", "只在当前进程内保留", "进程重启后不会恢复",
-        "新版 OMPS 可以读取旧版写入的 Fast Mode 状态", "旧状态为开启时映射到 `fast`", "为关闭时映射到 `off`",
-        "旧版 OMPS 无法读取新的三态格式", "回退到该旧版本自己的默认 Fast 状态", "v1.0.0 写入", "顶层的 `fast` 字段仍会被忽略",
-        "OMPS active", "active preset 至少包含一个 provider 精确为 `openai` 或 `openai-codex` 的 role", "现有 OMPS status 会精确追加",
-        "`OpenAI Fast Mode: off`", "`OpenAI Fast Mode: fast`", "`OpenAI Fast Mode: ultrafast`", "footer 只表示请求的 session policy",
-        "provider 精确为 `openai` 或 `openai-codex`", "payload model 与当前 Pi model 匹配", '`service_tier: "priority"`',
-        '`service_tier: "ultrafast"`', "model ID 精确为 `gpt-5.6-sol`", "在 request 级自动降级", "不会改变持久化 session tier 或 footer",
-        "Sol role 因此请求 `ultrafast`，其他 OpenAI role 请求 `priority`", "不受当前 Main model 或当前 request 影响", "`off` 不修改 request",
-        "future child `create` 与 `resume` launch", "running child 不会热切换", "Main 也不会修改 `process.env`",
-        "compaction 与 branch summary model call 仍使用 default tier", "有限 preview", "权限、价格、可用性与服务端 fallback 行为尚未公开",
-        "Pi 内部费用估算不认识 `ultrafast`", "现有 `priority` 估算也可能不完整",
         "Cache Mode 属于当前 Pi session", "新 session 默认使用 Short", "裸 `/cache` 在 Long 与 Short 之间切换",
         "最近一次 toggle 对全部 branch 生效", "session resume 会从 session history 恢复状态", "fork 会继承",
         "provider 必须精确为 `anthropic`", "API 必须精确为 `anthropic-messages`", "payload model 必须与当前 Pi model 匹配",
@@ -3401,18 +3237,13 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "完整的 Anthropic OAuth gate", "在 Pi 当前实现下", "compaction 与 branch summary model call 保持不变", "不主动 prewarm cache",
         "不复制 context-cache header、OAuth 处理或 transport 行为", "可能增加 Anthropic cache write 成本",
         "任一 role 的 provider 精确为 `anthropic`", "`Anthropic Cache Mode: long` 或 `Anthropic Cache Mode: short`", "基于整个 preset",
-        "不依赖当前 Main model 或认证状态", "`OpenAI Fast Mode: ultrafast`，再显示 Anthropic Cache Mode", "请求的 session policy",
+        "不依赖当前 Main model 或认证状态", "请求的 session policy",
         "不证明 OAuth 已启用", "不证明 server 已接受 retention request", "不证明发生了 cache hit", "不会添加 Requested 字样",
       ], `${file} visible behavior contract`);
 
-  const presetIntro = section(english ? "## Presets and configuration" : "## Preset 与配置", "### Fast Mode");
-  const fastModeDoc = section("### Fast Mode", "### Cache Mode");
+  const presetIntro = section(english ? "## Presets and configuration" : "## Preset 与配置", "### Cache Mode");
   const cacheModeDoc = section("### Cache Mode", english ? "## Runtime, UI, and persistence" : "## Runtime、UI 与持久化");
-  hasNone(presetIntro, ["- `fast`", "- `cache`"], `${file} bundled preset schema must not document session policy state`);
-  hasNone(fastModeDoc, [
-    "agent-global Fast Mode state", "global agent-dir configuration", "agent-global Fast Mode 状态", "全局 agent-dir 配置",
-    "project-global", "project scoped", "项目作用域",
-  ], `${file} Fast Mode must not claim project or agent-global persistence`);
+  hasNone(presetIntro, ["- `cache`"], `${file} bundled preset schema must not document session policy state`);
   hasNone(cacheModeDoc, [
     "agent-global Cache Mode state", "global agent-dir configuration", "agent-global Cache Mode 状态", "全局 agent-dir 配置",
     "project-global", "project scoped", "项目作用域", "CCH", "x-api-key", "Authorization:",
@@ -4111,12 +3942,11 @@ hasAll(subagentRuntimeTests, [
 ], "runtime tests must cover cloned Viewer creation ordering and retained membership parity");
 hasAll(read("tests/loop-load.test.mjs"), ['event.method === "custom"'], "load tests must assert the viewer never opens outside a TUI session");
 hasAll(read("tests/loop-load.test.mjs"), [
-  'assert.deepEqual(main.commands, ["fast", "goal", "loop"])', "assert.deepEqual(child.commands, [])",
-  '"fast" in JSON.parse(readFileSync(bootstrappedConfig', "statSync(bootstrappedConfig).mode & 0o777, 0o600",
-], "load harness must lock the main-only Fast Mode command registration boundary");
+  'assert.deepEqual(main.commands, ["cache", "goal", "loop"])', "assert.deepEqual(child.commands, [])",
+  "statSync(bootstrappedConfig).mode & 0o777, 0o600",
+], "load harness must lock the main and child command registration boundary");
 
 const preset = json("config/oh-my-pi-slim.example.json");
-check(!Object.prototype.hasOwnProperty.call(preset, "fast"), "bundled config must not contain legacy agent-global Fast Mode state");
 check(Boolean(preset.presets?.[preset.defaultPreset]), "default preset must exist");
 for (const [presetName, value] of Object.entries(preset.presets ?? {})) {
   check(JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...ROLES].sort()), `${presetName} must define exactly seven roles`);

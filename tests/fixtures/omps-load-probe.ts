@@ -37,7 +37,7 @@ export default function ompsLoadProbe(pi: ExtensionAPI): void {
       ctx.ui.notify(`OMPS_LOAD_PROBE ${JSON.stringify({
         tools: tools.map((tool) => tool.name).sort(),
         activeTools: pi.getActiveTools().filter((name) => AUDITED_TOOLS.has(name)).sort(),
-        commands: pi.getCommands().map((command) => command.name).filter((name) => name === "fast" || name === "goal" || name === "loop").sort(),
+        commands: pi.getCommands().map((command) => command.name).filter((name) => name === "cache" || name === "goal" || name === "loop").sort(),
         descriptions: Object.fromEntries(tools.map((tool) => [tool.name, tool.description])),
         promptSnippets,
         guidelinesByTool,

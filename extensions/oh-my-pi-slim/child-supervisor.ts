@@ -14,9 +14,6 @@ import {
   CACHE_RETENTION_ENV_VAR,
   cacheRetentionFromEnv,
 } from "./cache-retention.js";
-import { applyFastServiceTier, FAST_ENV_VAR, fastTierFromEnv } from "./fast-mode.js";
-
-const FAST_TIER = fastTierFromEnv(process.env[FAST_ENV_VAR]) ?? "off";
 const CACHE_RETENTION = cacheRetentionFromEnv(process.env[CACHE_RETENTION_ENV_VAR]) ?? "short";
 const REASONS = ["need_decision", "interview_request", "progress_update"] as const;
 
@@ -42,16 +39,12 @@ export default function childSupervisor(pi: ExtensionAPI): void {
 
   pi.on("before_provider_request", (event, ctx) => {
     const model = ctx.model;
-    let payload = event.payload;
-    const fastPayload = applyFastServiceTier(payload, model, FAST_TIER);
-    if (fastPayload) payload = fastPayload;
-    const cachePayload = applyCacheRetentionForRequest(
-      payload,
+    return applyCacheRetentionForRequest(
+      event.payload,
       model,
       CACHE_RETENTION,
       () => model !== undefined && ctx.modelRegistry.isUsingOAuth(model),
     );
-    return cachePayload ?? fastPayload;
   });
 
   let pendingCheckpoint: { cycle: number } | undefined;

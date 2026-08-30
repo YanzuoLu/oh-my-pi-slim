@@ -15,7 +15,6 @@ const dependencyMap = {
   "./ask-tui.js": new URL("../extensions/oh-my-pi-slim/ask-tui.ts", import.meta.url).href,
   "./bootstrap.js": new URL("../extensions/oh-my-pi-slim/bootstrap.ts", import.meta.url).href,
   "./cache-retention.js": new URL("../extensions/oh-my-pi-slim/cache-retention.ts", import.meta.url).href,
-  "./fast-mode.js": new URL("../extensions/oh-my-pi-slim/fast-mode.ts", import.meta.url).href,
   "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
   "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
   "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
@@ -1080,7 +1079,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
   const previousOmpsChild = process.env.OMPS_SUBAGENT_CHILD;
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const previousSkipBootstrap = process.env.OMPS_SKIP_BOOTSTRAP;
-  let fastAgentDir;
+  let agentDir;
   try {
     delete process.env.PI_SUBAGENT_CHILD;
     delete process.env.OMPS_SUBAGENT_CHILD;
@@ -1094,7 +1093,6 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.ok(main.tools.includes("subagent"));
     assert.ok(main.commands.includes("goal"));
     assert.ok(main.commands.includes("loop"));
-    assert.ok(main.commands.includes("fast"));
     assert.ok(main.commands.includes("cache"));
     assert.equal(main.commands.includes("monitor"), false);
     assert.deepEqual(main.shortcuts, ["ctrl+shift+left", "ctrl+shift+right"], "main sessions register exactly the two viewer shortcuts");
@@ -1109,16 +1107,13 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.deepEqual(beforeAgentStart.map((handler) => handler({ systemPrompt: "base" }, promptCtx)), [undefined, undefined]);
     assert.deepEqual(main.sends, [], "reminder handlers never send or enqueue another message");
 
-    fastAgentDir = mkdtempSync(join(CACHE, "fast-main-agent-"));
-    process.env.PI_CODING_AGENT_DIR = fastAgentDir;
+    agentDir = mkdtempSync(join(CACHE, "cache-main-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     process.env.OMPS_SKIP_BOOTSTRAP = "1";
-    const legacyConfigPath = join(fastAgentDir, "oh-my-pi-slim.json");
-    const legacyConfig = {
-      ...JSON.parse(readFileSync(join(ROOT, "config/oh-my-pi-slim.example.json"), "utf8")),
-      fast: true,
-    };
-    writeFileSync(legacyConfigPath, `${JSON.stringify(legacyConfig, null, 2)}\n`);
-    const sessionDir = join(fastAgentDir, "sessions");
+    const configPath = join(agentDir, "oh-my-pi-slim.json");
+    const config = JSON.parse(readFileSync(join(ROOT, "config/oh-my-pi-slim.example.json"), "utf8"));
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    const sessionDir = join(agentDir, "sessions");
     mkdirSync(sessionDir, { recursive: true });
     const notifications = [];
     const makeCtx = (
@@ -1149,7 +1144,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
         getSessionId: () => sessionId,
       },
     });
-    const fastCtx = makeCtx(sessionEntries, "fast-main-session");
+    const mainCtx = makeCtx(sessionEntries, "main-session");
     const sessionStart = main.handlers.get("session_start")[0];
     const providerHook = main.handlers.get("before_provider_request");
     const providerResult = (runtime, ctx, payload = { model: ctx.model.id }) => runtime.handlers.get("before_provider_request")[0](
@@ -1157,44 +1152,8 @@ test("main sessions register Ask and runtime tools while child sessions return b
       ctx,
     );
     assert.equal(providerHook.length, 1, "main unconditionally registers exactly one provider payload hook");
-    await sessionStart({ reason: "startup" }, fastCtx);
-    assert.equal(JSON.parse(readFileSync(legacyConfigPath, "utf8")).fast, true, "the legal v1.0.0 preset config keeps its legacy field untouched");
-    assert.equal(providerResult(main, fastCtx), undefined, "empty session entries default Fast Mode off regardless of legacy agent-global config");
-
-    const fastCommand = main.commandDefinitions.get("fast");
-    const entriesBeforeUsage = sessionEntries.length;
-    await fastCommand.handler("on", fastCtx);
-    assert.equal(sessionEntries.length, entriesBeforeUsage, "Fast Mode arguments never append session state");
-    assert.deepEqual(notifications.at(-1), { message: "Usage: /fast", level: "warning" });
-
-    await fastCommand.handler("", fastCtx);
-    assert.deepEqual(sessionEntries.at(-1), {
-      type: "custom",
-      customType: "oh-my-pi-slim:fast-state",
-      data: { version: 2, tier: "fast" },
-    });
-    assert.equal(providerResult(main, fastCtx).service_tier, "priority", "the first command enters fast");
-
-    await fastCommand.handler("", fastCtx);
-    assert.deepEqual(sessionEntries.at(-1).data, { version: 2, tier: "ultrafast" });
-    assert.equal(providerResult(main, fastCtx).service_tier, "priority", "ultrafast downgrades non-Sol requests to priority");
-    const solCtx = makeCtx(sessionEntries, "fast-sol-session", {
-      provider: "openai", api: "openai-responses", id: "gpt-5.6-sol",
-    });
-    assert.equal(providerResult(main, solCtx).service_tier, "ultrafast");
-    assert.match(notifications.at(-1).message, /Fast Mode is now ultrafast.*account permission.*pricing/);
-
-    await fastCommand.handler("", fastCtx);
-    assert.deepEqual(sessionEntries.at(-1).data, { version: 2, tier: "off" });
-    assert.equal(providerResult(main, fastCtx), undefined);
-
+    await sessionStart({ reason: "startup" }, mainCtx);
     const appendEntry = main.pi.appendEntry;
-    main.pi.appendEntry = () => { throw new Error("injected append failure"); };
-    await fastCommand.handler("", fastCtx);
-    assert.equal(notifications.at(-1).level, "error");
-    assert.match(notifications.at(-1).message, /injected append failure/);
-    assert.equal(providerResult(main, fastCtx), undefined, "append failure does not change in-memory Fast Mode");
-    main.pi.appendEntry = appendEntry;
 
     const anthropicModel = {
       provider: "anthropic",
@@ -1215,6 +1174,10 @@ test("main sessions register Ask and runtime tools while child sessions return b
       { type: "ephemeral" },
       "a new session defaults Cache Mode Short",
     );
+    const apiKeyCacheCtx = makeCtx(sessionEntries, "cache-api-key-session", anthropicModel, false);
+    const apiKeyPayload = cachePayload("1h");
+    assert.equal(providerResult(main, apiKeyCacheCtx, apiKeyPayload), undefined, "API key requests bypass Cache Mode");
+    assert.deepEqual(apiKeyPayload.messages[0].content[0].cache_control, { type: "ephemeral", ttl: "1h" });
 
     const cacheCommand = main.commandDefinitions.get("cache");
     const entriesBeforeCacheUsage = sessionEntries.length;
@@ -1251,19 +1214,13 @@ test("main sessions register Ask and runtime tools while child sessions return b
 
     sessionEntries.push({
       type: "custom",
-      customType: "oh-my-pi-slim:fast-state",
-      data: { version: 2, tier: "off", invalid: true },
-    }, {
-      type: "custom",
       customType: "oh-my-pi-slim:cache-state",
       data: { version: 1, retention: "short", invalid: true },
     });
     const reload = registrationHarness(sessionEntries);
     ohMyPiSlim(reload.pi);
-    const reloadCtx = makeCtx(sessionEntries, "fast-main-session");
-    await reload.handlers.get("session_start")[0]({ reason: "reload" }, reloadCtx);
-    assert.equal(providerResult(reload, reloadCtx), undefined, "reload restores the last valid Fast state from the same full entry log");
     const reloadCacheCtx = makeCtx(sessionEntries, "cache-main-session", anthropicModel, true);
+    await reload.handlers.get("session_start")[0]({ reason: "reload" }, reloadCacheCtx);
     assert.deepEqual(
       providerResult(reload, reloadCacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
       { type: "ephemeral" },
@@ -1273,10 +1230,8 @@ test("main sessions register Ask and runtime tools while child sessions return b
     for (const reason of ["resume", "fork"]) {
       const restored = registrationHarness(sessionEntries);
       ohMyPiSlim(restored.pi);
-      const restoredCtx = makeCtx(sessionEntries, `fast-${reason}-session`);
-      await restored.handlers.get("session_start")[0]({ reason }, restoredCtx);
-      assert.equal(providerResult(restored, restoredCtx), undefined, `${reason} restores or inherits the copied Fast session path state`);
       const restoredCacheCtx = makeCtx(sessionEntries, `cache-${reason}-session`, anthropicModel, true);
+      await restored.handlers.get("session_start")[0]({ reason }, restoredCacheCtx);
       assert.deepEqual(
         providerResult(restored, restoredCacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
         { type: "ephemeral" },
@@ -1286,10 +1241,8 @@ test("main sessions register Ask and runtime tools while child sessions return b
 
     const newSession = registrationHarness([]);
     ohMyPiSlim(newSession.pi);
-    const newCtx = makeCtx(newSession.sessionEntries, "fast-new-session");
-    await newSession.handlers.get("session_start")[0]({ reason: "new" }, newCtx);
-    assert.equal(providerResult(newSession, newCtx), undefined, "a new empty session defaults Fast Mode off");
     const newCacheCtx = makeCtx(newSession.sessionEntries, "cache-new-session", anthropicModel, true);
+    await newSession.handlers.get("session_start")[0]({ reason: "new" }, newCacheCtx);
     assert.deepEqual(
       providerResult(newSession, newCacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
       { type: "ephemeral" },
@@ -1298,31 +1251,21 @@ test("main sessions register Ask and runtime tools while child sessions return b
 
     const treeEntries = [{
       type: "custom",
-      customType: "oh-my-pi-slim:fast-state",
-      data: { version: 1, fast: true },
-    }, {
-      type: "custom",
       customType: "oh-my-pi-slim:cache-state",
       data: { version: 1, retention: "short" },
     }];
     const treeRuntime = registrationHarness(treeEntries);
     ohMyPiSlim(treeRuntime.pi);
-    const treeCtx = makeCtx(treeEntries, "fast-tree-session");
-    await treeRuntime.handlers.get("session_start")[0]({ reason: "startup" }, treeCtx);
+    const treeCacheCtx = makeCtx(treeEntries, "cache-tree-session", anthropicModel, true);
+    await treeRuntime.handlers.get("session_start")[0]({ reason: "startup" }, treeCacheCtx);
     treeEntries.push({
-      type: "custom",
-      customType: "oh-my-pi-slim:fast-state",
-      data: { version: 1, fast: false },
-    }, {
       type: "custom",
       customType: "oh-my-pi-slim:cache-state",
       data: { version: 1, retention: "long" },
     });
     const entriesBeforeTree = treeEntries.length;
-    await treeRuntime.handlers.get("session_tree")[0]({}, treeCtx);
-    assert.equal(treeEntries.length, entriesBeforeTree, "tree navigation never appends Fast or Cache Mode state");
-    assert.equal(providerResult(treeRuntime, treeCtx).service_tier, "priority", "tree navigation never recomputes session-wide Fast Mode from a branch");
-    const treeCacheCtx = makeCtx(treeEntries, "cache-tree-session", anthropicModel, true);
+    await treeRuntime.handlers.get("session_tree")[0]({}, treeCacheCtx);
+    assert.equal(treeEntries.length, entriesBeforeTree, "tree navigation never appends Cache Mode state");
     assert.deepEqual(
       providerResult(treeRuntime, treeCacheCtx, cachePayload("1h")).messages[0].content[0].cache_control,
       { type: "ephemeral" },
@@ -1333,12 +1276,12 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.equal(main.handlers.has("message_start"), false);
     assert.equal(main.handlers.has("context"), false);
 
-    await main.commandDefinitions.get("omps").handler("on", fastCtx);
-    const presetReminderResults = beforeAgentStart.map((handler) => handler({ systemPrompt: "base" }, fastCtx));
+    await main.commandDefinitions.get("omps").handler("on", mainCtx);
+    const presetReminderResults = beforeAgentStart.map((handler) => handler({ systemPrompt: "base" }, mainCtx));
     assert.equal(presetReminderResults[0].message.customType, "oh-my-pi-slim:phase-reminder");
     assert.match(presetReminderResults[0].systemPrompt, /^base\n\n/);
     assert.equal(presetReminderResults[1], undefined);
-    await main.commandDefinitions.get("omps").handler("off", fastCtx);
+    await main.commandDefinitions.get("omps").handler("off", mainCtx);
 
     await main.toolDefinitions.get("goal").execute("goal-create", {
       action: "create",
@@ -1396,6 +1339,6 @@ test("main sessions register Ask and runtime tools while child sessions return b
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     if (previousSkipBootstrap === undefined) delete process.env.OMPS_SKIP_BOOTSTRAP;
     else process.env.OMPS_SKIP_BOOTSTRAP = previousSkipBootstrap;
-    if (fastAgentDir) rmSync(fastAgentDir, { recursive: true, force: true });
+    if (agentDir) rmSync(agentDir, { recursive: true, force: true });
   }
 });

@@ -257,22 +257,7 @@ completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠。tool output 折�
 | `/omps status` | 查看激活状态 |
 | `/omps presets` | 列出 preset |
 | `/preset [name]` | 切换 preset；省略名称时列出 preset |
-| `/fast` | 在当前 Pi session 中依次切换 Fast、Ultrafast 与 Off，不接受任何参数 |
 | `/cache` | 在当前 Pi session 的 Long 与 Short Cache Mode 间切换，不接受任何参数 |
-
-### Fast Mode
-
-Fast Mode 属于当前 Pi session，新 session 默认是 `off`。裸 `/fast` 按 `off → fast → ultrafast → off` 循环，因此新 session 的第一次命令会从 `off` 切到 `fast`。最近一次 tier 对整个 session 的全部 branch 生效，因此 tree navigation 不会改变状态。reload、进程重启与 session resume 都会从 session history 恢复状态。fork 会继承 Pi 为创建该 fork 而复制的 target path 上最后一条 Fast Mode 状态。使用 `--no-session` 时，Fast Mode 从 `off` 开始，状态只在当前进程内保留，进程重启后不会恢复。
-
-新版 OMPS 可以读取旧版写入的 Fast Mode 状态。旧状态为开启时映射到 `fast`，为关闭时映射到 `off`。旧版 OMPS 无法读取新的三态格式，会回退到该旧版本自己的默认 Fast 状态。v1.0.0 写入 `oh-my-pi-slim.json` 顶层的 `fast` 字段仍会被忽略，可以手动删除。Fast Mode 与 preset 是否激活相互独立。
-
-当 OMPS active 且 active preset 至少包含一个 provider 精确为 `openai` 或 `openai-codex` 的 role 时，现有 OMPS status 会精确追加 `OpenAI Fast Mode: off`、`OpenAI Fast Mode: fast` 或 `OpenAI Fast Mode: ultrafast`。如果 preset 的七个 role 全部使用其他 provider，即使手动把 Main 切到 OpenAI，也不会显示 OpenAI Fast Mode suffix。footer 只表示请求的 session policy，不表示当前 Main provider，也不证明 server 已接受 service tier。
-
-`fast` 作用于普通 agent request。仅当 provider 精确为 `openai` 或 `openai-codex`，且 payload model 与当前 Pi model 匹配时，才会请求 `service_tier: "priority"`。`ultrafast` 在相同精确 gate 全部通过并且 model ID 精确为 `gpt-5.6-sol` 时请求 `service_tier: "ultrafast"`。其他合格 OpenAI model 会在 request 级自动降级为 `service_tier: "priority"`，但不会改变持久化 session tier 或 footer，它们仍显示 `ultrafast`。在混合 preset 中，Sol role 因此请求 `ultrafast`，其他 OpenAI role 请求 `priority`。包含 Sol 的 preset 可以使用相同的 session-wide 三态循环，不受当前 Main model 或当前 request 影响。`off` 不修改 request。
-
-只有 future child `create` 与 `resume` launch 会继承当前三态 snapshot。running child 不会热切换，Main 也不会修改 `process.env`。compaction 与 branch summary model call 仍使用 default tier。Ultrafast 是有限 preview，其权限、价格、可用性与服务端 fallback 行为尚未公开。Priority 同样依赖账户权限，request 可能失败。后加载的 extension 可以覆盖 OMPS 修改后的 payload。任何 Fast tier 都不承诺 capacity 或更快完成。
-
-Pi 内部费用估算不认识 `ultrafast`，现有 `priority` 估算也可能不完整，因此显示费用可能与 provider billing 不同。
 
 ### Cache Mode
 
@@ -286,7 +271,7 @@ Long 只升级已有的合法 `{ type: "ephemeral" }` cache breakpoint，并通�
 
 只有 future child `create` 与 `resume` launch 会继承当前 Long 或 Short 的 OMPS 内部 snapshot。launch snapshot 不会重写 `PI_CACHE_RETENTION`，也不会修改运行中 parent process 的 `process.env`。running child 不会热切换。每个 child 都会再次执行完整的 Anthropic OAuth gate。在 Pi 当前实现下，compaction 与 branch summary model call 保持不变。OMPS 不主动 prewarm cache，也不复制 context-cache header、OAuth 处理或 transport 行为。更长 retention 可能增加 Anthropic cache write 成本，实际价格取决于当前 model 与账户。
 
-当 OMPS active 且 active preset 中任一 role 的 provider 精确为 `anthropic` 时，footer 会追加 `Anthropic Cache Mode: long` 或 `Anthropic Cache Mode: short`。该资格基于整个 preset，不依赖当前 Main model 或认证状态。混合 preset 会先显示 `OpenAI Fast Mode: off`、`OpenAI Fast Mode: fast` 或 `OpenAI Fast Mode: ultrafast`，再显示 Anthropic Cache Mode。Cache status 只是请求的 session policy，不证明 OAuth 已启用，不证明 server 已接受 retention request，也不证明发生了 cache hit。footer 不会添加 Requested 字样。
+当 OMPS active 且 active preset 中任一 role 的 provider 精确为 `anthropic` 时，footer 会追加 `Anthropic Cache Mode: long` 或 `Anthropic Cache Mode: short`。该资格基于整个 preset，不依赖当前 Main model 或认证状态。Cache status 只是请求的 session policy，不证明 OAuth 已启用，不证明 server 已接受 retention request，也不证明发生了 cache hit。footer 不会添加 Requested 字样。
 
 ## Runtime、UI 与持久化
 

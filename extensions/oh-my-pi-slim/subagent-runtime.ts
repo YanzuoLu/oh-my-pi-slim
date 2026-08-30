@@ -13,7 +13,6 @@ import {
   cacheRetentionEnvValue,
   type CacheRetention,
 } from "./cache-retention.js";
-import { FAST_ENV_VAR, fastEnvValue, type FastTier } from "./fast-mode.js";
 import {
   SPECIALIST_NAMES,
   SUBAGENT_ACTIONS,
@@ -100,7 +99,6 @@ interface AgentDefinition {
 
 type ModelResolver = (agent: SpecialistName) => string;
 type DenyResolver = (agent: SpecialistName) => string[];
-type FastModeResolver = () => FastTier;
 type CacheRetentionResolver = () => CacheRetention;
 
 type TimerHandle = ReturnType<typeof setInterval>;
@@ -486,7 +484,6 @@ export class OmpsSubagentRuntime {
   private goalStatsRoot?: string;
   private modelResolver?: ModelResolver;
   private denyResolver?: DenyResolver;
-  private fastModeResolver: FastModeResolver = () => "off";
   private cacheRetentionResolver: CacheRetentionResolver = () => "short";
   private poller?: TimerHandle;
   private shuttingDown = false;
@@ -524,10 +521,6 @@ export class OmpsSubagentRuntime {
 
   setDenyResolver(resolver?: DenyResolver): void {
     this.denyResolver = resolver;
-  }
-
-  setFastModeResolver(resolver: FastModeResolver = () => "off"): void {
-    this.fastModeResolver = resolver;
   }
 
   setCacheRetentionResolver(resolver: CacheRetentionResolver = () => "short"): void {
@@ -1404,7 +1397,6 @@ export class OmpsSubagentRuntime {
       env: {
         PI_SUBAGENT_CHILD: "1",
         OMPS_SUBAGENT_CHILD: "1",
-        [FAST_ENV_VAR]: fastEnvValue(this.fastModeResolver()),
         [CACHE_RETENTION_ENV_VAR]: cacheRetentionEnvValue(this.cacheRetentionResolver()),
         OMPS_PARENT_RUN_ID: run.id,
         OMPS_RUN_ID: run.id,

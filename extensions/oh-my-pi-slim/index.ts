@@ -20,15 +20,6 @@ import {
   type CacheRetention,
 } from "./cache-retention.js";
 import {
-  applyFastServiceTier,
-  FAST_STATE_ENTRY_TYPE,
-  isFastModeProvider,
-  makeFastState,
-  nextFastTier,
-  replayFastState,
-  type FastTier,
-} from "./fast-mode.js";
-import {
   GOAL_CONTINUATION_MESSAGE_TYPE,
   GOAL_REMINDER_MESSAGE_TYPE,
   registerGoalRuntime,
@@ -342,11 +333,6 @@ function availablePresetsMessage(config: PresetConfig): string {
   return `Available presets: ${Object.keys(config.presets).join(", ")}. Default: ${config.defaultPreset ?? "none"}.\nUsage: /preset <name>`;
 }
 
-/** Whether any of the active preset's seven roles uses an exact Fast Mode provider. */
-export function presetFastModeEligible(preset: Preset | undefined): boolean {
-  return preset !== undefined && Object.values(preset).some((role) => isFastModeProvider(role.provider));
-}
-
 /** Whether any of the active preset's seven roles uses the exact Anthropic provider. */
 export function presetCacheModeEligible(preset: Preset | undefined): boolean {
   return preset !== undefined && Object.values(preset).some((role) => role.provider === "anthropic");
@@ -356,17 +342,14 @@ export function presetCacheModeEligible(preset: Preset | undefined): boolean {
 export function presetStatusContent(
   theme: Pick<Theme, "fg">,
   presetName: string | undefined,
-  fastTier?: FastTier,
-  fastEligible?: boolean,
   cacheRetention?: CacheRetention,
   cacheEligible?: boolean,
 ): string | undefined {
   if (presetName === undefined) return undefined;
-  const fastStatus = fastEligible && fastTier ? ` · OpenAI Fast Mode: ${fastTier}` : "";
   const cacheStatus = cacheEligible && cacheRetention
     ? ` · Anthropic Cache Mode: ${cacheRetention}`
     : "";
-  return theme.fg("accent", `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})${fastStatus}${cacheStatus}`);
+  return theme.fg("accent", `OMPS Preset: ${presetName} (v${PACKAGE_VERSION})${cacheStatus}`);
 }
 
 function isAnthropicOAuth(ctx: ExtensionContext): boolean {
@@ -411,22 +394,16 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   const loops = registerLoopRuntime(pi);
   const monitors = registerMonitorRuntime(pi, { sendMessage: sendLaunchMessage });
   const subagents = registerSubagentRuntime(pi, { sendMessage: sendLaunchMessage });
-  let fastTier: FastTier = "off";
   let cacheRetention: CacheRetention = "short";
-  subagents.setFastModeResolver(() => fastTier);
   subagents.setCacheRetentionResolver(() => cacheRetention);
   pi.on("before_provider_request", (event, ctx) => {
     const model = ctx.model;
-    let payload = event.payload;
-    const fastPayload = applyFastServiceTier(payload, model, fastTier);
-    if (fastPayload) payload = fastPayload;
-    const cachePayload = applyCacheRetentionForRequest(
-      payload,
+    return applyCacheRetentionForRequest(
+      event.payload,
       model,
       cacheRetention,
       () => model !== undefined && ctx.modelRegistry.isUsingOAuth(model),
     );
-    return cachePayload ?? fastPayload;
   });
   // Read-only viewer: it owns no session state, writes nothing, and only reads cloned snapshots.
   const subagentViewer = createSubagentViewer({ snapshot: () => subagents.viewerSnapshot() });
@@ -510,8 +487,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       presetStatusContent(
         ctx.ui.theme,
         active ? activePresetName : undefined,
-        fastTier,
-        presetFastModeEligible(activePreset),
         cacheRetention,
         presetCacheModeEligible(activePreset),
       ),
@@ -644,26 +619,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     updateStatus(ctx);
   }
 
-  pi.registerCommand("fast", {
-    description: "Cycle OpenAI Fast Mode for this Pi session.",
-    handler: async (args, ctx) => {
-      if (args.trim()) {
-        report(ctx, "Usage: /fast", "warning");
-        return;
-      }
-      const next = nextFastTier(fastTier);
-      try {
-        pi.appendEntry(FAST_STATE_ENTRY_TYPE, makeFastState(next));
-      } catch (error) {
-        report(ctx, `Could not update Fast Mode: ${error instanceof Error ? error.message : String(error)}`, "error");
-        return;
-      }
-      fastTier = next;
-      updateStatus(ctx);
-      report(ctx, `Fast Mode is now ${next} for this Pi session. Service tiers require account permission and may have different availability or pricing.`, "info");
-    },
-  });
-
   pi.registerCommand("cache", {
     description: "Toggle Anthropic cache retention for this Pi session.",
     handler: async (args, ctx) => {
@@ -792,10 +747,8 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     notificationGate.clearWithoutDelivery();
     goal?.setDeliveryPaused(false);
     sessionCtx = ctx;
-    // Fast and Cache modes are session-wide across every branch, so replay the full entry log rather than the active branch.
-    const sessionEntries = ctx.sessionManager.getEntries();
-    fastTier = replayFastState(sessionEntries);
-    cacheRetention = replayCacheState(sessionEntries);
+    // Cache Mode is session-wide across every branch, so replay the full entry log rather than the active branch.
+    cacheRetention = replayCacheState(ctx.sessionManager.getEntries());
     active = false;
     activePresetName = undefined;
     activePreset = undefined;
