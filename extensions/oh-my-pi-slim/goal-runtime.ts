@@ -187,6 +187,12 @@ function toolText(text: string, details: unknown) {
   return { content: [{ type: "text" as const, text }], details };
 }
 
+function goalResult(goal: PublicGoalState | null, changed: boolean, message?: string) {
+  const resultGoal = goal ? cloneGoal(goal) : null;
+  const details = { goal: resultGoal, changed };
+  return toolText(JSON.stringify({ ...details, ...(message === undefined ? {} : { message }) }), details);
+}
+
 function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
   return value as Record<string, unknown>;
@@ -395,7 +401,7 @@ export function goalPhaseReminder(abstract: string): string {
 
 function statusReceipt(prefix: string, goal: PublicGoalState, changed: boolean) {
   const receipt = changed ? prefix : `${prefix} No change.`;
-  return toolText(`${receipt}\n${JSON.stringify(goal, null, 2)}`, { goal: cloneGoal(goal), changed });
+  return goalResult(goal, changed, receipt);
 }
 
 function emptyStats(): GoalExecutionStats {
@@ -828,11 +834,10 @@ export class GoalRuntime {
     this.validateActionFields(input, action);
 
     if (action === "status") {
-      if (!this.snapshot) return toolText("No Goal.", { goal: null, changed: false });
-      const goal = cloneGoal(this.snapshot.goal);
-      return toolText(JSON.stringify(goal, null, 2), { goal, changed: false });
+      if (!this.snapshot) return goalResult(null, false, "No Goal.");
+      return goalResult(this.snapshot.goal, false);
     }
-    if (action === "clear" && !this.snapshot) return toolText("No Goal to clear.", { goal: null, changed: false });
+    if (action === "clear" && !this.snapshot) return goalResult(null, false, "No Goal to clear.");
     if (action === "create") return this.create(input);
     if (!this.snapshot) throw new Error("No Goal exists on the current branch.");
     if (action === "modify") return this.modify(input);
@@ -883,7 +888,7 @@ export class GoalRuntime {
     };
     this.clearRetryTimer();
     this.store(snapshot);
-    return toolText(goalActivationContent("created", snapshot.goal), { goal: cloneGoal(snapshot.goal), changed: true });
+    return goalResult(snapshot.goal, true, goalActivationContent("created", snapshot.goal));
   }
 
   private modify(input: Record<string, unknown>): ReturnType<typeof toolText> {
@@ -908,7 +913,7 @@ export class GoalRuntime {
     };
     this.clearRetryTimer();
     this.store(next);
-    return toolText(goalActivationContent("modified", next.goal), { goal: cloneGoal(next.goal), changed: true });
+    return goalResult(next.goal, true, goalActivationContent("modified", next.goal));
   }
 
   private pause(input: Record<string, unknown>): ReturnType<typeof toolText> {
@@ -949,7 +954,7 @@ export class GoalRuntime {
     next.goal.noProgressCount = 0;
     this.clearRetryTimer();
     this.store(next);
-    return toolText(goalActivationContent("resumed", next.goal), { goal: cloneGoal(next.goal), changed: true });
+    return goalResult(next.goal, true, goalActivationContent("resumed", next.goal));
   }
 
   private complete(input: Record<string, unknown>): ReturnType<typeof toolText> {
@@ -1011,7 +1016,7 @@ export class GoalRuntime {
     this.pi.appendEntry<null>(GOAL_STATE_ENTRY_TYPE, null);
     this.activitySerial += 1;
     this.emit();
-    return toolText("Goal cleared.", { goal: null, changed: true });
+    return goalResult(null, true, "Goal cleared.");
   }
 
   private requireMutable(action: string): GoalSnapshot {

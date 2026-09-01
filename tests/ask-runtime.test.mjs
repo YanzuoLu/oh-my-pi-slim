@@ -27,6 +27,7 @@ const {
   AskRuntime,
   askResultModelContent,
   askUserQuestionParameters,
+  buildAskModelDto,
   buildAskResult,
   createRpcAskDriver,
   validateQuestionnaire,
@@ -207,14 +208,62 @@ test("shared result builder normalizes answers, partial submit, empty submit, an
   assert.deepEqual(buildAskResult(questionnaire, { answers: [] }), {
     answers: [], cancelled: true, partial: true, cancelReason: "empty_submit",
   });
-  const partialContent = askResultModelContent(partial, questionnaire);
-  assert.match(partialContent, /Questionnaire partially submitted\./);
-  assert.match(partialContent, /Confirmed answers:/);
-  assert.match(partialContent, /Answer: note/);
-  assert.match(partialContent, /Unanswered questions:/);
-  const emptyContent = askResultModelContent(buildAskResult(questionnaire, { answers: [] }), questionnaire);
-  assert.match(emptyContent, /Questionnaire not completed because no answers were submitted\./);
-  assert.match(emptyContent, /No answers were confirmed\./);
+});
+
+test("model DTO content is exact compact JSON for complete, partial, user-cancelled, and empty-submit outcomes", () => {
+  const questionnaire = validateQuestionnaire({ questions: [
+    baseParams.questions[0],
+    {
+      question: "Which extras?",
+      header: "Extras",
+      multiSelect: true,
+      options: [{ label: "Logs", description: "Include logs." }, { label: "Metrics", description: "Include metrics." }],
+    },
+    {
+      question: "Any note?",
+      header: "Note",
+      options: [{ label: "Skip", description: "Skip it." }, { label: "Add", description: "Add it." }],
+    },
+  ] });
+  const complete = buildAskResult(questionnaire, { answers: [
+    { questionIndex: 0, kind: "option", answer: "Safe" },
+    { questionIndex: 1, kind: "multi", answer: [] },
+    { questionIndex: 2, kind: "custom", answer: "" },
+  ] });
+  const partial = buildAskResult(questionnaire, { answers: [{ questionIndex: 2, kind: "custom", answer: "note" }] });
+  const userCancelled = buildAskResult(questionnaire, {
+    answers: [{ questionIndex: 0, kind: "option", answer: "Safe" }],
+    cancelled: true,
+  });
+  const emptySubmit = buildAskResult(questionnaire, { answers: [] });
+
+  assert.equal(
+    askResultModelContent(complete, questionnaire),
+    '{"outcome":"complete","answers":[{"questionIndex":0,"kind":"option","answer":"Safe","preview":"full preview"},{"questionIndex":1,"kind":"multi","answer":[]},{"questionIndex":2,"kind":"custom","answer":null}],"unanswered":[]}',
+  );
+  assert.equal(
+    askResultModelContent(partial, questionnaire),
+    '{"outcome":"partial","answers":[{"questionIndex":2,"kind":"custom","answer":"note"}],"unanswered":[0,1]}',
+  );
+  assert.equal(
+    askResultModelContent(userCancelled, questionnaire),
+    '{"outcome":"cancelled","answers":[],"unanswered":[0,1,2],"reason":"user_cancelled"}',
+  );
+  assert.equal(
+    askResultModelContent(emptySubmit, questionnaire),
+    '{"outcome":"cancelled","answers":[],"unanswered":[0,1,2],"reason":"empty_submit"}',
+  );
+  assert.deepEqual(buildAskModelDto(complete, questionnaire), {
+    outcome: "complete",
+    answers: [
+      { questionIndex: 0, kind: "option", answer: "Safe", preview: "full preview" },
+      { questionIndex: 1, kind: "multi", answer: [] },
+      { questionIndex: 2, kind: "custom", answer: null },
+    ],
+    unanswered: [],
+  });
+  assert.equal(askResultModelContent(complete, questionnaire).includes("\n"), false);
+  assert.doesNotMatch(askResultModelContent(complete, questionnaire), /"(?:question|header|selected)"/);
 });
 
 test("the shared result builder discards cancelled driver answers, malformed ones included", () => {
@@ -243,13 +292,8 @@ test("the shared result builder discards cancelled driver answers, malformed one
   assert.throws(() => buildAskResult(questionnaire, { cancelled: true }), /must return an answers array/);
 
   const content = askResultModelContent(canonical, questionnaire);
-  assert.match(content, /Questionnaire not completed because the user cancelled it\./);
-  assert.match(content, /No answers were retained\./);
-  assert.doesNotMatch(content, /Confirmed answers:/);
-  assert.doesNotMatch(content, /Safe|Yes/);
-  assert.match(content, /Unanswered questions:/);
-  assert.match(content, /1\. Path — Which path\?/);
-  assert.match(content, /2\. Extra — Any extra\?/);
+  assert.equal(content, '{"outcome":"cancelled","answers":[],"unanswered":[0,1],"reason":"user_cancelled"}');
+  assert.doesNotMatch(content, /Safe|Yes|Which path|Any extra|Path|Extra/);
 });
 
 test("single-flight queue runs one dialog at a time and waiting excludes queued invocations", async () => {
@@ -555,10 +599,10 @@ test("registered tool uses the shared envelope and user cancel remains a normal 
   runtime.registerTool();
   const result = await harness.tools.get("ask_user_question").execute("call", baseParams, undefined, undefined, tuiCtx());
   assert.deepEqual(result.details, { answers: [], cancelled: true, partial: true, cancelReason: "user_cancelled" });
-  assert.match(result.content[0].text, /not completed/);
-  assert.match(result.content[0].text, /No answers were retained\./);
-  assert.doesNotMatch(result.content[0].text, /partial\b/);
-  assert.doesNotMatch(result.content[0].text, /declin/i);
+  assert.equal(
+    result.content[0].text,
+    '{"outcome":"cancelled","answers":[],"unanswered":[0],"reason":"user_cancelled"}',
+  );
 });
 
 test("a host, tool, or session abort stays an AbortError and never becomes a user cancellation", async () => {

@@ -211,26 +211,38 @@ test("tool results start with one blank separator line", () => {
 
 test("subagent immediate results use accurate compact action acknowledgements", () => {
   const created = render(renderSubagentResult(
-    { details: { run: run({ id: "create-id", agent: "explorer", status: "starting", output: undefined, error: undefined }) } },
+    {
+      content: [{ type: "text", text: '{"id":"content-create-id","agent":"fixer","status":"failed"}' }],
+      details: { run: run({ id: "create-id", agent: "explorer", status: "starting", output: undefined, error: undefined }) },
+    },
     { expanded: false, isPartial: false }, theme, { args: { action: "create", agent: "explorer", task: "full task" } },
   ));
   assert.equal(created, "✓  Started explorer [create-id] · starting");
   assert.doesNotMatch(created, /Subagent result|Task|Cwd|Tools|Model|Activity|Response|Session/);
 
   const resume = render(renderSubagentResult(
-    { details: { run: run({ id: "resume-id", agent: "explorer", status: "starting", output: undefined, error: undefined }) } },
+    {
+      content: [{ type: "text", text: '{"id":"content-resume-id","sourceRunId":"wrong-source","status":"failed"}' }],
+      details: { run: run({ id: "resume-id", agent: "explorer", status: "starting", output: undefined, error: undefined }) },
+    },
     { expanded: false, isPartial: false }, theme, { args: { action: "resume", id: "source-id", abstract: "new summary", message: "continue" } },
   ));
   assert.equal(resume, "✓  Resumed [source-id] → explorer [resume-id] · starting");
 
   const steer = render(renderSubagentResult(
-    { details: { run: run({ id: "steer-id", agent: "explorer", status: "running", output: undefined, error: undefined }) } },
+    {
+      content: [{ type: "text", text: '{"id":"content-steer-id","status":"failed","outcome":"already-terminal"}' }],
+      details: { run: run({ id: "steer-id", agent: "explorer", status: "running", output: undefined, error: undefined }) },
+    },
     { expanded: false, isPartial: false }, theme, { args: { action: "steer", id: "steer-id", message: "focus" } },
   ));
   assert.equal(steer, "✓  Steer requested · explorer [steer-id] · running");
 
   const reply = render(renderSubagentResult(
-    { details: { run: run({ id: "reply-id", agent: "fixer", status: "running", output: undefined, error: undefined }) } },
+    {
+      content: [{ type: "text", text: '{"id":"content-reply-id","status":"failed","outcome":"replied"}' }],
+      details: { run: run({ id: "reply-id", agent: "fixer", status: "running", output: undefined, error: undefined }) },
+    },
     { expanded: false, isPartial: false }, theme, { args: { action: "reply", id: "reply-id", message: "continue" } },
   ));
   assert.equal(reply, "✓  Replied · fixer [reply-id] · running");
@@ -275,7 +287,10 @@ test("synchronous interrupt outcomes collapse to the final result and expand its
     { outcome: "unconfirmed", status: "interrupted", glyph: "✗", collapsed: "✗  fixer [stop-id] · interrupted · stop unconfirmed" },
   ]) {
     const result = {
-      content: [{ type: "text", text: `Run stop-id (fixer) is ${status}.` }],
+      content: [{ type: "text", text: JSON.stringify({
+        id: "content-stop-id", agent: "explorer", status: "failed", outcome,
+        output: "CONTENT_OUTPUT_SENTINEL", error: "CONTENT_ERROR_SENTINEL",
+      }) }],
       details: {
         outcome,
         run: run({
@@ -296,7 +311,7 @@ test("synchronous interrupt outcomes collapse to the final result and expand its
     assert.equal(compact.startsWith(glyph), true);
     const expanded = render(renderSubagentResult(result, { expanded: true, isPartial: false }, theme, context));
     assertFull(expanded, [collapsed, "INTERRUPT_OUTPUT_SENTINEL", "INTERRUPT_ERROR_SENTINEL"]);
-    assert.doesNotMatch(expanded, /INTERRUPT_TASK_SENTINEL|INTERRUPT_ACTIVITY_SENTINEL|Task:|Cwd:|Model:|Live response/);
+    assert.doesNotMatch(expanded, /CONTENT_(?:OUTPUT|ERROR)_SENTINEL|content-stop-id|INTERRUPT_TASK_SENTINEL|INTERRUPT_ACTIVITY_SENTINEL|Task:|Cwd:|Model:|Live response/);
   }
 });
 

@@ -90,6 +90,8 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 
 `ask_user_question`、`goal`、`loop`、`monitor` 和 `subagent` 仅 main 可用；Todo 在 main 与 child 都可用；`contact_supervisor` 仅 child 可用。RPC session 可使用对应工具，但不注册 package widget；JSON 与 print mode 无法使用 Ask。
 
+`ask_user_question`、`goal`、`loop`、`monitor`、`subagent`、`contact_supervisor` 与 `todo` 的每个成功结果都会在 `content` 中放入一个紧凑单行 JSON 值。该 JSON 是面向模型的正文。`details` 仍是完整的 UI 与内部契约，正常 transcript 渲染会优先读取 `details`，仅在无法使用时才回退到 `content`。错误与主动 custom notification 仍使用自然语言，其中包括 Goal continuation、Loop fire、Monitor notification，以及 Subagent waiting 或 terminal notification。
+
 ## Main 工具
 
 以下五个 lifecycle 工具都没有 `confirmed` 或 `force` 字段。删除动作被受保护工作拒绝时，main model 会先按需检查 status 并询问用户。获得同意后，它会按场景执行 `pause`、`stop`、`interrupt`、Todo `modify` 或 Goal `cancel`，再重试原动作。
@@ -110,7 +112,7 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 | `delete` | 删除一个 retained terminal run |
 | `clear` | 所有 run 都 terminal 时删除全部 retained history |
 
-`list` 包含 `starting`、`running`、`waiting`、`completed`、`failed` 与 `interrupted` run，但绝不包含 terminal `output` 或 `error`。使用单个 retained run ID 调用 `status`，可查看相同公开字段，并在结果存在时取回 terminal 结果。subagent widget 使用相同的 retained 集合与排序，因此 terminal run 会一直显示到 `delete` 或 `clear` 将其移除。
+`list` 包含 `starting`、`running`、`waiting`、`completed`、`failed` 与 `interrupted` run，但绝不包含 terminal `output` 或 `error`。使用单个 retained run ID 调用 `status`，可查看相同公开字段，并在结果存在时取回 terminal 结果。subagent widget 使用相同的 retained 集合与排序来计数并管理 lifecycle，但 foreground body 永久隐藏 terminal 行。这些 run 会一直保留到 `delete` 或 `clear` 将其移除，并且始终可通过 Subagent viewer 查看。
 
 每个 active 或 waiting widget entry 都是不可拆分的两行 block。第一行把 identity 与 abstract 放在末尾 activity 之前。第二行承载 model、turn、tool、token、context、compaction 与 elapsed statistics。12 行 widget 预算绝不会拆开 active entry。
 
@@ -167,19 +169,19 @@ Loop 会跨 compaction 与 tree navigation 保留，但 reload、new session、s
 | Action | 作用 |
 | --- | --- |
 | `create` | 用 abstract、必填 `checkAfter` 静默阈值、可选 cwd 与可选 `notifyOn` literal 启动命令 |
-| `stop` | 同步停止一个 running monitor，并返回完整 terminal state |
+| `stop` | 同步停止一个 running monitor，并返回 termination receipt |
 | `delete` | 删除一个 terminal monitor 及其 retained record |
 | `clear` | 没有 running monitor 时删除全部 terminal record |
 | `list` | 列出精简的 monitor 状态 |
-| `status` | 查看当前状态与保留的合并输出 |
+| `status` | 返回一个 record 的诊断状态与合并日志 |
 
 `notifyOn` 使用区分大小写的 literal match。命令必须保持前台运行：不要使用 `nohup`、`setsid`、`disown`、尾随 `&` 或其他 detach escape。
 
 `checkAfter` 在 `create` 时必填，闭区间从 `10s` 到 `7d`，格式为一个正整数加 `s`、`m`、`h` 或 `d`。静默时长从 `create` 成功开始计时，并在最近一次原始 stdout/stderr chunk 处重新起算，因此半行输出与没有换行的输出同样算作活动。运行中的命令只要静默达到该阈值，就会收到一条 silence reminder，要求你用该 ID 调用 `monitor status`。每个 monitor 同时最多只排队一条 reminder：后续 interval 只会就地更新同一条 reminder 的累计静默时长，不会堆积。`status` 会返回 canonical 的 `checkAfter` 与 `lastOutputAt`，在命令产生第一段输出前 `lastOutputAt` 为 `null`。
 
-matcher 与 terminal notification 共用同一种形式，每条都说明 monitor 当前状态。matcher notification 只携带命中 `notifyOn` literal 的新增行，同一行即使命中多个 literal 也只出现一次，而已交付位置仍会越过全部普通行，因此未命中的输出不会在之后被重放。terminal notification 始终报告最终状态、exit code、signal 与 error。completed 的命令只追加此前没有交付过的命中行，因此一次只有普通输出的正常退出不携带任何行。failed 或 killed 的命令还会追加最近二十条新增行作为有界诊断尾部，并按 seq 与尚未交付的命中行合并去重。所有 payload 都遵守同一套字节上限，`omitted` 会说明被留下的部分。要看一个 record 的完整 retained state 与合并输出，`status` 是唯一入口。
+matcher 与 terminal notification 共用同一种形式，每条都说明 monitor 当前状态。matcher notification 只携带命中 `notifyOn` literal 的新增行，同一行即使命中多个 literal 也只出现一次，而已交付位置仍会越过全部普通行，因此未命中的输出不会在之后被重放。terminal notification 始终报告最终状态、exit code、signal 与 error。completed 的命令只追加此前没有交付过的命中行，因此一次只有普通输出的正常退出不携带任何行。failed 或 killed 的命令还会追加最近二十条新增行作为有界诊断尾部，并按 seq 与尚未交付的命中行合并去重。所有 payload 都遵守同一套字节上限，`omitted` 会说明被留下的部分。`monitor status` 返回一个 record 的诊断状态与合并日志。完整 operational details 仅在 `details` 中供 TUI 与内部使用。
 
-`stop` 会保留 terminal record 与 retained log。该 tool result 独占 terminal state 的交付，因此同一次 stop 不会再发送另一条 terminal notification。running monitor 会阻止 `delete` 与 `clear`；main model 必须先询问是否停止，并在 stop 完成后重试。terminal record 与输出会一直保留到 `delete` 或 `clear`。
+`stop` 会保留 terminal record 与 retained log。该 tool result 返回紧凑 termination receipt，其中包含 ID、status、outcome、exit code、signal、error 与可选 warning。诊断状态与合并日志通过 `status` 获取。该 tool result 独占 terminal delivery，因此同一次 stop 不会再发送另一条 terminal notification。running monitor 会阻止 `delete` 与 `clear`；main model 必须先询问是否停止，并在 stop 完成后重试。terminal record 与输出会一直保留到 `delete` 或 `clear`。
 
 ### `ask_user_question`
 
@@ -289,11 +291,12 @@ Long 只升级已有的合法 `{ type: "ephemeral" }` cache breakpoint，并通�
 ## Runtime、UI 与持久化
 
 - compaction 与 tree operation 期间，package notification 会安全排队，之后正常交付，不丢失用户可见结果。
-- package tool row 与 notification 使用 Ctrl+O 切换 collapsed/expanded；展开只改变显示，不改变工具数据或持久化状态。
-- Monitor notification 是增量的。每个 Monitor 都有一条独立 delivery lane，其中最多保留一条已交给 Pi 的不可变 notification，以及其后一个可变 aggregate。匹配输出、限流计数与最新 silence 状态会按 Monitor 聚合，并在 Pi 确认前一副本后推进，而 `monitor status` 始终是读取完整 retained state 与日志的唯一入口。
+- transcript tool call、tool result 与 notification 使用 Ctrl+O 切换 collapsed/expanded。展开只改变显示，不改变工具数据或持久化状态。
+- Monitor notification 是增量的。每个 Monitor 都有一条独立 delivery lane，其中最多保留一条已交给 Pi 的不可变 notification，以及其后一个可变 aggregate。匹配输出、限流计数与最新 silence 状态会按 Monitor 聚合，并在 Pi 确认前一副本后推进，而 `monitor status` 返回一个 record 的诊断状态与合并日志。完整 operational details 保留在 `details` 中供 TUI 与内部使用。
 - 删除或清空 Monitor 会立即丢弃其 queued aggregate 与 delivery tracking。已经交给 Pi 的副本最多仍可能显示一次，但 OMPS 不会重试，晚到确认也会被忽略。
 - 前台 TUI 为 retained subagent、Todo、Loop、Monitor 与 active Goal 提供紧凑 widget；RPC session 不注册这些 widget。
-- subagent、Todo 与 Monitor widget 跟随与 tool row 相同的 Ctrl+O 状态：collapsed 隐藏已结束的行，并在标题末尾追加使用当前配置键位的 dim 提示；expanded 显示完整内容。Loop 与 Goal widget 始终显示完整内容。
+- Todo、Agents 与 Monitor foreground widget 永久保持紧凑模式，且绝不显示 Ctrl+O expand 提示。Todo 始终隐藏 completed 行。Agents 与 Monitor 始终隐藏 terminal 行。它们的 heading 仍按完整 retained 集合计数。
+- Goal widget 仍读取 Pi 共享的 tool-output 展开状态。折叠时，completed Goal 隐藏 detail 行，其他 Goal 状态仍保留两行。Loop widget 始终显示完整内容。
 - Subagent、Todo 与 Goal 会按各自 session 或 branch 范围恢复。尤其是成功执行的 subagent `clear` 在 reload 后仍保持清空。
 - Loop 与 Monitor 是 runtime service，不是 durable schedule。session transition 会关闭它们；Loop 按上文列出的规则清空。
 - child process 是隔离的 Pi RPC session。session shutdown 时，active run 会被中断，而不会被后续 session 静默接管；retained terminal session 可用 `resume` 继续，但会创建新 run。
@@ -302,16 +305,16 @@ Long 只升级已有的合法 `{ type: "ephemeral" }` cache breakpoint，并通�
 
 `ctrl+shift+left` 与 `ctrl+shift+right` 打开只读全屏 viewer，查看任意 retained subagent run 的 child transcript。viewer 只展示：没有 reply、steer 或 interrupt，也不会写入 session entry、control 文件或 run 文件。
 
-- Agents widget 折叠时，只有存在因 policy 而隐藏的 retained terminal run，并且已有 Ctrl+O expand hint 时，heading 才会追加固定的 `ctrl+shift+←/→ viewer` 提示。宽度不足以容纳两条完整提示时，heading 先只保留完整的 Ctrl+O 提示；若仍放不下，则两条提示都省略。Agents heading 展开时不显示任何提示。
+- 存在被隐藏的 retained terminal run 时，Agents heading 会追加固定的 `ctrl+shift+←/→ viewer` 提示。宽度不足以容纳完整提示时会将其省略。heading 绝不显示 Ctrl+O expand 提示。
 - Main 是循环中的第 0 项。`ctrl+shift+right` 从 Main 进入第一个 retained run，逐个前进，最后回到 Main；`ctrl+shift+left` 沿同一个环反向移动。
-- 循环范围与 Agents widget 的 retained 集合及总数一致。`starting`、`running`、`waiting`、`completed`、`failed`、`interrupted` 六种状态全部可达，也包括 widget 折叠或超出行预算时隐藏的 run。viewer 导航按 `createdAt` 从早到晚排列，同一时间按 ID 排序，非法时间稳定放在合法时间之后并按 ID 排序。状态与 `updatedAt` 变化不会移动 run，resume 产生的新 run 则按自己的新创建时间加入后方。`subagent delete` 删除一个 terminal run，`subagent clear` 删除全部 terminal history。最后一个 retained run 消失时自动回到 Main。
+- 循环范围与 Agents widget 的 retained 集合及总数一致。`starting`、`running`、`waiting`、`completed`、`failed`、`interrupted` 六种状态全部可达，也包括被永久紧凑策略隐藏或超出行预算的 run。viewer 导航按 `createdAt` 从早到晚排列，同一时间按 ID 排序，非法时间稳定放在合法时间之后并按 ID 排序。状态与 `updatedAt` 变化不会移动 run，resume 产生的新 run 则按自己的新创建时间加入后方。`subagent delete` 删除一个 terminal run，`subagent clear` 删除全部 terminal history。最后一个 retained run 消失时自动回到 Main。
 - 在 viewer 内，普通 `Left`/`Right` 与 `ctrl+shift+left`/`ctrl+shift+right` 的循环方向一致；`Escape` 或 `q` 回到 Main。
 - transcript 从屏幕第一行开始；其余信息全部位于底部，顺序与 Main 自己的底部区域一致：live/waiting 区、`Read-Only` 输入占位栏、run 状态行、导航提示。
 - transcript 由 Pi 自己的 transcript 组件渲染，因此 user 消息、assistant Markdown、thinking 块、tool call、tool result、compaction summary 与 branch summary 都保持 Main 的配色、间距与框架。
 - `Up`/`Down` 滚动一行，`PageUp`/`PageDown` 翻页，`Home` 跳到顶部，`End` 跳到底部并开启 follow，`f` 切换 follow，`r` 立即重新读取 transcript。
 - follow 是"到底感知"的：向上滚动会关闭它；用滚动、翻页或滚轮重新回到最后一行会重新开启。在底部用 `f` 显式关闭后会进入 suppressed 状态：此后新输出、终端 resize，以及在最后一行继续按 `Down`/`PageDown` 或向下滚轮，都不会重新开启 follow，只有再次按 `f`，或用 `End` 显式回到底部才会恢复。若你主动向上滚动离开底部，suppression 即被清除，之后再滚回底部会照常重新开启 follow。
 - 鼠标滚轮每格滚动一行 transcript。viewer 打开期间会启用最小滚轮上报，并在每一条退出路径上关闭它，因此离开 viewer 后 Main 的原生 scrollback 与终端选择立即恢复正常。viewer 打开时按住 `Shift` 拖动即可使用终端原生选择（Ghostty、iTerm2 等）。快捷键与滚轮都是普通终端字节序列，SSH 下同样可用。
-- `Ctrl+O`（或你为 `app.tools.expand` 绑定的实际键）切换 tool 输出的折叠与展开。Pi 中这个状态只有一份：Main、所有 subagent transcript 与 package widget 共用，因此在 viewer 内切换后回到 Main 即已生效，反之亦然。折叠隐藏 tool result 正文与冗长参数，展开显示完整（有界）内容。底部提示始终显示你的实际按键与当前状态。
+- `Ctrl+O`（或你为 `app.tools.expand` 绑定的实际键）切换 tool 输出的折叠与展开。Main 与所有 subagent transcript 共用该状态，Goal foreground widget 也会读取它。在 viewer 内切换后回到 Main 即已生效，反之亦然。折叠隐藏 tool result 正文与冗长参数。展开显示完整且有界的内容。底部提示始终显示你的实际按键与当前状态。Todo、Agents 与 Monitor 永久保持紧凑模式，Loop 永久保持完整模式。
 - viewer 每秒刷新约四次：activity 计数按该频率更新，elapsed 时钟只在其显示值真正变化的那一次刷新时重绘，两者都不会重建 transcript。
 - 展示相关设置（thinking 块、输出内边距、Markdown 代码块缩进）直接从全局 settings 文件读取；项目受信任时再叠加项目 settings 文件。viewer 只读取它们，绝不创建、加锁或写入 settings 文件。
 - 每个 run 各自保留自己的滚动位置、follow 状态与 suppression。

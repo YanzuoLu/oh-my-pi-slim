@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "1.1.7", "package version must be 1.1.7");
+check(packageJson.version === "1.1.8", "package version must be 1.1.8");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "1.1.7" && lock.packages?.[""]?.version === "1.1.7", "package-lock version must be 1.1.7");
+check(lock.version === "1.1.8" && lock.packages?.[""]?.version === "1.1.8", "package-lock version must be 1.1.8");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -238,7 +238,7 @@ hasAll(widgetStackHost, [
   "if (sections.size === 0) {", "clearWidget(ui)",
   "target.setWidget(WIDGET_STACK_KEY,", 'placement: "aboveEditor"',
   "renderWidgetStack([...sections.values()]", "resolveWidth(width, nextTui)",
-  "readWidgetExpanded(ui)", "widgetExpandHint()", "invalidate() {}",
+  "readWidgetExpanded(ui)", "expanded: readWidgetExpanded(ui)", "invalidate() {}",
   // A binding released with no UI must release exactly this owner's recorded claim.
   "host.unbind(owner, owners.get(owner))",
   // The newest distinct UI takes over, and only owners of the live UI hold it open.
@@ -333,7 +333,7 @@ for (const [name, source] of [
   ], `${name} must publish one stack section and request aggregate renders`);
 }
 
-// Persistent widget expansion must reuse Pi's own global tool-output state and nothing else.
+// Pi's global tool-output state remains available to transcript surfaces and the Goal widget.
 hasAll(widgetExpansion, [
   'import { keyText } from "@earendil-works/pi-coding-agent"',
   'DEFAULT_WIDGET_EXPAND_KEY = "ctrl+o"',
@@ -346,22 +346,26 @@ hasNone(widgetExpansion, [
   "registerShortcut", "setToolsExpanded", "setEditorComponent", "CustomEditor", "handleInput",
   "writeFileSync", "appendEntry", "localStorage", "globalThis", "let ", "theme.fg(", "theme.bold(", "registerTool",
 ], "shared widget expansion must own no keybinding, editor, store, persistence, or theme");
+hasAll(widgetStack, [
+  "readonly expanded: boolean",
+], "the aggregate render input must retain the shared expansion flag for Goal");
 hasAll(widgetStackHost, [
-  "readWidgetExpanded", "widgetExpandHint()",
+  "readWidgetExpanded", "expanded: readWidgetExpanded(ui)",
 ], "the aggregate host must read Pi global expansion live on every render");
+hasNone(widgetStackHost, ["widgetExpandHint"], "the aggregate host must not create a foreground expand hint");
 for (const [name, source] of [
   ["Monitor widget", monitorWidget],
   ["Todo widget", todoWidget],
-  ["Subagent widget", subagentWidget],
+  ["Agents widget", subagentWidget],
 ]) {
-  hasAll(source, [
-    "input.expanded", "input.hint",
-  ], `${name} must pass the host's live expansion state straight into its pure renderer`);
+  hasNone(source, [
+    "input.expanded", "input.hint", "widgetExpandHint", "to expand",
+  ], `${name} must remain permanently compact without an expand hint`);
 }
 for (const [name, source] of [
   ["Monitor widget", monitorWidget],
   ["Todo widget", todoWidget],
-  ["Subagent widget", subagentWidget],
+  ["Agents widget", subagentWidget],
   ["widget stack host", widgetStackHost],
 ]) {
   hasNone(source, [
@@ -371,9 +375,7 @@ for (const [name, source] of [
 hasNone(loopWidget, [
   "widget-expansion", "readWidgetExpanded", "widgetExpandHint", "getToolsExpanded", "input.expanded", "input.hint", "to expand",
 ], "Loop widget must stay out of Ctrl+O expansion with a permanently full body");
-// The Goal widget joins the shared collapse as a pure consumer. The aggregate host resolves Pi's
-// expansion state once and hands it down, so the section itself must never read that state, cache
-// it, or advertise an expand hint of its own.
+// Goal is the only foreground section that consumes the aggregate host's shared expansion state.
 hasNone(goalWidget, [
   "widget-expansion", "readWidgetExpanded", "widgetExpandHint", "getToolsExpanded", "input.hint", "to expand",
 ], "Goal widget must consume the shared expansion flag without resolving or hinting it");
@@ -611,7 +613,7 @@ hasNone(shutdownStatusHandler, ["setStatus("], "shutdown must not duplicate the 
 const presetStatusBody = extension.slice(extension.indexOf("export function presetStatusContent"), extension.indexOf("function isAnthropicOAuth"));
 hasNone(presetStatusBody, [".bold(", "theme.bold", "glyph", "Glyph", "Requested"], "OMPS status plain accent-only rendering without a Requested label");
 check((json("package.json").version ?? "").trim().length > 0, "package.json must define a non-empty version for the OMPS status line");
-check(json("package.json").version === "1.1.7", "configurable default-off phase and Goal reminders must remain shipped in v1.1.7");
+check(json("package.json").version === "1.1.8", "compact JSON successful results and permanently compact foreground widgets remain shipped in v1.1.8");
 
 const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
 const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
@@ -926,11 +928,18 @@ hasNone(goalResumeNoOp, ["this.store(", "generation +="], "Goal repeated resume 
 hasAll(goalRuntime.slice(goalRuntime.indexOf("private clearRetryAfterSuccess"), goalRuntime.indexOf("private hasRetryMetadata")), ['status !== "active"', 'status !== "retry_wait"'], "Goal retry-success internal status guard");
 // Clearing erases the branch-local Goal instead of ending it. It is the only action that removes a
 // Goal, it never ends a live one on the user's behalf, and it leaves nothing behind for replay.
+const goalResultBlock = goalRuntime.slice(goalRuntime.indexOf("function goalResult("), goalRuntime.indexOf("function record("));
+hasAll(goalResultBlock, [
+  "const resultGoal = goal ? cloneGoal(goal) : null", "const details = { goal: resultGoal, changed }",
+  "JSON.stringify({ ...details, ...(message === undefined ? {} : { message }) })", "toolText(", "details",
+], "Goal success helper keeps full details and emits one compact model DTO");
+hasNone(goalResultBlock, ["null, 2", ".join(\"\\n\")"], "Goal success helper must not pretty-print or compose prose outside JSON");
 const goalExecuteBlock = goalRuntime.slice(goalRuntime.indexOf("async execute(inputValue: GoalInput)"), goalRuntime.indexOf("private validateActionFields"));
 hasAll(goalExecuteBlock, [
-  'if (action === "clear" && !this.snapshot) return toolText("No Goal to clear.", { goal: null, changed: false });',
+  'if (action === "clear" && !this.snapshot) return goalResult(null, false, "No Goal to clear.");',
+  'if (!this.snapshot) return goalResult(null, false, "No Goal.");', "return goalResult(this.snapshot.goal, false);",
   "return this.clear();",
-], "Goal clear on an empty branch is a receipt-only no-op");
+], "Goal status and empty clear use the unified success DTO");
 check(
   goalExecuteBlock.indexOf('action === "clear" && !this.snapshot') <
   goalExecuteBlock.indexOf('if (!this.snapshot) throw new Error("No Goal exists on the current branch.")'),
@@ -944,8 +953,8 @@ hasAll(goalClearBlock, [
   "this.snapshot = undefined;",
   "this.pi.appendEntry<null>(GOAL_STATE_ENTRY_TYPE, null);",
   "this.emit();",
-  'return toolText("Goal cleared.", { goal: null, changed: true });',
-], "Goal clear terminal guard, null tombstone, runtime reset, and null emission");
+  'return goalResult(null, true, "Goal cleared.");',
+], "Goal clear terminal guard, null tombstone, runtime reset, and unified success DTO");
 hasNone(goalClearBlock, [
   "this.store(", "generation +=", 'status: "cancelled"', "this.cancel(", "queueStateMessage", "statusReceipt(",
 ], "Goal clear must erase the Goal instead of cancelling it or writing another snapshot");
@@ -1099,8 +1108,15 @@ hasAll(askRuntime, [
   // buildAskResult is the last line of defence: a cancelled driver result is discarded before normalization.
   "if (driverResult.cancelled === true) {",
   'return { answers: [], cancelled: true, partial: true, cancelReason: "user_cancelled" as const };',
-  '"No answers were retained."',
-], "Ask cancel discards every answer in the shared result builder and model content");
+  "export function buildAskModelDto", 'outcome: "cancelled"', 'outcome: result.partial ? "partial" : "complete"',
+  "answers,", "unanswered,", 'reason: result.cancelReason === "user_cancelled" ? "user_cancelled" : "empty_submit"',
+  "return JSON.stringify(buildAskModelDto(result, questionnaire));",
+  "text: askResultModelContent(result, questionnaire)", "details: result",
+], "Ask results keep complete details while every outcome uses one compact model DTO");
+hasNone(askRuntime, [
+  "Questionnaire completed.", "Questionnaire partially submitted.", "Questionnaire not completed", "Confirmed answers:",
+  "No answers were retained.", "No answers were confirmed.", "Unanswered questions:", "answerDisplay(",
+], "Ask successful model content must not return the removed prose outcome");
 hasAll(askTui, [
   // A single question owns the whole questionnaire, so there is no Submit tab and no ghost index.
   "this.hasSubmitTab = this.questionnaire.questions.length > 1;",
@@ -1314,6 +1330,13 @@ hasAll(interruptDispatch, ["return this.interruptRun(id, signal);"], "interrupt 
 hasNone(interruptDispatch, ["Interrupt requested"], "interrupt must not return an enqueue-only receipt");
 hasAll(monitorRuntime, [
   'export const MONITOR_ACTIONS = ["create", "stop", "delete", "clear", "list", "status"] as const',
+  "type MonitorCreateContent", "type MonitorListContent", "type MonitorStatusContent", "interface MonitorStopContent",
+  "interface MonitorDeleteContent", "interface MonitorClearContent", "type MonitorActionContent", "function actionToolText(",
+  "return toolText(JSON.stringify(content), details);", "function statusContent(",
+  "return actionToolText(monitors, { monitors });", "return actionToolText(statusContent(state), { monitor: state });",
+  "return actionToolText({ id: state.id, status: state.status }, { monitor: state });",
+  "return actionToolText(content, { id: record.id, deleted: true, changed: true, status, warning });",
+  "return actionToolText({ clearedCount: receipt.clearedCount, warnings: receipt.warnings }, receipt);",
   'export const MONITOR_PUBLIC_FIELDS = ["action", "abstract", "command", "cwd", "checkAfter", "notifyOn", "id", "start", "end"] as const',
   "export const MONITOR_MIN_CHECK_AFTER_MS = 10_000", "export const MONITOR_MAX_CHECK_AFTER_MS = 7 * 24 * 60 * 60 * 1_000",
   'export type MonitorNotificationKind = "matcher" | "silence" | "summary" | "terminal"',
@@ -1336,7 +1359,11 @@ hasAll(monitorRuntime, [
   "private buildUpdateNotification(", 'kind: "update"', "const state = this.operationalState(record, start, end, this.toolContentMaxBytes)", "combined: scan.lines",
   "private notificationRetryTimer?: TimerHandle", "this.clearTimeoutFn(this.notificationRetryTimer)", "this.notificationRetryTimer = undefined",
   "lastOutputAt: record.lastOutputAt", "checkAfter: record.checkAfter",
-], "Monitor runtime and visual wiring contract");
+], "Monitor runtime, compact success content, complete details, and visual wiring contract");
+hasNone(monitorRuntime.slice(monitorRuntime.indexOf("async execute(inputValue: MonitorInput"), monitorRuntime.indexOf("private attachProcess(record: MonitorRecord)")), [
+  "JSON.stringify(monitors, null, 2)", "JSON.stringify(state, null, 2)", "JSON.stringify(monitor, null, 2)",
+  "Deleted monitor ${record.id}.", "Warning: ${warning}",
+], "all six Monitor success actions must avoid pretty JSON, prose receipts, and full operational model content");
 hasAll(monitorRuntime, [
   "type SendMessage = (", "sendMessage?: SendMessage", "private readonly sendMessage: SendMessage",
   "this.sendMessage = options.sendMessage ?? ((message, sendOptions) => this.pi.sendMessage(message, sendOptions))",
@@ -1378,6 +1405,18 @@ hasNone(monitorRuntime, [
   "parseLoopInterval", "canonicalizeLoopInterval", "./loop-runtime.js",
   "silenceReminderCount", "nextCheckAt",
 ], "Monitor silence threshold must stay self-contained and expose no extra public counters");
+const monitorStatusContent = monitorRuntime.slice(monitorRuntime.indexOf("function statusContent("), monitorRuntime.indexOf("function asRecord("));
+hasAll(monitorStatusContent, [
+  "id: state.id", "abstract: state.abstract", "status: state.status", "start: state.start", "end: state.end",
+  "returned: state.returned", "omitted: state.omitted", "truncated: state.truncated", "logLines: state.logLines",
+  "droppedLines: state.droppedLines", "combined: state.combined", 'state.status === "running"',
+  "content.lastOutputAt = state.lastOutputAt", "content.checkAfter = state.checkAfter",
+  "content.exitCode = state.exitCode", "content.signal = state.signal", "if (state.error) content.error = state.error",
+], "Monitor status model DTO exposes only diagnostic state and combined logs");
+hasNone(monitorStatusContent, [
+  "command", "cwd", "pid", "createdAt", "updatedAt", "endedAt", "notifyOn", "matchedCount", "notificationCount",
+  "suppressedCount", "logPath", "logBytes", "droppedBytes",
+], "Monitor status model DTO must keep complete operational fields in details only");
 const monitorStopDispatch = monitorRuntime.slice(monitorRuntime.indexOf("private stop(record: MonitorRecord)"), monitorRuntime.indexOf("private async stopRunning(record: MonitorRecord)"));
 const monitorStopRunning = monitorRuntime.slice(monitorRuntime.indexOf("private async stopRunning(record: MonitorRecord)"), monitorRuntime.indexOf("private delete(record: MonitorRecord)"));
 const monitorDeleteClear = monitorRuntime.slice(monitorRuntime.indexOf("private delete(record: MonitorRecord)"), monitorRuntime.indexOf("private attachProcess(record: MonitorRecord)"));
@@ -1395,10 +1434,13 @@ hasAll(monitorStopRunning, [
 const monitorStopResult = monitorRuntime.slice(monitorRuntime.indexOf("private stopResult("), monitorRuntime.indexOf("private delete(record: MonitorRecord)"));
 hasAll(monitorStopResult, [
   "this.operationalState(record, 0, 100, this.toolContentMaxBytes)",
-], "Monitor stop result must use the fixed bounded latest-100 operational window");
+  "const content: MonitorStopContent", "id: monitor.id", "status: monitor.status", "outcome,",
+  "exitCode: monitor.exitCode", "signal: monitor.signal", "error: monitor.error", "if (warning) content.warning = warning",
+  "return actionToolText(content, { monitor, changed, outcome, warning });",
+], "Monitor stop keeps complete details while model content is a compact termination receipt");
 hasNone(monitorStopResult, [
-  "record.logLines", "Math.max(100", "2_000",
-], "Monitor stop result must never expand its synchronous scan window from retained log size");
+  "record.logLines", "Math.max(100", "2_000", "JSON.stringify(monitor, null, 2)",
+], "Monitor stop receipt must never expose its retained operational window as model content");
 hasNone(monitorStopRunning, [
   'this.queueNotification(record, "terminal"', "this.records.delete(record.id)", "this.removeRecordLog(record)",
 ], "Monitor stop must retain the record and log and never double-deliver a terminal notification");
@@ -1606,10 +1648,13 @@ hasAll(monitorWidget, [
   "change.reason === \"output\"", "scheduleRender()", "requestRender()", "dispose()",
   "isActive: () => hasRunningMonitors(this.listMonitors())",
   "if (!this.ui || !this.published) return;",
-  "expanded = true", 'hint = ""', 'sorted.filter((monitor) => monitor.status === "running")',
-  "const policyHidden = sorted.length - shown.length", "const hidden = shown.length - visible.length",
-  "monitorHeadingLine(monitorWidgetHeading(monitors, theme), policyHidden > 0 ? hint : \"\", theme, safeWidth)",
-], "Monitor foreground widget visual, collapse policy, and throttle contract");
+  'sortMonitorsForDisplay(monitors).filter((monitor) => monitor.status === "running")',
+  "const hidden = running.length - visible.length",
+  "truncateToWidth(monitorWidgetHeading(monitors, theme), safeWidth, \"…\")",
+], "Monitor foreground widget permanently hides terminal rows without an expand hint");
+hasNone(monitorWidget, [
+  "policyHidden", "input.expanded", "input.hint", "monitorHeadingLine", "widgetExpandHint", "to expand",
+], "Monitor foreground widget must not expose its permanent filtering as expandable state");
 hasNone(monitorWidget, ["notify(", "setStatus", "registerShortcut", "overlay", "setInterval("], "Monitor widget excluded UI");
 hasAll(monitorWidget, [
   'export function countRunningMonitors(monitors: readonly MonitorWidgetItem[]): number {\n  return monitors.filter((monitor) => monitor.status === "running").length;',
@@ -1627,12 +1672,10 @@ hasAll(monitorHeadingBlock, [
   'const glyph = active ? theme.bold("●") : "○"',
   'const label = active ? theme.bold(`Monitors (${terminal}/${monitors.length})`) : `Monitors (${terminal}/${monitors.length})`',
   "formatSemanticGlyphPrefix(theme.fg(role, glyph))", "theme.fg(role, label)",
-  'if (hint !== "" && visibleWidth(heading) + visibleWidth(hint) <= width)',
-  '`${heading}${theme.fg("dim", hint)}`', 'return truncateToWidth(heading, width, "…")',
-], "Monitor terminal-over-total heading, active-idle emphasis, and atomic dim expand hint");
+], "Monitor terminal-over-total heading and active-idle emphasis");
 hasNone(monitorHeadingBlock, [
-  'theme.bold("○")', "${running}/", "sorted", "shown", "policyHidden", "theme.bold(hint)",
-], "Monitor heading must count the whole retained set and never bold the idle glyph or the hint");
+  'theme.bold("○")', "${running}/", "sorted", "shown", "policyHidden", "hint", "to expand",
+], "Monitor heading must count the whole retained set and never advertise expansion");
 hasAll(monitorTranscriptRenderer, [
   "renderMonitorCall", "renderMonitorResult", "renderMonitorNotification", 'theme.bold("monitor")', 'monitorStatusGlyph("running", theme)',
   '`· ${safeAction}${expanded ? "" : " (ctrl+o to expand)"}`', "spacedResult", "safeFirstLine", "sanitizeMonitorBody",
@@ -1710,7 +1753,7 @@ const monitorGuidelinesEnd = monitorRuntime.indexOf("      ],", monitorGuideline
 const monitorToolMetadata = monitorRuntime.slice(monitorToolStart, monitorGuidelinesEnd);
 const monitorDescription = propertyString(monitorToolMetadata, "description", "Monitor tool metadata");
 const monitorPromptSnippet = propertyString(monitorToolMetadata, "promptSnippet", "Monitor tool metadata");
-check(monitorDescription === "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor stop` terminates a running group and returns its complete terminal state. `monitor delete` removes one terminal record, while `monitor clear` removes all terminal records. Terminal records remain available until deletion or clearing. Runtime shutdown terminates active groups and clears retained monitor data.", "Monitor description must match the reviewed contract");
+check(monitorDescription === "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's diagnostic state and combined logs. `monitor stop` terminates a running group and returns a termination receipt. Use `monitor status` to retrieve diagnostic state and logs. `monitor delete` removes one terminal record, while `monitor clear` removes all terminal records. Terminal records remain available until deletion or clearing. Runtime shutdown terminates active groups and clears retained monitor data.", "Monitor description must match the reviewed diagnostic-status and termination-receipt contract");
 check(monitorPromptSnippet === "Supervise long-running foreground commands.", "Monitor promptSnippet must match the reviewed contract");
 checkSteBlock(monitorDescription, "Monitor description");
 checkSteBlock(monitorPromptSnippet, "Monitor promptSnippet");
@@ -1739,6 +1782,19 @@ hasAll(loopRuntime, [
   "PreparedLoopSchedule", "firedBeforeActivation", "scheduled.activate()", "acceptScheduledTimeout",
   "this.setTimeoutFn", "this.schedule(current, this.nowMs())", "this.generation += 1",
 ], "Loop runtime contract");
+const loopSuccessBlock = loopRuntime.slice(loopRuntime.indexOf("async execute(inputValue: LoopInput)"), loopRuntime.indexOf("private newId()"));
+hasAll(loopSuccessBlock, [
+  "return toolText(JSON.stringify(loops), { loops });",
+  "return toolText(JSON.stringify(result), { loop: result, changed: true });",
+  "return toolText(JSON.stringify(result), { loop: result, changed: false });",
+  "const receipt = { id: loop.id, deleted: true }", "return toolText(JSON.stringify(receipt), receipt);",
+  "const receipt = { cleared: true, changed: false, clearedCount: 0, ids }",
+  "cleared: true,", "changed: true,", "clearedCount: ids.length,", "ids,",
+], "all seven Loop success actions emit compact JSON while details keep the complete UI contract");
+hasNone(loopSuccessBlock, [
+  "JSON.stringify(loops, null, 2)", "JSON.stringify(result, null, 2)", "Deleted loop ${loop.id}.",
+  "No loops to clear.", "Cleared ${ids.length} loops.",
+], "Loop success content must not pretty-print or return delete and clear prose");
 const loopCreateBlock = loopRuntime.slice(loopRuntime.indexOf("private create("), loopRuntime.indexOf("private delete("));
 check(
   loopCreateBlock.indexOf("const scheduled = this.prepareSchedule") < loopCreateBlock.indexOf("this.loops.set(loop.id, loop)") &&
@@ -1895,6 +1951,20 @@ hasAll(applyState, [
   'current.status === "waiting" && state.status === "waiting"', "!sameRequest(current.request, request)",
   "enteredWaiting || waitingRequestChanged", '? "waiting"', "deliverPendingNotification(id)",
 ], "changed waiting-request notification transition");
+hasAll(runtime, [
+  "function toolJson(value: unknown, details?: unknown)", "text: JSON.stringify(value)",
+  "return toolJson({ id: retained.id, agent: retained.agent, status: retained.status }, {",
+  "return toolJson({ id, status: run.status, outcome: \"requested\" }, { run: this.formatRun(run) });",
+  "return toolJson({ id, status: running.status, outcome: \"replied\" }, { run: this.formatRun(running) });",
+  "return toolJson({ id, deleted: true, warnings }, receipt);",
+  "return toolJson({ clearedCount: receipt.clearedCount, warnings: receipt.warnings }, receipt);",
+  "result.content[0].text = JSON.stringify({", "sourceRunId: sourceId", "status: retained.status",
+], "all nine Subagent success actions use compact JSON while details retain rich run contracts");
+hasNone(runtime.slice(runtime.indexOf("private async interruptRun("), runtime.indexOf("private reply(")), [
+  "function interruptResultText", "Created asynchronous run", "Steer requested for", "Replied to run",
+  "Deleted retained subagent run", "No retained subagent runs to clear", "Resumed ${sourceId} as new detached run",
+  "JSON.stringify(runs, null, 2)", "JSON.stringify(run, null, 2)",
+], "Subagent success actions must not return the removed prose or pretty JSON bodies");
 const summaryFormatterStart = runtime.indexOf("private formatRunSummary(run: PersistedRun)");
 const statusFormatterStart = runtime.indexOf("private formatRunStatus(run: PersistedRun)", summaryFormatterStart);
 const fullFormatterStart = runtime.indexOf("private formatRun(run: PersistedRun)", statusFormatterStart);
@@ -1913,12 +1983,12 @@ hasAll(statusFormatter, [
 ], "single-run status formatter");
 hasNone(statusFormatter, ["...run", "task:", "cwd:", "model:", "deniedTools:", "createdAt:", "updatedAt:", "sessionFile:", "activity:", "notificationPending:"], "single-run status formatter");
 const listAction = runtime.slice(listActionStart, listActionEnd);
-hasAll(listAction, ["reconcileAll", "this.registry.list()", "formatRunSummary", "JSON.stringify(runs, null, 2)", "{ runs }"], "retained-run list action");
+hasAll(listAction, ["reconcileAll", "this.registry.list()", "formatRunSummary", "return toolJson(runs, { runs });"], "retained-run list action compact JSON content");
 hasNone(listAction, ["formatRunStatus", ".formatRun(", "this.activity", "ACTIVE_STATUSES.has(run.status)", ".task"], "list action");
 const statusActionStart = runtime.indexOf('if (action === "status") {', listActionEnd);
 const statusActionEnd = runtime.indexOf('if (action === "reply")', statusActionStart);
 const statusAction = runtime.slice(statusActionStart, statusActionEnd);
-hasAll(statusAction, ["this.formatRunStatus(this.requireRun(id))", "JSON.stringify(run, null, 2)", "{ run }"], "single retained-run status action");
+hasAll(statusAction, ["this.formatRunStatus(this.requireRun(id))", "return toolJson(run, { run });"], "single retained-run status action compact JSON content");
 const terminalRaceStart = runtime.indexOf("if (isTerminalStatus(run.status)) {", statusActionEnd);
 const terminalRaceEnd = runtime.indexOf("const target = this.validConfig(id);", terminalRaceStart);
 check(terminalRaceStart > statusActionEnd && terminalRaceEnd > terminalRaceStart, "steer and interrupt must share one terminal-status branch before control writing");
@@ -1927,12 +1997,13 @@ hasAll(terminalRace, [
   "const terminalRun = this.formatRunSummary(run)",
   'const alreadyTerminal: InterruptOutcome = "already-terminal"',
   'action === "interrupt" ? { run: terminalRun, outcome: alreadyTerminal } : { run: terminalRun }',
-  "`${id} is already ${run.status}.`", "toolText(`${id} is already ${run.status}.`, terminalDetails)",
-], "terminal steer and interrupt race receipts must carry only the public run summary");
+  "const receipt = action === \"interrupt\"", "id,", "agent: run.agent", "status: run.status", "outcome: alreadyTerminal",
+  "run.output !== undefined", "run.error !== undefined", "return toolJson(receipt, terminalDetails);",
+], "terminal steer and interrupt race receipts keep compact details while returning exact JSON outcomes");
 hasNone(terminalRace, [
-  "run.output", "run.error", "this.activity", "formatRunStatus", "deliverPendingNotification",
-  "notificationPending", "queuedNotifications", "deliveryKey", "controlWriter", "acquireNotificationSuppression",
-], "terminal steer and interrupt race receipts");
+  "this.activity", "formatRunStatus", "deliverPendingNotification", "notificationPending", "queuedNotifications",
+  "deliveryKey", "controlWriter", "acquireNotificationSuppression", "is already ${run.status}",
+], "terminal steer and interrupt race lifecycle boundary");
 check(runtime.indexOf("await this.reconcileRun(id)", listActionEnd) < statusActionStart, "status must reconcile its ID before reading the latest registry value");
 hasAll(runtime, [
   'if ((action === "status" || action === "interrupt" || action === "delete") && input.message !== undefined)',
@@ -1976,7 +2047,7 @@ hasAll(clearImplementation, [
   "await this.reconcileAll()", "ACTIVE_STATUSES.has(run.status)",
   "clear requires every retained run to reach a terminal status",
   "Ask the user whether to interrupt these active runs, then retry clear only if they agree.",
-  "clearedCount: 0, warnings: [], changed: false", "No retained subagent runs to clear.",
+  "clearedCount: 0, warnings: [], changed: false", "toolJson({ clearedCount: 0, warnings: [] }, receipt)",
   "this.clearing = true", "this.purgeRetainedRuns(runs, [])", "runJournalClearEntry()",
   "this.clearedRunIds.add(run.id)", "this.queuedNotifications.clear()", "this.registry.clear()",
   "} finally {", "this.clearing = false",
@@ -2117,9 +2188,9 @@ hasAll(child, [
   '"need_decision"',
   '"interview_request"',
   '"progress_update"',
+  'content: [{ type: "text", text: JSON.stringify({ status: "waiting", reason: params.reason }) }]',
   "details: { request }",
   "terminate: true",
-  "Yielded to supervisor for run",
   'pi.on("session_start"',
   "pi.setActiveTools(pi.getAllTools().map((tool) => tool.name))",
   'pi.on("turn_start"', 'pi.on("tool_execution_end"', 'pi.on("turn_end"',
@@ -2129,7 +2200,8 @@ hasAll(child, [
   "ctx.abort()", 'event.reason !== "threshold"', "event.willRetry !== false",
   'pi.sendUserMessage(CHECKPOINT_RESUME_TEXT, { deliverAs: "followUp" })',
   "pendingCheckpoint = undefined",
-], "child supervisor extension");
+], "child supervisor extension with compact JSON result content");
+hasNone(child, ["Yielded to supervisor for run"], "contact_supervisor production result must not keep the legacy prose body");
 hasAll(child, [
   'const CACHE_RETENTION = cacheRetentionFromEnv(process.env[CACHE_RETENTION_ENV_VAR]) ?? "short"',
   'pi.on("before_provider_request", (event, ctx) => {', "applyCacheRetentionForRequest(",
@@ -2339,6 +2411,19 @@ hasAll(subagentRuntimeTests, [
   "a steer that loses the terminal race stays compact while the queued notification keeps the only full result",
 ], "Subagent clear and retained-history list tests");
 hasAll(subagentRuntimeTests, [
+  "function assertCompactJsonContent(result, expected)", "JSON.stringify(expected)", "JSON.parse(result.content[0].text)",
+  'assertCompactJsonContent(result, { id, agent: "fixer", status: "starting" })',
+  "assertCompactJsonContent(result, result.details.runs)", "assertCompactJsonContent(statusResult, statusResult.details.run)",
+  'assertCompactJsonContent(result, { id, status: "running", outcome: "requested" })',
+  'assertCompactJsonContent(reply, { id, status: "running", outcome: "replied" })',
+  'assertCompactJsonContent(result, { id, sourceRunId: "source", status: "starting" })',
+  "id, agent: \"fixer\", status: \"interrupted\", outcome: \"stopped\"",
+  "id, agent: \"fixer\", status: \"completed\", outcome: \"already-terminal\"",
+  "assertCompactJsonContent(result, { id, deleted: true, warnings: [] })",
+  "assertCompactJsonContent(result, { clearedCount: 0, warnings: [] })",
+  'assertCompactJsonContent(result, { status: "waiting", reason: params.reason })',
+], "Subagent and contact_supervisor tests parse every success action or outcome and pin exact compact shapes");
+hasAll(subagentRuntimeTests, [
   "interrupt stops a running run synchronously, returns the full result, and sends no notification",
   "interrupting a waiting run keeps its waiting notification and adds no retry",
   "interrupt accepts natural completion inside its wait window and never sends a terminal notification",
@@ -2387,38 +2472,31 @@ hasAll(subagentWidgetTests, [
   "↻  0 · 5.0s", "[●⠋↻◦✓] [^ ]|[●⠋↻◦✓] {3}", "visibleWidth(line) <= terminalWidth",
   "persistent widget heading counts terminal over retained runs with Todo-parity active and idle roles",
   "a single retained ID disappearing updates widget counts and the last removal retracts the section",
-  '"**●**  **Agents (5/8)**"', '"○  Agents (5/5)"', '"**●**  **Agents (1/2)**"', '"**●**  **Agents (2/3)**"',
-  '"\\u001b[35m\\u001b[1m●\\u001b[22m\\u001b[0m  \\u001b[35m\\u001b[1mAgents (5/8)\\u001b[22m\\u001b[0m"',
-  '"\\u001b[2m○\\u001b[0m  \\u001b[2mAgents (5/5)\\u001b[0m"',
   "must count as live and stay out of the numerator",
   "an all-terminal widget must not render any accent role",
   "the idle heading must stay dim without bold emphasis",
-  "hidden rows never change the retained counts", "two hidden terminal rows still count toward the heading",
   "removing the last retained ID retracts the widget", "roleAnsiTheme",
-  "collapsed Agents body keeps starting, running, and waiting rows while hiding terminal rows",
-  "expanded keeps the previous body byte for byte", "COMBINED_HINT",
-  "a collapsed widget with nothing policy-hidden shows no hint",
-  "an all-terminal collapsed widget keeps a heading-only body with no tree",
-  "the last collapsed active entry keeps its two-line block and closes the tree",
-  "collapsed Agents hint degrades from Viewer plus expand to expand-only to no semantic hint",
-  "wide headings show Viewer before expand", "medium headings preserve the complete original expand hint",
-  "tight headings drop both semantic hint segments instead of truncating either one",
-  "Viewer and expand hints share one dim non-bold segment",
-  "withConfiguredExpandKey", '"app.tools.expand"', '" · ctrl+shift+e to expand"',
-  "Viewer remains fixed while the existing expand hint follows its configured binding",
-  "heading counts ignore policy filtering and overflow",
-  "terminal policy-hidden runs out of more", "the 12-line budget keeps five whole two-line active blocks",
+  "Agents body permanently keeps starting, running, and waiting rows while hiding terminal rows",
+  'const VIEWER_HINT = " · ctrl+shift+←/→ viewer"',
+  "terminal-only history keeps a heading without terminal rows",
+  "compact rendering leaves retained run data unchanged",
+  "Agents Viewer hint stays complete when wide and disappears atomically when narrow",
+  "tight headings drop the Viewer hint instead of truncating it",
+  "a widget with no hidden terminal history needs no viewer hint",
+  "compact Agents overflow keeps queued rows eligible and terminal rows out of more",
+  "heading counts ignore row filtering and overflow",
+  "terminal rows out of more", "the 12-line budget keeps five whole two-line active blocks",
   "multiline waiting messages and terminal errors stay newline-free and preserve atomic renderer layout",
   "a waiting run remains one atomic two-line entry", "every returned renderer string is one physical line",
   "Do not render this second line", "stack detail must stay hidden",
-  "reads Pi's live expansion state on every render without re-registering the widget",
-  "Ctrl+O must not re-register the widget", "Ctrl+O toggles straight back to the full body",
-  "a host without getToolsExpanded stays expanded",
+  "SubagentWidget ignores Pi expansion state without re-registering the widget",
+  "Ctrl+O collapse state does not affect Agents", "Ctrl+O expanded state does not affect Agents",
+  "expansion changes must not re-register the widget",
   "manual and runtime-style updates refresh without advancing the spinner frame",
   "one timer tick advances one shared frame regardless of active run counts",
   "consecutive manual updates keep the current glyph", "runtime-style activity updates cannot accelerate the spinner",
   "multiple running rows share the same single-frame advance", "waiting rows stay static", "starting rows stay static",
-], "Subagent widget retained-run parity, heading count, collapse, hint, and fixed turn-glyph padding tests");
+], "Subagent widget retained-run parity, permanent compact body, Viewer hint, and fixed turn-glyph padding tests");
 
 hasAll(bootstrap, [
   "Seed the user preset once",
@@ -2462,8 +2540,14 @@ hasAll(todoExtension, [
   "additionalProperties: false", "minItems: 1", "TODO_PROMPT_GUIDELINES",
   'ctx.mode !== "tui"', 'pi.on("session_start"', 'pi.on("session_tree"',
   'pi.on("session_compact"', 'pi.on("session_shutdown"', "makeTodoSnapshot",
-  "JSON.stringify(tasks)",
-], "built-in Todo extension");
+  "JSON.stringify(tasks)", "const unfinished = result.tasks", 'task.status !== "completed"',
+  "map(({ subject, status, blockedBy }) => ({ subject, status, blockedBy }))",
+  "JSON.stringify({ receipts: result.receipts, unfinished })", "details,",
+], "built-in Todo extension with compact list and update model DTOs");
+const todoExecuteBlock = todoExtension.slice(todoExtension.indexOf("execute(_toolCallId"), todoExtension.indexOf("renderCall("));
+hasNone(todoExecuteBlock, [
+  "result.receipts.map", "sanitizeTodoText(receipt.text)", '.join("\\n")',
+], "Todo successful update content must not mix prose receipt lines with JSON list output");
 const todoFactory = todoExtension.slice(todoExtension.indexOf("export default function todoExtension"));
 hasNone(todoFactory, ["getAllTools("], "Todo extension factory initialization");
 const todoSchemaBlock = todoExtension.slice(0, todoExtension.indexOf("export const TODO_PROMPT_SNIPPET"));
@@ -2547,6 +2631,33 @@ hasAll(todoExtension, [
 ], "Todo child-only prompt guideline registration");
 const todoGuidelineText = [...todoGuidelines, ...todoChildGuidelines].join("\n");
 check(!/\b(?:snapshot|replay|store|version|widget|ID)\b/i.test(todoGuidelineText), "Todo promptGuidelines must not expose internal terms");
+
+for (const [name, source, detailPath, fallbackPath] of [
+  ["Ask", askTranscriptRenderer, "const result = askResult(resultValue.details)", "fallbackResult"],
+  ["Goal", goalTranscriptRenderer, "const details = goalDetails(result.details)", "fallbackResult"],
+  ["Loop", loopTranscriptRenderer, "const details = asRecord(result.details)", "fallbackResult"],
+  ["Monitor", monitorTranscriptRenderer, "const details = asRecord(result.details)", "fallbackResult"],
+  ["Subagent", read("extensions/oh-my-pi-slim/subagent-transcript-renderer.ts"), "const details = asRecord(result.details)", "fallbackResult"],
+  ["Todo", todoExtension, "if (isListDetails(result.details))", "const text = textContent(result)"],
+]) {
+  hasAll(source, [detailPath, fallbackPath], `${name} transcript must prefer complete details and use model content only as fallback`);
+}
+hasAll(goalRuntime, [
+  "customType: GOAL_CONTINUATION_MESSAGE_TYPE", "content: pending.content", "display: true",
+  "Goal state changed: ${message.event}.", "Reason: ${message.reason}",
+], "Goal continuation and state custom notifications remain proactive natural-language messages");
+hasAll(loopRuntime, [
+  "`Loop ${snapshot.id} fired.`", "`Abstract: ${snapshot.abstract}`", '"Prompt:"', "].join(\"\\n\")",
+  "customType: LOOP_MESSAGE_TYPE, content, display: true, details",
+], "Loop fire custom notifications remain proactive natural-language messages");
+hasAll(monitorUpdateBuilder, [
+  "`Monitor ${record.id} (${abstract}) status ${terminal ? record.status : \"running\"}.`",
+  "`Matched: ${matched.join(\", \")}.`", "Silence: no output for ${silence.silentFor}",
+], "Monitor proactive notifications remain natural-language messages");
+hasAll(runtime.slice(runtime.indexOf("private sendNotification("), runtime.indexOf("private deliverPendingNotification(")), [
+  "Subagent ${run.id} (${run.agent}) is ${delivery.event}.", "Request:\\n${JSON.stringify(run.request, null, 2)}", "terminalResultTail(run)",
+  "content:", "display: true", "details:",
+], "Subagent waiting and terminal custom notifications remain natural-language messages with full details");
 
 const modelMetadataAudit = [
   {
@@ -2669,7 +2780,7 @@ hasAll(todoWidget, [
   "export function hasOpenTodoTasks(tasks: readonly TodoTask[]): boolean {\n  return countCompletedTodoTasks(tasks) < tasks.length;",
   "isActive: () => hasOpenTodoTasks(this.tasks)",
 ], "Todo heading counts and stack section share one open-task predicate");
-const todoWidgetHeadingBlock = todoWidget.slice(todoWidget.indexOf("function todoWidgetHeading"), todoWidget.indexOf("/** Appends the collapsed hint"));
+const todoWidgetHeadingBlock = todoWidget.slice(todoWidget.indexOf("function todoWidgetHeading"), todoWidget.indexOf("export function isTodoTaskBlocked"));
 hasAll(todoWidgetHeadingBlock, [
   "const completed = countCompletedTodoTasks(tasks)", "const active = hasOpenTodoTasks(tasks)", 'const color = active ? "accent" : "dim"',
   'const glyph = active ? theme.bold("●") : "○"',
@@ -2677,25 +2788,14 @@ hasAll(todoWidgetHeadingBlock, [
   "formatSemanticGlyphPrefix(theme.fg(color, glyph))", "theme.fg(color, label)",
 ], "Todo persistent widget active and all-completed idle heading visual");
 hasNone(todoWidgetHeadingBlock, ['theme.bold("○")'], "Todo idle heading must remain dim without bold emphasis");
-check(
-  todoWidget.includes("todoHeadingLine(todoWidgetHeading(tasks, theme), policyHidden > 0 ? hint : \"\", theme, safeWidth)"),
-  "Todo persistent widget must render through the active-idle heading helper with its collapsed hint",
-);
-const todoHeadingLineBlock = todoWidget.slice(
-  todoWidget.indexOf("function todoHeadingLine"),
-  todoWidget.indexOf("export function isTodoTaskBlocked"),
-);
-hasAll(todoHeadingLineBlock, [
-  'if (hint !== "" && visibleWidth(heading) + visibleWidth(hint) <= width)',
-  '`${heading}${theme.fg("dim", hint)}`', 'return truncateToWidth(heading, width, "…")',
-], "Todo collapsed hint is one atomic dim segment that only fits or disappears");
-hasNone(todoHeadingLineBlock, ["theme.bold(hint)", "slice(0,", "to collapse"], "Todo hint must never be bold, split, or inverted");
 hasAll(todoWidget, [
-  "expanded = true", 'hint = ""',
-  'const sorted = expanded ? ranked : ranked.filter((task) => task.status !== "completed")',
-  "const policyHidden = expanded ? 0 : countCompletedTodoTasks(tasks)",
-  "selectTodoWidgetLayout(tasks, maxLines, expanded)",
-], "Todo collapsed policy hides only completed rows and ranks against the whole ledger");
+  'sortTodoTasksForWidget(tasks).filter((task) => task.status !== "completed")',
+  "selectTodoWidgetLayout(tasks, maxLines)",
+  "const lines = [truncate(todoWidgetHeading(tasks, theme))]",
+], "Todo foreground widget permanently filters completed rows before applying its budget");
+hasNone(todoWidget, [
+  "input.expanded", "input.hint", "policyHidden", "todoHeadingLine", "widgetExpandHint", "to expand",
+], "Todo foreground widget must remain permanently compact without an expand hint");
 hasAll(todoExtension, [
   "context.expanded === true", "todoCallTitle", 'theme.bold("todo")', 'theme.fg("muted", detail)',
   '`· ${action}${expanded ? "" : " (ctrl+o to expand)"}`', 'action === "list" || !expanded',
@@ -2762,7 +2862,9 @@ hasAll(widgetStackTests, [
   "a late tick never re-registers a disposed section", "a late tick never republishes a disposed section",
   "a tree cycle drops the old sections and republishes them on the new UI without orphan rows",
   "the pre-tree branch leaves no orphan rows behind", "a tree cycle reuses the single registration",
-  "the aggregate component reads live width, theme, and Ctrl+O state while invalidate stays a no-op",
+  "Ctrl+O only changes Goal while compact widgets stay unchanged and the aggregate stays registered once",
+  "output is independent of Ctrl+O", "the Goal section still receives the live collapsed state",
+  "the Goal detail returns from the same live registration",
   "Ctrl+O never re-registers the aggregate", "invalidate is a no-op and never re-registers",
   "one width reaches every section",
   "a session without a TUI UI publishes freely and still calls setWidget zero times",
@@ -2846,6 +2948,8 @@ hasAll(loopCoreTests, [
   "injected cache append failure",
 ], "Cache main hook, command, session lifecycle, tree invariance, and append atomicity tests");
 hasAll(loopCoreTests, [
+  "all seven successful actions return compact JSON with exact public shapes", "const parsed = JSON.parse(text)",
+  "assert.equal(text, JSON.stringify(parsed))", "PUBLIC_LOOP_KEYS", 'deleted: true', 'clearedCount: 1',
   "synchronous injected timeout callbacks activate after commit", "scheduler failures preserve active modify and paused resume atomicity",
   "scheduler unavailable", "tree abort waits for shutdown completion", "abort cannot release delivery before subagent shutdown completes",
   "shutdown failure schedules deferred gate release before propagating", "ordinary input releases a canceled tree gate",
@@ -2853,7 +2957,7 @@ hasAll(loopCoreTests, [
   "orchestrator prompt remains active when phase reminders default off", "an active preset triggers phase without an active Goal",
   "an active Goal triggers phase even when Goal reminders are off", "reminder handlers never send or enqueue another message", "reminder handlers append no entries of their own",
   "reminder handlers create no recursive or additional turn", "Goal reminder registers no renderer",
-], "Loop scheduler seam, tree abort compensation, and independent reminder registration tests");
+], "Loop compact success DTO, scheduler seam, tree abort compensation, and independent reminder registration tests");
 const askRuntimeTests = read("tests/ask-runtime.test.mjs");
 const askUiTests = read("tests/ask-ui.test.mjs");
 const askTranscriptTests = read("tests/ask-transcript-renderer.test.mjs");
@@ -2863,8 +2967,11 @@ hasAll(askRuntimeTests, [
   // Cancel discards answers at the driver and again in the shared builder, including malformed driver output.
   "every RPC cancel entry discards answers that were already confirmed",
   "the shared result builder discards cancelled driver answers, malformed ones included",
-  "No answers were retained",
-], "Ask core schema, result, cancel discard, RPC, single-flight, abort, headless, and renderer registration tests");
+  "model DTO content is exact compact JSON for complete, partial, user-cancelled, and empty-submit outcomes",
+  '"outcome":"complete"', '"outcome":"partial"', '"outcome":"cancelled"',
+  '"reason":"user_cancelled"', '"reason":"empty_submit"', "buildAskModelDto(complete, questionnaire)",
+  "askResultModelContent(complete, questionnaire).includes(\"\\n\")", "question|header|selected",
+], "Ask tests pin every success outcome to an exact compact JSON shape without authored-question leakage");
 hasAll(askUiTests, [
   "tabs wrap in both directions", "single-select cycles", "multi-select toggles", "per-tab drafts", "partial and zero answers",
   "wide two-column", "narrow stacked", "Abort closes the overlay exactly once", "RPC never uses custom overlay", "main lifecycle binds fresh TUI drivers",
@@ -2885,33 +2992,37 @@ for (const file of ["tests/loop.test.mjs", "tests/provider-schema.test.mjs", "te
 }
 const todoTests = read("tests/todo.test.mjs");
 hasAll(todoTests, [
+  "update content is compact JSON with complete receipts and minimal unfinished tasks without changing details or UI",
+  "update content explicitly returns an empty unfinished array with complete receipts",
+  "const content = JSON.parse(result.content[0].text)", "assert.equal(result.content[0].text, JSON.stringify(content))",
+  'Object.keys(content), ["receipts", "unfinished"]',
+  'content.unfinished.map((item) => Object.keys(item))', '["subject", "status", "blockedBy"]',
+  'Object.keys(JSON.parse(result.content[0].text)[0]).sort()', '["abstract", "blockedBy", "status", "subject"]',
   'todo · list (ctrl+o to expand)', 'todo · update (ctrl+o to expand)',
   'assert.equal(collapsed, "todo · update (ctrl+o to expand)")',
   'Action:|Operations:|Append:|Modify:|Delete:|Clear:',
   '✓  Applied 1 append · 2 modify · 0 delete · 0 clear → 2 changed · 1 no change',
   '✓  Applied 0 append · 0 modify · 1 delete · 0 clear → 1 changed · 0 no change',
-  "widget priority sorts every state from current dependencies", "missing-ref", "sorts before slicing",
+  "widget priority sorts every state from current dependencies", "missing-ref",
+  "widget filters completed rows before slicing, preserves the 12-line budget, and pads semantic glyphs",
   'cannot delete "Core" because "Left", "Right" depend on it',
-  "widget active and all-completed idle headings keep exact roles, ANSI, width, overflow, and row treatment",
+  "widget headings keep full-ledger counts and all-completed ledgers stay heading-only",
   "widget heading refreshes both ways across update, delete, clear, replay, tree, compact, and session restore",
   '"○  Todos (14/14)"', "all-completed widget must not render any accent role",
   "an all-completed list result uses the idle heading visual", "roleAnsiTheme",
   '○  Applied 0 append · 0 modify · 0 delete · 1 clear → 0 changed · 1 no change',
   "top-level, delete, and clear receipts all use success", '"○  Todos (0/0)\\nNo todos."',
-  "collapsed widget keeps pending and in_progress rows, including blocked pending, and hides only completed ones",
-  '"●  Todos (2/6) · ctrl+o to expand"', '"├─ ○  blocked-work ⛓  open-dependency"',
-  '["○  Todos (2/2) · ctrl+o to expand"]', "a collapsed ledger with nothing hidden shows no hint at all",
-  "withConfiguredExpandKey", '"app.tools.expand"', '" · ctrl+shift+e to expand"',
-  "the hint renders identically in the active and idle heading states",
-  "the hint is never bold", "must drop the whole hint, never half of it",
-  "heading counts ignore both filtering and overflow",
-  "policy-hidden completed rows stay out of the overflow summary",
-  "reads Pi's live expansion state on every render without re-registering the widget",
-  "Ctrl+O must not re-register the widget", "Ctrl+O toggles straight back without a second registration",
-  "an all-completed collapsed ledger keeps a heading-only widget",
-  "a non-empty ledger stays registered while collapsed",
-  "an empty ledger still unregisters while collapsed",
-], "Todo focused Ctrl+O, active-idle, and collapsed-widget visual tests");
+  "widget permanently keeps pending and in_progress rows and hides completed rows without a hint",
+  '"●  Todos (2/6)"', '"└─ ○  blocked-work ⛓  open-dependency"',
+  '["○  Todos (2/2)"]',
+  "Todo widget overflow counts only unfinished rows while the heading counts the full ledger",
+  "completed rows stay outside the line budget and overflow",
+  "TodoWidget ignores Pi's live Ctrl+O state and remains permanently compact",
+  "Ctrl+O state changes must not re-register the widget",
+  "Ctrl+O state changes must not alter widget registration",
+  "a non-empty all-completed ledger keeps its heading",
+  "an empty ledger still unregisters",
+], "Todo exact list and update JSON shapes, transcript Ctrl+O, active-idle, and permanent compact widget tests");
 const subagentTranscriptTests = read("tests/subagent-transcript-renderer.test.mjs");
 hasAll(subagentTranscriptTests, [
   "collapsed list results show only the retained-run heading count",
@@ -2939,6 +3050,13 @@ hasAll(providerSchemaTests, [
 ], "provider schema JSON audit");
 const monitorTests = read("tests/monitor.test.mjs");
 hasAll(monitorTests, [
+  "function assertActionContent(result, expected)", "JSON.stringify(expected)", "JSON.parse(result.content[0].text)",
+  "function assertStopContent(result)", "function assertStatusContent(result)",
+  "stop content must omit ${field}", "status content must omit ${field}",
+  'assertActionContent(first, { id: "00000001", status: "running" })',
+  "assertActionContent(listed, harness.runtime.list())", "assertStatusContent(statusResult)", "assertStopContent(stopped)",
+  'assertActionContent(deleted, { id: "44444444", deleted: true })',
+  "assertActionContent(cleared, { clearedCount: 2, warnings: [] })",
   "real detached descendant holding a pipe cannot block sequential stop",
   "shutdown invalidates first, signals all groups in parallel, kills survivors, clears blockers and log root, and is idempotent",
   "bounded recent-line ring without reading the JSONL file",
@@ -2960,7 +3078,7 @@ hasAll(monitorTests, [
   "a matcher batch still pending at close folds its lines into the single terminal update",
   "zero incremental lines stay legal and never replay retained history",
   "terminal notification must not carry full state field",
-  "monitor status stays the only full retained state and log entry point",
+  "monitor status stays the diagnostic state and log entry point",
   "stop owns terminal delivery, sends TERM then KILL, preserves the real killed state, and retains logs",
   "stop reports raced and already-terminal outcomes and folds pending matches into its complete state once",
   "stop drops mutable pending while preserving only an already handed copy",
@@ -2978,12 +3096,12 @@ hasAll(monitorTests, [
   "terminal absorbs a gated per-monitor suppression aggregate with unique ordered seqs",
   "delete removes terminal delivery tracking and Goal blocking immediately", "a delayed ACK for the removed lane is stale",
   "shutdown waits for an owned stop before scanning and never sends duplicate TERM or KILL",
-], "Monitor focused process, logging, delivery, payload, stop ownership, and Goal-reservation tests");
+], "Monitor all-action compact JSON shapes, diagnostic status, termination receipt, notifications, and Goal-reservation tests");
 const monitorUiTests = read("tests/monitor-ui.test.mjs");
 hasAll(monitorUiTests, [
-  "the exact terminal/total heading ratio, glyphs, running/terminal order, overflow, width safety, and empty state",
+  "Monitor widget renders the exact terminal/total heading ratio, running rows, overflow, width safety, and empty state",
   "throttles and coalesces output", "registers once", "invalidate a no-op", "rebinds", "disposes",
-  "all six actions", "uniform hints", "full operational state", "never fall through to model content", "global summary notifications",
+  "all six actions", "uniform hints", "full operational state", "global summary notifications",
   "matched 2 (ctrl+o to expand)", "rate limited (ctrl+o to expand)", '${status} (ctrl+o to expand)',
   "Monitor unified update notifications collapse by status and expand one incremental layout without full operational state",
   "Monitor legacy matcher, legacy terminal, and global summary notifications still render complete bounded details",
@@ -2994,29 +3112,20 @@ hasAll(monitorUiTests, [
   "fallbacks and errors sanitize controls", "model-facing list data invariant", "without a TUI context",
   "narrow.map((line) => stripVTControlCharacters(line))", '"printf done"',
   "├─ ↻  running first", "[↻!×✓●○] [^ ]|[↻!×✓●○] {3}", "↻  Monitor [00000001]",
-  'assert.equal(lines[0], "●  Monitors (3/5)"', "completed, failed, and killed all count as terminal in the numerator",
-  '"●  Monitors (0/13)"', "the 12-line budget and overflow row never shrink the heading total",
-  '"●  Monitors (0/2)"', "a fully running widget reports a zero numerator",
-  '"○  Monitors (3/3)"', "an all-terminal widget reads N/N with the hollow dim glyph, even while every row stays hidden",
-  "collapsing away every terminal row leaves the heading ratio untouched",
+  'assert.equal(overflow[0], "●  Monitors (0/13)"', "the 12-line budget and overflow row never shrink the heading total",
+  "Monitor widget permanently hides terminal rows and never displays an expand hint",
+  '"●  Monitors (0/2)"', '"○  Monitors (3/3)"',
+  "completed, failed, and killed all count as terminal in the numerator",
   "a narrow terminal keeps the whole ratio while the rows truncate",
-  "the widest hintless heading keeps the ratio whole",
-  "six rows hidden by the line budget still count in the heading",
-  "collapse plus budget never changes the ratio", "display sorting never reorders the counted set",
-  "a lifecycle refresh moves the ratio and drops the heading to idle",
-  "collapsed body keeps only running rows", "one atomic dim expand hint",
-  '"●  Monitors (3/5) · ctrl+o to expand"', '["○  Monitors (3/3) · ctrl+o to expand"]',
-  "a collapsed widget with nothing hidden shows no hint at all",
-  "withConfiguredExpandKey", '"app.tools.expand"', '" · ctrl+shift+e to expand"',
-  "the hint renders identically in the active and idle heading states",
-  "a running monitor keeps the filled accent bold glyph, label, and ratio",
-  "an all-terminal widget drops to a hollow dim non-bold glyph, label, and ratio",
-  "the hint is never bold", "must drop the whole hint, never half of it",
-  "only the two budget-hidden running rows are summarised", "policy-hidden terminal rows never reach the body",
-  "reads Pi's live expansion state on every render without re-registering the widget",
-  "Ctrl+O must not re-register the widget", "Ctrl+O toggles straight back to the full body",
-  "a host without getToolsExpanded stays expanded", "roleAnsiTheme",
-], "Monitor focused widget, terminal/total heading ratio, collapse, hint, and RPC visual tests");
+  "Monitor overflow counts only visible running rows while the heading ratio still spans every retained monitor",
+  "all retained monitors still count in the heading", "display sorting never changes the counted set",
+  "only the two budget-hidden running rows are summarised", "terminal rows and expand hints never reach the widget",
+  "MonitorWidget output is invariant across Pi expansion state changes without re-registering",
+  "Ctrl+O never reveals terminal monitor rows or an expand hint",
+  "Ctrl+O must not re-register the widget",
+  "switching Ctrl+O back leaves widget output unchanged",
+  "a host without getToolsExpanded uses the same compact output", "roleAnsiTheme",
+], "Monitor focused widget, permanent terminal filtering, transcript Ctrl+O, and RPC visual tests");
 const loopLoadTests = read("tests/loop-load.test.mjs");
 hasAll(loopLoadTests, [
   "real Pi isolated RPC main and child sessions expose exact package tools without widgets",
@@ -3035,6 +3144,10 @@ hasAll(loopLoadTests, [
 const goalTests = read("tests/goal.test.mjs");
 const goalUiTests = read("tests/goal-ui.test.mjs");
 hasAll(goalTests, [
+  "all eight Goal actions return the unified compact DTO for changes, no-ops, and empty state",
+  "Goal success content must be compact single-line JSON", "const dto = JSON.parse(text)",
+  "assert.deepEqual({ goal: dto.goal, changed: dto.changed }, result.details)",
+  'dto.message === undefined ? ["goal", "changed"] : ["goal", "changed", "message"]',
   "Goal schema is a strict portable object", "create, modify, terminal replacement", "status and repeated pause or resume no-ops", "retry-success cleanup is internally guarded", "snapshot replay is strict",
   "Goal reminder type and model-facing text", 'GOAL_REMINDER_MESSAGE_TYPE, "oh-my-pi-slim:goal-reminder"',
   'runtime.status().status, "retry_wait"', 'runtime.phaseReminder(), undefined',
@@ -3061,7 +3174,7 @@ hasAll(goalTests, [
   "clear notifies subscribers and the widget with a null Goal without an automatic state message",
   "clearing a paused Goal drops deferred continuation work",
   "a Goal created after a clear is a fresh instance whose stats exclude the cleared Goal",
-], "Goal focused durable state, lifecycle, gate, retry, abort, ownership, stats, numbering, clear, and registration tests");
+], "Goal compact success DTO, durable state, lifecycle, gate, retry, abort, ownership, stats, numbering, clear, and registration tests");
 hasAll(goalUiTests, [
   "five statuses, exact two-line order, stats, elapsed, retry, paused reason, width, and empty state",
   "one shared 1s timer", "Component.invalidate is a no-op", "caches branch stats across timer ticks", "RPC or print widget",
@@ -3168,7 +3281,10 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "any other compaction failure fails the run instead of prompting it",
         "matched exactly", "atomic", "still names it in `blockedBy`", "Multiple items may be `in_progress`", "acyclic graph", "draft-relative `in_progress` status",
         "runtime-only fixed-delay", "Creation and resume wait one full interval", "active loop cannot be deleted", "reload, new session, session resume, fork, or quit",
-        "case-sensitive literal matching", "`stop` preserves the terminal record and retained log", "does not send another terminal notification", "available until `delete` or `clear`",
+        "case-sensitive literal matching", "`stop` preserves the terminal record and retained log", "compact termination receipt",
+        "Use `status` to retrieve that diagnostic state and combined logs", "does not send another terminal notification", "available until `delete` or `clear`",
+        "`monitor status` returns one record's diagnostic state and combined logs",
+        "Complete operational details remain available only in `details` for TUI and internal use",
         "`checkAfter` is required on `create`", "a silence reminder asks you to call `monitor status`", "`lastOutputAt`",
         "one to four questions", "single-select", "multi-select", "custom responses", "previews", "unavailable while a Goal is active",
         "branch-local durable Goal", "restore unfinished work as paused", "Provider failures retry automatically", "A user abort pauses only when Goal continuation is immediately safe to deliver", "If any continuation gate is blocked, the Goal remains active", "one non-empty evidence item for each criterion",
@@ -3183,10 +3299,20 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "An `active` or `retry_wait` Goal blocks `clear`", "must ask whether to pause or cancel it",
         "A cleared branch reports no Goal at all",
         "leaving retained subagent runs untouched", "no `confirmed` or `force` field",
+        "Every successful result from `ask_user_question`, `goal`, `loop`, `monitor`, `subagent`, `contact_supervisor`, and `todo`",
+        "one compact single-line JSON value in `content`", "model-facing body", "`details` remains the complete UI and internal contract",
+        "normal transcript rendering reads `details` first before falling back to `content`",
+        "Errors and proactive custom notifications remain natural language", "Goal continuations", "Loop fires", "Monitor notifications",
+        "Subagent waiting or terminal notifications",
         "safely queued during compaction and tree operations", "collapsed and expanded views", "compact widgets",
-        "When the Agents widget is collapsed", "fixed `ctrl+shift+←/→ viewer` hint",
-        "retained terminal runs are policy-hidden", "existing Ctrl+O expand hint is present",
-        "keeps only the complete Ctrl+O hint", "omits both hints", "expanded Agents heading shows neither hint",
+        "Transcript tool calls, tool results, and notifications use Ctrl+O",
+        "Todo, Agents, and Monitor foreground widgets are permanently compact and never show a Ctrl+O expand hint",
+        "Todo always hides completed rows", "Agents and Monitor always hide terminal rows", "full retained set",
+        "Goal widget still reads Pi's shared tool-output expansion state", "Loop widget always shows its full body",
+        "The Agents heading appends the fixed `ctrl+shift+←/→ viewer` hint when retained terminal runs are hidden",
+        "heading never shows a Ctrl+O expand hint",
+        "Main and every subagent transcript share this state", "Goal foreground widget reads it too",
+        "Todo, Agents, and Monitor remain permanently compact", "Loop remains permanently full",
         "successful subagent `clear` remains clear after reload",
         "Cache Mode belongs to the current Pi session", "defaults to Short for a new session", "Bare `/cache` toggles between Long and Short",
         "latest toggle applies across every branch", "session resume recover it from session history", "fork inherits the last Cache Mode state",
@@ -3224,7 +3350,9 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "其他任何 compaction 失败都会让该 run 失败",
         "使用 exact match", "原子性", "仍在 `blockedBy` 中引用目标", "多个 item 可以同时处于 `in_progress`", "无环图", "batch draft 中目标的当前状态",
         "runtime-only fixed-delay", "创建和恢复后都会先等待一个完整 interval", "active loop 不能被 `delete`", "reload、new session、session resume、fork 或 quit",
-        "区分大小写的 literal match", "`stop` 会保留 terminal record 与 retained log", "不会再发送另一条 terminal notification", "一直保留到 `delete` 或 `clear`",
+        "区分大小写的 literal match", "`stop` 会保留 terminal record 与 retained log", "紧凑 termination receipt",
+        "诊断状态与合并日志通过 `status` 获取", "不会再发送另一条 terminal notification", "一直保留到 `delete` 或 `clear`",
+        "`monitor status` 返回一个 record 的诊断状态与合并日志", "完整 operational details 仅在 `details` 中供 TUI 与内部使用",
         "`checkAfter` 在 `create` 时必填", "就会收到一条 silence reminder", "`lastOutputAt`",
         "一到四个 question", "single-select", "multi-select", "custom response", "preview", "Goal active 时不可用",
         "branch-local durable Goal", "恢复为 paused", "provider failure 会自动重试", "只有 Goal continuation 此刻可以安全交付时，用户 abort 才会暂停 Goal", "任一 continuation gate 被阻塞时，Goal 会保持 active", "每条 criterion 必须精确对应一条非空 evidence",
@@ -3239,10 +3367,18 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "`active` 或 `retry_wait` Goal 会阻止 `clear`", "必须先询问是否暂停或取消",
         "清理后的 branch 报告没有任何 Goal",
         "retained subagent run 保持不变", "没有 `confirmed` 或 `force` 字段",
+        "`ask_user_question`、`goal`、`loop`、`monitor`、`subagent`、`contact_supervisor` 与 `todo` 的每个成功结果",
+        "一个紧凑单行 JSON 值", "面向模型的正文", "`details` 仍是完整的 UI 与内部契约",
+        "正常 transcript 渲染会优先读取 `details`", "错误与主动 custom notification 仍使用自然语言",
+        "Goal continuation", "Loop fire", "Monitor notification", "Subagent waiting 或 terminal notification",
         "compaction 与 tree operation 期间", "collapsed/expanded", "紧凑 widget",
-        "Agents widget 折叠时", "policy 而隐藏的 retained terminal run", "已有 Ctrl+O expand hint",
-        "固定的 `ctrl+shift+←/→ viewer` 提示", "先只保留完整的 Ctrl+O 提示", "两条提示都省略",
-        "Agents heading 展开时不显示任何提示",
+        "transcript tool call、tool result 与 notification 使用 Ctrl+O",
+        "Todo、Agents 与 Monitor foreground widget 永久保持紧凑模式，且绝不显示 Ctrl+O expand 提示",
+        "Todo 始终隐藏 completed 行", "Agents 与 Monitor 始终隐藏 terminal 行", "完整 retained 集合",
+        "Goal widget 仍读取 Pi 共享的 tool-output 展开状态", "Loop widget 始终显示完整内容",
+        "Agents heading 会追加固定的 `ctrl+shift+←/→ viewer` 提示", "heading 绝不显示 Ctrl+O expand 提示",
+        "Main 与所有 subagent transcript 共用该状态", "Goal foreground widget 也会读取它",
+        "Todo、Agents 与 Monitor 永久保持紧凑模式", "Loop 永久保持完整模式",
         "subagent `clear` 在 reload 后仍保持清空",
         "Cache Mode 属于当前 Pi session", "新 session 默认使用 Short", "裸 `/cache` 在 Long 与 Short 之间切换",
         "最近一次 toggle 对全部 branch 生效", "session resume 会从 session history 恢复状态", "fork 会继承",
@@ -3265,6 +3401,18 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "不依赖当前 Main model 或认证状态", "请求的 session policy",
         "不证明 OAuth 已启用", "不证明 server 已接受 retention request", "不证明发生了 cache hit", "不会添加 Requested 字样",
       ], `${file} visible behavior contract`);
+  hasNone(text, english
+    ? [
+        "The subagent, Todo, and Monitor widgets follow the same Ctrl+O state",
+        "When the Agents widget is collapsed", "existing Ctrl+O expand hint",
+        "the package widgets share it", "full retained state and logs", "complete operational state and logs",
+        "return its complete terminal state",
+      ]
+    : [
+        "subagent、Todo 与 Monitor widget 跟随与 tool row 相同的 Ctrl+O 状态",
+        "Agents widget 折叠时", "已有 Ctrl+O expand hint",
+        "package widget 共用", "完整 retained state 与日志", "完整 operational state 与日志", "返回完整 terminal state",
+      ], `${file} rejected foreground expansion documentation`);
 
   const presetIntro = section(english ? "## Presets and configuration" : "## Preset 与配置", "### Cache Mode");
   const cacheModeDoc = section("### Cache Mode", english ? "## Runtime, UI, and persistence" : "## Runtime、UI 与持久化");
@@ -3316,30 +3464,33 @@ hasAll(widgetRenderer, [
   "describeWidgetActivity", "activeLines.length * 2", "queuedLines.length", "budget >= 2", "run.abstract", "shortAbstract",
   'shortAbstract(run.request?.message ?? "") || "supervisor reply required"',
   'shortAbstract(run.error).slice(0, 60)',
-  "sortRetainedSubagentRuns(runs)", "lines.push(...sections.queuedLines, ...sections.finishedLines)",
-  "const expanded = params.expanded ?? true",
-  "const policyHidden = expanded ? 0 : categories.finished.length",
-  "const shown: Categories = expanded ? categories : { ...categories, finished: [] }",
-  "subagentHeadingLine(", "subagentWidgetHeading(runs, theme),", 'policyHidden > 0 ? params.hint ?? "" : "",',
-  "buildSections(shown, spinnerFrame, theme, truncate, nowMs, terminalWidth)",
+  "sortRetainedSubagentRuns(runs)", "lines.push(...sections.queuedLines)",
+  "const categories = categorizeRuns(sortRetainedSubagentRuns(runs))",
+  "subagentHeadingLine(", "subagentWidgetHeading(runs, theme),", "categories.finished.length > 0,",
+  "buildSections(categories, spinnerFrame, theme, truncate, nowMs, terminalWidth)",
   "export type ActiveRunLines = [summary: string, stats: string]", "maxSummaryWidth?: number", "visibleWidth(identity) > maxSummaryWidth",
   "visibleWidth(identity) + visibleWidth(separator) > maxSummaryWidth", "const summaryIndex = lines.length - 2",
   'lines[summaryIndex] = lines[summaryIndex].replace("├─", "└─")',
   'lines[summaryIndex + 1] = lines[summaryIndex + 1].replace("│  ", "   ")',
   'theme.fg("dim", " · ")', 'theme.fg(waiting ? "warning" : "dim", activityText)',
   'AGENTS_VIEWER_HINT = " · ctrl+shift+←/→ viewer"',
-], "subagent widget two-line active renderer");
+], "subagent widget permanent compact two-line active renderer");
+hasNone(widgetRenderer, [
+  "params.expanded", "params.hint", "input.expanded", "widgetExpandHint", "to expand", "sections.finishedLines",
+], "Agents foreground widget must permanently hide terminal rows without expansion state");
 const subagentHintBlock = widgetRenderer.slice(
   widgetRenderer.indexOf("function subagentHeadingLine"),
   widgetRenderer.indexOf("interface Categories"),
 );
 hasAll(subagentHintBlock, [
-  'const fullHint = expandHint === "" ? "" : `${AGENTS_VIEWER_HINT}${expandHint}`',
-  'visibleWidth(heading) + visibleWidth(fullHint) <= width', 'theme.fg("dim", fullHint)',
-  'visibleWidth(heading) + visibleWidth(expandHint) <= width', 'theme.fg("dim", expandHint)',
+  "showViewerHint: boolean",
+  "showViewerHint && visibleWidth(heading) + visibleWidth(AGENTS_VIEWER_HINT) <= width",
+  '`${heading}${theme.fg("dim", AGENTS_VIEWER_HINT)}`',
   "return truncateToWidth(heading, width)",
-], "Agents collapsed hint preserves Viewer plus expand, then expand-only, then no semantic hint");
-hasNone(subagentHintBlock, ["theme.bold(fullHint)", "theme.bold(expandHint)", "slice(0,", "to collapse"], "Agents hints must never be bold, split, or inverted");
+], "Agents heading keeps one complete Viewer hint when permanently hidden terminal rows exist");
+hasNone(subagentHintBlock, [
+  "expandHint", "ctrl+o", "to expand", "theme.bold(AGENTS_VIEWER_HINT)", "slice(0,",
+], "Agents heading must never advertise foreground expansion or truncate its Viewer hint");
 const subagentHeadingBlock = widgetRenderer.slice(
   widgetRenderer.indexOf("function subagentWidgetHeading"),
   widgetRenderer.indexOf("function subagentHeadingLine"),
@@ -3641,6 +3792,11 @@ hasAll(viewerTranscript, [
   "showImages: false", "PROMPT_ZONE_PATTERN", "sanitizeViewerText", "boundViewerBlockText",
   "VIEWER_MAX_TRANSCRIPT_LINES", "dispose(): void", "setExpanded(expanded: boolean): void",
 ], "viewer transcript body reuses Pi's Main components with sanitized, bounded input");
+hasAll(viewerTranscript, [
+  'toolName !== "contact_supervisor"', "JSON.parse(part.text)", "Object.keys(payload).length !== 2",
+  'payload.status !== "waiting"', '!["need_decision", "interview_request", "progress_update"].includes(String(payload.reason))',
+  'return [{ type: "text", text: "Yielded to supervisor." }];',
+], "the child viewer renders compact contact JSON as a friendly receipt without exposing details");
 check(
   !viewerTranscript.includes("VIEWER_MAX_BLOCK_CHARS"),
   "no transcript block may be cut to the live-overlay head budget",
@@ -3874,6 +4030,9 @@ hasAll(read("tests/loop.test.mjs"), [
 ], "registration tests must pin two main shortcuts and none in a child");
 
 hasAll(viewerTests, [
+  "contact_supervisor minimal DTOs get a friendly receipt while historical text stays unchanged",
+  'JSON.stringify({ status: "waiting", reason })', "Yielded to supervisor\\.",
+  "Yielded to supervisor for run historical-text-run\\.", "CHILD_RENDERER_SENTINEL",
   "every retained status stays in the cycle and i/N counts the whole retained set",
   "a retained set larger than the widget's visible budget keeps every run in the cycle",
   "a running run that completes keeps the selection and creation-stable index",

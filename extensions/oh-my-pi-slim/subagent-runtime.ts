@@ -235,8 +235,8 @@ export function discoverPackageAgents(): Map<SpecialistName, AgentDefinition> {
   return definitions;
 }
 
-function toolText(text: string, details?: unknown) {
-  return { content: [{ type: "text" as const, text }], details };
+function toolJson(value: unknown, details?: unknown) {
+  return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details };
 }
 
 function abortError(message: string): Error {
@@ -249,16 +249,6 @@ function terminalResultTail(run: PersistedRun): string {
   const output = run.output !== undefined ? `\n\nOutput: ${run.output}` : "";
   const error = run.error !== undefined ? `\n\nError: ${run.error}` : "";
   return `${output}${error}`;
-}
-
-/** Interrupt hands back the same complete result that a terminal lifecycle notification would have carried. */
-function interruptResultText(run: PersistedRun, outcome: InterruptOutcome): string {
-  const headline = outcome === "raced"
-    ? `Run ${run.id} (${run.agent}) reached ${run.status} before the interrupt stopped it.`
-    : outcome === "unconfirmed"
-      ? `Run ${run.id} (${run.agent}) is ${run.status}, but its detached runner did not confirm that it stopped and its run directory is retained.`
-      : `Run ${run.id} (${run.agent}) is ${run.status}.`;
-  return `${headline}${terminalResultTail(run)}`;
 }
 
 function publicSchemaKeys(schema: { properties?: Record<string, unknown> }): string[] {
@@ -1321,7 +1311,14 @@ export class OmpsSubagentRuntime {
       const handed = this.registry.require(id);
       if (handed.notificationPending !== undefined) this.updateRun(id, { notificationPending: undefined });
       const final = this.registry.require(id);
-      return toolText(interruptResultText(final, outcome), { run: this.formatRun(final), outcome });
+      return toolJson({
+        id: final.id,
+        agent: final.agent,
+        status: final.status,
+        outcome,
+        ...(final.output !== undefined ? { output: final.output } : {}),
+        ...(final.error !== undefined ? { error: final.error } : {}),
+      }, { run: this.formatRun(final), outcome });
     } finally {
       this.releaseNotificationSuppression(id);
       this.deliverPendingNotification(id);
@@ -1447,7 +1444,7 @@ export class OmpsSubagentRuntime {
       this.failRun(run.id, error instanceof Error ? error.message : String(error), true);
     }
     const retained = this.registry.require(run.id);
-    return toolText(`Created asynchronous run ${run.id} (${run.agent}) with status ${retained.status}.`, {
+    return toolJson({ id: retained.id, agent: retained.agent, status: retained.status }, {
       run: this.formatRun(retained),
     });
   }
@@ -1484,7 +1481,7 @@ export class OmpsSubagentRuntime {
     if (action === "list") {
       await this.reconcileAll();
       const runs = this.registry.list().map((run) => this.formatRunSummary(run));
-      return toolText(JSON.stringify(runs, null, 2), { runs });
+      return toolJson(runs, { runs });
     }
 
     if (action === "clear") return this.clearRetainedRuns();
@@ -1494,7 +1491,7 @@ export class OmpsSubagentRuntime {
     await this.reconcileRun(id);
     if (action === "status") {
       const run = this.formatRunStatus(this.requireRun(id));
-      return toolText(JSON.stringify(run, null, 2), { run });
+      return toolJson(run, { run });
     }
     if (action === "reply") return this.reply(id, requireString(input.message, "message"));
     const run = this.requireRun(id);
@@ -1504,7 +1501,17 @@ export class OmpsSubagentRuntime {
       const terminalRun = this.formatRunSummary(run);
       const alreadyTerminal: InterruptOutcome = "already-terminal";
       const terminalDetails = action === "interrupt" ? { run: terminalRun, outcome: alreadyTerminal } : { run: terminalRun };
-      return toolText(`${id} is already ${run.status}.`, terminalDetails);
+      const receipt = action === "interrupt"
+        ? {
+          id,
+          agent: run.agent,
+          status: run.status,
+          outcome: alreadyTerminal,
+          ...(run.output !== undefined ? { output: run.output } : {}),
+          ...(run.error !== undefined ? { error: run.error } : {}),
+        }
+        : { id, status: run.status, outcome: alreadyTerminal };
+      return toolJson(receipt, terminalDetails);
     }
     const target = this.validConfig(id);
     if (!target) throw new Error(`Run ${id} has no valid detached control target.`);
@@ -1515,7 +1522,7 @@ export class OmpsSubagentRuntime {
         throw new Error("steer messages beginning with / are unsupported because detached RPC control cannot preserve slash-command expansion semantics.");
       }
       this.controlWriter(target.paths, target.config.token, "steer", message);
-      return toolText(`Steer requested for ${id}.`, { run: this.formatRun(run) });
+      return toolJson({ id, status: run.status, outcome: "requested" }, { run: this.formatRun(run) });
     }
     return this.interruptRun(id, signal);
   }
@@ -1616,7 +1623,7 @@ export class OmpsSubagentRuntime {
       this.terminationConfirmed.delete(id);
       this.clearQueuedNotificationsForRun(id);
       const receipt: SubagentDeleteReceipt = { id, deleted: true, changed: true, warnings };
-      return toolText(`Deleted retained subagent run ${id}.`, receipt);
+      return toolJson({ id, deleted: true, warnings }, receipt);
     } finally {
       this.deletingRunIds.delete(id);
     }
@@ -1632,7 +1639,7 @@ export class OmpsSubagentRuntime {
       throw new Error(`clear requires every retained run to reach a terminal status. Still active: ${active.map((run) => `${run.id} (${run.status})`).join(", ")}. Ask the user whether to interrupt these active runs, then retry clear only if they agree.`);
     }
     const receipt: SubagentClearReceipt = { clearedCount: 0, warnings: [], changed: false };
-    if (runs.length === 0) return toolText("No retained subagent runs to clear.", receipt);
+    if (runs.length === 0) return toolJson({ clearedCount: 0, warnings: [] }, receipt);
 
     this.clearing = true;
     try {
@@ -1653,13 +1660,7 @@ export class OmpsSubagentRuntime {
     } finally {
       this.clearing = false;
     }
-    const warningTail = receipt.warnings.length > 0
-      ? ` Retained ${receipt.warnings.length} item${receipt.warnings.length === 1 ? "" : "s"}:\n${receipt.warnings.join("\n")}`
-      : "";
-    return toolText(
-      `Cleared ${receipt.clearedCount} retained subagent run${receipt.clearedCount === 1 ? "" : "s"}.${warningTail}`,
-      receipt,
-    );
+    return toolJson({ clearedCount: receipt.clearedCount, warnings: receipt.warnings }, receipt);
   }
 
   /**
@@ -1698,7 +1699,11 @@ export class OmpsSubagentRuntime {
     };
     const result = await this.launchRun(run, source.sessionFile, resumeCompactFrom);
     const retained = this.registry.require(run.id);
-    result.content[0].text = `Resumed ${sourceId} as new detached run ${run.id} with status ${retained.status}.`;
+    result.content[0].text = JSON.stringify({
+      id: retained.id,
+      sourceRunId: sourceId,
+      status: retained.status,
+    });
     return result;
   }
 
@@ -1720,7 +1725,7 @@ export class OmpsSubagentRuntime {
       notificationPending: current.notificationPending === "waiting" ? undefined : current.notificationPending,
       updatedAt: this.now(),
     });
-    return toolText(`Replied to run ${id}; it is running.`, { run: this.formatRun(running) });
+    return toolJson({ id, status: running.status, outcome: "replied" }, { run: this.formatRun(running) });
   }
 }
 

@@ -24,7 +24,7 @@ export interface SubagentWidgetState {
   readonly hasActive: boolean;
 }
 
-/** Every retained run stays visible until `subagent delete` or `subagent clear` removes it. */
+/** Retained runs keep the widget mounted until `subagent delete` or `subagent clear` removes them. */
 export function assembleSubagentWidgetState(runs: readonly RunSummary[]): SubagentWidgetState {
   let runningCount = 0;
   let waitingCount = 0;
@@ -72,8 +72,6 @@ export class SubagentWidget {
         spinnerFrame: this.widgetFrame,
         terminalWidth: input.width,
         theme: input.theme,
-        expanded: input.expanded,
-        hint: input.hint,
       }),
     };
   }

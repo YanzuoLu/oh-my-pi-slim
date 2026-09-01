@@ -107,7 +107,7 @@ function monitorLine(
   return truncateToWidth(`${glyphPrefix}${theme.fg("dim", `[${id}] · ${status}`)}`, safeWidth, "…");
 }
 
-/** Counts every retained monitor directly, so collapse, budget, overflow, and sorting never move the heading numbers. */
+/** Counts every retained monitor directly, so row visibility, budget, overflow, and sorting never move the heading numbers. */
 export function countRunningMonitors(monitors: readonly MonitorWidgetItem[]): number {
   return monitors.filter((monitor) => monitor.status === "running").length;
 }
@@ -127,29 +127,17 @@ function monitorWidgetHeading(monitors: readonly MonitorWidgetItem[], theme: The
   return `${formatSemanticGlyphPrefix(theme.fg(role, glyph))}${theme.fg(role, label)}`;
 }
 
-/** Appends the collapsed hint only when the separator-through-expand segment fits whole; never half of it. */
-function monitorHeadingLine(heading: string, hint: string, theme: Theme, width: number): string {
-  if (hint !== "" && visibleWidth(heading) + visibleWidth(hint) <= width) {
-    return `${heading}${theme.fg("dim", hint)}`;
-  }
-  return truncateToWidth(heading, width, "…");
-}
-
 export function renderMonitorWidgetLines(
   monitors: readonly MonitorWidgetItem[],
   theme: Theme,
   width: number,
-  expanded = true,
-  hint = "",
 ): string[] {
   if (monitors.length === 0) return [];
   const safeWidth = Math.max(1, width);
-  const sorted = sortMonitorsForDisplay(monitors);
-  const shown = expanded ? sorted : sorted.filter((monitor) => monitor.status === "running");
-  const policyHidden = sorted.length - shown.length;
-  const visible = shown.slice(0, MAX_VISIBLE_MONITORS);
-  const hidden = shown.length - visible.length;
-  const lines = [monitorHeadingLine(monitorWidgetHeading(monitors, theme), policyHidden > 0 ? hint : "", theme, safeWidth)];
+  const running = sortMonitorsForDisplay(monitors).filter((monitor) => monitor.status === "running");
+  const visible = running.slice(0, MAX_VISIBLE_MONITORS);
+  const hidden = running.length - visible.length;
+  const lines = [truncateToWidth(monitorWidgetHeading(monitors, theme), safeWidth, "…")];
 
   for (let index = 0; index < visible.length; index += 1) {
     const continues = index < visible.length - 1 || hidden > 0;
@@ -179,7 +167,7 @@ export class MonitorWidget {
     this.section = {
       id: MONITOR_SECTION_ID,
       isActive: () => hasRunningMonitors(this.listMonitors()),
-      render: (input) => renderMonitorWidgetLines(this.listMonitors(), input.theme, input.width, input.expanded, input.hint),
+      render: (input) => renderMonitorWidgetLines(this.listMonitors(), input.theme, input.width),
     };
   }
 

@@ -1285,6 +1285,54 @@ test("a child extension's custom renderer is never resolved or executed", () => 
   assert.match(text, /custom payload/);
 });
 
+test("contact_supervisor minimal DTOs get a friendly receipt while historical text stays unchanged", () => {
+  const request = {
+    runId: "internal-run",
+    reason: "need_decision",
+    message: "Choose a path.",
+    createdAt: "2026-04-17T00:00:00.000Z",
+  };
+  const reasons = ["need_decision", "interview_request", "progress_update"];
+  const text = bodyText([
+    messageEntry("m1", null, {
+      role: "assistant",
+      content: [
+        ...reasons.map((reason, index) => ({
+          type: "toolCall",
+          id: `contact-${index}`,
+          name: "contact_supervisor",
+          arguments: { reason },
+        })),
+        { type: "toolCall", id: "contact-old", name: "contact_supervisor", arguments: { reason: "progress_update" } },
+      ],
+      timestamp: 0,
+    }),
+    ...reasons.map((reason, index) => messageEntry(`m${index + 2}`, index === 0 ? "m1" : `m${index + 1}`, {
+      role: "toolResult",
+      toolCallId: `contact-${index}`,
+      toolName: "contact_supervisor",
+      content: [{ type: "text", text: JSON.stringify({ status: "waiting", reason }) }],
+      details: index === 0 ? { request, childRendererSentinel: "CHILD_RENDERER_SENTINEL" } : undefined,
+      isError: false,
+      timestamp: 0,
+    })),
+    messageEntry("m5", "m4", {
+      role: "toolResult",
+      toolCallId: "contact-old",
+      toolName: "contact_supervisor",
+      content: [{ type: "text", text: "Yielded to supervisor for run historical-text-run." }],
+      isError: false,
+      timestamp: 0,
+    }),
+  ]);
+  assert.equal(text.match(/Yielded to supervisor\./g)?.length, reasons.length);
+  assert.match(text, /Yielded to supervisor for run historical-text-run\./);
+  assert.equal(text.includes("internal-run"), false);
+  assert.equal(text.includes("Choose a path."), false);
+  assert.equal(text.includes('"status"'), false);
+  assert.equal(text.includes("CHILD_RENDERER_SENTINEL"), false);
+});
+
 test("the transcript body pairs tool results with their call by id", () => {
   const text = bodyText([
     messageEntry("m1", null, {

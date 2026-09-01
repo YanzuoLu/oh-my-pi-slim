@@ -241,6 +241,65 @@ test("CRUD preserves creation order, permits duplicate configurations, retries I
   await assert.rejects(harness.execute({ action: "delete", id: "00000001" }), /was not found/);
 });
 
+test("all seven successful actions return compact JSON with exact public shapes", async () => {
+  const harness = createHarness();
+  const parseCompactContent = (result) => {
+    assert.deepEqual(result.content.map((block) => block.type), ["text"]);
+    const text = result.content[0].text;
+    const parsed = JSON.parse(text);
+    assert.equal(text, JSON.stringify(parsed));
+    return parsed;
+  };
+  const assertLoopContent = (result) => {
+    const parsed = parseCompactContent(result);
+    assert.deepEqual(publicKeys(parsed), PUBLIC_LOOP_KEYS);
+    assert.deepEqual(parsed, result.details.loop);
+  };
+
+  const created = await harness.execute({ action: "create", interval: "10s", abstract: "shape", prompt: "shape prompt" });
+  assertLoopContent(created);
+  assert.deepEqual(Object.keys(created.details).sort(), ["changed", "loop"]);
+
+  const modified = await harness.execute({ action: "modify", id: "00000001", abstract: "updated shape" });
+  assertLoopContent(modified);
+  assert.deepEqual(Object.keys(modified.details).sort(), ["changed", "loop"]);
+
+  const paused = await harness.execute({ action: "pause", id: "00000001" });
+  assertLoopContent(paused);
+  assert.deepEqual(Object.keys(paused.details).sort(), ["changed", "loop"]);
+
+  const resumed = await harness.execute({ action: "resume", id: "00000001" });
+  assertLoopContent(resumed);
+  assert.deepEqual(Object.keys(resumed.details).sort(), ["changed", "loop"]);
+
+  const listed = await harness.execute({ action: "list" });
+  const listedContent = parseCompactContent(listed);
+  assert.deepEqual(listedContent, listed.details.loops);
+  assert.deepEqual(Object.keys(listed.details), ["loops"]);
+  assert.deepEqual(listedContent.map(publicKeys), [PUBLIC_LOOP_KEYS]);
+
+  await harness.execute({ action: "pause", id: "00000001" });
+  const deleted = await harness.execute({ action: "delete", id: "00000001" });
+  assert.deepEqual(parseCompactContent(deleted), { id: "00000001", deleted: true });
+  assert.deepEqual(deleted.details, { id: "00000001", deleted: true });
+
+  await harness.execute({ action: "create", interval: "10s", abstract: "clear shape", prompt: "clear shape prompt" });
+  await harness.execute({ action: "pause", id: "00000002" });
+  const cleared = await harness.execute({ action: "clear" });
+  assert.deepEqual(parseCompactContent(cleared), {
+    cleared: true,
+    changed: true,
+    clearedCount: 1,
+    ids: ["00000002"],
+  });
+  assert.deepEqual(cleared.details, {
+    cleared: true,
+    changed: true,
+    clearedCount: 1,
+    ids: ["00000002"],
+  });
+});
+
 test("delete rejects active loops without touching timers or gated fires and removes paused loops", async () => {
   const harness = createHarness();
   await harness.execute({ action: "create", interval: "10s", abstract: "protected", prompt: "protected prompt" });
@@ -310,7 +369,12 @@ test("clear atomically rejects mixed active loops and clears all paused loops wi
   }));
   const pausedRecords = [...harness.runtime.loops.values()].map((loop) => ({ loop, token: loop.timerToken }));
   const cleared = await harness.execute({ action: "clear" });
-  assert.equal(cleared.content[0].text, "Cleared 2 loops.");
+  assert.equal(cleared.content[0].text, JSON.stringify({
+    cleared: true,
+    changed: true,
+    clearedCount: 2,
+    ids: ["00000001", "00000002"],
+  }));
   assert.deepEqual(cleared.details, {
     cleared: true,
     changed: true,
@@ -328,7 +392,7 @@ test("clear atomically rejects mixed active loops and clears all paused loops wi
   assert.equal(harness.messages.length, 0, "clear discards every gated fire");
 
   const empty = await harness.execute({ action: "clear" });
-  assert.equal(empty.content[0].text, "No loops to clear.");
+  assert.equal(empty.content[0].text, JSON.stringify({ cleared: true, changed: false, clearedCount: 0, ids: [] }));
   assert.deepEqual(empty.details, { cleared: true, changed: false, clearedCount: 0, ids: [] });
   assert.equal(harness.runtime.generation, generation);
 });

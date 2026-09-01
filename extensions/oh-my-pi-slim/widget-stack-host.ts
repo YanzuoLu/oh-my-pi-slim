@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { readWidgetExpanded, widgetExpandHint } from "./widget-expansion.js";
+import { readWidgetExpanded } from "./widget-expansion.js";
 import { renderWidgetStack, type WidgetStackSection, type WidgetStackSectionId } from "./widget-stack.js";
 
 /**
@@ -95,7 +95,6 @@ function createWidgetStackHost(): WidgetStackHost {
           width: resolveWidth(width, nextTui),
           theme: ui?.theme ?? theme,
           expanded: readWidgetExpanded(ui),
-          hint: widgetExpandHint(),
         }),
         // Theme and layout invalidation never re-registers: the factory reads live state already.
         invalidate() {},

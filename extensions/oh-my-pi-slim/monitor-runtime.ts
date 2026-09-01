@@ -108,6 +108,33 @@ export interface MonitorInput {
   end?: unknown;
 }
 
+type MonitorCreateContent = Pick<MonitorOperationalState, "id" | "status">;
+type MonitorListContent = MonitorListItem[];
+type MonitorStatusContent = Pick<
+  MonitorOperationalState,
+  "id" | "abstract" | "status" | "start" | "end" | "returned" | "omitted" | "truncated" | "logLines" | "droppedLines" | "combined"
+> & Partial<Pick<MonitorOperationalState, "lastOutputAt" | "checkAfter" | "exitCode" | "signal" | "error">>;
+interface MonitorStopContent extends Pick<MonitorOperationalState, "id" | "status" | "exitCode" | "signal" | "error"> {
+  outcome: MonitorStopOutcome;
+  warning?: string;
+}
+interface MonitorDeleteContent {
+  id: string;
+  deleted: true;
+  warning?: string;
+}
+interface MonitorClearContent {
+  clearedCount: number;
+  warnings: string[];
+}
+type MonitorActionContent =
+  | MonitorCreateContent
+  | MonitorListContent
+  | MonitorStatusContent
+  | MonitorStopContent
+  | MonitorDeleteContent
+  | MonitorClearContent;
+
 interface StructuredLogLine extends MonitorCombinedLine {
   marker?: true;
 }
@@ -324,6 +351,35 @@ const DEFAULT_FS: MonitorFs = {
 
 function toolText(text: string, details?: unknown) {
   return { content: [{ type: "text" as const, text }], details };
+}
+
+function actionToolText(content: MonitorActionContent, details: unknown) {
+  return toolText(JSON.stringify(content), details);
+}
+
+function statusContent(state: MonitorOperationalState): MonitorStatusContent {
+  const content: MonitorStatusContent = {
+    id: state.id,
+    abstract: state.abstract,
+    status: state.status,
+    start: state.start,
+    end: state.end,
+    returned: state.returned,
+    omitted: state.omitted,
+    truncated: state.truncated,
+    logLines: state.logLines,
+    droppedLines: state.droppedLines,
+    combined: state.combined,
+  };
+  if (state.status === "running") {
+    content.lastOutputAt = state.lastOutputAt;
+    content.checkAfter = state.checkAfter;
+  } else {
+    content.exitCode = state.exitCode;
+    content.signal = state.signal;
+  }
+  if (state.error) content.error = state.error;
+  return content;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -596,7 +652,7 @@ export class MonitorRuntime {
       name: "monitor",
       label: "Monitor",
       executionMode: "sequential",
-      description: "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor stop` terminates a running group and returns its complete terminal state. `monitor delete` removes one terminal record, while `monitor clear` removes all terminal records. Terminal records remain available until deletion or clearing. Runtime shutdown terminates active groups and clears retained monitor data.",
+      description: "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's diagnostic state and combined logs. `monitor stop` terminates a running group and returns a termination receipt. Use `monitor status` to retrieve diagnostic state and logs. `monitor delete` removes one terminal record, while `monitor clear` removes all terminal records. Terminal records remain available until deletion or clearing. Runtime shutdown terminates active groups and clears retained monitor data.",
       promptSnippet: "Supervise long-running foreground commands.",
       promptGuidelines: [
         "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
@@ -701,7 +757,7 @@ export class MonitorRuntime {
     this.validateActionFields(input, action);
     if (action === "list") {
       const monitors = this.list();
-      return toolText(JSON.stringify(monitors, null, 2), { monitors });
+      return actionToolText(monitors, { monitors });
     }
     if (this.shuttingDown) throw new Error("Monitor runtime is shutting down.");
     if (action === "create") return this.create(input, ctx);
@@ -716,7 +772,7 @@ export class MonitorRuntime {
     if (start < 0 || end <= start) throw new Error("status requires 0 <= start < end.");
     if (end - start > 2_000) throw new Error("status window must contain at most 2000 lines.");
     const state = this.operationalState(record, start, end, this.toolContentMaxBytes);
-    return toolText(JSON.stringify(state, null, 2), { monitor: state });
+    return actionToolText(statusContent(state), { monitor: state });
   }
 
   async reset(): Promise<void> {
@@ -933,7 +989,7 @@ export class MonitorRuntime {
       throw error;
     }
     const state = this.operationalState(record, 0, 100, this.toolContentMaxBytes);
-    return toolText(JSON.stringify(state, null, 2), { monitor: state });
+    return actionToolText({ id: state.id, status: state.status }, { monitor: state });
   }
 
   private stop(record: MonitorRecord): Promise<ReturnType<typeof toolText>> {
@@ -985,7 +1041,16 @@ export class MonitorRuntime {
     warning: string | null,
   ): ReturnType<typeof toolText> {
     const monitor = this.operationalState(record, 0, 100, this.toolContentMaxBytes);
-    return toolText(JSON.stringify(monitor, null, 2), { monitor, changed, outcome, warning });
+    const content: MonitorStopContent = {
+      id: monitor.id,
+      status: monitor.status,
+      outcome,
+      exitCode: monitor.exitCode,
+      signal: monitor.signal,
+      error: monitor.error,
+    };
+    if (warning) content.warning = warning;
+    return actionToolText(content, { monitor, changed, outcome, warning });
   }
 
   private delete(record: MonitorRecord): ReturnType<typeof toolText> {
@@ -997,8 +1062,9 @@ export class MonitorRuntime {
     this.cancelNotifications(record.id);
     this.records.delete(record.id);
     this.emit({ type: "deleted", reason: "lifecycle", id: record.id, status });
-    const text = warning ? `Deleted monitor ${record.id}. Warning: ${warning}` : `Deleted monitor ${record.id}.`;
-    return toolText(text, { id: record.id, deleted: true, changed: true, status, warning });
+    const content: MonitorDeleteContent = { id: record.id, deleted: true };
+    if (warning) content.warning = warning;
+    return actionToolText(content, { id: record.id, deleted: true, changed: true, status, warning });
   }
 
   private clear(): ReturnType<typeof toolText> {
@@ -1010,7 +1076,7 @@ export class MonitorRuntime {
     const terminal = this.sortedRecords();
     if (terminal.length === 0) {
       const receipt = { cleared: true, changed: false, clearedCount: 0, ids: [] as string[], warnings: [] as string[] };
-      return toolText(JSON.stringify(receipt), receipt);
+      return actionToolText({ clearedCount: receipt.clearedCount, warnings: receipt.warnings }, receipt);
     }
     const ids: string[] = [];
     const warnings: string[] = [];
@@ -1023,7 +1089,7 @@ export class MonitorRuntime {
       this.emit({ type: "deleted", reason: "lifecycle", id: record.id, status: record.status });
     }
     const receipt = { cleared: true, changed: true, clearedCount: ids.length, ids, warnings };
-    return toolText(JSON.stringify(receipt), receipt);
+    return actionToolText({ clearedCount: receipt.clearedCount, warnings: receipt.warnings }, receipt);
   }
 
   private attachProcess(record: MonitorRecord): void {

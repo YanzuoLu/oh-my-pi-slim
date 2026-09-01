@@ -89,6 +89,19 @@ function goal(overrides = {}) {
   };
 }
 
+function goalDtoResult(goalValue, changed, message) {
+  const details = { goal: goalValue === null ? null : structuredClone(goalValue), changed };
+  const dto = { ...structuredClone(details), ...(message === undefined ? {} : { message }) };
+  return { content: [{ type: "text", text: JSON.stringify(dto) }], details };
+}
+
+function modelResultBody(rendered) {
+  const marker = "Model result:\n";
+  const start = rendered.indexOf(marker);
+  assert.notEqual(start, -1, "expanded Goal result must contain Model result");
+  return rendered.slice(start + marker.length).split("\n").map((line) => line.startsWith("  ") ? line.slice(2) : line).join("\n");
+}
+
 function view(goalValue = goal(), overrides = {}) {
   return {
     goal: goalValue,
@@ -540,6 +553,44 @@ test("Goal tool renders all eight calls with uniform collapsed hints, action-spe
     "an expanded clear call invents no fields it was never given",
   );
   assert.deepEqual(clearArgs, clearBefore);
+});
+
+test("expanded Goal results rebuild historical model text from compact DTOs without exposing raw JSON", () => {
+  const active = goal();
+  const paused = goal({ status: "paused", pauseReason: "waiting for approval" });
+  const completed = goal({ status: "completed", endedAt: "2026-06-01T00:12:00.000Z", evidence: ["Widget test", "Renderer test"] });
+  const cancelled = goal({ status: "cancelled", endedAt: "2026-06-01T00:12:00.000Z", cancelReason: "user stopped it" });
+  const cases = [
+    ["create", goalDtoResult(active, true, goalActivationContent("created", active)), goalActivationContent("created", active)],
+    ["modify", goalDtoResult(active, true, goalActivationContent("modified", active)), goalActivationContent("modified", active)],
+    ["status", goalDtoResult(active, false), JSON.stringify(active, null, 2)],
+    ["pause", goalDtoResult(paused, true, "Goal paused."), `Goal paused.\n${JSON.stringify(paused, null, 2)}`],
+    ["resume", goalDtoResult(active, true, goalActivationContent("resumed", active)), goalActivationContent("resumed", active)],
+    ["complete", goalDtoResult(completed, true, "Goal completed."), `Goal completed.\n${JSON.stringify(completed, null, 2)}`],
+    ["cancel", goalDtoResult(cancelled, true, "Goal cancelled."), `Goal cancelled.\n${JSON.stringify(cancelled, null, 2)}`],
+    ["clear", goalDtoResult(null, true, "Goal cleared."), "Goal cleared."],
+  ];
+
+  assert.deepEqual(cases.map(([action]) => action), ["create", "modify", "status", "pause", "resume", "complete", "cancel", "clear"]);
+  for (const [action, result, expected] of cases) {
+    const before = structuredClone(result);
+    const expanded = render(renderGoalResult(result, { expanded: true }, theme, { args: { action } }));
+    assert.equal(modelResultBody(expanded), expected, action);
+    assert.doesNotMatch(expanded, escaped(result.content[0].text), `${action} must not expose compact DTO JSON`);
+    assert.deepEqual(result, before);
+  }
+
+  const noOps = [
+    ["pause", goalDtoResult(paused, false, "Goal is already paused. No change."), `Goal is already paused. No change.\n${JSON.stringify(paused, null, 2)}`],
+    ["resume", goalDtoResult(active, false, "Goal is already active. No change."), `Goal is already active. No change.\n${JSON.stringify(active, null, 2)}`],
+    ["status", goalDtoResult(null, false, "No Goal."), "No Goal."],
+    ["clear", goalDtoResult(null, false, "No Goal to clear."), "No Goal to clear."],
+  ];
+  for (const [action, result, expected] of noOps) {
+    const expanded = render(renderGoalResult(result, { expanded: true }, theme, { args: { action } }));
+    assert.equal(modelResultBody(expanded), expected, `${action} no-op`);
+    assert.doesNotMatch(expanded, escaped(result.content[0].text));
+  }
 });
 
 test("Goal clear receipts separate a real clear from an already empty branch, keep status none intact, and freeze model data", () => {

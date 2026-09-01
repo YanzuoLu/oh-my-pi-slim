@@ -96,6 +96,58 @@ function ack(runtime, sent) {
   return runtime.acknowledgeNotificationMessage({ role: "custom", customType: MONITOR_NOTIFICATION_TYPE, details: sent.message.details });
 }
 
+function assertActionContent(result, expected) {
+  assert.deepEqual(result.content, [{ type: "text", text: JSON.stringify(expected) }]);
+  assert.deepEqual(JSON.parse(result.content[0].text), expected);
+}
+
+function assertStopContent(result) {
+  const { monitor, outcome, warning } = result.details;
+  const expected = {
+    id: monitor.id,
+    status: monitor.status,
+    outcome,
+    exitCode: monitor.exitCode,
+    signal: monitor.signal,
+    error: monitor.error,
+  };
+  if (warning) expected.warning = warning;
+  assertActionContent(result, expected);
+  for (const field of ["command", "cwd", "pid", "combined", "logPath", "logLines", "createdAt", "updatedAt", "endedAt"]) {
+    assert.equal(field in expected, false, `stop content must omit ${field}`);
+  }
+}
+
+function assertStatusContent(result) {
+  const { monitor } = result.details;
+  const expected = {
+    id: monitor.id,
+    abstract: monitor.abstract,
+    status: monitor.status,
+    start: monitor.start,
+    end: monitor.end,
+    returned: monitor.returned,
+    omitted: monitor.omitted,
+    truncated: monitor.truncated,
+    logLines: monitor.logLines,
+    droppedLines: monitor.droppedLines,
+    combined: monitor.combined,
+  };
+  if (monitor.status === "running") {
+    expected.lastOutputAt = monitor.lastOutputAt;
+    expected.checkAfter = monitor.checkAfter;
+  } else {
+    expected.exitCode = monitor.exitCode;
+    expected.signal = monitor.signal;
+  }
+  if (monitor.error) expected.error = monitor.error;
+  assertActionContent(result, expected);
+  for (const field of [
+    "command", "cwd", "pid", "createdAt", "updatedAt", "endedAt", "notifyOn", "matchedCount",
+    "notificationCount", "suppressedCount", "logPath", "logBytes", "droppedBytes",
+  ]) assert.equal(field in expected, false, `status content must omit ${field}`);
+}
+
 test("monitor schema and registration expose the exact portable main-only contract", () => {
   const schema = JSON.parse(JSON.stringify(monitorParameters));
   assert.equal(schema.type, "object");
@@ -111,7 +163,7 @@ test("monitor schema and registration expose the exact portable main-only contra
   const tool = harness.tools.get("monitor");
   assert.equal(tool.executionMode, "sequential");
   assert.equal(harness.tools.size, 1);
-  assert.equal(tool.description, "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor stop` terminates a running group and returns its complete terminal state. `monitor delete` removes one terminal record, while `monitor clear` removes all terminal records. Terminal records remain available until deletion or clearing. Runtime shutdown terminates active groups and clears retained monitor data.");
+  assert.equal(tool.description, "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's diagnostic state and combined logs. `monitor stop` terminates a running group and returns a termination receipt. Use `monitor status` to retrieve diagnostic state and logs. `monitor delete` removes one terminal record, while `monitor clear` removes all terminal records. Terminal records remain available until deletion or clearing. Runtime shutdown terminates active groups and clears retained monitor data.");
   assert.equal(tool.promptSnippet, "Supervise long-running foreground commands.");
   assert.deepEqual(tool.promptGuidelines, [
     "Never detach a `monitor create` command with nohup, setsid, disown, trailing &, or another daemon escape.",
@@ -169,12 +221,18 @@ test("spawn failure is atomic while IDs collide safely and cwd defaults from con
   t.after(async () => { children.forEach((child) => closeChild(child)); await harness.runtime.shutdown(); });
   const first = await harness.execute({ action: "create", checkAfter: "10m", abstract: " first ", command: " echo first " });
   const second = await harness.execute({ action: "create", checkAfter: "10m", abstract: "second", command: "echo second" });
+  assertActionContent(first, { id: "00000001", status: "running" });
+  assertActionContent(second, { id: "00000002", status: "running" });
   assert.equal(first.details.monitor.id, "00000001");
   assert.equal(second.details.monitor.id, "00000002");
   assert.equal(first.details.monitor.abstract, "first");
   assert.equal(first.details.monitor.command, "echo first");
   assert.equal(first.details.monitor.cwd, process.cwd());
+  assert.equal(first.content[0].text.includes("command"), false, "create content never repeats the command");
   assert.deepEqual(harness.runtime.list().map((item) => item.id), ["00000001", "00000002"]);
+  const listed = await harness.execute({ action: "list" });
+  assertActionContent(listed, harness.runtime.list());
+  assert.deepEqual(listed.details, { monitors: harness.runtime.list() });
 });
 
 test("stream decoding reconstructs UTF-8 and chunks, normalizes CR, sanitizes controls, truncates long lines, and flushes EOF once", async (t) => {
@@ -195,7 +253,23 @@ test("stream decoding reconstructs UTF-8 and chunks, normalizes CR, sanitizes co
   child.stdout.write("abcdefghijklmnopqrstuvwxyz");
   closeChild(child, 0, null);
   await wait();
-  const status = (await harness.execute({ action: "status", id: "11111111", start: 0, end: 100 })).details.monitor;
+  const statusResult = await harness.execute({ action: "status", id: "11111111", start: 0, end: 100 });
+  const status = statusResult.details.monitor;
+  assertActionContent(statusResult, {
+    id: status.id,
+    abstract: status.abstract,
+    status: status.status,
+    start: status.start,
+    end: status.end,
+    returned: status.returned,
+    omitted: status.omitted,
+    truncated: status.truncated,
+    logLines: status.logLines,
+    droppedLines: status.droppedLines,
+    combined: status.combined,
+    exitCode: status.exitCode,
+    signal: status.signal,
+  });
   assert.equal(status.status, "completed");
   assert.deepEqual(status.combined.map((line) => [line.stream, line.text]), [
     ["stdout", "split snow ☃"],
@@ -250,7 +324,23 @@ test("reverse status pagination returns chronological combined lines and never a
   t.after(async () => harness.runtime.shutdown());
   await harness.execute({ action: "create", checkAfter: "10m", abstract: "paging", command: "unused", notifyOn: ["hit"] });
   child.stdout.write("one\ntwo hit\nthree\nfour\n");
-  const page = (await harness.execute({ action: "status", id: "22222222", start: 1, end: 3 })).details.monitor;
+  const pageResult = await harness.execute({ action: "status", id: "22222222", start: 1, end: 3 });
+  const page = pageResult.details.monitor;
+  assertActionContent(pageResult, {
+    id: page.id,
+    abstract: page.abstract,
+    status: "running",
+    start: 1,
+    end: 3,
+    returned: page.returned,
+    omitted: page.omitted,
+    truncated: page.truncated,
+    logLines: page.logLines,
+    droppedLines: page.droppedLines,
+    combined: page.combined,
+    lastOutputAt: page.lastOutputAt,
+    checkAfter: page.checkAfter,
+  });
   assert.deepEqual(page.combined.map((line) => line.text), ["two hit", "three"]);
   await assert.rejects(harness.execute({ action: "status", id: "22222222", start: 2, end: 2 }), /0 <= start < end/);
   await assert.rejects(harness.execute({ action: "status", id: "22222222", start: 0, end: 2001 }), /at most 2000/);
@@ -591,6 +681,7 @@ test("stop owns terminal delivery, sends TERM then KILL, preserves the real kill
   t.after(async () => harness.runtime.shutdown());
   const created = await harness.execute({ action: "create", checkAfter: "10m", abstract: "stop", command: "unused" });
   const stopped = await harness.execute({ action: "stop", id: "44444444" });
+  assertStopContent(stopped);
   assert.deepEqual(signals, [[44444, "SIGTERM"], [44444, 0], [44444, "SIGKILL"]]);
   assert.equal(stopped.details.changed, true);
   assert.equal(stopped.details.outcome, "stopped");
@@ -600,7 +691,8 @@ test("stop owns terminal delivery, sends TERM then KILL, preserves the real kill
   assert.equal(harness.messages.length, 0, "stop suppresses its independently queued terminal notification");
   assert.equal(harness.runtime.hasBlockingWork(), false);
   assert.equal(existsSync(created.details.monitor.logPath), true, "stop retains the record and log");
-  await harness.execute({ action: "delete", id: "44444444" });
+  const deleted = await harness.execute({ action: "delete", id: "44444444" });
+  assertActionContent(deleted, { id: "44444444", deleted: true });
 });
 
 test("stop reports raced and already-terminal outcomes and folds pending matches into its complete state once", async (t) => {
@@ -621,6 +713,7 @@ test("stop reports raced and already-terminal outcomes and folds pending matches
   child.stdout.write("hit before stop\n");
   await wait();
   const stopped = await harness.execute({ action: "stop", id: "45454545" });
+  assertStopContent(stopped);
   assert.deepEqual(signals, [[45454, "SIGTERM"]]);
   assert.equal(stopped.details.changed, true);
   assert.equal(stopped.details.outcome, "raced");
@@ -628,6 +721,7 @@ test("stop reports raced and already-terminal outcomes and folds pending matches
   assert.deepEqual(stopped.details.monitor.combined.map((line) => line.text), ["hit before stop"]);
   assert.equal(harness.messages.length, 0);
   const again = await harness.execute({ action: "stop", id: "45454545" });
+  assertStopContent(again);
   assert.equal(again.details.changed, false);
   assert.equal(again.details.outcome, "already-terminal");
   assert.equal(again.details.monitor.status, "completed");
@@ -747,6 +841,7 @@ test("an unconfirmed stop force-fails and quiesces every resource without deleti
   t.after(async () => harness.runtime.shutdown());
   const created = await harness.execute({ action: "create", checkAfter: "10m", abstract: "held pipe", command: "unused" });
   const stopped = await harness.execute({ action: "stop", id: "46464646" });
+  assertStopContent(stopped);
   assert.deepEqual(signals, [[46464, "SIGTERM"], [46464, 0], [46464, "SIGKILL"]]);
   assert.equal(stopped.details.changed, true);
   assert.equal(stopped.details.outcome, "unconfirmed");
@@ -759,6 +854,9 @@ test("an unconfirmed stop force-fails and quiesces every resource without deleti
   assert.equal(existsSync(created.details.monitor.logPath), true);
   assert.equal(harness.messages.length, 0);
   assert.equal(harness.runtime.hasBlockingWork(), false);
+  const statusResult = await harness.execute({ action: "status", id: "46464646" });
+  assertStatusContent(statusResult);
+  assert.match(JSON.parse(statusResult.content[0].text).error, /unconfirmed/i);
 });
 
 test("running delete and clear reject with zero mutation, then terminal clear removes every record", async (t) => {
@@ -786,6 +884,7 @@ test("running delete and clear reject with zero mutation, then terminal clear re
   closeChild(children[1]);
   await wait();
   const cleared = await harness.execute({ action: "clear" });
+  assertActionContent(cleared, { clearedCount: 2, warnings: [] });
   assert.equal(cleared.details.cleared, true);
   assert.equal(cleared.details.changed, true);
   assert.equal(cleared.details.clearedCount, 2);
@@ -794,7 +893,9 @@ test("running delete and clear reject with zero mutation, then terminal clear re
   assert.deepEqual(harness.runtime.list(), []);
   assert.equal(existsSync(first.details.monitor.logPath), false);
   assert.equal(existsSync(second.details.monitor.logPath), false);
-  assert.deepEqual((await harness.execute({ action: "clear" })).details, {
+  const noop = await harness.execute({ action: "clear" });
+  assertActionContent(noop, { clearedCount: 0, warnings: [] });
+  assert.deepEqual(noop.details, {
     cleared: true,
     changed: false,
     clearedCount: 0,
@@ -818,11 +919,13 @@ test("terminal delete and clear report log removal failures but still remove rec
   closeChild(children[1], 0, null);
   await wait();
   const deleted = await harness.execute({ action: "delete", id: "49474747" });
+  assertActionContent(deleted, { id: "49474747", deleted: true, warning: deleted.details.warning });
   assert.deepEqual({ ...deleted.details, warning: null }, {
     id: "49474747", deleted: true, changed: true, status: "failed", warning: null,
   });
   assert.match(deleted.details.warning, /rm denied/);
   const cleared = await harness.execute({ action: "clear" });
+  assertActionContent(cleared, { clearedCount: 1, warnings: cleared.details.warnings });
   assert.equal(cleared.details.changed, true);
   assert.deepEqual(cleared.details.ids, ["50474747"]);
   assert.equal(cleared.details.warnings.length, 1);
@@ -882,6 +985,7 @@ test("status scans JSONL from the tail in chunks and bounds large status and cre
   readBytes = 0;
   const statusResult = await harness.execute({ action: "status", id: "49494949", start: 0, end: 2000 });
   const status = statusResult.details.monitor;
+  assertStatusContent(statusResult);
   assert.ok(Buffer.byteLength(statusResult.content[0].text) <= 50 * 1024);
   assert.ok(Buffer.byteLength(JSON.stringify(statusResult.details)) <= 96 * 1024);
   assert.equal(status.truncated, true);
@@ -932,7 +1036,7 @@ test("matcher and terminal payloads include abstract and stay within content and
   const state = (await harness.execute({ action: "status", id: "50505050" })).details.monitor;
   assert.equal(state.status, "completed");
   assert.equal(typeof state.logPath, "string");
-  assert.ok(state.combined.length > 0, "monitor status stays the only full retained state and log entry point");
+  assert.ok(state.combined.length > 0, "monitor status stays the diagnostic state and log entry point");
 });
 
 test("matcher and terminal notifications share one incremental update contract that states current status", async (t) => {

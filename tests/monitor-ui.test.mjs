@@ -25,8 +25,7 @@ registerHooks({
   },
 });
 
-const { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, visibleWidth } = await import("@earendil-works/pi-tui");
-const { widgetExpandHint } = await import("../extensions/oh-my-pi-slim/widget-expansion.ts");
+const { visibleWidth } = await import("@earendil-works/pi-tui");
 const {
   MONITOR_NOTIFICATION_TYPE,
   MonitorRuntime,
@@ -130,22 +129,6 @@ function escaped(value) {
   return new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
 }
 
-const DEFAULT_HINT = " · ctrl+o to expand";
-
-/** Installs a user-configured `app.tools.expand` binding so the hint proves it reads the live keymap. */
-function withConfiguredExpandKey(keys, body) {
-  setKeybindings(new KeybindingsManager(
-    { ...TUI_KEYBINDINGS, "app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" } },
-    { "app.tools.expand": keys },
-  ));
-  try { body(); } finally { setKeybindings(null); }
-}
-
-function withBrokenKeybindings(body) {
-  setKeybindings({ getKeys() { throw new Error("keybindings unavailable"); } });
-  try { body(); } finally { setKeybindings(null); }
-}
-
 function fakeChild(pid = 24680) {
   const child = new EventEmitter();
   child.pid = pid;
@@ -163,7 +146,7 @@ function closeChild(child, code = 0, signal = null) {
   child.emit("close", code, signal);
 }
 
-test("Monitor widget renders the exact terminal/total heading ratio, glyphs, running/terminal order, overflow, width safety, and empty state", () => {
+test("Monitor widget renders the exact terminal/total heading ratio, running rows, overflow, width safety, and empty state", () => {
   const monitors = [
     widgetMonitor({ id: "00000003", abstract: "terminal old", status: "completed", createdAt: "2026-04-30T00:00:00.000Z", endedAt: "2026-05-01T00:00:03.000Z" }),
     widgetMonitor({ id: "00000002", abstract: "running later", createdAt: "2026-05-01T00:00:02.000Z" }),
@@ -174,10 +157,8 @@ test("Monitor widget renders the exact terminal/total heading ratio, glyphs, run
   const lines = renderMonitorWidgetLines(monitors, theme, 100);
   assert.equal(lines[0], "●  Monitors (3/5)", "completed, failed, and killed all count as terminal in the numerator");
   assert.equal(lines[1], "├─ ↻  running first [00000001] · running");
-  assert.equal(lines[2], "├─ ↻  running later [00000002] · running");
-  assert.equal(lines[3], "├─ !  terminal newest [00000004] · failed");
-  assert.equal(lines[4], "├─ ×  terminal middle [00000005] · killed");
-  assert.equal(lines[5], "└─ ✓  terminal old [00000003] · completed");
+  assert.equal(lines[2], "└─ ↻  running later [00000002] · running");
+  assert.doesNotMatch(lines.join("\n"), /terminal (?:newest|middle|old)|ctrl\+o|to expand/);
   assert.doesNotMatch(lines.join("\n"), /[↻!×✓●○] [^ ]|[↻!×✓●○] {3}/);
   assert.match(lines.slice(1).join("\n"), /^├─ |\n(?:├─ |└─ )/);
 
@@ -210,7 +191,7 @@ test("Monitor widget renders the exact terminal/total heading ratio, glyphs, run
   assert.deepEqual(renderMonitorWidgetLines([], theme, 80), []);
 });
 
-test("Monitor collapsed body keeps only running rows, adds one atomic dim expand hint, and never touches the expanded body", () => {
+test("Monitor widget permanently hides terminal rows and never displays an expand hint", () => {
   const mixed = [
     widgetMonitor({ id: "00000001", abstract: "running first", createdAt: "2026-05-01T00:00:01.000Z" }),
     widgetMonitor({ id: "00000002", abstract: "running later", createdAt: "2026-05-01T00:00:02.000Z" }),
@@ -219,90 +200,30 @@ test("Monitor collapsed body keeps only running rows, adds one atomic dim expand
     widgetMonitor({ id: "00000005", abstract: "terminal stopped", status: "killed", endedAt: "2026-05-01T00:00:05.000Z" }),
   ];
 
-  assert.deepEqual(renderMonitorWidgetLines(mixed, theme, 100, true, DEFAULT_HINT), renderMonitorWidgetLines(mixed, theme, 100));
-  assert.deepEqual(renderMonitorWidgetLines(mixed, theme, 100, false, DEFAULT_HINT), [
-    "●  Monitors (3/5) · ctrl+o to expand",
+  assert.deepEqual(renderMonitorWidgetLines(mixed, theme, 100), [
+    "●  Monitors (3/5)",
     "├─ ↻  running first [00000001] · running",
     "└─ ↻  running later [00000002] · running",
   ]);
-  assert.equal(
-    renderMonitorWidgetLines(mixed, theme, 100, false, "")[0],
-    renderMonitorWidgetLines(mixed, theme, 100, true, "")[0],
-    "collapsing away every terminal row leaves the heading ratio untouched",
-  );
 
   const runningOnly = mixed.filter((monitor) => monitor.status === "running");
-  assert.deepEqual(
-    renderMonitorWidgetLines(runningOnly, theme, 100, false, DEFAULT_HINT),
-    renderMonitorWidgetLines(runningOnly, theme, 100),
-    "a collapsed widget with nothing hidden shows no hint at all",
-  );
-
-  assert.equal(
-    renderMonitorWidgetLines(runningOnly, theme, 100)[0],
-    "●  Monitors (0/2)",
-    "a fully running widget reports a zero numerator",
-  );
+  assert.equal(renderMonitorWidgetLines(runningOnly, theme, 100)[0], "●  Monitors (0/2)");
 
   const terminalOnly = mixed.filter((monitor) => monitor.status !== "running");
-  assert.deepEqual(renderMonitorWidgetLines(terminalOnly, theme, 100, false, DEFAULT_HINT), ["○  Monitors (3/3) · ctrl+o to expand"]);
-  assert.equal(renderMonitorWidgetLines(terminalOnly, theme, 100, true, DEFAULT_HINT).length, 4);
-  assert.equal(
-    renderMonitorWidgetLines(terminalOnly, theme, 100, true, DEFAULT_HINT)[0],
-    "○  Monitors (3/3)",
-    "an all-terminal widget reads N/N with the hollow dim glyph, even while every row stays hidden",
-  );
-});
+  assert.deepEqual(renderMonitorWidgetLines(terminalOnly, theme, 100), ["○  Monitors (3/3)"]);
 
-test("Monitor expand hint stays one dim non-bold segment, uses the configured key, and drops whole when the width is tight", () => {
-  const mixed = [
-    widgetMonitor({ id: "00000001", abstract: "running first" }),
-    widgetMonitor({ id: "00000003", abstract: "terminal done", status: "completed", endedAt: "2026-05-01T00:00:03.000Z" }),
-  ];
-  const terminalOnly = [mixed[1]];
-  const dimHint = "\u001b[2m · ctrl+o to expand\u001b[0m";
-
-  const activeHeading = renderMonitorWidgetLines(mixed, roleAnsiTheme, 100, false, DEFAULT_HINT)[0];
+  const activeHeading = renderMonitorWidgetLines(mixed, roleAnsiTheme, 100)[0];
   assert.equal(
     activeHeading,
-    `\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mMonitors (1/2)\u001b[22m\u001b[0m${dimHint}`,
-    "a running monitor keeps the filled accent bold glyph, label, and ratio",
+    "\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mMonitors (3/5)\u001b[22m\u001b[0m",
   );
-  const idleHeading = renderMonitorWidgetLines(terminalOnly, roleAnsiTheme, 100, false, DEFAULT_HINT)[0];
-  assert.equal(
-    idleHeading,
-    `\u001b[2m○\u001b[0m  \u001b[2mMonitors (1/1)\u001b[0m${dimHint}`,
-    "an all-terminal widget drops to a hollow dim non-bold glyph, label, and ratio",
-  );
-  assert.ok(
-    activeHeading.endsWith(dimHint) && idleHeading.endsWith(dimHint),
-    "the hint renders identically in the active and idle heading states",
-  );
-  assert.doesNotMatch(activeHeading.slice(activeHeading.indexOf(dimHint)), /\u001b\[1m/, "the hint is never bold");
+  const idleHeading = renderMonitorWidgetLines(terminalOnly, roleAnsiTheme, 100)[0];
+  assert.equal(idleHeading, "\u001b[2m○\u001b[0m  \u001b[2mMonitors (3/3)\u001b[0m");
 
-  withConfiguredExpandKey("ctrl+shift+e", () => {
-    assert.equal(widgetExpandHint(), " · ctrl+shift+e to expand");
-    assert.equal(
-      renderMonitorWidgetLines(mixed, theme, 100, false, widgetExpandHint())[0],
-      "●  Monitors (1/2) · ctrl+shift+e to expand",
-    );
-  });
-  assert.equal(widgetExpandHint(), DEFAULT_HINT, "an unconfigured keymap falls back to Pi's default binding");
-  withBrokenKeybindings(() => {
-    assert.equal(widgetExpandHint(), DEFAULT_HINT, "a failing keybinding registry falls back without breaking widget render");
-  });
-
-  const full = "●  Monitors (1/2) · ctrl+o to expand";
-  assert.equal(renderMonitorWidgetLines(mixed, theme, full.length, false, DEFAULT_HINT)[0], full);
-  assert.equal(
-    renderMonitorWidgetLines(mixed, theme, 17, false, DEFAULT_HINT)[0],
-    "●  Monitors (1/2)",
-    "the widest hintless heading keeps the ratio whole",
-  );
-  for (const width of [1, 4, 8, 11, 20, full.length - 1]) {
-    const heading = renderMonitorWidgetLines(mixed, theme, width, false, DEFAULT_HINT)[0];
+  for (const width of [1, 4, 8, 11, 20]) {
+    const heading = renderMonitorWidgetLines(mixed, theme, width)[0];
     assert.ok(visibleWidth(heading) <= width, `width ${width} must stay inside the terminal`);
-    assert.doesNotMatch(heading, /·|expand|ctrl/, `width ${width} must drop the whole hint, never half of it`);
+    assert.doesNotMatch(heading, /expand|ctrl\+o/, `width ${width} must never show an expand hint`);
   }
 });
 
@@ -321,24 +242,19 @@ test("Monitor overflow counts only visible running rows while the heading ratio 
     })),
   ];
 
-  const expanded = renderMonitorWidgetLines(monitors, theme, 80, true, DEFAULT_HINT);
-  assert.equal(expanded.length, MAX_MONITOR_WIDGET_LINES);
-  assert.equal(expanded[0], "●  Monitors (4/16)", "six rows hidden by the line budget still count in the heading");
-  assert.equal(expanded.at(-1), "└─ … 6 more");
-
-  const collapsed = renderMonitorWidgetLines(monitors, theme, 80, false, DEFAULT_HINT);
-  assert.equal(collapsed[0], "●  Monitors (4/16) · ctrl+o to expand", "collapse plus budget never changes the ratio");
+  const lines = renderMonitorWidgetLines(monitors, theme, 80);
+  assert.equal(lines.length, MAX_MONITOR_WIDGET_LINES);
+  assert.equal(lines[0], "●  Monitors (4/16)", "all retained monitors still count in the heading");
   assert.equal(
-    renderMonitorWidgetLines([...monitors].reverse(), theme, 80, false, DEFAULT_HINT)[0],
-    collapsed[0],
-    "display sorting never reorders the counted set",
+    renderMonitorWidgetLines([...monitors].reverse(), theme, 80)[0],
+    lines[0],
+    "display sorting never changes the counted set",
   );
-  assert.equal(collapsed.at(-1), "└─ … 2 more", "only the two budget-hidden running rows are summarised");
-  assert.doesNotMatch(collapsed.join("\n"), /terminal /, "policy-hidden terminal rows never reach the body");
-  assert.equal(collapsed.length, MAX_MONITOR_WIDGET_LINES);
+  assert.equal(lines.at(-1), "└─ … 2 more", "only the two budget-hidden running rows are summarised");
+  assert.doesNotMatch(lines.join("\n"), /terminal |ctrl\+o|to expand/, "terminal rows and expand hints never reach the widget");
 });
 
-test("MonitorWidget reads Pi's live expansion state on every render without re-registering the widget", () => {
+test("MonitorWidget output is invariant across Pi expansion state changes without re-registering", () => {
   let expanded = true;
   const monitors = [
     widgetMonitor({ id: "00000001", abstract: "running first" }),
@@ -363,14 +279,15 @@ test("MonitorWidget reads Pi's live expansion state on every render without re-r
   widget.setContext(ui);
   widget.update();
   assert.equal(calls.length, 1);
-  assert.equal(component.render(100).length, 3);
+  const compactLines = ["●  Monitors (1/2)", "└─ ↻  running first [00000001] · running"];
+  assert.deepEqual(component.render(100), compactLines);
 
   expanded = false;
-  assert.deepEqual(component.render(100), ["●  Monitors (1/2) · ctrl+o to expand", "└─ ↻  running first [00000001] · running"]);
+  assert.deepEqual(component.render(100), compactLines, "Ctrl+O never reveals terminal monitor rows or an expand hint");
   assert.equal(calls.length, 1, "Ctrl+O must not re-register the widget");
 
   expanded = true;
-  assert.equal(component.render(100).length, 3, "Ctrl+O toggles straight back to the full body");
+  assert.deepEqual(component.render(100), compactLines, "switching Ctrl+O back leaves widget output unchanged");
   assert.equal(calls.length, 1);
 
   const legacyCalls = [];
@@ -387,8 +304,7 @@ test("MonitorWidget reads Pi's live expansion state on every render without re-r
     },
   });
   legacyWidget.update();
-  assert.equal(legacyComponent.render(100).length, 3, "a host without getToolsExpanded stays expanded");
-  assert.doesNotMatch(legacyComponent.render(100).join("\n"), /to expand/);
+  assert.deepEqual(legacyComponent.render(100), compactLines, "a host without getToolsExpanded uses the same compact output");
 });
 
 test("MonitorWidget throttles and coalesces output, refreshes lifecycle immediately, registers once, keeps invalidate a no-op, rebinds, and disposes", () => {
@@ -567,10 +483,10 @@ test("Monitor tool calls render all six actions with uniform hints, complete exp
   }
 });
 
-test("Monitor create/status/list/delete results render compact receipts, full operational state, terminal warnings, separators, and preserve data", () => {
+test("Monitor create/status/list/delete results render from details instead of compact action JSON and preserve data", () => {
   const state = monitor();
   for (const action of ["create", "status"]) {
-    const result = { content: [{ type: "text", text: "model content" }], details: { monitor: state } };
+    const result = { content: [{ type: "text", text: '{"id":"ffffffff","status":"failed"}' }], details: { monitor: state } };
     const before = structuredClone(result);
     const collapsedComponent = renderMonitorResult(result, { expanded: false }, theme, { args: { action } });
     assertBlankSeparator(collapsedComponent);
@@ -595,7 +511,7 @@ test("Monitor create/status/list/delete results render compact receipts, full op
   }
 
   const listResult = {
-    content: [{ type: "text", text: "model list" }],
+    content: [{ type: "text", text: "[]" }],
     details: { monitors: [
       { id: "00000001", status: "running", abstract: "first" },
       { id: "00000002", status: "completed", abstract: "second" },
@@ -615,7 +531,7 @@ test("Monitor create/status/list/delete results render compact receipts, full op
   }
   assert.doesNotMatch(listExpanded, /[↻✓!×●] [^ ]|[↻✓!×●] {3}/);
 
-  const emptyList = { details: { monitors: [] } };
+  const emptyList = { content: [{ type: "text", text: '[{"id":"ffffffff","status":"running","abstract":"content only"}]' }], details: { monitors: [] } };
   assert.equal(render(renderMonitorResult(emptyList, { expanded: false }, theme, { args: { action: "list" } })), "○  Monitors (0/0)");
   assert.equal(render(renderMonitorResult(emptyList, { expanded: true }, theme, { args: { action: "list" } })), "○  Monitors (0/0)\nNo monitors.");
   const activeAnsi = renderMonitorResult(listResult, { expanded: false }, roleAnsiTheme, { args: { action: "list" } }).render(200)[1].trimEnd();
@@ -623,7 +539,7 @@ test("Monitor create/status/list/delete results render compact receipts, full op
   assert.equal(activeAnsi, "\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mMonitors (3/4)\u001b[22m\u001b[0m");
   assert.equal(idleAnsi, "\u001b[2m○\u001b[0m  \u001b[2mMonitors (0/0)\u001b[0m");
 
-  const normalResult = { details: { id: "00000001", deleted: true, changed: true, status: "completed", warning: null } };
+  const normalResult = { content: [{ type: "text", text: '{"id":"ffffffff","deleted":true}' }], details: { id: "00000001", deleted: true, changed: true, status: "completed", warning: null } };
   const normalBefore = structuredClone(normalResult);
   const normal = renderMonitorResult(normalResult, { expanded: false }, theme, { args: { action: "delete" } });
   assertBlankSeparator(normal);
@@ -635,7 +551,7 @@ test("Monitor create/status/list/delete results render compact receipts, full op
   assert.doesNotMatch(normalExpanded, /Deleted:|Changed:|forced/i);
   assert.deepEqual(normalResult, normalBefore);
 
-  const warnedResult = { details: { id: "00000002", deleted: true, changed: true, status: "failed", warning: "Retained log could not be removed.\nInspect it manually.", privateHandle: "PRIVATE_DELETE_SENTINEL" } };
+  const warnedResult = { content: [{ type: "text", text: '{"id":"ffffffff","deleted":true,"warning":"content warning"}' }], details: { id: "00000002", deleted: true, changed: true, status: "failed", warning: "Retained log could not be removed.\nInspect it manually.", privateHandle: "PRIVATE_DELETE_SENTINEL" } };
   const warnedBefore = structuredClone(warnedResult);
   const warned = render(renderMonitorResult(warnedResult, { expanded: false }, theme, { args: { action: "delete" } }));
   assert.equal(warned, "✓  Deleted monitor [00000002] · failed · warning");
@@ -647,7 +563,7 @@ test("Monitor create/status/list/delete results render compact receipts, full op
   assert.deepEqual(warnedResult, warnedBefore);
 });
 
-test("Monitor stop and clear receipts use terminal truth, expose only operational details, and never fall through to model content", () => {
+test("Monitor stop and clear receipts use terminal truth from details and never fall through to compact action JSON", () => {
   const stopCases = [
     { outcome: "stopped", changed: true, status: "killed", glyph: "×", warning: null },
     { outcome: "raced", changed: true, status: "completed", glyph: "✓", warning: null },
@@ -656,7 +572,7 @@ test("Monitor stop and clear receipts use terminal truth, expose only operationa
   ];
   for (const value of stopCases) {
     const result = {
-      content: [{ type: "text", text: `RAW_STOP_${value.outcome}_MODEL_SENTINEL` }],
+      content: [{ type: "text", text: JSON.stringify({ id: "ffffffff", status: "running", outcome: value.outcome, exitCode: 99, signal: null, error: "content only" }) }],
       details: {
         monitor: monitor({
           status: value.status,
@@ -688,12 +604,12 @@ test("Monitor stop and clear receipts use terminal truth, expose only operationa
     assert.equal((expanded.match(/\[stdout\] ready now/g) ?? []).length, 1);
     if (value.warning) assert.match(expanded, /Child close was not observed\.\n    A detached descendant may remain\./);
     else assert.match(expanded, /Warning:\n    —/);
-    assert.doesNotMatch(expanded, new RegExp(`RAW_STOP_${value.outcome}_MODEL_SENTINEL|PRIVATE_STOP_SENTINEL|privateStopToken`));
+    assert.doesNotMatch(expanded, /ffffffff|content only|PRIVATE_STOP_SENTINEL|privateStopToken/);
     assert.deepEqual(result, before);
   }
 
   const clear = {
-    content: [{ type: "text", text: "RAW_CLEAR_MODEL_SENTINEL" }],
+    content: [{ type: "text", text: '{"clearedCount":99,"warnings":["content only"]}' }],
     details: {
       cleared: true,
       changed: true,
@@ -712,11 +628,11 @@ test("Monitor stop and clear receipts use terminal truth, expose only operationa
   for (const expected of ["Monitor IDs:", "00000001", "00000002", "Warnings:", "Retained log remains", "Permission warning"]) {
     assert.match(clearExpanded, escaped(expected));
   }
-  assert.doesNotMatch(clearExpanded, /RAW_CLEAR_MODEL_SENTINEL|PRIVATE_CLEAR_SENTINEL|privateRecords|clearedCount|changed:/);
+  assert.doesNotMatch(clearExpanded, /content only|PRIVATE_CLEAR_SENTINEL|privateRecords|clearedCount|changed:/);
   assert.deepEqual(clear, clearBefore);
 
   const noop = {
-    content: [{ type: "text", text: "RAW_CLEAR_NOOP_SENTINEL" }],
+    content: [{ type: "text", text: '{"clearedCount":99,"warnings":[]}' }],
     details: { cleared: true, changed: false, clearedCount: 0, ids: [], warnings: [] },
   };
   const noopBefore = structuredClone(noop);

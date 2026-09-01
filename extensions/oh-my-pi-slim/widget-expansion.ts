@@ -2,7 +2,7 @@ import { keyText } from "@earendil-works/pi-coding-agent";
 
 /**
  * Shared access to Pi's own global tool-output expansion state for the persistent
- * Monitor, Todo, and Agents widgets. The package owns no expansion state of its own:
+ * Goal widget and subagent viewer. The package owns no expansion state of its own:
  * no keybinding is registered, no editor is wrapped, and nothing is persisted.
  */
 
@@ -37,8 +37,8 @@ export function widgetExpandKey(): string {
 }
 
 /**
- * Plain, theme-free hint appended to a collapsed heading that hides terminal rows.
- * Pure renderers wrap this whole segment—separator included—in a single dim role.
+ * Plain, theme-free hint used by the subagent viewer when collapsed rows are hidden.
+ * The viewer wraps this whole segment—separator included—in a single dim role.
  */
 export function widgetExpandHint(): string {
   return ` · ${widgetExpandKey()} to expand`;

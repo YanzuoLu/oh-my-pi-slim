@@ -22,7 +22,7 @@ registerHooks({
 const { initTheme } = await import("@earendil-works/pi-coding-agent");
 const { visibleWidth } = await import("@earendil-works/pi-tui");
 initTheme(undefined, false);
-const { AskRuntime, buildAskResult, validateQuestionnaire } = await import("../extensions/oh-my-pi-slim/ask-runtime.ts");
+const { AskRuntime, askResultModelContent, buildAskResult, validateQuestionnaire } = await import("../extensions/oh-my-pi-slim/ask-runtime.ts");
 const { renderAskCall, renderAskResult } = await import("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts");
 
 const theme = {
@@ -124,6 +124,29 @@ test("Ask result collapsed summaries distinguish complete, partial, cancelled, a
     assert.doesNotMatch(render(component), /MODEL_CONTENT_SENTINEL|Question:|Answer:|Unanswered/);
     assert.doesNotMatch(render(component), /[✓◐!] [^ ]|[✓◐!] {3}/);
   }
+});
+
+test("Ask result rendering prioritizes details while compact JSON remains a safe fallback", () => {
+  const questionnaire = validateQuestionnaire(args);
+  const details = buildAskResult(questionnaire, { answers: [
+    { questionIndex: 0, kind: "option", answer: "Safe" },
+    { questionIndex: 1, kind: "multi", answer: ["Logs"] },
+    { questionIndex: 2, kind: "custom", answer: "line one\nline two" },
+  ] });
+  const content = askResultModelContent(details, questionnaire);
+  const result = { content: [{ type: "text", text: content }], details };
+
+  const collapsed = render(renderAskResult(result, { expanded: false }, theme, { args }));
+  assert.equal(collapsed, "✓  Answered 3/3 · complete");
+  assert.doesNotMatch(collapsed, /outcome|questionIndex|line one/);
+  const expanded = render(renderAskResult(result, { expanded: true }, theme, { args }));
+  containsAll(expanded, ["Answered 3/3 · complete", "Safe", "- Logs", "line one", "line two"]);
+  assert.doesNotMatch(expanded, /"outcome"|"questionIndex"/);
+
+  const fallback = render(renderAskResult({ content: result.content, details: { answers: "malformed" } }, { expanded: false }, theme, { args }), 1000);
+  assert.equal(fallback, content);
+  assert.equal(content.includes("\n"), false);
+  assert.match(fallback, /line one\\nline two/);
 });
 
 test("a new cancel renders an honest empty result in both densities", () => {

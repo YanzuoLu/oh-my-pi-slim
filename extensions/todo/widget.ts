@@ -1,5 +1,5 @@
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { formatSemanticGlyphPrefix } from "../oh-my-pi-slim/semantic-glyph.js";
 import { widgetStackHost } from "../oh-my-pi-slim/widget-stack-host.js";
 import type { WidgetStackSection } from "../oh-my-pi-slim/widget-stack.js";
@@ -78,14 +78,6 @@ function todoWidgetHeading(tasks: readonly TodoTask[], theme: Theme): string {
   return `${formatSemanticGlyphPrefix(theme.fg(color, glyph))}${theme.fg(color, label)}`;
 }
 
-/** Appends the collapsed hint only when the separator-through-expand segment fits whole; never half of it. */
-function todoHeadingLine(heading: string, hint: string, theme: Theme, width: number): string {
-  if (hint !== "" && visibleWidth(heading) + visibleWidth(hint) <= width) {
-    return `${heading}${theme.fg("dim", hint)}`;
-  }
-  return truncateToWidth(heading, width, "…");
-}
-
 export function isTodoTaskBlocked(task: TodoTask, tasks: readonly TodoTask[]): boolean {
   const bySubject = new Map(tasks.map((candidate) => [candidate.subject, candidate]));
   return task.blockedBy.some((dependency) => bySubject.get(dependency)?.status !== "completed");
@@ -108,16 +100,14 @@ export function sortTodoTasksForWidget(tasks: readonly TodoTask[]): TodoTask[] {
 }
 
 /**
- * Ranks against the whole ledger first so blocked-ness and order never depend on the collapsed
- * filter, then drops completed rows when collapsed and finally applies the line budget.
+ * Ranks against the whole ledger so blocked-ness stays accurate, then permanently omits completed
+ * rows before applying the line budget.
  */
 export function selectTodoWidgetLayout(
   tasks: readonly TodoTask[],
   maxLines = MAX_TODO_WIDGET_LINES,
-  expanded = true,
 ): { visible: TodoTask[]; hidden: TodoTask[] } {
-  const ranked = sortTodoTasksForWidget(tasks);
-  const sorted = expanded ? ranked : ranked.filter((task) => task.status !== "completed");
+  const sorted = sortTodoTasksForWidget(tasks).filter((task) => task.status !== "completed");
   const directBudget = Math.max(0, maxLines - 1);
   if (sorted.length <= directBudget) return { visible: sorted, hidden: [] };
   const taskBudget = Math.max(0, maxLines - 2);
@@ -132,15 +122,12 @@ export function renderTodoLines(
   theme: Theme,
   width: number,
   maxLines = MAX_TODO_WIDGET_LINES,
-  expanded = true,
-  hint = "",
 ): string[] {
   if (tasks.length === 0 || maxLines <= 0) return [];
   const safeWidth = Math.max(1, width);
   const truncate = (line: string): string => truncateToWidth(line, safeWidth, "…");
-  const policyHidden = expanded ? 0 : countCompletedTodoTasks(tasks);
-  const lines = [todoHeadingLine(todoWidgetHeading(tasks, theme), policyHidden > 0 ? hint : "", theme, safeWidth)];
-  const layout = selectTodoWidgetLayout(tasks, maxLines, expanded);
+  const lines = [truncate(todoWidgetHeading(tasks, theme))];
+  const layout = selectTodoWidgetLayout(tasks, maxLines);
   for (let index = 0; index < layout.visible.length; index += 1) {
     const last = index === layout.visible.length - 1 && layout.hidden.length === 0;
     lines.push(truncate(`${theme.fg("dim", last ? "└─" : "├─")} ${taskLine(layout.visible[index], theme)}`));
@@ -259,8 +246,6 @@ export class TodoWidget {
       input.theme,
       input.width,
       MAX_TODO_WIDGET_LINES,
-      input.expanded,
-      input.hint,
     ),
   };
 

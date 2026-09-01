@@ -168,6 +168,15 @@ function publicKeys(goal) {
   return Object.keys(goal).sort();
 }
 
+function resultDto(result) {
+  const text = result.content[0].text;
+  assert.equal(text.includes("\n"), false, "Goal success content must be compact single-line JSON");
+  const dto = JSON.parse(text);
+  assert.deepEqual({ goal: dto.goal, changed: dto.changed }, result.details);
+  assert.deepEqual(Object.keys(dto), dto.message === undefined ? ["goal", "changed"] : ["goal", "changed", "message"]);
+  return dto;
+}
+
 const PUBLIC_STATUS_KEYS = [
   "status", "abstract", "objective", "criteria", "createdAt", "updatedAt", "endedAt", "pauseReason",
   "retryAttempt", "nextRetryAt", "lastProviderError", "noProgressCount", "evidence", "cancelReason",
@@ -219,12 +228,12 @@ test("create, modify, terminal replacement, evidence, and no-op receipts preserv
   const harness = createHarness();
   const none = await harness.execute({ action: "status" });
   assert.deepEqual(none.details, { goal: null, changed: false });
-  assert.equal(none.content[0].text, "No Goal.");
+  assert.deepEqual(resultDto(none), { goal: null, changed: false, message: "No Goal." });
 
   const created = await harness.execute(createInput);
   assert.equal(created.details.goal.status, "active");
   assert.deepEqual(publicKeys(created.details.goal), PUBLIC_STATUS_KEYS);
-  assert.equal(created.content[0].text, goalActivationContent("created", created.details.goal));
+  assert.equal(resultDto(created).message, goalActivationContent("created", created.details.goal));
   const exactActivation = [
     "Goal created and active.",
     "",
@@ -244,7 +253,7 @@ test("create, modify, terminal replacement, evidence, and no-op receipts preserv
     "If safe progress is blocked, call `goal pause` with a concrete reason.",
     "Call `goal complete` only with one evidence entry for every criterion.",
   ].join("\n");
-  assert.equal(created.content[0].text, exactActivation);
+  assert.equal(resultDto(created).message, exactActivation);
   assert.equal(goalActivationContent("modified", created.details.goal), exactActivation.replace("Goal created and active.", "Goal modified and active."));
   assert.equal(goalActivationContent("resumed", created.details.goal), exactActivation.replace("Goal created and active.", "Goal resumed and active."));
   await assert.rejects(harness.execute(createInput), /no Goal or a terminal Goal/);
@@ -255,7 +264,7 @@ test("create, modify, terminal replacement, evidence, and no-op receipts preserv
   assert.equal(paused.details.goal.pauseReason, "blocked");
   const pausedAgain = await harness.execute({ action: "pause", reason: "ignored" });
   assert.equal(pausedAgain.details.changed, false);
-  assert.match(pausedAgain.content[0].text, /No change/);
+  assert.equal(resultDto(pausedAgain).message, "Goal is already paused. No change.");
 
   const modified = await harness.execute({
     action: "modify", abstract: "Updated", objective: "Updated objective", criteria: ["One"],
@@ -264,7 +273,7 @@ test("create, modify, terminal replacement, evidence, and no-op receipts preserv
   assert.equal(modified.details.goal.createdAt, created.details.goal.createdAt);
   assert.equal(harness.runtime.goalView().ownedChildRunCount, 1);
   assert.equal(modified.details.goal.pauseReason, null);
-  assert.equal(modified.content[0].text, goalActivationContent("modified", modified.details.goal));
+  assert.equal(resultDto(modified).message, goalActivationContent("modified", modified.details.goal));
 
   await assert.rejects(harness.execute({ action: "complete", evidence: ["one", "two"] }), /exactly 1 items/);
   const completed = await harness.execute({ action: "complete", evidence: ["proof"] });
@@ -278,6 +287,39 @@ test("create, modify, terminal replacement, evidence, and no-op receipts preserv
   assert.equal(replacement.details.goal.status, "active");
   assert.notEqual(replacement.details.goal.createdAt, undefined);
   assert.equal(harness.runtime.goalView().ownedChildRunCount, 0);
+});
+
+test("all eight Goal actions return the unified compact DTO for changes, no-ops, and empty state", async () => {
+  const harness = createHarness();
+
+  assert.deepEqual(resultDto(await harness.execute({ action: "status" })), {
+    goal: null, changed: false, message: "No Goal.",
+  });
+  assert.deepEqual(resultDto(await harness.execute({ action: "clear" })), {
+    goal: null, changed: false, message: "No Goal to clear.",
+  });
+
+  const created = await harness.execute(createInput);
+  assert.equal(resultDto(created).message, goalActivationContent("created", created.details.goal));
+  const status = await harness.execute({ action: "status" });
+  assert.deepEqual(resultDto(status), { goal: status.details.goal, changed: false });
+  assert.equal(resultDto(await harness.execute({ action: "resume" })).message, "Goal is already active. No change.");
+
+  const paused = await harness.execute({ action: "pause", reason: "blocked" });
+  assert.equal(resultDto(paused).message, "Goal paused.");
+  assert.equal(resultDto(await harness.execute({ action: "pause", reason: "ignored" })).message, "Goal is already paused. No change.");
+  const resumed = await harness.execute({ action: "resume" });
+  assert.equal(resultDto(resumed).message, goalActivationContent("resumed", resumed.details.goal));
+
+  const modified = await harness.execute({
+    action: "modify", abstract: "Updated", objective: "Updated objective", criteria: ["One"],
+  });
+  assert.equal(resultDto(modified).message, goalActivationContent("modified", modified.details.goal));
+  assert.equal(resultDto(await harness.execute({ action: "complete", evidence: ["proof"] })).message, "Goal completed.");
+  assert.equal(resultDto(await harness.execute({ action: "clear" })).message, "Goal cleared.");
+
+  await harness.execute(createInput);
+  assert.equal(resultDto(await harness.execute({ action: "cancel", reason: "superseded" })).message, "Goal cancelled.");
 });
 
 test("status and repeated pause or resume no-ops do not append snapshots or mutate state", async () => {
@@ -839,7 +881,7 @@ test("clear is a no-op with no Goal and never appends a tombstone", async () => 
   const harness = createHarness();
   const entries = harness.branch.length;
   const cleared = await harness.execute({ action: "clear" });
-  assert.equal(cleared.content[0].text, "No Goal to clear.");
+  assert.deepEqual(resultDto(cleared), { goal: null, changed: false, message: "No Goal to clear." });
   assert.deepEqual(cleared.details, { goal: null, changed: false });
   assert.equal(harness.branch.length, entries);
   assert.equal(harness.runtime.status(), null);
@@ -862,7 +904,7 @@ test("clear erases a paused, completed, or cancelled Goal through a null tombsto
     const before = goalStateEntries(harness.branch).length;
 
     const cleared = await harness.execute({ action: "clear" });
-    assert.equal(cleared.content[0].text, "Goal cleared.");
+    assert.deepEqual(resultDto(cleared), { goal: null, changed: true, message: "Goal cleared." });
     assert.deepEqual(cleared.details, { goal: null, changed: true });
     const stateEntries = goalStateEntries(harness.branch);
     assert.equal(stateEntries.length, before + 1);

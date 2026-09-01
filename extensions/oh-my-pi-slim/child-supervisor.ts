@@ -77,7 +77,7 @@ export default function childSupervisor(pi: ExtensionAPI): void {
         createdAt: new Date().toISOString(),
       };
       return {
-        content: [{ type: "text", text: `Yielded to supervisor for run ${runId}.` }],
+        content: [{ type: "text", text: JSON.stringify({ status: "waiting", reason: params.reason }) }],
         details: { request },
         terminate: true,
       };

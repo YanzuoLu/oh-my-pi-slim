@@ -203,6 +203,23 @@ function contentPlainText(content: unknown): string {
   return sanitizeContentParts(content).map((part) => part.text).join("\n");
 }
 
+/** Gives the minimal contact receipt a friendly label only in the read-only viewer. */
+function contactSupervisorViewerContent(toolName: string, content: unknown): unknown {
+  if (toolName !== "contact_supervisor" || !Array.isArray(content) || content.length !== 1) return content;
+  const part = record(content[0]);
+  if (part?.type !== "text" || typeof part.text !== "string") return content;
+  try {
+    const payload = record(JSON.parse(part.text) as unknown);
+    if (
+      !payload || Object.keys(payload).length !== 2 || payload.status !== "waiting" ||
+      !["need_decision", "interview_request", "progress_update"].includes(String(payload.reason))
+    ) return content;
+    return [{ type: "text", text: "Yielded to supervisor." }];
+  } catch {
+    return content;
+  }
+}
+
 interface SanitizedAssistant {
   readonly content: unknown[];
   readonly toolCalls: { id: string; name: string; args: unknown }[];
@@ -240,6 +257,7 @@ interface ViewerBlock {
 
 interface ToolBlockRef {
   readonly component: ToolExecutionComponent;
+  readonly name: string;
 }
 
 /**
@@ -505,7 +523,7 @@ export function buildViewerTranscriptBody(input: ViewerTranscriptBodyInput): Vie
               cwd,
             );
             push(`tool ${call.name}`, [component]);
-            pendingTools.set(call.id, { component });
+            pendingTools.set(call.id, { component, name: call.name });
           }
           continue;
         }
@@ -515,7 +533,7 @@ export function buildViewerTranscriptBody(input: ViewerTranscriptBodyInput): Vie
           if (!pending) continue;
           pendingTools.delete(toolCallId);
           pending.component.updateResult({
-            content: sanitizeContentParts(message.content),
+            content: sanitizeContentParts(contactSupervisorViewerContent(pending.name, message.content)),
             details: undefined,
             isError: message.isError === true,
           });

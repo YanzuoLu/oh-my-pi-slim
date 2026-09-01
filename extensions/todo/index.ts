@@ -223,11 +223,14 @@ export default function todoExtension(pi: ExtensionAPI): void {
       const result = applyTodoUpdate(current, params.operations as TodoOperation[]);
       replaceState(id, result.tasks);
       const details = makeTodoSnapshot(result.tasks, result.operations, result.receipts);
+      const unfinished = result.tasks
+        .filter((task) => task.status !== "completed")
+        .map(({ subject, status, blockedBy }) => ({ subject, status, blockedBy }));
       refreshWidget(ctx);
       return {
         content: [{
           type: "text",
-          text: result.receipts.map((receipt) => `${receipt.operation}. ${sanitizeTodoText(receipt.text)}`).join("\n"),
+          text: JSON.stringify({ receipts: result.receipts, unfinished }),
         }],
         details,
       };

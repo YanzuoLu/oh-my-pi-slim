@@ -275,7 +275,7 @@ export class LoopRuntime {
 
     if (action === "list") {
       const loops = this.list();
-      return toolText(JSON.stringify(loops, null, 2), { loops });
+      return toolText(JSON.stringify(loops), { loops });
     }
     if (this.shuttingDown) throw new Error("Loop runtime is shutting down.");
     if (action === "create") return this.create(input);
@@ -332,7 +332,7 @@ export class LoopRuntime {
     this.applySchedule(loop, scheduled);
     this.widget.update();
     const result = this.publicLoop(loop);
-    return toolText(JSON.stringify(result, null, 2), { loop: result, changed: true });
+    return toolText(JSON.stringify(result), { loop: result, changed: true });
   }
 
   private delete(loop: LoopRecord): ReturnType<typeof toolText> {
@@ -343,7 +343,8 @@ export class LoopRuntime {
     this.cancelGatedFires(loop.id);
     this.loops.delete(loop.id);
     this.widget.update();
-    return toolText(`Deleted loop ${loop.id}.`, { id: loop.id, deleted: true });
+    const receipt = { id: loop.id, deleted: true };
+    return toolText(JSON.stringify(receipt), receipt);
   }
 
   private clear(): ReturnType<typeof toolText> {
@@ -355,24 +356,26 @@ export class LoopRuntime {
 
     const ids = [...this.loops.keys()];
     if (ids.length === 0) {
-      return toolText("No loops to clear.", { cleared: true, changed: false, clearedCount: 0, ids });
+      const receipt = { cleared: true, changed: false, clearedCount: 0, ids };
+      return toolText(JSON.stringify(receipt), receipt);
     }
     for (const loop of this.loops.values()) this.cancelTimer(loop);
     this.loops.clear();
     this.gatedFires = [];
     this.widget.update();
-    return toolText(`Cleared ${ids.length} loops.`, {
+    const receipt = {
       cleared: true,
       changed: true,
       clearedCount: ids.length,
       ids,
-    });
+    };
+    return toolText(JSON.stringify(receipt), receipt);
   }
 
   private pause(loop: LoopRecord): ReturnType<typeof toolText> {
     if (loop.status === "paused") {
       const result = this.publicLoop(loop);
-      return toolText(JSON.stringify(result, null, 2), { loop: result, changed: false });
+      return toolText(JSON.stringify(result), { loop: result, changed: false });
     }
     const now = new Date(this.nowMs()).toISOString();
     this.cancelTimer(loop);
@@ -382,13 +385,13 @@ export class LoopRuntime {
     loop.updatedAt = now;
     this.widget.update();
     const result = this.publicLoop(loop);
-    return toolText(JSON.stringify(result, null, 2), { loop: result, changed: true });
+    return toolText(JSON.stringify(result), { loop: result, changed: true });
   }
 
   private resume(loop: LoopRecord): ReturnType<typeof toolText> {
     if (loop.status === "active") {
       const result = this.publicLoop(loop);
-      return toolText(JSON.stringify(result, null, 2), { loop: result, changed: false });
+      return toolText(JSON.stringify(result), { loop: result, changed: false });
     }
     const nowMs = this.nowMs();
     const scheduled = this.prepareSchedule(loop, nowMs, loop.intervalMs);
@@ -397,7 +400,7 @@ export class LoopRuntime {
     this.applySchedule(loop, scheduled);
     this.widget.update();
     const result = this.publicLoop(loop);
-    return toolText(JSON.stringify(result, null, 2), { loop: result, changed: true });
+    return toolText(JSON.stringify(result), { loop: result, changed: true });
   }
 
   private modify(loop: LoopRecord, input: Record<string, unknown>): ReturnType<typeof toolText> {
@@ -409,7 +412,7 @@ export class LoopRuntime {
     const promptChanged = prompt !== undefined && prompt !== loop.prompt;
     if (!intervalChanged && !abstractChanged && !promptChanged) {
       const result = this.publicLoop(loop);
-      return toolText(JSON.stringify(result, null, 2), { loop: result, changed: false });
+      return toolText(JSON.stringify(result), { loop: result, changed: false });
     }
 
     const nowMs = this.nowMs();
@@ -430,7 +433,7 @@ export class LoopRuntime {
     }
     this.widget.update();
     const result = this.publicLoop(loop);
-    return toolText(JSON.stringify(result, null, 2), { loop: result, changed: true });
+    return toolText(JSON.stringify(result), { loop: result, changed: true });
   }
 
   private newId(): string {

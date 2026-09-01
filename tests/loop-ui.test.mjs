@@ -348,6 +348,36 @@ test("Loop tool calls render all seven actions with uniform collapsed hints and 
   }
 });
 
+test("Loop result rendering prioritizes details for all actions and falls back to compact JSON content", () => {
+  const activeLoop = loop();
+  const cases = [
+    ["create", { loop: activeLoop, changed: true }, "✓  Created loop [00000001] · active"],
+    ["modify", { loop: activeLoop, changed: true }, "✓  Modified loop [00000001] · active"],
+    ["pause", { loop: { ...activeLoop, status: "paused", nextFireAt: null }, changed: true }, "✓  Paused loop [00000001] · paused"],
+    ["resume", { loop: activeLoop, changed: true }, "✓  Resumed loop [00000001] · active"],
+    ["delete", { id: "00000001", deleted: true }, "✓  Deleted loop [00000001]"],
+    ["clear", { cleared: true, changed: true, clearedCount: 1, ids: ["00000001"] }, "✓  Cleared 1 loops"],
+    ["list", { loops: [activeLoop] }, "●  Loops (1/1)"],
+  ];
+
+  for (const [action, details, receipt] of cases) {
+    const fallback = JSON.stringify({ action, fallback: true });
+    const result = { content: [{ type: "text", text: fallback }], details };
+    for (const expanded of [false, true]) {
+      const output = render(renderLoopResult(result, { expanded }, theme, { args: { action } }));
+      assert.match(output, escaped(receipt));
+      assert.doesNotMatch(output, escaped(fallback));
+    }
+  }
+
+  for (const action of ["create", "modify", "pause", "resume", "delete", "clear", "list"]) {
+    const fallback = JSON.stringify({ action, fallback: true });
+    const result = { content: [{ type: "text", text: fallback }], details: {} };
+    assert.equal(render(renderLoopResult(result, { expanded: false }, theme, { args: { action } })), fallback);
+    assert.equal(render(renderLoopResult(result, { expanded: true }, theme, { args: { action } })), fallback);
+  }
+});
+
 test("Loop mutation and list results render compact receipts, no-change, full hierarchy, errors, and blank separators", () => {
   const activeLoop = loop({
     fireCount: 2,

@@ -382,6 +382,11 @@ async function createRun(harness, overrides = {}) {
   });
 }
 
+function assertCompactJsonContent(result, expected) {
+  assert.equal(result.content[0].text, JSON.stringify(expected));
+  assert.deepEqual(JSON.parse(result.content[0].text), JSON.parse(JSON.stringify(expected)));
+}
+
 /** Interrupt harness with a single-shot sleep hook, so one deterministic event lands inside the interrupt wait window. */
 function createInterruptHarness(options = {}) {
   let sleepHook;
@@ -1082,12 +1087,12 @@ test("subagent list stays compact across all six statuses while status isolates 
       assert.equal("output" in run, false, `${run.status} list entry must not expose output`);
       assert.equal("error" in run, false, `${run.status} list entry must not expose error`);
     }
-    assert.deepEqual(JSON.parse(result.content[0].text), result.details.runs);
+    assertCompactJsonContent(result, result.details.runs);
 
     const statusIds = [...result.details.runs.map((run) => run.id)];
     for (const id of statusIds) {
       const statusResult = await harness.tools.get("subagent").execute("status", { action: "status", id });
-      assert.deepEqual(JSON.parse(statusResult.content[0].text), statusResult.details.run);
+      assertCompactJsonContent(statusResult, statusResult.details.run);
       const listed = byId.get(id);
       const statusBase = Object.fromEntries(Object.entries(statusResult.details.run)
         .filter(([field]) => field !== "output" && field !== "error"));
@@ -1145,7 +1150,7 @@ test("subagent status reconciles before reading the latest registry and distingu
   } finally { harness.cleanup(); }
 });
 
-test("contact_supervisor prompt metadata describes persistent reply-to-continue requests", async () => {
+test("contact_supervisor returns minimal waiting content while retaining request details", async () => {
   const previousChild = process.env.OMPS_SUBAGENT_CHILD;
   const previousPiChild = process.env.PI_SUBAGENT_CHILD;
   const previousParentRun = process.env.OMPS_PARENT_RUN_ID;
@@ -1202,15 +1207,24 @@ test("contact_supervisor prompt metadata describes persistent reply-to-continue 
     ]);
     const guidelines = definition.promptGuidelines.join("\n");
     assert.doesNotMatch(`${definition.description}\n${definition.promptSnippet}\n${guidelines}`, /request ID|UUID|waitingSeq|deliveryKey|legacy|saved child/i);
-    const result = await definition.execute("call", { reason: "interview_request", message: "choose", interview: { title: "Choice" } });
-    assert.deepEqual(result.details.request, {
-      runId: process.env.OMPS_PARENT_RUN_ID,
-      reason: "interview_request",
-      message: "choose",
-      interview: { title: "Choice" },
-      createdAt: result.details.request.createdAt,
-    });
-    assert.equal("id" in result.details.request, false);
+    for (const params of [
+      { reason: "need_decision" },
+      { reason: "interview_request", message: "choose", interview: { title: "Choice" } },
+      { reason: "progress_update", message: "still working" },
+    ]) {
+      const result = await definition.execute("call", params);
+      const expectedRequest = {
+        runId: process.env.OMPS_PARENT_RUN_ID,
+        reason: params.reason,
+        message: params.message ?? params.reason,
+        interview: params.interview,
+        createdAt: result.details.request.createdAt,
+      };
+      assert.deepEqual(result.details.request, expectedRequest);
+      assertCompactJsonContent(result, { status: "waiting", reason: params.reason });
+      assert.equal(result.terminate, true);
+      assert.equal("id" in result.details.request, false);
+    }
   } finally {
     if (previousChild === undefined) delete process.env.OMPS_SUBAGENT_CHILD;
     else process.env.OMPS_SUBAGENT_CHILD = previousChild;
@@ -1401,7 +1415,7 @@ test("create writes secure detached config, journals once, launches, and returns
     const result = await createRun(harness);
     const id = result.details.run.id;
     const config = readConfig(harness, id);
-    assert.match(result.content[0].text, new RegExp(`${id}.*status starting`));
+    assertCompactJsonContent(result, { id, agent: "fixer", status: "starting" });
     assert.deepEqual(result.details, {
       run: {
         id,
@@ -1623,7 +1637,7 @@ test("create failure returns the complete failed run", async () => {
     await harness.restore();
     const result = await createRun(harness);
     const run = result.details.run;
-    assert.match(result.content[0].text, new RegExp(`${run.id}.*status failed`));
+    assertCompactJsonContent(result, { id: run.id, agent: "fixer", status: "failed" });
     assert.deepEqual(run, {
       id: run.id,
       agent: "fixer",
@@ -1706,6 +1720,11 @@ test("waiting notification and subagent reply use run ID and waiting sequence", 
     assert.equal(waitingNotification.details.deliveryKey, expectedDeliveryKey(id, "waiting", 1));
     assert.equal(waitingNotification.details.waitingSeq, 1);
     assert.equal(waitingNotification.details.request.message, "choose");
+    assert.equal(
+      waitingNotification.content,
+      `Subagent ${id} (fixer) is waiting.\n\nRequest:\n${JSON.stringify(waitingNotification.details.request, null, 2)}`,
+      "waiting notification ownership and model-facing body remain unchanged",
+    );
     assert.match(waitingNotification.content, new RegExp(`"runId": "${id}"`));
     assert.match(waitingNotification.content, /"reason": "need_decision"/);
     assert.match(waitingNotification.content, /"interview"/);
@@ -1717,7 +1736,7 @@ test("waiting notification and subagent reply use run ID and waiting sequence", 
     const reply = await harness.tools.get("subagent").execute("reply", {
       action: "reply", id, message: "option A",
     });
-    assert.match(reply.content[0].text, /is running/);
+    assertCompactJsonContent(reply, { id, status: "running", outcome: "replied" });
     assert.deepEqual(controls(harness, id).at(-1), {
       v: 1, token: config.token, type: "reply", message: "option A", waitingSeq: 1,
     });
@@ -1951,7 +1970,7 @@ test("steer only enqueues a control and returns requested", async () => {
     assert.equal(controls(harness, id).length, 0, "a slash steer is rejected before any control write");
 
     const result = await harness.tools.get("subagent").execute("steer", { action: "steer", id, message: "focus" });
-    assert.match(result.content[0].text, /requested/i);
+    assertCompactJsonContent(result, { id, status: "running", outcome: "requested" });
     assert.equal(controls(harness, id).at(-1).type, "steer");
     assert.equal(harness.runtime.registry.get(id).status, "running");
   } finally { harness.cleanup(); }
@@ -1984,7 +2003,7 @@ test("a steer that loses the terminal race stays compact while the queued notifi
       }));
       const result = await harness.tools.get("subagent").execute("steer", { action: "steer", id, message: "too late" });
 
-      assert.equal(result.content[0].text, `${id} is already ${status}.`);
+      assertCompactJsonContent(result, { id, status, outcome: "already-terminal" });
       assert.deepEqual(Object.keys(result.details.run).sort(), ["abstract", "agent", "id", "live", "status"]);
       assert.deepEqual(result.details.run, { id, agent: "fixer", abstract: "detached summary", status, live: false });
       assert.equal(result.details.run.output, undefined);
@@ -2040,8 +2059,10 @@ test("interrupt stops a running run synchronously, returns the full result, and 
     assert.equal(result.details.run.status, "interrupted");
     assert.equal(result.details.run.output, "INTERRUPT_PARTIAL_SENTINEL");
     assert.equal(result.details.run.error, "Interrupted by supervisor.");
-    assert.match(result.content[0].text, /Output: INTERRUPT_PARTIAL_SENTINEL/);
-    assert.match(result.content[0].text, /Error: Interrupted by supervisor\./);
+    assertCompactJsonContent(result, {
+      id, agent: "fixer", status: "interrupted", outcome: "stopped",
+      output: "INTERRUPT_PARTIAL_SENTINEL", error: "Interrupted by supervisor.",
+    });
     assert.equal(controls(harness, id).filter(({ type }) => type === "interrupt").length, 1);
     assert.deepEqual(harness.killed, [], "a runner that honors the interrupt control is never signaled");
 
@@ -2109,8 +2130,9 @@ test("interrupt accepts natural completion inside its wait window and never send
     assert.equal(result.details.outcome, "raced");
     assert.equal(result.details.run.status, "completed");
     assert.equal(result.details.run.output, "RACED_OUTPUT_SENTINEL");
-    assert.match(result.content[0].text, /reached completed before the interrupt stopped it/);
-    assert.match(result.content[0].text, /Output: RACED_OUTPUT_SENTINEL/);
+    assertCompactJsonContent(result, {
+      id, agent: "fixer", status: "completed", outcome: "raced", output: "RACED_OUTPUT_SENTINEL",
+    });
     assert.deepEqual(harness.killed, []);
     assert.equal(harness.notifications.length, 0, "an authoritative natural terminal state is handed back, not notified");
     assert.equal(harness.runtime.registry.get(id).notificationPending, undefined);
@@ -2129,7 +2151,9 @@ test("interrupt of an already terminal run writes no control and never steals it
 
     const result = await interrupt(harness, id);
 
-    assert.equal(result.content[0].text, `${id} is already completed.`);
+    assertCompactJsonContent(result, {
+      id, agent: "fixer", status: "completed", outcome: "already-terminal", output: "ALREADY_TERMINAL_SENTINEL",
+    });
     assert.equal(result.details.outcome, "already-terminal");
     assert.deepEqual(Object.keys(result.details.run).sort(), ["abstract", "agent", "id", "live", "status"]);
     assert.doesNotMatch(JSON.stringify(result.details), /SENTINEL/);
@@ -2187,7 +2211,10 @@ test("interrupt never signals an unverifiable runner and reports an unconfirmed 
 
     assert.equal(result.details.outcome, "unconfirmed");
     assert.equal(result.details.run.status, "interrupted");
-    assert.match(result.content[0].text, /did not confirm that it stopped and its run directory is retained/);
+    assertCompactJsonContent(result, {
+      id, agent: "fixer", status: "interrupted", outcome: "unconfirmed",
+      error: "Interrupted by the parent session.",
+    });
     assert.deepEqual(harness.killed, [], "a PID-reused or unverifiable process is never signaled");
     assert.equal(existsSync(harness.paths(id).runDir), true);
     assert.equal(harness.notifications.length, 0);
@@ -2215,7 +2242,10 @@ test("interrupt of a dead runner adopts the failed reconciliation without a cont
 
     assert.equal(result.details.outcome, "already-terminal");
     assert.equal(result.details.run.status, "failed");
-    assert.equal(result.content[0].text, `${id} is already failed.`);
+    assertCompactJsonContent(result, {
+      id, agent: "fixer", status: "failed", outcome: "already-terminal",
+      error: "Detached runner process exited before publishing a terminal state.",
+    });
     assert.equal(controls(harness, id).length, 0);
     assert.equal(harness.notifications.length, 1, "the reconciled failure keeps its own notification");
     assert.equal(harness.notifications[0].message.details.status, "failed");
@@ -2298,7 +2328,10 @@ test("poller failure paths never duplicate a termination that an interrupt alrea
       assert.equal(result.details.run.status, "interrupted");
       assert.equal(result.details.run.output, "OWNED_STOP_SENTINEL");
       assert.equal(result.details.run.error, "Interrupted by supervisor.", `${mode} must not overwrite the authoritative diagnosis`);
-      assert.match(result.content[0].text, /Output: OWNED_STOP_SENTINEL/);
+      assertCompactJsonContent(result, {
+        id, agent: "fixer", status: "interrupted", outcome: "stopped",
+        output: "OWNED_STOP_SENTINEL", error: "Interrupted by supervisor.",
+      });
       assert.equal(controls(harness, id).filter(({ type }) => type === "interrupt").length, 1,
         `${mode} must not write a second interrupt control`);
       assert.deepEqual(harness.killed, [], `${mode} must not signal a process the termination owner already handles`);
@@ -2362,7 +2395,10 @@ test("an interrupt waits out a reconciliation that already owns the stop and nev
     assert.equal(result.details.run.status, "failed");
     assert.equal(result.details.run.error, "Detached runner heartbeat no longer advances.",
       "the reconciliation diagnosis stays authoritative");
-    assert.match(result.content[0].text, /Error: Detached runner heartbeat no longer advances\./);
+    assertCompactJsonContent(result, {
+      id, agent: "fixer", status: "failed", outcome: "raced",
+      error: "Detached runner heartbeat no longer advances.",
+    });
     assert.equal(controls(harness, id).filter(({ type }) => type === "interrupt").length, 1,
       "the whole interleaving writes exactly one interrupt control");
     assert.deepEqual(harness.killed, [{ pid: -999, signal: "SIGTERM" }], "the whole interleaving signals exactly once");
@@ -3515,7 +3551,7 @@ test("resume creates a new run ID and a complete --session invocation", async ()
     });
     const id = result.details.run.id;
     const config = readConfig(harness, id);
-    assert.match(result.content[0].text, new RegExp(`${id}.*status starting`));
+    assertCompactJsonContent(result, { id, sourceRunId: "source", status: "starting" });
     assert.notEqual(id, "source");
     assert.deepEqual(result.details.run, {
       id,
@@ -3833,7 +3869,7 @@ test("delete succeeds for completed, failed, and interrupted runs and reports re
     for (const status of ["completed", "failed", "interrupted"]) {
       const id = `delete-${status}`;
       const result = await deleteRun(harness, id);
-      assert.equal(result.content[0].text, `Deleted retained subagent run ${id}.`);
+      assertCompactJsonContent(result, { id, deleted: true, warnings: [] });
       assert.deepEqual(result.details, { id, deleted: true, changed: true, warnings: [] });
       assert.equal(harness.runtime.registry.get(id), undefined);
       assert.equal(harness.runtime.clearedRunIds.has(id), true);
@@ -3886,6 +3922,11 @@ test("delete purges run files and only exclusively owned child sessions while pr
     harness.runtime.registry.add(persistedRun({ id: linkedId, status: "failed", sessionFile: outsideSession }), false);
 
     const warningResult = await deleteRun(harness, linkedId);
+    assertCompactJsonContent(warningResult, {
+      id: linkedId,
+      deleted: true,
+      warnings: warningResult.details.warnings,
+    });
     const warnings = warningResult.details.warnings.join("\n");
     assert.match(warnings, /Retained run directory for warning-run/);
     assert.match(warnings, /Retained child session file for warning-run: .*outside this session's child session directory/);
@@ -4061,7 +4102,7 @@ test("reload and restore retain terminal results for status until clear removes 
       id: "restored-terminal", agent: "fixer", abstract: "restored result",
       status: "completed", live: false, output: "RESTORED_OUTPUT", error: "RESTORED_ERROR",
     });
-    assert.deepEqual(JSON.parse(status.content[0].text), status.details.run);
+    assertCompactJsonContent(status, status.details.run);
     await clear(restored);
     await assert.rejects(
       restored.tools.get("subagent").execute("status", { action: "status", id: "restored-terminal" }),
@@ -4107,7 +4148,7 @@ test("clear on empty terminal history is a no-change without a clear journal ent
     await harness.restore();
     const result = await clear(harness);
     assert.deepEqual(result.details, { clearedCount: 0, warnings: [], changed: false });
-    assert.equal(result.content[0].text, "No retained subagent runs to clear.");
+    assertCompactJsonContent(result, { clearedCount: 0, warnings: [] });
     assert.deepEqual(harness.journalWrites, []);
 
     const collapsed = stripVTControlCharacters(harness.tools.get("subagent")
@@ -4137,6 +4178,7 @@ test("clear removes terminal run directories and appends one version-3 replaceme
     const result = await clear(harness);
     assert.equal(result.details.clearedCount, 1);
     assert.equal(result.details.changed, true);
+    assertCompactJsonContent(result, { clearedCount: 1, warnings: [] });
     assert.equal(existsSync(harness.paths(id).runDir), false, "clear removes the run directory, state, and config");
     assert.deepEqual(harness.runtime.registry.list(), []);
     assert.deepEqual(harness.journalWrites.at(-1), {
@@ -4232,6 +4274,7 @@ test("clear removes owned child session files once and warns about shared, escap
     const result = await clear(harness);
     assert.equal(result.details.clearedCount, 7);
     assert.equal(result.details.changed, true);
+    assertCompactJsonContent(result, { clearedCount: 7, warnings: result.details.warnings });
     assert.equal(existsSync(shared), false, "a session file shared by two cleared runs is removed exactly once");
     assert.equal(existsSync(nestedFile), false);
     assert.equal(existsSync(linked), true, "a symlinked session file is never removed");
@@ -4609,17 +4652,20 @@ test("viewerSnapshot membership matches registry, list, and widget while navigat
       assert.ok(snapshot.runs.some((run) => run.id === id), `${id} must be part of the viewer cycle`);
     }
 
-    // The widget renders the same retained set; its heading total is the viewer's N.
+    // The compact widget counts the same retained set while only rendering starting, running, and waiting rows.
     const widgetLines = renderSubagentWidgetLines({
       runs: retained,
       spinnerFrame: 0,
       terminalWidth: 200,
       theme: transcriptTheme,
       nowMs: NOW_MS,
-      expanded: true,
     });
     const heading = stripVTControlCharacters(widgetLines[0]);
     assert.ok(heading.includes(`Agents (3/${snapshot.runs.length})`), heading);
+    assert.match(heading, /ctrl\+shift\+←\/→ viewer/);
+    for (const id of [running.id, waiting.id, startingId]) assert.match(widgetLines.join("\n"), new RegExp(`\\[${id}\\]`));
+    for (const id of [completed.id, failed.id, interrupted.id]) assert.doesNotMatch(widgetLines.join("\n"), new RegExp(`\\[${id}\\]`));
+    assert.doesNotMatch(widgetLines.join("\n"), /ctrl\+o|expand/);
     assert.ok(widgetLines.length <= MAX_SUBAGENT_WIDGET_LINES, "the widget still budgets its own rows");
 
     const terminalSnapshot = snapshot.runs.find((run) => run.id === completed.id);

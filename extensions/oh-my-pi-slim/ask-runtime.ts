@@ -92,6 +92,22 @@ export interface AskResult {
   cancelReason?: "user_cancelled" | "empty_submit";
 }
 
+export interface AskModelAnswerDto {
+  questionIndex: number;
+  kind: AskAnswerKind;
+  answer: string | string[] | null;
+  preview?: string;
+}
+
+interface AskModelDtoBase {
+  answers: AskModelAnswerDto[];
+  unanswered: number[];
+}
+
+export type AskModelDto =
+  | ({ outcome: "complete" | "partial" } & AskModelDtoBase)
+  | ({ outcome: "cancelled"; reason: "user_cancelled" | "empty_submit" } & AskModelDtoBase);
+
 export interface AskTuiDriver {
   ask(questionnaire: ValidatedQuestionnaire, signal: AbortSignal): Promise<AskDriverResult>;
 }
@@ -279,41 +295,34 @@ export function buildAskResult(questionnaire: ValidatedQuestionnaire, driverResu
   };
 }
 
-function answerDisplay(answer: AskPublicAnswer): string {
-  if (answer.kind === "multi") {
-    const selected = answer.answer as string[];
-    return selected.length === 0 ? "(no options selected)" : selected.join(", ");
+export function buildAskModelDto(result: AskResult, questionnaire: ValidatedQuestionnaire): AskModelDto {
+  const answers = result.answers.map((answer): AskModelAnswerDto => ({
+    questionIndex: answer.questionIndex,
+    kind: answer.kind,
+    answer: Array.isArray(answer.answer) ? [...answer.answer] : answer.answer,
+    ...(answer.preview === undefined ? {} : { preview: answer.preview }),
+  }));
+  const answered = new Set(answers.map((answer) => answer.questionIndex));
+  const unanswered = questionnaire.questions
+    .map((_question, questionIndex) => questionIndex)
+    .filter((questionIndex) => !answered.has(questionIndex));
+  if (result.cancelled) {
+    return {
+      outcome: "cancelled",
+      answers,
+      unanswered,
+      reason: result.cancelReason === "user_cancelled" ? "user_cancelled" : "empty_submit",
+    };
   }
-  if (answer.kind === "custom" && answer.answer === null) return "(empty custom response)";
-  return String(answer.answer);
+  return {
+    outcome: result.partial ? "partial" : "complete",
+    answers,
+    unanswered,
+  };
 }
 
 export function askResultModelContent(result: AskResult, questionnaire: ValidatedQuestionnaire): string {
-  const lines: string[] = [];
-  if (result.cancelReason === "user_cancelled") {
-    lines.push("Questionnaire not completed because the user cancelled it.");
-    lines.push("No answers were retained.");
-  } else if (result.cancelled) {
-    lines.push("Questionnaire not completed because no answers were submitted.");
-    lines.push("No answers were confirmed.");
-  } else {
-    lines.push(result.partial ? "Questionnaire partially submitted." : "Questionnaire completed.");
-    lines.push("Confirmed answers:");
-  }
-  for (const answer of result.answers) {
-    lines.push(`${answer.questionIndex + 1}. ${answer.header} — ${answer.question}`);
-    lines.push(`   Answer: ${answerDisplay(answer)}`);
-    if (answer.preview !== undefined) lines.push(`   Preview: ${answer.preview}`);
-  }
-  if (result.partial) {
-    const answered = new Set(result.answers.map((answer) => answer.questionIndex));
-    const unanswered = questionnaire.questions
-      .map((question, index) => ({ question, index }))
-      .filter(({ index }) => !answered.has(index));
-    lines.push("Unanswered questions:");
-    for (const { question, index } of unanswered) lines.push(`${index + 1}. ${question.header} — ${question.question}`);
-  }
-  return lines.join("\n");
+  return JSON.stringify(buildAskModelDto(result, questionnaire));
 }
 
 function boundedText(value: string, maxLength: number): string {

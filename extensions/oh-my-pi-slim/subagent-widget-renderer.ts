@@ -135,14 +135,10 @@ function subagentWidgetHeading(runs: readonly WidgetRun[], theme: WidgetTheme): 
 
 const AGENTS_VIEWER_HINT = " · ctrl+shift+←/→ viewer";
 
-/** Prefers the complete Viewer plus expand hint, then the whole expand hint, and never truncates either segment. */
-function subagentHeadingLine(heading: string, expandHint: string, theme: WidgetTheme, width: number): string {
-  const fullHint = expandHint === "" ? "" : `${AGENTS_VIEWER_HINT}${expandHint}`;
-  if (fullHint !== "" && visibleWidth(heading) + visibleWidth(fullHint) <= width) {
-    return `${heading}${theme.fg("dim", fullHint)}`;
-  }
-  if (expandHint !== "" && visibleWidth(heading) + visibleWidth(expandHint) <= width) {
-    return `${heading}${theme.fg("dim", expandHint)}`;
+/** Keeps the complete Viewer hint when it fits and never exposes a truncated semantic hint. */
+function subagentHeadingLine(heading: string, showViewerHint: boolean, theme: WidgetTheme, width: number): string {
+  if (showViewerHint && visibleWidth(heading) + visibleWidth(AGENTS_VIEWER_HINT) <= width) {
+    return `${heading}${theme.fg("dim", AGENTS_VIEWER_HINT)}`;
   }
   return truncateToWidth(heading, width);
 }
@@ -162,7 +158,6 @@ function categorizeRuns(runs: readonly WidgetRun[]): Categories {
 }
 
 interface Sections {
-  finishedLines: string[];
   activeLines: ActiveRunLines[];
   queuedLines: string[];
 }
@@ -175,8 +170,6 @@ function buildSections(
   nowMs: number,
   terminalWidth: number,
 ): Sections {
-  const finishedLines = categories.finished.map((run) =>
-    truncate(theme.fg("dim", "├─") + " " + renderFinishedRunLine(run, theme, nowMs)));
   const activeLines = categories.active.map((run) => {
     const summaryPrefix = theme.fg("dim", "├─") + " ";
     const [summary, statsLine] = renderActiveRunLines(
@@ -194,17 +187,14 @@ function buildSections(
   const queuedLines = categories.queued.map((run) => truncate(
     theme.fg("dim", "├─") + ` ${formatSemanticGlyphPrefix(theme.fg("muted", SUBAGENT_WIDGET_GLYPHS.queued))}${theme.fg("dim", runName(run, theme))}  ${theme.fg("dim", shortAbstract(run.abstract))} ${theme.fg("dim", "·")} ${theme.fg("dim", stats(run, theme, nowMs))} ${theme.fg("muted", "queued")}`,
   ));
-  return { finishedLines, activeLines, queuedLines };
+  return { activeLines, queuedLines };
 }
 
 function assembleWithinBudget(heading: string, sections: Sections): string[] {
   const lines = [heading];
   for (const entry of sections.activeLines) lines.push(...entry);
-  lines.push(...sections.queuedLines, ...sections.finishedLines);
-  if (sections.finishedLines.length > 0) {
-    const last = lines.length - 1;
-    lines[last] = lines[last].replace("├─", "└─");
-  } else if (sections.queuedLines.length > 0) {
+  lines.push(...sections.queuedLines);
+  if (sections.queuedLines.length > 0) {
     const last = lines.length - 1;
     lines[last] = lines[last].replace("├─", "└─");
   } else if (sections.activeLines.length > 0) {
@@ -226,7 +216,6 @@ function assembleOverflow(
   let budget = maxBody - 1;
   let hiddenActive = 0;
   let hiddenQueued = 0;
-  let hiddenFinished = 0;
   for (const entry of sections.activeLines) {
     if (budget >= 2) {
       lines.push(...entry);
@@ -239,17 +228,10 @@ function assembleOverflow(
       budget -= 1;
     } else hiddenQueued += 1;
   }
-  for (const line of sections.finishedLines) {
-    if (budget >= 1) {
-      lines.push(line);
-      budget -= 1;
-    } else hiddenFinished += 1;
-  }
   const parts: string[] = [];
   if (hiddenActive > 0) parts.push(`${hiddenActive} active`);
   if (hiddenQueued > 0) parts.push(`${hiddenQueued} queued`);
-  if (hiddenFinished > 0) parts.push(`${hiddenFinished} finished`);
-  const hiddenTotal = hiddenActive + hiddenQueued + hiddenFinished;
+  const hiddenTotal = hiddenActive + hiddenQueued;
   lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hiddenTotal} more (${parts.join(", ")})`)}`));
   return lines;
 }
@@ -260,27 +242,21 @@ export function renderSubagentWidgetLines(params: {
   terminalWidth: number;
   theme: WidgetTheme;
   nowMs?: number;
-  expanded?: boolean;
-  hint?: string;
 }): string[] {
   const { runs, spinnerFrame, terminalWidth, theme } = params;
   const nowMs = params.nowMs ?? Date.now();
-  const expanded = params.expanded ?? true;
   const categories = categorizeRuns(sortRetainedSubagentRuns(runs));
-  const hasActive = categories.active.length > 0 || categories.queued.length > 0;
-  if (!hasActive && categories.finished.length === 0) return [];
-  const policyHidden = expanded ? 0 : categories.finished.length;
-  const shown: Categories = expanded ? categories : { ...categories, finished: [] };
+  if (runs.length === 0) return [];
   const truncate = (line: string) => truncateToWidth(line, terminalWidth);
   const heading = subagentHeadingLine(
     subagentWidgetHeading(runs, theme),
-    policyHidden > 0 ? params.hint ?? "" : "",
+    categories.finished.length > 0,
     theme,
     terminalWidth,
   );
-  const sections = buildSections(shown, spinnerFrame, theme, truncate, nowMs, terminalWidth);
+  const sections = buildSections(categories, spinnerFrame, theme, truncate, nowMs, terminalWidth);
   const maxBody = MAX_SUBAGENT_WIDGET_LINES - 1;
-  const totalBody = sections.finishedLines.length + sections.activeLines.length * 2 + sections.queuedLines.length;
+  const totalBody = sections.activeLines.length * 2 + sections.queuedLines.length;
   return totalBody <= maxBody
     ? assembleWithinBudget(heading, sections)
     : assembleOverflow(heading, sections, maxBody, truncate, theme);

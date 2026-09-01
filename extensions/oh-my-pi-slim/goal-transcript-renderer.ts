@@ -90,6 +90,47 @@ function goalDetails(value: unknown): { goal: PublicGoalState | null; changed: b
   return goal ? { goal, changed: details.changed } : undefined;
 }
 
+interface GoalResultDto {
+  goal: PublicGoalState | null;
+  changed: boolean;
+  message?: string;
+}
+
+function goalResultDto(content: unknown, details: { goal: PublicGoalState | null; changed: boolean }): GoalResultDto | undefined {
+  const text = contentText(content);
+  if (!text || text.includes("\n")) return;
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { return; }
+  const dto = asRecord(value);
+  if (!dto) return;
+  const keys = Object.keys(dto).sort();
+  const expected = dto.message === undefined ? ["changed", "goal"] : ["changed", "goal", "message"];
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index]) ||
+      typeof dto.changed !== "boolean" || dto.changed !== details.changed ||
+      !(dto.message === undefined || typeof dto.message === "string")) return;
+  const parsedGoal = dto.goal === null ? null : goalFromValue(dto.goal);
+  if (dto.goal !== null && !parsedGoal) return;
+  if (JSON.stringify(parsedGoal) !== JSON.stringify(details.goal)) return;
+  return {
+    goal: parsedGoal,
+    changed: dto.changed,
+    ...(dto.message === undefined ? {} : { message: dto.message }),
+  };
+}
+
+function modelResultText(
+  action: GoalResultAction,
+  details: { goal: PublicGoalState | null; changed: boolean },
+  content: unknown,
+): string {
+  const dto = goalResultDto(content, details);
+  if (!dto) return contentText(content);
+  if (action === "clear") return dto.message ?? "";
+  if (action === "status") return dto.goal ? JSON.stringify(dto.goal, null, 2) : dto.message ?? "";
+  if (action === "create" || action === "modify" || action === "resume" && dto.changed) return dto.message ?? "";
+  return [dto.message, dto.goal ? JSON.stringify(dto.goal, null, 2) : undefined].filter((value) => value !== undefined).join("\n");
+}
+
 function title(theme: Theme, action: string, expanded: boolean): Text {
   return new Text(
     `${theme.fg("toolTitle", theme.bold("goal"))} ${theme.fg("muted", `· ${sanitizeGoalText(action)}${expanded ? "" : " (ctrl+o to expand)"}`)}`,
@@ -257,13 +298,13 @@ export function renderGoalResult(
       container.addChild(new Spacer(1));
       addCriterionEvidence(container, details.goal, theme);
     }
-    const modelResult = contentText(result.content);
+    const modelResult = modelResultText(action, details, result.content);
     if (modelResult) {
       container.addChild(new Spacer(1));
       addSection(container, theme, "Model result", modelResult);
     }
   } else if (options.expanded === true) {
-    const modelResult = contentText(result.content);
+    const modelResult = modelResultText(action, details, result.content);
     if (modelResult) addSection(container, theme, "Model result", modelResult);
   }
   return spacedResult(container);

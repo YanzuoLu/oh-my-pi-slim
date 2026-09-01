@@ -255,7 +255,7 @@ test("the stack sorts every active combination with active sections above idle o
       `mask ${mask} must keep active sections on top and Goal → Todos → Agents → Monitors → Loops inside each group`,
     );
     assert.deepEqual(
-      renderWidgetStack(sections, { width: 80, theme, expanded: true, hint: "" }),
+      renderWidgetStack(sections, { width: 80, theme, expanded: true }),
       expected.map((id) => labels[id]),
       `mask ${mask} must concatenate the same order it sorts`,
     );
@@ -267,7 +267,7 @@ test("the stack concatenates section bodies with no separator, no blank line, an
     fakeSection("loops", false, ["loop-head", "loop-row"]),
     fakeSection("goal", true, ["goal-head", "goal-row"]),
   ];
-  const lines = renderWidgetStack(sections, { width: 80, theme, expanded: true, hint: "" });
+  const lines = renderWidgetStack(sections, { width: 80, theme, expanded: true });
   assert.deepEqual(lines, ["goal-head", "goal-row", "loop-head", "loop-row"]);
   assert.ok(lines.every((line) => line !== ""), "the stack never inserts a blank line between sections");
 
@@ -276,11 +276,11 @@ test("the stack concatenates section bodies with no separator, no blank line, an
     fakeSection("todos", true, Array.from({ length: 12 }, (_, index) => `todo-${index}`)),
   ];
   assert.equal(
-    renderWidgetStack(tall, { width: 80, theme, expanded: true, hint: "" }).length,
+    renderWidgetStack(tall, { width: 80, theme, expanded: true }).length,
     24,
     "each section keeps its own budget and the stack adds no cap of its own",
   );
-  assert.deepEqual(renderWidgetStack([], { width: 80, theme, expanded: true, hint: "" }), []);
+  assert.deepEqual(renderWidgetStack([], { width: 80, theme, expanded: true }), []);
 });
 
 test("every section's active flag comes from the same source as its own heading glyph", () => {
@@ -347,7 +347,7 @@ test("five real widgets register one aggregate key once and reorder on every act
     assert.equal(harness.calls.length, callsBefore, `${id} going idle must not call setWidget again`);
     assert.ok(harness.renders > rendersBefore, `${id} going idle must request an aggregate render`);
   }
-  assert.deepEqual(harness.headings(), ["○  Goal · Ⅱ  paused · goal-paused", "○  Todos (1/1)", "○  Agents (1/1)", "○  Monitors (1/1)", "○  Loops"]);
+  assert.deepEqual(harness.headings(), ["○  Goal · Ⅱ  paused · goal-paused", "○  Todos (1/1)", "○  Agents (1/1) · ctrl+shift+←/→ viewer", "○  Monitors (1/1)", "○  Loops"]);
 
   harness.state.monitors = [monitorItem("running")];
   harness.monitors.update();
@@ -541,20 +541,46 @@ test("a tree cycle drops the old sections and republishes them on the new UI wit
   assert.deepEqual(harness.headings(), ["●  Goal · ↻  active · goal-active", "●  Todos (0/1)", "●  Agents (0/1)", "●  Monitors (0/1)", "●  Loops"]);
 });
 
-test("the aggregate component reads live width, theme, and Ctrl+O state while invalidate stays a no-op", () => {
+test("Ctrl+O only changes Goal while compact widgets stay unchanged and the aggregate stays registered once", () => {
   let expanded = true;
   const harness = stack({ getToolsExpanded: () => expanded });
-  harness.bindAll();
+  harness.state.goal = goalView("completed");
   harness.state.todos = [todoTask("pending"), todoTask("completed")];
+  harness.state.agents = [subagentRun("running"), subagentRun("completed")];
+  harness.state.monitors = [monitorItem("running"), monitorItem("completed")];
+  harness.state.loops = [];
+  harness.bindAll();
   harness.publishAll();
+
+  const sectionLines = (lines, label) => {
+    const start = lines.findIndex((line) => new RegExp(`^[●○]  ${label}`).test(line));
+    assert.notEqual(start, -1, `${label} section must be present`);
+    const next = lines.findIndex((line, index) => index > start && /^[●○]  /.test(line));
+    return lines.slice(start, next === -1 ? undefined : next);
+  };
+  const compactLabels = ["Todos", "Agents", "Monitors"];
+  const before = harness.lines();
+  const compactBefore = Object.fromEntries(compactLabels.map((label) => [label, sectionLines(before, label)]));
+  const goalBefore = sectionLines(before, "Goal");
+  assert.equal(goalBefore.length, 2, "an expanded completed Goal includes its detail row");
+  assert.match(compactBefore.Todos[0], /Todos \(1\/2\)/, "the Todo fixture includes a completed item");
+  assert.match(compactBefore.Agents[0], /Agents \(1\/2\)/, "the Agent fixture includes a completed run");
+  assert.match(compactBefore.Monitors[0], /Monitors \(1\/2\)/, "the Monitor fixture includes a completed process");
+  assert.ok(compactLabels.every((label) => !compactBefore[label].join("\n").includes("to expand")));
   const registrations = harness.registrations();
-  assert.match(harness.lines().join("\n"), /Todos \(1\/2\)/);
-  assert.ok(harness.lines().some((line) => line.includes("~todo-completed~")), "the expanded body keeps completed rows");
 
   expanded = false;
-  assert.ok(harness.lines().some((line) => line.includes("Todos (1/2) · ctrl+o to expand")), "collapsing reaches every section through one render");
-  assert.ok(!harness.lines().some((line) => line.includes("~todo-completed~")));
+  const after = harness.lines();
+  for (const label of compactLabels) {
+    assert.deepEqual(sectionLines(after, label), compactBefore[label], `${label} output is independent of Ctrl+O`);
+  }
+  assert.ok(compactLabels.every((label) => !sectionLines(after, label).join("\n").includes("to expand")));
+  assert.equal(sectionLines(after, "Goal").length, 1, "the Goal section still receives the live collapsed state");
   assert.equal(harness.registrations(), registrations, "Ctrl+O never re-registers the aggregate");
+
+  expanded = true;
+  assert.deepEqual(sectionLines(harness.lines(), "Goal"), goalBefore, "the Goal detail returns from the same live registration");
+  assert.equal(harness.registrations(), registrations);
 
   harness.component.invalidate();
   assert.equal(harness.registrations(), registrations, "invalidate is a no-op and never re-registers");

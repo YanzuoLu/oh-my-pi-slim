@@ -7,7 +7,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
  * on top, parked and finished sections sink below them, and inside each group the product
  * order Goal → Todos → Agents → Monitors → Loops never changes. Nothing here owns UI state,
  * registers a widget, or rewrites a section's own lines: the section renderers stay the sole
- * authority for their body, line budget, hint, and glyphs.
+ * authority for their body, line budget, and glyphs.
  */
 
 export const WIDGET_STACK_SECTION_IDS = ["goal", "todos", "agents", "monitors", "loops"] as const;
@@ -19,7 +19,6 @@ export interface WidgetStackRenderInput {
   readonly width: number;
   readonly theme: Theme;
   readonly expanded: boolean;
-  readonly hint: string;
 }
 
 export interface WidgetStackSection {

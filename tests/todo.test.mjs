@@ -26,8 +26,7 @@ registerHooks({
   },
 });
 
-const { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, visibleWidth } = await import("@earendil-works/pi-tui");
-const { widgetExpandHint } = await import("../extensions/oh-my-pi-slim/widget-expansion.ts");
+const { visibleWidth } = await import("@earendil-works/pi-tui");
 const core = await import("../extensions/todo/core.ts");
 const todoModule = await import("../extensions/todo/index.ts");
 const {
@@ -77,17 +76,6 @@ const roleAnsiTheme = {
 
 function task(subject, status = "pending", blockedBy = [], abstract = `${subject} summary`) {
   return { subject, abstract, status, blockedBy };
-}
-
-const DEFAULT_HINT = " · ctrl+o to expand";
-
-/** Installs a user-configured `app.tools.expand` binding so the hint proves it reads the live keymap. */
-function withConfiguredExpandKey(keys, body) {
-  setKeybindings(new KeybindingsManager(
-    { ...TUI_KEYBINDINGS, "app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" } },
-    { "app.tools.expand": keys },
-  ));
-  try { body(); } finally { setKeybindings(null); }
 }
 
 function branchResult(details, { isError = false } = {}) {
@@ -553,6 +541,73 @@ test("modify receipts identify the current target and same-value updates keep sn
   assert.deepEqual(successfulNoOp.details.state.tasks, [task("A")]);
 });
 
+test("update content is compact JSON with complete receipts and minimal unfinished tasks without changing details or UI", () => {
+  const harness = createHarness({ mode: "rpc" });
+  harness.emit("session_start", { reason: "startup" });
+  const result = runUpdate(harness.tool, harness.ctx, [
+    { op: "append", subject: "Done", abstract: "finished" },
+    { op: "modify", target: "Done", status: "completed" },
+    { op: "append", subject: "Pending", abstract: "waiting", blockedBy: ["Done"] },
+    { op: "append", subject: "Active", abstract: "working", blockedBy: ["Done"] },
+    { op: "modify", target: "Active", status: "in_progress" },
+  ]);
+  const content = JSON.parse(result.content[0].text);
+  const receipts = [
+    { operation: 1, kind: "append", text: 'Appended "Done".' },
+    { operation: 2, kind: "status", text: 'Modified "Done": status pending to completed.' },
+    { operation: 3, kind: "append", text: 'Appended "Pending".' },
+    { operation: 4, kind: "append", text: 'Appended "Active".' },
+    { operation: 5, kind: "status", text: 'Modified "Active": status pending to in_progress.' },
+  ];
+  assert.equal(result.content[0].text, JSON.stringify(content));
+  assert.deepEqual(Object.keys(content), ["receipts", "unfinished"]);
+  assert.deepEqual(content.receipts, receipts);
+  assert.deepEqual(content.receipts.map((receipt) => Object.keys(receipt)), [
+    ["operation", "kind", "text"],
+    ["operation", "kind", "text"],
+    ["operation", "kind", "text"],
+    ["operation", "kind", "text"],
+    ["operation", "kind", "text"],
+  ]);
+  assert.deepEqual(content.unfinished, [
+    { subject: "Pending", status: "pending", blockedBy: ["Done"] },
+    { subject: "Active", status: "in_progress", blockedBy: ["Done"] },
+  ]);
+  assert.deepEqual(content.unfinished.map((item) => Object.keys(item)), [
+    ["subject", "status", "blockedBy"],
+    ["subject", "status", "blockedBy"],
+  ]);
+  assert.doesNotMatch(result.content[0].text, /abstract|waiting|working/);
+
+  assert.deepEqual(result.details.receipts, receipts);
+  assert.deepEqual(result.details.state.tasks, [
+    task("Done", "completed", [], "finished"),
+    task("Pending", "pending", ["Done"], "waiting"),
+    task("Active", "in_progress", ["Done"], "working"),
+  ]);
+  assert.equal(
+    renderComponent(harness.tool.renderResult(result, { expanded: false }, theme, {})),
+    "✓  Applied 3 append · 2 modify · 0 delete · 0 clear → 5 changed · 0 no change",
+  );
+  assert.match(
+    renderComponent(harness.tool.renderResult(result, { expanded: true }, theme, {})),
+    /5\. ○  → ◐  Modified "Active": status pending to in_progress\./,
+  );
+});
+
+test("update content explicitly returns an empty unfinished array with complete receipts", () => {
+  const harness = createHarness({ mode: "rpc" });
+  harness.emit("session_start", { reason: "startup" });
+  const result = runUpdate(harness.tool, harness.ctx, [{ op: "clear" }]);
+  const content = JSON.parse(result.content[0].text);
+  assert.equal(result.content[0].text, JSON.stringify(content));
+  assert.deepEqual(Object.keys(content), ["receipts", "unfinished"]);
+  assert.deepEqual(content, {
+    receipts: [{ operation: 1, kind: "no-change", text: "No change." }],
+    unfinished: [],
+  });
+});
+
 test("list returns every exact field in append order and never returns a snapshot", () => {
   const harness = createHarness({ mode: "rpc" });
   harness.emit("session_start", { reason: "startup" });
@@ -561,7 +616,9 @@ test("list returns every exact field in append order and never returns a snapsho
     { op: "append", subject: "A", abstract: "a" },
   ]);
   const result = runList(harness.tool, harness.ctx);
-  assert.deepEqual(JSON.parse(result.content[0].text), [task("B", "pending", [], "b"), task("A", "pending", [], "a")]);
+  const content = JSON.parse(result.content[0].text);
+  assert.equal(result.content[0].text, JSON.stringify(content));
+  assert.deepEqual(content, [task("B", "pending", [], "b"), task("A", "pending", [], "a")]);
   assert.equal(result.details.type, "oh-my-pi-slim:todo-list");
   assert.equal(parseTodoSnapshot(result.details), undefined);
   assert.deepEqual(Object.keys(JSON.parse(result.content[0].text)[0]).sort(), ["abstract", "blockedBy", "status", "subject"]);
@@ -700,7 +757,7 @@ test("widget priority sorts every state from current dependencies without changi
   assert.deepEqual(sortTodoTasksForWidget(missingReference).map((item) => item.subject), ["ready", "missing-ref"]);
 });
 
-test("widget sorts before slicing, preserves the 12-line budget, counts hidden states, and pads semantic glyphs", () => {
+test("widget filters completed rows before slicing, preserves the 12-line budget, and pads semantic glyphs", () => {
   const noOverflow = [
     task("done-old", "completed"),
     ...Array.from({ length: 7 }, (_, index) => task(`pending-${index}`, "pending")),
@@ -709,33 +766,32 @@ test("widget sorts before slicing, preserves the 12-line budget, counts hidden s
     task("done-new", "completed"),
   ];
   const direct = selectTodoWidgetLayout(noOverflow);
-  assert.equal(direct.visible.length, 11);
+  assert.equal(direct.visible.length, 8);
   assert.deepEqual(direct.hidden, []);
   assert.deepEqual(direct.visible.map((item) => item.subject), [
     "active", "pending-0", "pending-1", "pending-2", "pending-3", "pending-4", "pending-5", "pending-6",
-    "done-new", "done-middle", "done-old",
   ]);
-  assert.equal(renderTodoLines(noOverflow, theme, 100).length, MAX_TODO_WIDGET_LINES);
+  assert.equal(renderTodoLines(noOverflow, theme, 100).length, 9);
 
   const overflowTasks = [
     ...Array.from({ length: 4 }, (_, index) => task(`done-${index}`, "completed")),
-    ...Array.from({ length: 5 }, (_, index) => task(`ready-${index}`, "pending")),
+    ...Array.from({ length: 7 }, (_, index) => task(`ready-${index}`, "pending")),
     task("dependency", "pending"),
     ...Array.from({ length: 3 }, (_, index) => task(`blocked-${index}`, "pending", ["dependency"])),
     task("active", "in_progress"),
   ];
   const overflowLayout = selectTodoWidgetLayout(overflowTasks);
   assert.equal(overflowLayout.visible.length, 10);
-  assert.equal(overflowLayout.hidden.length, 4);
+  assert.equal(overflowLayout.hidden.length, 2);
   assert.deepEqual(overflowLayout.visible.map((item) => item.subject), [
-    "active", "ready-0", "ready-1", "ready-2", "ready-3", "ready-4", "dependency",
-    "blocked-0", "blocked-1", "blocked-2",
+    "active", "ready-0", "ready-1", "ready-2", "ready-3", "ready-4", "ready-5", "ready-6", "dependency", "blocked-0",
   ]);
-  assert.deepEqual(overflowLayout.hidden.map((item) => item.subject), ["done-3", "done-2", "done-1", "done-0"]);
+  assert.deepEqual(overflowLayout.hidden.map((item) => item.subject), ["blocked-1", "blocked-2"]);
   const overflow = renderTodoLines(overflowTasks, theme, 42);
   assert.equal(overflow.length, MAX_TODO_WIDGET_LINES);
-  assert.equal(overflow[0], "●  Todos (4/14)");
-  assert.equal(overflow.at(-1), "└─ +4 more (4 completed)");
+  assert.equal(overflow[0], "●  Todos (4/16)");
+  assert.equal(overflow.at(-1), "└─ +2 more (2 pending)");
+  assert.doesNotMatch(overflow.join("\n"), /done-/);
 
   const exact = renderTodoLines([
     task("Pending", "pending"),
@@ -745,8 +801,7 @@ test("widget sorts before slicing, preserves the 12-line budget, counts hidden s
   assert.deepEqual(exact, [
     "●  Todos (1/3)",
     "├─ ◐  Active",
-    "├─ ○  Pending",
-    "└─ ✓  ~Done~",
+    "└─ ○  Pending",
   ]);
   const chained = renderTodoLines([task("Blocked", "pending", ["First", "Second"], "hidden abstract")], theme, 80);
   assert.equal(chained[1], "└─ ○  Blocked ⛓  First, Second");
@@ -761,7 +816,7 @@ test("widget sorts before slicing, preserves the 12-line budget, counts hidden s
   assert.deepEqual(renderTodoLines([], theme, 80), []);
 });
 
-test("widget active and all-completed idle headings keep exact roles, ANSI, width, overflow, and row treatment", () => {
+test("widget headings keep full-ledger counts and all-completed ledgers stay heading-only", () => {
   const activeAnsi = renderTodoLines([task("Pending")], roleAnsiTheme, 80);
   assert.equal(
     activeAnsi[0],
@@ -773,17 +828,11 @@ test("widget active and all-completed idle headings keep exact roles, ANSI, widt
     task("Dependent", "completed", ["First"]),
     task("Latest", "completed"),
   ];
-  assert.deepEqual(renderTodoLines(completed, theme, 80), [
-    "○  Todos (3/3)",
-    "├─ ✓  ~Latest~",
-    "├─ ✓  ~Dependent~ ⛓  First",
-    "└─ ✓  ~First~",
-  ]);
+  assert.deepEqual(renderTodoLines(completed, theme, 80), ["○  Todos (3/3)"]);
   const idleAnsi = renderTodoLines(completed, roleAnsiTheme, 80);
   assert.equal(idleAnsi[0], "\u001b[2m○\u001b[0m  \u001b[2mTodos (3/3)\u001b[0m");
   assert.doesNotMatch(idleAnsi.join("\n"), /\u001b\[35m/, "all-completed widget must not render any accent role");
-  assert.match(idleAnsi.join("\n"), /\u001b\[2m\u001b\[9mLatest\u001b\[29m\u001b\[0m/);
-  assert.match(idleAnsi.join("\n"), /\u001b\[2m⛓\u001b\[0m  \u001b\[2mFirst\u001b\[0m/);
+  assert.doesNotMatch(idleAnsi.join("\n"), /First|Dependent|Latest/);
 
   for (const width of [6, 12, 18]) {
     const narrow = renderTodoLines(completed, roleAnsiTheme, width);
@@ -794,16 +843,13 @@ test("widget active and all-completed idle headings keep exact roles, ANSI, widt
 
   const completedOverflow = Array.from({ length: 14 }, (_, index) => task(`done-${index}`, "completed"));
   const overflow = renderTodoLines(completedOverflow, theme, 80);
-  assert.equal(overflow.length, MAX_TODO_WIDGET_LINES);
-  assert.equal(overflow[0], "○  Todos (14/14)");
-  assert.equal(overflow.at(-1), "└─ +4 more (4 completed)");
+  assert.deepEqual(overflow, ["○  Todos (14/14)"]);
   const overflowAnsi = renderTodoLines(completedOverflow, roleAnsiTheme, 30);
   assert.ok(overflowAnsi.every((line) => visibleWidth(line) <= 30));
-  assert.doesNotMatch(overflowAnsi.join("\n"), /\u001b\[35m/);
-  assert.match(overflowAnsi.at(-1), /\u001b\[2m\+4 more \(4 completed\)\u001b\[0m/);
+  assert.doesNotMatch(overflowAnsi.join("\n"), /\u001b\[35m|done-/);
 });
 
-test("collapsed widget keeps pending and in_progress rows, including blocked pending, and hides only completed ones", () => {
+test("widget permanently keeps pending and in_progress rows and hides completed rows without a hint", () => {
   const tasks = [
     task("finished-dependency", "completed"),
     task("open-dependency", "pending"),
@@ -813,96 +859,43 @@ test("collapsed widget keeps pending and in_progress rows, including blocked pen
     task("finished-late", "completed"),
   ];
 
-  const expanded = renderTodoLines(tasks, theme, 80);
-  assert.deepEqual(renderTodoLines(tasks, theme, 80, MAX_TODO_WIDGET_LINES, true, DEFAULT_HINT), expanded);
-  assert.deepEqual(expanded, [
+  assert.deepEqual(renderTodoLines(tasks, theme, 80), [
     "●  Todos (2/6)",
     "├─ ◐  active",
     "├─ ○  open-dependency",
     "├─ ○  ready-work ⛓  finished-dependency",
-    "├─ ○  blocked-work ⛓  open-dependency",
-    "├─ ✓  ~finished-late~",
-    "└─ ✓  ~finished-dependency~",
+    "└─ ○  blocked-work ⛓  open-dependency",
   ]);
+  assert.doesNotMatch(renderTodoLines(tasks, theme, 80).join("\n"), /finished-late|✓|ctrl|expand/i);
 
-  assert.deepEqual(renderTodoLines(tasks, theme, 80, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT), [
-    "●  Todos (2/6) · ctrl+o to expand",
+  const openOnly = tasks.filter((item) => item.status !== "completed");
+  assert.deepEqual(renderTodoLines(openOnly, theme, 80), [
+    "●  Todos (0/4)",
     "├─ ◐  active",
     "├─ ○  open-dependency",
     "├─ ○  ready-work ⛓  finished-dependency",
     "└─ ○  blocked-work ⛓  open-dependency",
   ]);
 
-  const openOnly = tasks.filter((item) => item.status !== "completed");
-  assert.deepEqual(
-    renderTodoLines(openOnly, theme, 80, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT),
-    renderTodoLines(openOnly, theme, 80),
-    "a collapsed ledger with nothing hidden shows no hint at all",
-  );
-
   const completedOnly = tasks.filter((item) => item.status === "completed");
-  assert.deepEqual(
-    renderTodoLines(completedOnly, theme, 80, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT),
-    ["○  Todos (2/2) · ctrl+o to expand"],
-  );
-  assert.equal(renderTodoLines(completedOnly, theme, 80, MAX_TODO_WIDGET_LINES, true, DEFAULT_HINT).length, 3);
-  assert.deepEqual(renderTodoLines([], theme, 80, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT), []);
+  assert.deepEqual(renderTodoLines(completedOnly, theme, 80), ["○  Todos (2/2)"]);
+  assert.deepEqual(renderTodoLines([], theme, 80), []);
 });
 
-test("collapsed Todo hint is one dim non-bold segment with the configured key, dropped whole when the width is tight", () => {
-  const mixed = [task("Open"), task("Done", "completed")];
-  const completedOnly = [task("Done", "completed")];
-  const dimHint = "\u001b[2m · ctrl+o to expand\u001b[0m";
-
-  const activeHeading = renderTodoLines(mixed, roleAnsiTheme, 80, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT)[0];
-  assert.equal(
-    activeHeading,
-    `\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mTodos (1/2)\u001b[22m\u001b[0m${dimHint}`,
-  );
-  const idleHeading = renderTodoLines(completedOnly, roleAnsiTheme, 80, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT)[0];
-  assert.equal(idleHeading, `\u001b[2m○\u001b[0m  \u001b[2mTodos (1/1)\u001b[0m${dimHint}`);
-  assert.ok(
-    activeHeading.endsWith(dimHint) && idleHeading.endsWith(dimHint),
-    "the hint renders identically in the active and idle heading states",
-  );
-  assert.doesNotMatch(activeHeading.slice(activeHeading.indexOf(dimHint)), /\u001b\[1m/, "the hint is never bold");
-
-  withConfiguredExpandKey("ctrl+shift+e", () => {
-    assert.equal(widgetExpandHint(), " · ctrl+shift+e to expand");
-    assert.equal(
-      renderTodoLines(mixed, theme, 80, MAX_TODO_WIDGET_LINES, false, widgetExpandHint())[0],
-      "●  Todos (1/2) · ctrl+shift+e to expand",
-    );
-  });
-  assert.equal(widgetExpandHint(), DEFAULT_HINT, "an unconfigured keymap falls back to Pi's default binding");
-
-  const full = "●  Todos (1/2) · ctrl+o to expand";
-  assert.equal(renderTodoLines(mixed, theme, full.length, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT)[0], full);
-  for (const width of [1, 5, 10, 15, full.length - 1]) {
-    const heading = renderTodoLines(mixed, theme, width, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT)[0];
-    assert.ok(visibleWidth(heading) <= width, `width ${width} must stay inside the terminal`);
-    assert.doesNotMatch(heading, /·|expand|ctrl/, `width ${width} must drop the whole hint, never half of it`);
-  }
-});
-
-test("collapsed Todo overflow counts only the visible open rows and keeps heading counts on the whole ledger", () => {
+test("Todo widget overflow counts only unfinished rows while the heading counts the full ledger", () => {
   const tasks = [
     ...Array.from({ length: 6 }, (_, index) => task(`done-${index}`, "completed")),
     ...Array.from({ length: 12 }, (_, index) => task(`open-${index}`, "pending")),
   ];
 
-  const expanded = renderTodoLines(tasks, theme, 60);
-  assert.equal(expanded[0], "●  Todos (6/18)");
-  assert.equal(expanded.at(-1), "└─ +8 more (6 completed, 2 pending)");
-
-  const collapsed = renderTodoLines(tasks, theme, 60, MAX_TODO_WIDGET_LINES, false, DEFAULT_HINT);
-  assert.equal(collapsed[0], "●  Todos (6/18) · ctrl+o to expand", "heading counts ignore both filtering and overflow");
-  assert.equal(collapsed.length, MAX_TODO_WIDGET_LINES);
-  assert.equal(collapsed.at(-1), "└─ +2 more (2 pending)", "policy-hidden completed rows stay out of the overflow summary");
-  assert.doesNotMatch(collapsed.join("\n"), /done-/);
+  const lines = renderTodoLines(tasks, theme, 60);
+  assert.equal(lines[0], "●  Todos (6/18)", "heading counts use the full ledger");
+  assert.equal(lines.length, MAX_TODO_WIDGET_LINES);
+  assert.equal(lines.at(-1), "└─ +2 more (2 pending)", "completed rows stay outside the line budget and overflow");
+  assert.doesNotMatch(lines.join("\n"), /done-|ctrl|expand/i);
 });
 
-test("TodoWidget reads Pi's live expansion state on every render without re-registering the widget", () => {
+test("TodoWidget ignores Pi's live Ctrl+O state and remains permanently compact", () => {
   let expanded = true;
   const harness = createHarness({ mode: "tui", getToolsExpanded: () => expanded });
   harness.emit("session_start", { reason: "startup" });
@@ -912,36 +905,32 @@ test("TodoWidget reads Pi's live expansion state on every render without re-regi
     { op: "modify", target: "Done", status: "completed" },
   ]);
   const registrations = harness.widgetCalls.filter((call) => typeof call.content === "function").length;
+  const compact = ["●  Todos (1/2)", "└─ ○  Open"];
 
-  assert.deepEqual(harness.widgetComponent.render(80), ["●  Todos (1/2)", "├─ ○  Open", "└─ ✓  ~Done~"]);
-
+  assert.deepEqual(harness.widgetComponent.render(80), compact);
   expanded = false;
-  assert.deepEqual(harness.widgetComponent.render(80), ["●  Todos (1/2) · ctrl+o to expand", "└─ ○  Open"]);
+  assert.deepEqual(harness.widgetComponent.render(80), compact);
+  assert.doesNotMatch(harness.widgetComponent.render(80).join("\n"), /Done|ctrl|expand/i);
   assert.equal(
     harness.widgetCalls.filter((call) => typeof call.content === "function").length,
     registrations,
-    "Ctrl+O must not re-register the widget",
+    "Ctrl+O state changes must not re-register the widget",
   );
 
   runUpdate(harness.tool, harness.ctx, [{ op: "modify", target: "Open", status: "completed" }]);
-  assert.deepEqual(
-    harness.widgetComponent.render(80),
-    ["○  Todos (2/2) · ctrl+o to expand"],
-    "an all-completed collapsed ledger keeps a heading-only widget",
-  );
-  assert.notEqual(harness.widgetCalls.at(-1).content, undefined, "a non-empty ledger stays registered while collapsed");
+  assert.deepEqual(harness.widgetComponent.render(80), ["○  Todos (2/2)"]);
+  assert.notEqual(harness.widgetCalls.at(-1).content, undefined, "a non-empty all-completed ledger keeps its heading");
 
   expanded = true;
-  assert.deepEqual(harness.widgetComponent.render(80), ["○  Todos (2/2)", "├─ ✓  ~Done~", "└─ ✓  ~Open~"]);
+  assert.deepEqual(harness.widgetComponent.render(80), ["○  Todos (2/2)"]);
   assert.equal(
     harness.widgetCalls.filter((call) => typeof call.content === "function").length,
     registrations,
-    "Ctrl+O toggles straight back without a second registration",
+    "Ctrl+O state changes must not alter widget registration",
   );
 
-  expanded = false;
   runUpdate(harness.tool, harness.ctx, [{ op: "clear" }]);
-  assert.equal(harness.widgetCalls.at(-1).content, undefined, "an empty ledger still unregisters while collapsed");
+  assert.equal(harness.widgetCalls.at(-1).content, undefined, "an empty ledger still unregisters");
 });
 
 test("widget heading refreshes both ways across update, delete, clear, replay, tree, compact, and session restore", () => {
@@ -1017,16 +1006,17 @@ test("widget immediately reorders after status, dependency completion or restore
     "├─ ◐  active",
     "├─ ○  open-dependency",
     "├─ ○  ready-work ⛓  ready-dependency",
-    "├─ ○  blocked-work ⛓  open-dependency",
-    "├─ ✓  ~ready-dependency~",
-    "├─ ✓  ~completed-new~",
-    "└─ ✓  ~completed-old~",
+    "└─ ○  blocked-work ⛓  open-dependency",
   ]);
 
   runUpdate(harness.tool, harness.ctx, [{ op: "modify", target: "open-dependency", status: "completed" }]);
   assert.equal(harness.renders, 1);
-  assert.match(harness.widgetComponent.render(100)[3], /blocked-work/);
-  assert.match(harness.widgetComponent.render(100)[4], /completed.*open-dependency|open-dependency/);
+  assert.deepEqual(harness.widgetComponent.render(100), [
+    "●  Todos (4/7)",
+    "├─ ◐  active",
+    "├─ ○  ready-work ⛓  ready-dependency",
+    "└─ ○  blocked-work ⛓  open-dependency",
+  ]);
 
   runUpdate(harness.tool, harness.ctx, [{ op: "modify", target: "open-dependency", status: "pending" }]);
   assert.equal(harness.renders, 2);
@@ -1036,7 +1026,7 @@ test("widget immediately reorders after status, dependency completion or restore
 
   runUpdate(harness.tool, harness.ctx, [{ op: "modify", target: "active", status: "completed" }]);
   assert.equal(harness.renders, 3);
-  assert.match(harness.widgetComponent.render(100)[4], /✓  ~active~/);
+  assert.doesNotMatch(harness.widgetComponent.render(100).join("\n"), /active/);
   const removed = runUpdate(harness.tool, harness.ctx, [{ op: "delete", target: "active" }]);
   assert.equal(harness.renders, 4);
   assert.doesNotMatch(harness.widgetComponent.render(100).join("\n"), /active/);
@@ -1124,7 +1114,16 @@ test("Ctrl+O expands Todo update and list results without changing model data", 
     { op: "modify", target: "A", status: "completed" },
   ]);
   const updateBefore = structuredClone(updateResult);
-  assert.doesNotMatch(updateResult.content[0].text, /"state"|"tasks"|abstract/);
+  assert.deepEqual(JSON.parse(updateResult.content[0].text), {
+    receipts: [
+      { operation: 1, kind: "append", text: 'Appended "A".' },
+      { operation: 2, kind: "status", text: 'Modified "A": status pending to completed.' },
+      { operation: 3, kind: "no-change", text: 'No change for "A".' },
+    ],
+    unfinished: [],
+  });
+  assert.equal(updateResult.content[0].text, JSON.stringify(JSON.parse(updateResult.content[0].text)));
+  assert.doesNotMatch(updateResult.content[0].text, /"state"|"tasks"/);
   const updateCollapsedComponent = harness.tool.renderResult(updateResult, { expanded: false }, theme, {});
   assertBlankResultSeparator(updateCollapsedComponent);
   const updateCollapsed = renderComponent(updateCollapsedComponent);
@@ -1203,19 +1202,20 @@ test("Ctrl+O expands Todo update and list results without changing model data", 
   assert.doesNotMatch(destructiveReceipts, /\u001b\[33m✓/);
 });
 
-test("Todo fallback collapses safely and expands full text", () => {
+test("Todo fallback safely shows the JSON first line and expands full text", () => {
   const harness = createHarness({ mode: "rpc" });
-  const result = { content: [{ type: "text", text: "Fallback\u0000 first\nFallback second\nFallback third" }] };
+  const jsonLine = '{"receipts":[],"unfinished":[]}';
+  const result = { content: [{ type: "text", text: `${jsonLine}\nFallback\u0000 second\nFallback third` }] };
   const before = structuredClone(result);
   const collapsedComponent = harness.tool.renderResult(result, { expanded: false }, theme, {});
   assertBlankResultSeparator(collapsedComponent);
   const collapsed = renderComponent(collapsedComponent);
-  assert.equal(collapsed, "Fallback  first");
+  assert.equal(collapsed, jsonLine);
   assert.doesNotMatch(collapsed, /second|third|\u0000/);
   const expandedComponent = harness.tool.renderResult(result, { expanded: true }, theme, {});
   assertBlankResultSeparator(expandedComponent);
   const expanded = renderComponent(expandedComponent);
-  assert.match(expanded, /Fallback  first\nFallback second\nFallback third/);
+  assert.match(expanded, /\{"receipts":\[\],"unfinished":\[\]\}\nFallback  second\nFallback third/);
   assert.doesNotMatch(expanded, /\u0000/);
   assert.deepEqual(result, before);
 });
