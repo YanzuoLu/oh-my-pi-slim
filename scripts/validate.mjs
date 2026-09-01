@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "1.1.6", "package version must be 1.1.6");
+check(packageJson.version === "1.1.7", "package version must be 1.1.7");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "1.1.6" && lock.packages?.[""]?.version === "1.1.6", "package-lock version must be 1.1.6");
+check(lock.version === "1.1.7" && lock.packages?.[""]?.version === "1.1.7", "package-lock version must be 1.1.7");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -611,7 +611,7 @@ hasNone(shutdownStatusHandler, ["setStatus("], "shutdown must not duplicate the 
 const presetStatusBody = extension.slice(extension.indexOf("export function presetStatusContent"), extension.indexOf("function isAnthropicOAuth"));
 hasNone(presetStatusBody, [".bold(", "theme.bold", "glyph", "Glyph", "Requested"], "OMPS status plain accent-only rendering without a Requested label");
 check((json("package.json").version ?? "").trim().length > 0, "package.json must define a non-empty version for the OMPS status line");
-check(json("package.json").version === "1.1.6", "configurable default-off phase and Goal reminders must ship in v1.1.6");
+check(json("package.json").version === "1.1.7", "configurable default-off phase and Goal reminders must remain shipped in v1.1.7");
 
 const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
 const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
@@ -1710,7 +1710,7 @@ const monitorGuidelinesEnd = monitorRuntime.indexOf("      ],", monitorGuideline
 const monitorToolMetadata = monitorRuntime.slice(monitorToolStart, monitorGuidelinesEnd);
 const monitorDescription = propertyString(monitorToolMetadata, "description", "Monitor tool metadata");
 const monitorPromptSnippet = propertyString(monitorToolMetadata, "promptSnippet", "Monitor tool metadata");
-check(monitorDescription === "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor stop` terminates a running group and returns its complete terminal state. `monitor delete` removes one terminal record, while `monitor clear` removes all terminal records. Running records must be stopped only after user agreement. Terminal records remain available until deletion or clearing. Runtime shutdown terminates active groups and clears retained monitor data.", "Monitor description must match the reviewed contract");
+check(monitorDescription === "Run and manage long-running foreground Bash commands on POSIX systems while Pi remains available. Each monitor owns the command's foreground process group. Matcher notifications carry the current status and only the new lines that matched a `notifyOn` literal. Terminal notifications carry the final status, exit code, signal, error, and any matched lines no earlier notification delivered. A failed or killed command also adds a bounded recent diagnostic tail. A silence reminder arrives whenever a running command produces no output for its `checkAfter` threshold. Summary notifications report rate-limited matcher batches. `notifyOn` performs case-sensitive literal matching. `monitor list` returns compact retained records. `monitor status` returns one record's full retained state and combined logs. `monitor stop` terminates a running group and returns its complete terminal state. `monitor delete` removes one terminal record, while `monitor clear` removes all terminal records. Terminal records remain available until deletion or clearing. Runtime shutdown terminates active groups and clears retained monitor data.", "Monitor description must match the reviewed contract");
 check(monitorPromptSnippet === "Supervise long-running foreground commands.", "Monitor promptSnippet must match the reviewed contract");
 checkSteBlock(monitorDescription, "Monitor description");
 checkSteBlock(monitorPromptSnippet, "Monitor promptSnippet");
