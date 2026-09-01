@@ -1,5 +1,9 @@
 {
   "defaultPreset": "balanced",
+  "reminders": {
+    "phase": false,
+    "goal": false
+  },
   "presets": {
     "balanced": {
       "orchestrator": {

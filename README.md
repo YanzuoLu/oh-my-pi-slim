@@ -219,7 +219,7 @@ A Goal is durable on its branch. Reload, session resume, fork, and tree restorat
 
 Autonomous continuation waits until blocking work is gone, including active or waiting subagents, Monitor work and pending terminal delivery, and a waiting Ask dialog. Use `status`, `pause`, `resume`, or `cancel` to stay in control.
 
-Each agent prompt persists two independent hidden reminders in order. The phase reminder comes first, followed by a Goal reminder only while the Goal is `active`. `retry_wait`, `paused`, `completed`, and `cancelled` Goals receive no Goal reminder. A Goal created during a prompt first receives its reminder on the next agent prompt.
+Two independent hidden reminders are available and both default to disabled. When enabled, the phase reminder comes first and is injected while either an OMPS preset or an `active` Goal exists. The Goal reminder follows only while the Goal is `active`. `retry_wait`, `paused`, `completed`, and `cancelled` Goals receive no Goal reminder. A Goal created during a prompt first becomes eligible on the next agent prompt.
 
 A completed Goal's detail row joins the shared Ctrl+O collapse. With tool output collapsed the widget keeps only the Goal heading, and every other status keeps both rows in either state.
 
@@ -241,12 +241,25 @@ Both commands forward natural language to the model; they are not rigid command 
 
 The runtime preset file is `~/.pi/agent/oh-my-pi-slim.json`. On first use, the package seeds it from `config/oh-my-pi-slim.example.json`; existing presets are not overwritten or removed.
 
-The basic structure is:
+The reminder portion of the top-level structure is:
+
+```json
+{
+  "reminders": {
+    "phase": false,
+    "goal": false
+  }
+}
+```
 
 - `defaultPreset`: preset selected by default.
+- `reminders.phase`: inject the phase reminder when an active preset or active Goal exists.
+- `reminders.goal`: inject the Goal reminder only when an active Goal exists.
 - `presets.<name>`: configuration for `orchestrator` and all six specialists.
 - Each role: `provider`, `model`, and `thinking`.
 - `deny.<specialist>`: exact tool names excluded for that specialist.
+
+Both reminder switches are independent and default to `false`, including when `reminders` or either field is absent from an older user file. Changes take effect at session start or reload. Disabling the phase reminder does not disable the active preset's orchestrator system prompt.
 
 Provider, model, and thinking level are independently configurable per role. Authentication and model availability are checked when a preset is activated. The `observer` model must support image input.
 

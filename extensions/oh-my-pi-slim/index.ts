@@ -85,15 +85,20 @@ export function createLaunchMessageSender(
     sessionCtx: () => Pick<ExtensionContext, "isIdle"> | undefined;
     hasActivePreset: () => boolean;
     goalReminder: () => string | undefined;
+    reminders: () => ReminderConfig;
   },
 ): ExtensionAPI["sendMessage"] {
   return (message, options) => {
     if (state.sessionCtx()?.isIdle() === true && options?.triggerTurn === true) {
       const goalReminder = state.goalReminder();
-      if (state.hasActivePreset() || goalReminder) {
+      const reminders = state.reminders();
+      const hasActiveGoal = goalReminder !== undefined;
+      if (reminders.phase && (state.hasActivePreset() || hasActiveGoal)) {
         pi.sendMessage(makePhaseReminderMessage(), { triggerTurn: false });
       }
-      if (goalReminder) pi.sendMessage(makeGoalReminderMessage(goalReminder), { triggerTurn: false });
+      if (reminders.goal && hasActiveGoal) {
+        pi.sendMessage(makeGoalReminderMessage(goalReminder), { triggerTurn: false });
+      }
     }
     pi.sendMessage(message, options);
   };
@@ -115,10 +120,16 @@ interface RolePreset {
 export type Preset = Record<RoleName, RolePreset>;
 type DenyConfig = Record<SpecialistName, string[]>;
 
+export interface ReminderConfig {
+  phase: boolean;
+  goal: boolean;
+}
+
 interface PresetConfig {
   defaultPreset?: string;
   presets: Record<string, Preset>;
   deny: DenyConfig;
+  reminders: ReminderConfig;
   observerFallbackPresets: Set<string>;
 }
 
@@ -257,6 +268,20 @@ export function parseDenyConfig(value: unknown, field: string): DenyConfig {
   return deny;
 }
 
+export function parseReminderConfig(value: unknown, field: string): ReminderConfig {
+  if (value === undefined) return { phase: false, goal: false };
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${field} must be an object.`);
+  const object = value as Record<string, unknown>;
+  const phase = object.phase;
+  const goal = object.goal;
+  if (phase !== undefined && typeof phase !== "boolean") throw new Error(`${field}.phase must be a boolean.`);
+  if (goal !== undefined && typeof goal !== "boolean") throw new Error(`${field}.goal must be a boolean.`);
+  return {
+    phase: typeof phase === "boolean" ? phase : false,
+    goal: typeof goal === "boolean" ? goal : false,
+  };
+}
+
 export function parseConfigFile(path: string): PresetConfig {
   let raw: unknown;
   try {
@@ -300,6 +325,7 @@ export function parseConfigFile(path: string): PresetConfig {
     defaultPreset,
     presets,
     deny: parseDenyConfig(object.deny, `${path}.deny`),
+    reminders: parseReminderConfig(object.reminders, `${path}.reminders`),
     observerFallbackPresets,
   };
 }
@@ -385,10 +411,12 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   let activePresetName: string | undefined;
   let activePreset: Preset | undefined;
   let sessionCtx: ExtensionContext | undefined;
+  let reminders: ReminderConfig = { phase: false, goal: false };
   const sendLaunchMessage = createLaunchMessageSender(pi, {
     sessionCtx: () => sessionCtx,
     hasActivePreset: () => active && activePreset !== undefined && activePresetName !== undefined,
     goalReminder: () => goal?.phaseReminder(),
+    reminders: () => reminders,
   });
   const asks = registerAskRuntime(pi);
   const loops = registerLoopRuntime(pi);
@@ -579,10 +607,10 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     subagents.setDenyResolver((role) => loadPresetConfig().deny[role]);
   }
 
-  async function activate(ctx: ExtensionContext, requestedPreset?: string): Promise<void> {
+  async function activate(ctx: ExtensionContext, requestedPreset?: string, loadedConfig?: PresetConfig): Promise<void> {
     assertNoLegacyBackend(pi);
     ensurePackageSetup(PACKAGE_ROOT);
-    const config = loadPresetConfig();
+    const config = loadedConfig ?? loadPresetConfig();
     const presetName = requestedPreset || config.defaultPreset;
     if (!presetName) throw new Error(`No preset selected and no defaultPreset configured. Available presets: ${Object.keys(config.presets).join(", ")}.`);
     const preset = config.presets[presetName];
@@ -749,6 +777,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     sessionCtx = ctx;
     // Cache Mode is session-wide across every branch, so replay the full entry log rather than the active branch.
     cacheRetention = replayCacheState(ctx.sessionManager.getEntries());
+    reminders = { phase: false, goal: false };
     active = false;
     activePresetName = undefined;
     activePreset = undefined;
@@ -758,9 +787,12 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     originalThinking = undefined;
     goal?.restore(ctx, event.reason === "startup" || event.reason === "reload" || event.reason === "resume" || event.reason === "fork");
     goal?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined);
+    let config: PresetConfig;
     try {
       assertNoLegacyBackend(pi);
       ensurePackageSetup(PACKAGE_ROOT);
+      config = loadPresetConfig();
+      reminders = config.reminders;
       await subagents.restore(ctx);
     } catch (error) {
       report(ctx, error instanceof Error ? error.message : String(error), "error");
@@ -773,7 +805,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     const reloadPreset = event.reason === "reload" ? savedPreset : undefined;
     const shouldActivate = pi.getFlag("omps") === true || envEnabled() || requestedPreset !== undefined || reloadPreset !== undefined;
     if (shouldActivate) {
-      try { await activate(ctx, requestedPreset ?? reloadPreset); }
+      try { await activate(ctx, requestedPreset ?? reloadPreset, config); }
       catch (error) { report(ctx, error instanceof Error ? error.message : String(error), "error"); }
     }
     updateStatus(ctx);
@@ -892,17 +924,21 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   pi.on("before_agent_start", (event, ctx) => {
     asks.reconcileHostMode(ctx);
     const goalReminder = goal?.phaseReminder();
-    const message = makePhaseReminderMessage();
-    if (!active || !activePreset || !activePresetName) return goalReminder ? { message } : undefined;
+    const hasPhaseSubject = Boolean(active && activePreset && activePresetName) || goalReminder !== undefined;
+    const phaseEnabled = reminders.phase && hasPhaseSubject;
+    if (!active || !activePreset || !activePresetName) {
+      return phaseEnabled ? { message: makePhaseReminderMessage() } : undefined;
+    }
     let systemPrompt = removeMainPiDocumentation(event.systemPrompt);
     if (isAnthropicOAuth(ctx)) systemPrompt = removeMainPiIdentity(systemPrompt);
     return {
       systemPrompt: `${systemPrompt}\n\n${ORCHESTRATOR_PROMPT}`,
-      message,
+      ...(phaseEnabled ? { message: makePhaseReminderMessage() } : {}),
     };
   });
 
   pi.on("before_agent_start", () => {
+    if (!reminders.goal) return;
     const goalReminder = goal?.phaseReminder();
     if (!goalReminder) return;
     return { message: makeGoalReminderMessage(goalReminder) };

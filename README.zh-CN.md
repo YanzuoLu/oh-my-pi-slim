@@ -219,7 +219,7 @@ Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree res
 
 自主 continuation 会等待阻塞工作消失，包括 active 或 waiting subagent、Monitor 工作与 pending terminal delivery，以及 waiting Ask dialog。你可以随时用 `status`、`pause`、`resume` 或 `cancel` 控制推进。
 
-每次 agent prompt 都会按顺序持久化两条独立的 hidden reminder。phase reminder 在前，只有 Goal 为 `active` 时才紧随 Goal reminder。`retry_wait`、`paused`、`completed` 与 `cancelled` Goal 都不会收到 Goal reminder。在某次 prompt 中创建的 Goal 会从下一次 agent prompt 开始收到 reminder。
+系统提供两条独立的 hidden reminder，二者默认都关闭。启用后，phase reminder 在前，并会在 OMPS preset 或 `active` Goal 任一存在时注入。Goal reminder 只会在 Goal 为 `active` 时紧随其后。`retry_wait`、`paused`、`completed` 与 `cancelled` Goal 都不会收到 Goal reminder。在某次 prompt 中创建的 Goal 会从下一次 agent prompt 开始具备注入条件。
 
 completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠。tool output 折叠时，widget 只保留 Goal heading；其他状态在折叠与展开下都保留两行。
 
@@ -241,12 +241,25 @@ completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠。tool output 折�
 
 运行时 preset 文件位于 `~/.pi/agent/oh-my-pi-slim.json`。首次使用时，package 会从 `config/oh-my-pi-slim.example.json` 生成它；已有 preset 不会被覆盖或删除。
 
-基本结构如下：
+顶层 reminder 结构如下：
+
+```json
+{
+  "reminders": {
+    "phase": false,
+    "goal": false
+  }
+}
+```
 
 - `defaultPreset`：默认选择的 preset。
+- `reminders.phase`：存在 active preset 或 active Goal 时注入 phase reminder。
+- `reminders.goal`：仅在 active Goal 存在时注入 Goal reminder。
 - `presets.<name>`：`orchestrator` 与六个 specialist 的配置。
 - 每个角色包含 `provider`、`model` 与 `thinking`。
 - `deny.<specialist>`：为对应 specialist 排除的 exact tool name。
+
+两个 reminder 开关彼此独立，并且都默认是 `false`。旧用户文件缺少整个 `reminders` 或其中任一字段时，对应项同样默认关闭。配置修改会在 session start 或 reload 后生效。关闭 phase reminder 不会关闭 active preset 的 orchestrator system prompt。
 
 每个角色都可独立配置 provider、model 与 thinking。激活 preset 时会检查认证和 model 可用性；`observer` model 必须支持 image input。
 

@@ -858,6 +858,26 @@ test("old presets inherit observer from explorer and explicit observer config is
     assert.deepEqual(config.presets.explicit.observer, role("vision", "observer", "xhigh"));
     assert.equal(config.observerFallbackPresets.has("explicit"), false);
     assert.deepEqual(config.deny.observer, ["ask_user_question"]);
+    assert.deepEqual(config.reminders, { phase: false, goal: false }, "old config files default both reminders off");
+
+    const writeReminders = (reminders) => writeFileSync(configFile, JSON.stringify({
+      defaultPreset: "legacy",
+      presets: { legacy: oldPreset },
+      reminders,
+    }));
+    writeReminders({ phase: true });
+    assert.deepEqual(parseConfigFile(configFile).reminders, { phase: true, goal: false });
+    writeReminders({ goal: true });
+    assert.deepEqual(parseConfigFile(configFile).reminders, { phase: false, goal: true });
+    writeReminders({ phase: false, goal: false });
+    assert.deepEqual(parseConfigFile(configFile).reminders, { phase: false, goal: false });
+    for (const [field, value] of [["phase", "true"], ["goal", 1]]) {
+      writeReminders({ [field]: value });
+      assert.throws(() => parseConfigFile(configFile), new RegExp(`reminders\\.${field} must be a boolean`));
+    }
+    writeReminders(null);
+    assert.throws(() => parseConfigFile(configFile), /reminders must be an object/);
+
     assert.equal(supportsImageInput({ input: ["text", "image"] }), true);
     assert.equal(supportsImageInput({ input: ["text"] }), false);
   } finally { rmSync(tempDir, { recursive: true, force: true }); }

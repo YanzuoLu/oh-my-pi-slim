@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "1.1.5", "package version must be 1.1.5");
+check(packageJson.version === "1.1.6", "package version must be 1.1.6");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "1.1.5" && lock.packages?.[""]?.version === "1.1.5", "package-lock version must be 1.1.5");
+check(lock.version === "1.1.6" && lock.packages?.[""]?.version === "1.1.6", "package-lock version must be 1.1.6");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -465,7 +465,7 @@ hasAll(extension, [
   "registerGoalRuntime(pi", "asks.setGoalActiveResolver", "subagents.subscribeRunCreated", "goal?.onAgentSettled(ctx)",
   "const sendLaunchMessage = createLaunchMessageSender(pi", "sessionCtx: () => sessionCtx",
   "hasActivePreset: () => active && activePreset !== undefined && activePresetName !== undefined",
-  "goalReminder: () => goal?.phaseReminder()",
+  "goalReminder: () => goal?.phaseReminder()", "reminders: () => reminders",
   "registerLoopRuntime(pi)", "registerMonitorRuntime(pi, { sendMessage: sendLaunchMessage })",
   "registerSubagentRuntime(pi, { sendMessage: sendLaunchMessage })", "sendContinuationMessage: sendLaunchMessage",
   'let cacheRetention: CacheRetention = "short"',
@@ -556,6 +556,16 @@ check(
   "phase reminder must preserve direct execution while forbidding overlapping post-dispatch work and waiting for notifications",
 );
 hasNone(extension, ["track task IDs", "hook-driven completion"], "phase reminder removed manual tracking and implementation-specific completion wording");
+const reminderParser = extension.slice(extension.indexOf("export function parseReminderConfig"), extension.indexOf("export function parseConfigFile"));
+hasAll(reminderParser, [
+  "export function parseReminderConfig(value: unknown, field: string): ReminderConfig",
+  "if (value === undefined) return { phase: false, goal: false }",
+  'throw new Error(`${field}.phase must be a boolean.`)', 'throw new Error(`${field}.goal must be a boolean.`)',
+  'phase: typeof phase === "boolean" ? phase : false', 'goal: typeof goal === "boolean" ? goal : false',
+], "reminder config parser defaults and boolean validation");
+hasAll(extension.slice(extension.indexOf("export function parseConfigFile"), extension.indexOf("function loadPresetConfig")), [
+  "reminders: parseReminderConfig(object.reminders, `${path}.reminders`)",
+], "user config parser includes top-level reminders");
 // The footer status must name the active preset with the version taken from package metadata, never a second literal.
 hasAll(extension, [
   'const PACKAGE_ROOT = resolve(EXTENSION_DIR, "../..")',
@@ -601,7 +611,7 @@ hasNone(shutdownStatusHandler, ["setStatus("], "shutdown must not duplicate the 
 const presetStatusBody = extension.slice(extension.indexOf("export function presetStatusContent"), extension.indexOf("function isAnthropicOAuth"));
 hasNone(presetStatusBody, [".bold(", "theme.bold", "glyph", "Glyph", "Requested"], "OMPS status plain accent-only rendering without a Requested label");
 check((json("package.json").version ?? "").trim().length > 0, "package.json must define a non-empty version for the OMPS status line");
-check(json("package.json").version === "1.1.5", "Goal abort continuation gating must remain shipped in v1.1.5");
+check(json("package.json").version === "1.1.6", "configurable default-off phase and Goal reminders must ship in v1.1.6");
 
 const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
 const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
@@ -618,6 +628,10 @@ hasAll(sessionStartHandler, [
   "Cache Mode is session-wide across every branch", "full entry log rather than the active branch",
   "cacheRetention = replayCacheState(ctx.sessionManager.getEntries())",
 ], "session_start Cache full-session replay contract");
+hasAll(sessionStartHandler, [
+  "reminders = { phase: false, goal: false }", "config = loadPresetConfig()", "reminders = config.reminders",
+  "activate(ctx, requestedPreset ?? reloadPreset, config)",
+], "session_start loads reminder switches once and shares the parsed preset config with activation");
 check(
   /catch \(error\) \{[\s\S]*?report\(ctx,[\s\S]*?updateStatus\(ctx\);\s*return;/.test(sessionStartHandler),
   "session_start setup failure must clear stale OMPS status before returning",
@@ -654,9 +668,10 @@ hasNone(reminderConstructors, [
 hasAll(launchSender, [
   "export function createLaunchMessageSender(", 'pi: Pick<ExtensionAPI, "sendMessage">', '): ExtensionAPI["sendMessage"]',
   "state.sessionCtx()?.isIdle() === true", "options?.triggerTurn === true", "const goalReminder = state.goalReminder()",
-  "state.hasActivePreset() || goalReminder", "pi.sendMessage(makePhaseReminderMessage(), { triggerTurn: false })",
-  "pi.sendMessage(makeGoalReminderMessage(goalReminder), { triggerTurn: false })", "pi.sendMessage(message, options)",
-], "idle launch wrapper sends phase, Goal, then the unchanged launch");
+  "reminders: () => ReminderConfig", "const reminders = state.reminders()", "const hasActiveGoal = goalReminder !== undefined",
+  "reminders.phase && (state.hasActivePreset() || hasActiveGoal)", "pi.sendMessage(makePhaseReminderMessage(), { triggerTurn: false })",
+  "reminders.goal && hasActiveGoal", "pi.sendMessage(makeGoalReminderMessage(goalReminder), { triggerTurn: false })", "pi.sendMessage(message, options)",
+], "idle launch wrapper applies independent reminder switches before the unchanged launch");
 check(
   launchSender.indexOf("makePhaseReminderMessage()") < launchSender.indexOf("makeGoalReminderMessage(goalReminder)") &&
   launchSender.indexOf("makeGoalReminderMessage(goalReminder)") < launchSender.indexOf("pi.sendMessage(message, options)"),
@@ -686,23 +701,24 @@ check(
 );
 hasAll(phaseReminderHandler, [
   'pi.on("before_agent_start", (event, ctx) => {', "asks.reconcileHostMode(ctx)",
-  "const goalReminder = goal?.phaseReminder()", "const message = makePhaseReminderMessage()",
-  "if (!active || !activePreset || !activePresetName) return goalReminder ? { message } : undefined",
+  "const goalReminder = goal?.phaseReminder()", "const hasPhaseSubject = Boolean(active && activePreset && activePresetName) || goalReminder !== undefined",
+  "const phaseEnabled = reminders.phase && hasPhaseSubject", "return phaseEnabled ? { message: makePhaseReminderMessage() } : undefined",
   "let systemPrompt = removeMainPiDocumentation(event.systemPrompt)",
   "if (isAnthropicOAuth(ctx)) systemPrompt = removeMainPiIdentity(systemPrompt)",
-  "systemPrompt: `${systemPrompt}\\n\\n${ORCHESTRATOR_PROMPT}`", "message,",
-], "phase reminder and fixed orchestrator prompt handler");
+  "systemPrompt: `${systemPrompt}\\n\\n${ORCHESTRATOR_PROMPT}`", "...(phaseEnabled ? { message: makePhaseReminderMessage() } : {})",
+], "phase switch and fixed orchestrator prompt handler");
 hasNone(phaseReminderHandler, [
   "makeGoalReminderMessage", "sendMessage", "appendEntry", "registerMessageRenderer", "messages:",
 ], "phase reminder handler must return one phase-only message without side effects");
 hasAll(goalReminderHandler, [
-  'pi.on("before_agent_start", () => {', "const goalReminder = goal?.phaseReminder()", "if (!goalReminder) return",
+  'pi.on("before_agent_start", () => {', "if (!reminders.goal) return", "const goalReminder = goal?.phaseReminder()", "if (!goalReminder) return",
   "return { message: makeGoalReminderMessage(goalReminder) }",
-], "active Goal reminder handler");
+], "Goal switch and active Goal reminder handler");
 hasNone(goalReminderHandler, [
   "makePhaseReminderMessage", "systemPrompt", "ORCHESTRATOR_PROMPT", "reconcileHostMode", "sendMessage", "appendEntry",
-  "registerMessageRenderer", "event", "ctx", "messages:",
-], "Goal reminder handler must return only one hidden Goal message without side effects");
+  "registerMessageRenderer", "event", "ctx", "messages:", "loadPresetConfig", "readFileSync",
+], "Goal reminder handler must return only one configured hidden Goal message without side effects or file IO");
+hasNone(phaseReminderHandler, ["loadPresetConfig", "readFileSync", "getAgentDir", "CONFIG_FILE"], "phase reminder handler must use session-cached configuration without file IO");
 check((extension.match(/"oh-my-pi-slim:phase-reminder"/g) ?? []).length === 1, "phase reminder custom type must remain unique");
 check(!extension.includes('goalReminder ? `${PHASE_REMINDER}\\n\\n${goalReminder}` : PHASE_REMINDER'), "phase and Goal reminder concatenation must be removed");
 hasAll(extension.slice(0, extension.indexOf("const EXTENSION_DIR")), ["GOAL_REMINDER_MESSAGE_TYPE"], "main extension Goal reminder constant import");
@@ -2288,6 +2304,10 @@ hasAll(subagentRuntimeTests, [
   "API key", "child repeats the model compatibility gate",
 ], "Cache child launch inheritance, OAuth gate, and registration-boundary tests");
 hasAll(subagentRuntimeTests, [
+  "old config files default both reminders off", "{ phase: true, goal: false }", "{ phase: false, goal: true }",
+  "reminders\\\\.${field} must be a boolean", "reminders must be an object",
+], "reminder config defaults, partial fields, combinations, and invalid boolean tests");
+hasAll(subagentRuntimeTests, [
   "Goal stats sidecars enforce private paths", "Goal stats capture writes only actual changes", "Goal stats sidecars preserve completed owned-run aggregates across branch restore",
   "getGoalStatsSidecarPaths", "writeGoalStatsSidecar", "readGoalStatsSidecar", "run-directory GC never deletes session-owned Goal stats sidecars",
 ], "Subagent Goal stats sidecar security, bounded-write, and cross-branch tests");
@@ -2829,8 +2849,9 @@ hasAll(loopCoreTests, [
   "synchronous injected timeout callbacks activate after commit", "scheduler failures preserve active modify and paused resume atomicity",
   "scheduler unavailable", "tree abort waits for shutdown completion", "abort cannot release delivery before subagent shutdown completes",
   "shutdown failure schedules deferred gate release before propagating", "ordinary input releases a canceled tree gate",
-  "main registers exactly two ordered before_agent_start handlers", "an inactive preset with an active Goal returns phase then Goal reminders in one prompt",
-  "reminder handlers never send or enqueue another message", "reminder handlers append no entries of their own",
+  "main registers exactly two ordered before_agent_start handlers", "applies both reminder switches independently to idle lifecycle launches",
+  "orchestrator prompt remains active when phase reminders default off", "an active preset triggers phase without an active Goal",
+  "an active Goal triggers phase even when Goal reminders are off", "reminder handlers never send or enqueue another message", "reminder handlers append no entries of their own",
   "reminder handlers create no recursive or additional turn", "Goal reminder registers no renderer",
 ], "Loop scheduler seam, tree abort compensation, and independent reminder registration tests");
 const askRuntimeTests = read("tests/ask-runtime.test.mjs");
@@ -3152,8 +3173,10 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "one to four questions", "single-select", "multi-select", "custom responses", "previews", "unavailable while a Goal is active",
         "branch-local durable Goal", "restore unfinished work as paused", "Provider failures retry automatically", "A user abort pauses only when Goal continuation is immediately safe to deliver", "If any continuation gate is blocked, the Goal remains active", "one non-empty evidence item for each criterion",
         "active or waiting subagents", "Monitor work", "waiting Ask dialog",
-        "two independent hidden reminders in order", "phase reminder comes first", "only while the Goal is `active`",
-        "`retry_wait`, `paused`, `completed`, and `cancelled` Goals receive no Goal reminder", "on the next agent prompt",
+        "Two independent hidden reminders", "both default to disabled", "phase reminder comes first", "either an OMPS preset or an `active` Goal exists",
+        "Goal reminder follows only while the Goal is `active`", "`retry_wait`, `paused`, `completed`, and `cancelled` Goals receive no Goal reminder", "on the next agent prompt",
+        '"reminders"', '"phase": false', '"goal": false', "Both reminder switches are independent", "session start or reload",
+        "Disabling the phase reminder does not disable the active preset's orchestrator system prompt",
         "A completed Goal's detail row joins the shared Ctrl+O collapse",
         "every other status keeps both rows in either state",
         "removes a paused, completed, or cancelled Goal from the branch",
@@ -3206,8 +3229,10 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "一到四个 question", "single-select", "multi-select", "custom response", "preview", "Goal active 时不可用",
         "branch-local durable Goal", "恢复为 paused", "provider failure 会自动重试", "只有 Goal continuation 此刻可以安全交付时，用户 abort 才会暂停 Goal", "任一 continuation gate 被阻塞时，Goal 会保持 active", "每条 criterion 必须精确对应一条非空 evidence",
         "active 或 waiting subagent", "Monitor 工作", "waiting Ask dialog",
-        "两条独立的 hidden reminder", "phase reminder 在前", "只有 Goal 为 `active` 时",
-        "`retry_wait`、`paused`、`completed` 与 `cancelled` Goal 都不会收到 Goal reminder", "下一次 agent prompt",
+        "两条独立的 hidden reminder", "默认都关闭", "phase reminder 在前", "OMPS preset 或 `active` Goal 任一存在时",
+        "Goal reminder 只会在 Goal 为 `active` 时", "`retry_wait`、`paused`、`completed` 与 `cancelled` Goal 都不会收到 Goal reminder", "下一次 agent prompt",
+        '"reminders"', '"phase": false', '"goal": false', "两个 reminder 开关彼此独立", "session start 或 reload",
+        "关闭 phase reminder 不会关闭 active preset 的 orchestrator system prompt",
         "completed Goal 的 detail 行会跟随共享的 Ctrl+O 折叠",
         "其他状态在折叠与展开下都保留两行",
         "可从 branch 上移除 paused、completed 或 cancelled Goal",
@@ -3947,6 +3972,7 @@ hasAll(read("tests/loop-load.test.mjs"), [
 ], "load harness must lock the main and child command registration boundary");
 
 const preset = json("config/oh-my-pi-slim.example.json");
+check(JSON.stringify(preset.reminders) === JSON.stringify({ phase: false, goal: false }), "bundled example must explicitly disable both reminders");
 check(Boolean(preset.presets?.[preset.defaultPreset]), "default preset must exist");
 for (const [presetName, value] of Object.entries(preset.presets ?? {})) {
   check(JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...ROLES].sort()), `${presetName} must define exactly seven roles`);

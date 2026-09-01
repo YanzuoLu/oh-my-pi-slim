@@ -728,14 +728,14 @@ test("custom fire messages use a fixed non-command banner even when the future p
   assert.match(fire.content, /Prompt:\n\/loop create another loop only as future prompt text$/);
 });
 
-test("launch wrapper injects independent reminders only for idle lifecycle launches", () => {
+test("launch wrapper applies both reminder switches independently to idle lifecycle launches", () => {
   const launchTypes = [
     "oh-my-pi-slim:monitor-notification",
     "oh-my-pi-slim:subagent-notification",
     "oh-my-pi-slim:goal-continuation",
   ];
   const goalContent = "<system-reminder>active Goal</system-reminder>";
-  const run = ({ preset, goal, idle = true, types = launchTypes }) => {
+  const run = ({ preset, goal, reminders, idle = true, types = launchTypes }) => {
     const sent = [];
     const sessionCtx = { isIdle: () => idle };
     const pi = {
@@ -748,6 +748,7 @@ test("launch wrapper injects independent reminders only for idle lifecycle launc
       sessionCtx: () => sessionCtx,
       hasActivePreset: () => preset,
       goalReminder: () => goal ? goalContent : undefined,
+      reminders: () => reminders,
     });
     for (const customType of types) {
       const launch = {
@@ -764,28 +765,35 @@ test("launch wrapper injects independent reminders only for idle lifecycle launc
     return sent;
   };
 
-  const expectedTypes = new Map([
-    ["false:false", ["oh-my-pi-slim:monitor-notification"]],
-    ["true:false", ["oh-my-pi-slim:phase-reminder", "oh-my-pi-slim:monitor-notification"]],
-    ["false:true", ["oh-my-pi-slim:phase-reminder", "oh-my-pi-slim:goal-reminder", "oh-my-pi-slim:monitor-notification"]],
-    ["true:true", ["oh-my-pi-slim:phase-reminder", "oh-my-pi-slim:goal-reminder", "oh-my-pi-slim:monitor-notification"]],
-  ]);
-  for (const preset of [false, true]) {
-    for (const goal of [false, true]) {
-      const sent = run({ preset, goal, types: [launchTypes[0]] });
-      assert.deepEqual(sent.map(({ message }) => message.customType), expectedTypes.get(`${preset}:${goal}`));
-      assert.deepEqual(sent.map(({ options }) => options.triggerTurn), goal
-        ? [false, false, true]
-        : preset ? [false, true] : [true]);
-      if (goal) {
-        assert.equal(sent[0].message.content.includes(goalContent), false, "phase and Goal content stay independent");
-        assert.equal(sent[1].message.content, goalContent);
+  for (const phase of [false, true]) {
+    for (const goalEnabled of [false, true]) {
+      for (const preset of [false, true]) {
+        for (const goal of [false, true]) {
+          const sent = run({
+            preset,
+            goal,
+            reminders: { phase, goal: goalEnabled },
+            types: [launchTypes[0]],
+          });
+          const expected = [];
+          if (phase && (preset || goal)) expected.push("oh-my-pi-slim:phase-reminder");
+          if (goalEnabled && goal) expected.push("oh-my-pi-slim:goal-reminder");
+          expected.push(launchTypes[0]);
+          assert.deepEqual(sent.map(({ message }) => message.customType), expected);
+          assert.deepEqual(sent.map(({ options }) => options.triggerTurn), expected.map((_, index) => index === expected.length - 1));
+          const phaseMessage = sent.find(({ message }) => message.customType === "oh-my-pi-slim:phase-reminder");
+          const goalMessage = sent.find(({ message }) => message.customType === "oh-my-pi-slim:goal-reminder");
+          if (phaseMessage && goalMessage) {
+            assert.equal(phaseMessage.message.content.includes(goalContent), false, "phase and Goal content stay independent");
+            assert.equal(goalMessage.message.content, goalContent);
+          }
+        }
       }
     }
   }
 
   for (const customType of launchTypes) {
-    const sent = run({ preset: true, goal: true, types: [customType] });
+    const sent = run({ preset: true, goal: true, reminders: { phase: true, goal: true }, types: [customType] });
     assert.deepEqual(sent.map(({ message }) => message.customType), [
       "oh-my-pi-slim:phase-reminder",
       "oh-my-pi-slim:goal-reminder",
@@ -795,17 +803,27 @@ test("launch wrapper injects independent reminders only for idle lifecycle launc
     assert.deepEqual(sent[2].message.details, { customType, nested: { unchanged: true } });
   }
 
-  const streaming = run({ preset: true, goal: true, idle: false, types: [launchTypes[1]] });
+  const streaming = run({
+    preset: true,
+    goal: true,
+    reminders: { phase: true, goal: true },
+    idle: false,
+    types: [launchTypes[1]],
+  });
   assert.deepEqual(streaming.map(({ message }) => message.customType), [launchTypes[1]]);
 
-  const consecutive = run({ preset: true, goal: true, types: [launchTypes[0], launchTypes[1]] });
+  const consecutive = run({
+    preset: true,
+    goal: true,
+    reminders: { phase: true, goal: true },
+    types: [launchTypes[0], launchTypes[1]],
+  });
   assert.deepEqual(consecutive.map(({ message }) => message.customType), [
     "oh-my-pi-slim:phase-reminder",
     "oh-my-pi-slim:goal-reminder",
     launchTypes[0],
     launchTypes[1],
   ], "synchronous triggerTurn state change lets only the first producer inject reminders");
-
 });
 
 test("slash command forwards raw loop text as a real user message with idle and busy semantics", async () => {
@@ -1142,6 +1160,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
         getBranch: () => [],
         getSessionDir: () => sessionDir,
         getSessionId: () => sessionId,
+        getLeafId: () => `${sessionId}-leaf`,
       },
     });
     const mainCtx = makeCtx(sessionEntries, "main-session");
@@ -1276,37 +1295,54 @@ test("main sessions register Ask and runtime tools while child sessions return b
     assert.equal(main.handlers.has("message_start"), false);
     assert.equal(main.handlers.has("context"), false);
 
-    await main.commandDefinitions.get("omps").handler("on", mainCtx);
-    const presetReminderResults = beforeAgentStart.map((handler) => handler({ systemPrompt: "base" }, mainCtx));
-    assert.equal(presetReminderResults[0].message.customType, "oh-my-pi-slim:phase-reminder");
-    assert.match(presetReminderResults[0].systemPrompt, /^base\n\n/);
-    assert.equal(presetReminderResults[1], undefined);
-    await main.commandDefinitions.get("omps").handler("off", mainCtx);
-
-    await main.toolDefinitions.get("goal").execute("goal-create", {
+    const writeReminderConfig = (phase, goalEnabled) => {
+      config.reminders = { phase, goal: goalEnabled };
+      writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    };
+    const createReminderGoal = () => main.toolDefinitions.get("goal").execute("goal-create", {
       action: "create",
       abstract: "Independent reminder",
       objective: "Keep Goal guidance separate from phase guidance.",
       criteria: ["Both hidden messages remain independent"],
     });
+
+    await main.commandDefinitions.get("omps").handler("on", mainCtx);
+    const defaultOffResults = beforeAgentStart.map((handler) => handler({ systemPrompt: "base" }, mainCtx));
+    assert.match(defaultOffResults[0].systemPrompt, /^base\n\n/, "orchestrator prompt remains active when phase reminders default off");
+    assert.equal(defaultOffResults[0].message, undefined);
+    assert.equal(defaultOffResults[1], undefined);
+
+    for (const [phase, goalEnabled] of [[false, false], [true, false], [false, true], [true, true]]) {
+      writeReminderConfig(phase, goalEnabled);
+      await sessionStart({ reason: "startup" }, mainCtx);
+      await createReminderGoal();
+      await main.commandDefinitions.get("omps").handler("on", mainCtx);
+      const results = beforeAgentStart.map((handler) => handler({ systemPrompt: "base" }, mainCtx));
+      assert.match(results[0].systemPrompt, /^base\n\n/, "phase off never blocks the active preset orchestrator prompt");
+      assert.equal(results[0].message?.customType, phase ? "oh-my-pi-slim:phase-reminder" : undefined);
+      assert.equal(results[1]?.message.customType, goalEnabled ? "oh-my-pi-slim:goal-reminder" : undefined);
+      if (phase && goalEnabled) {
+        writeReminderConfig(false, false);
+        const cachedResults = beforeAgentStart.map((handler) => handler({ systemPrompt: "base" }, mainCtx));
+        assert.equal(cachedResults[0].message.customType, "oh-my-pi-slim:phase-reminder");
+        assert.equal(cachedResults[1].message.customType, "oh-my-pi-slim:goal-reminder");
+      }
+    }
+
+    writeReminderConfig(true, false);
+    await sessionStart({ reason: "reload" }, mainCtx);
+    await main.commandDefinitions.get("omps").handler("on", mainCtx);
+    const presetOnlySubjectResults = beforeAgentStart.map((handler) => handler({ systemPrompt: "base" }, mainCtx));
+    assert.equal(presetOnlySubjectResults[0].message.customType, "oh-my-pi-slim:phase-reminder", "an active preset triggers phase without an active Goal");
+    assert.equal(presetOnlySubjectResults[1], undefined);
+    await createReminderGoal();
+    await main.commandDefinitions.get("omps").handler("off", mainCtx);
+    const goalOnlySubjectResults = beforeAgentStart.map((handler) => handler({ systemPrompt: "base" }, promptCtx));
+    assert.equal(goalOnlySubjectResults[0].message.customType, "oh-my-pi-slim:phase-reminder", "an active Goal triggers phase even when Goal reminders are off");
+    assert.equal(goalOnlySubjectResults[1], undefined);
+
     const entryCountAfterCreate = main.entries.length;
-    const reminderResults = beforeAgentStart.map((handler) => handler({ systemPrompt: "base" }, promptCtx));
-    assert.deepEqual(reminderResults, [
-      {
-        message: {
-          customType: "oh-my-pi-slim:phase-reminder",
-          content: `<system-reminder>\n!IMPORTANT! Scheduler workflow: First choose the lightest workflow that fits the work. If direct execution is justified, complete it and verify proportionately. Otherwise: plan lanes/dependencies → dispatch background specialists → continue non-overlapping work when available → await completion notifications → reconcile terminal results → verify. !END!\n</system-reminder>`,
-          display: false,
-        },
-      },
-      {
-        message: {
-          customType: "oh-my-pi-slim:goal-reminder",
-          content: `<system-reminder>\n!IMPORTANT! You are pursuing the active Goal: Independent reminder. Keep this run aligned with it and continue making concrete progress. !END!\n</system-reminder>`,
-          display: false,
-        },
-      },
-    ], "an inactive preset with an active Goal returns phase then Goal reminders in one prompt");
+    beforeAgentStart.forEach((handler) => handler({ systemPrompt: "base" }, promptCtx));
     assert.equal(main.entries.length, entryCountAfterCreate, "reminder handlers append no entries of their own");
     assert.deepEqual(main.sends, [], "reminder handlers create no recursive or additional turn");
     assert.equal(main.renderers.includes("oh-my-pi-slim:goal-reminder"), false, "Goal reminder registers no renderer");
