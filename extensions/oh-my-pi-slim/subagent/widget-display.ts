@@ -11,16 +11,6 @@ export type WidgetTheme = {
   bold(text: string): string;
 };
 
-const TOOL_DISPLAY: Record<string, string> = {
-  read: "reading",
-  bash: "running command",
-  edit: "editing",
-  write: "writing",
-  grep: "searching",
-  find: "finding files",
-  ls: "listing",
-};
-
 export function formatWidgetTokens(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M token`;
   if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k token`;
@@ -50,29 +40,4 @@ export function formatWidgetTurns(turnCount: number): string {
 
 export function formatWidgetMs(ms: number): string {
   return `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
-}
-
-function truncateLine(text: string, length = 60): string {
-  const line = text.split("\n").find((value) => value.trim())?.trim() ?? "";
-  return line.length <= length ? line : `${line.slice(0, length)}…`;
-}
-
-export function describeWidgetActivity(
-  activeTools: Readonly<Record<string, { name: string }>>,
-  responseText?: string,
-): string {
-  const groups = new Map<string, number>();
-  for (const tool of Object.values(activeTools)) {
-    const action = TOOL_DISPLAY[tool.name] ?? tool.name;
-    groups.set(action, (groups.get(action) ?? 0) + 1);
-  }
-  if (groups.size > 0) {
-    const parts: string[] = [];
-    for (const [action, count] of groups) {
-      parts.push(count > 1 ? `${action} ${count} ${action === "searching" ? "patterns" : "files"}` : action);
-    }
-    return `${parts.join(", ")}…`;
-  }
-  if (responseText?.trim()) return truncateLine(responseText);
-  return "thinking…";
 }

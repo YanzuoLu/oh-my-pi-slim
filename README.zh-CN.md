@@ -92,7 +92,7 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 
 `list` 包含 `starting`、`running`、`waiting`、`completed`、`failed` 与 `interrupted` run，但绝不包含 terminal `output` 或 `error`。使用单个 retained run ID 调用 `check`，可查看相同公开字段，并在结果存在时取回 terminal 结果。subagent widget 使用相同的 retained 集合与排序来计数并管理 lifecycle，但 foreground body 永久隐藏 terminal 行。这些 run 会一直保留到 `delete` 或 `clear` 将其移除，并且始终可通过 Subagent viewer 查看。
 
-每个 active 或 waiting widget entry 都是不可拆分的两行 block。第一行把 identity 与 abstract 放在末尾 activity 之前。第二行承载 model、turn、tool、token、context、compaction 与 elapsed statistics。12 行 widget 预算绝不会拆开 active entry。
+每个 starting、active 或 waiting widget entry 占一行。每行显示 `<abstract>[<id>]`，随后显示 turn、tool、token、context、compaction 与 elapsed statistics。foreground widget 不显示 provider、model、thinking level 或实时 activity 文本。12 行 widget 预算按每个可见 run 一行计算。
 
 `fork` 默认为 `true`。forked run 会继承当前 tool-call batch 之前的 conversation context。同一 batch 中的每个 `create` 都从同一个点派生。使用 `fork: false` 时，run 会启动独立 session，并且只接收自己的 `message`。
 

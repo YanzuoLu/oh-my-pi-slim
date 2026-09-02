@@ -47,7 +47,7 @@ const {
   MAX_SUBAGENT_WIDGET_LINES,
   SUBAGENT_WIDGET_SPINNER,
   formatWidgetModel,
-  renderActiveRunLines,
+  renderActiveRunLine,
   renderFinishedRunLine,
   renderSubagentWidgetLines,
 } = await import("../extensions/oh-my-pi-slim/subagent/widget-renderer.ts");
@@ -181,41 +181,34 @@ test("shared retained sorting keeps list, restored state, and widget IDs in acti
   assert.deepEqual(sortRetainedSubagentRuns(ties).map((item) => item.id), ["running-a", "waiting-b", "terminal-a", "terminal-b"]);
 });
 
-test("pure active renderer uses two exact lines and terminal renderers keep outcome icons", () => {
-  const [runningSummary, runningStats] = renderActiveRunLines(
+test("pure active renderer uses one abstract-first stats line and terminal renderers keep outcome icons", () => {
+  const running = renderActiveRunLine(
     run({ status: "running", model: "openai/gpt-5.6-sol:xhigh", updatedAt: "2026-04-16T23:59:56.000Z" }),
     0,
     theme,
     NOW_MS,
   );
-  assert.equal(runningSummary, "⠋  **Subagent [run-1]**  implement the widget · thinking…");
-  assert.equal(runningStats, "(openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s");
-  assert.doesNotMatch(runningSummary, /↻|tool use|token|5\.0s/);
-  assert.match(runningStats, /^\(openai\) gpt-5\.6-sol • xhigh · ↻  0/);
+  assert.equal(running, "⠋  **implement the widget**[run-1] · ↻  0 · 5.0s");
+  assert.doesNotMatch(running, /Subagent|openai|gpt-5\.6-sol|xhigh|thinking/);
 
-  const [waitingSummary, waitingStats] = renderActiveRunLines(run({
+  const waiting = renderActiveRunLine(run({
     status: "waiting",
     model: "openai/gpt-5.6-sol:xhigh",
     request: { runId: "run-1", reason: "need_decision", message: "Choose A or B", createdAt: "now" },
   }), 3, theme, NOW_MS);
-  assert.equal(waitingSummary, "!  **Subagent [run-1]** waiting  implement the widget · Choose A or B");
-  assert.equal(waitingStats, "(openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s");
-  assert.doesNotMatch(`${runningSummary}\n${waitingSummary}\n${runningStats}`, /[⠋!↻] [^ ]|[⠋!↻] {3}/);
+  assert.equal(waiting, "!  **implement the widget**[run-1] · ↻  0 · 5.0s");
+  assert.doesNotMatch(`${running}\n${waiting}`, /Choose A or B|[⠋!↻] [^ ]|[⠋!↻] {3}/);
 
-  const [styledRunning] = renderActiveRunLines(run({ status: "running" }), 0, roleAnsiTheme, NOW_MS);
-  const [styledWaiting] = renderActiveRunLines(run({
-    status: "waiting",
-    request: { runId: "run-1", reason: "need_decision", message: "Choose A or B", createdAt: "now" },
-  }), 0, roleAnsiTheme, NOW_MS);
-  assert.match(styledRunning, /\u001b\[2m · \u001b\[0m\u001b\[2mthinking…\u001b\[0m$/, "running activity and its separator stay dim");
-  assert.match(styledWaiting, /\u001b\[2m · \u001b\[0m\u001b\[33mChoose A or B\u001b\[0m$/, "waiting activity keeps the warning role after a dim separator");
+  const styledRunning = renderActiveRunLine(run({ status: "running" }), 0, roleAnsiTheme, NOW_MS);
+  const styledWaiting = renderActiveRunLine(run({ status: "waiting" }), 0, roleAnsiTheme, NOW_MS);
+  assert.doesNotMatch(`${styledRunning}\n${styledWaiting}`, /Subagent|provider|model|high|thinking/);
 
   assert.match(renderFinishedRunLine(run({ status: "completed" }), theme, NOW_MS), /✓/);
   assert.match(renderFinishedRunLine(run({ status: "failed", error: "boom" }), theme, NOW_MS), /✗.*failed: boom/);
   assert.match(renderFinishedRunLine(run({ status: "interrupted" }), theme, NOW_MS), /✗.*interrupted/);
 });
 
-test("multiline waiting messages and terminal errors stay newline-free and preserve atomic renderer layout", () => {
+test("multiline waiting messages stay hidden and every renderer result remains one physical line", () => {
   const waiting = run({
     id: "waiting-multiline",
     status: "waiting",
@@ -231,7 +224,7 @@ test("multiline waiting messages and terminal errors stay newline-free and prese
     status: "failed",
     error: "\nPrimary failure\nstack detail must stay hidden",
   });
-  const activeLines = renderActiveRunLines(waiting, 0, theme, NOW_MS);
+  const activeLine = renderActiveRunLine(waiting, 0, theme, NOW_MS);
   const finishedLine = renderFinishedRunLine(failed, theme, NOW_MS);
   const widgetLines = renderSubagentWidgetLines({
     runs: [failed, waiting],
@@ -241,21 +234,19 @@ test("multiline waiting messages and terminal errors stay newline-free and prese
     nowMs: NOW_MS,
   });
 
-  assert.equal(activeLines.length, 2, "a waiting run remains one atomic two-line entry");
-  assert.equal(widgetLines.length, 3, "the heading and two-line waiting entry stay atomic while terminal rows remain hidden");
+  assert.equal(widgetLines.length, 2, "the heading and waiting run each use one line while terminal rows remain hidden");
   assert.doesNotMatch(widgetLines.join("\n"), /failed-multiline|Primary failure/);
-  assert.match(activeLines[0], /Choose the safe option$/);
-  assert.doesNotMatch(activeLines[0], /Do not render this second line/);
+  assert.doesNotMatch(activeLine, /Choose the safe option|Do not render this second line/);
   assert.match(finishedLine, /failed: Primary failure$/);
   assert.doesNotMatch(finishedLine, /stack detail must stay hidden/);
-  for (const line of [...activeLines, finishedLine, ...widgetLines]) {
+  for (const line of [activeLine, finishedLine, ...widgetLines]) {
     assert.equal(typeof line, "string");
     assert.equal(line.includes("\n"), false, "every returned renderer string is one physical line");
   }
 });
 
-test("activity formatting keeps the abstract before activity and model before stats, tools, response, tokens, context, and compactions", () => {
-  const [toolSummary, toolStats] = renderActiveRunLines(run({
+test("single-line formatting keeps the abstract before turns, tools, tokens, context, compactions, and elapsed time", () => {
+  const toolLine = renderActiveRunLine(run({
     status: "running",
     model: "openai/gpt-5.6-sol:minimal",
     activity: {
@@ -268,10 +259,10 @@ test("activity formatting keeps the abstract before activity and model before st
       compactionCount: 2,
     },
   }), 0, theme, NOW_MS);
-  assert.equal(toolSummary, "⠋  **Subagent [run-1]**  implement the widget · reading, searching 2 patterns…");
-  assert.equal(toolStats, "(openai) gpt-5.6-sol • minimal · ↻  3 · 2 tool uses · 12.3k token (72% · ⇊  2) · 5.0s");
+  assert.equal(toolLine, "⠋  **implement the widget**[run-1] · ↻  3 · 2 tool uses · 12.3k token (72% · ⇊  2) · 5.0s");
+  assert.doesNotMatch(toolLine, /openai|gpt-5\.6-sol|minimal|reading|searching|ignored/);
 
-  const [responseSummary, responseStats] = renderActiveRunLines(run({
+  const responseLine = renderActiveRunLine(run({
     status: "running",
     activity: {
       turnCount: 1, toolUses: 0, activeTools: {},
@@ -279,11 +270,11 @@ test("activity formatting keeps the abstract before activity and model before st
       tokens: 0, compactionCount: 0,
     },
   }), 0, theme, NOW_MS);
-  assert.equal(responseStats, "(provider) model • high · ↻  1 · 5.0s");
-  assert.equal(responseSummary, "⠋  **Subagent [run-1]**  implement the widget · A concise response line that is visible");
+  assert.equal(responseLine, "⠋  **implement the widget**[run-1] · ↻  1 · 5.0s");
+  assert.doesNotMatch(responseLine, /provider|model|high|concise response/);
 });
 
-test("pure widget renderer preserves the two-line active tree and queued summary", () => {
+test("pure widget renderer gives every active and queued run one abstract-first line", () => {
   const lines = renderSubagentWidgetLines({
     runs: [
       run({ id: "done", status: "completed" }),
@@ -297,9 +288,8 @@ test("pure widget renderer preserves the two-line active tree and queued summary
   });
   assert.deepEqual(lines, [
     `**●**  **Subagents (1/3)**${VIEWER_HINT}`,
-    "├─ ⠋  **Subagent [live]**  implement the widget · thinking…",
-    "│  └─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
-    "└─ ◦  Subagent [queue]  implement the widget · ↻  0 · 5.0s queued",
+    "├─ ⠋  **implement the widget**[live] · ↻  0 · 5.0s",
+    "└─ ◦  implement the widget[queue] · ↻  0 · 5.0s",
   ]);
   assert.doesNotMatch(lines.join("\n"), /\[done\]/);
   assert.doesNotMatch(lines.join("\n").replaceAll("**", ""), /[●⠋↻◦✓] [^ ]|[●⠋↻◦✓] {3}/);
@@ -317,7 +307,7 @@ test("pure widget renderer preserves the two-line active tree and queued summary
     if (terminalWidth === 80) assert.match(ansiLines.map((line) => stripVTControlCharacters(line)).join("\n"), /↻  0 · 5\.0s/);
   }
 
-  const priorityPrefix = "└─ ⠋  Subagent [priority]  摘要优先🙂";
+  const priorityPrefix = "└─ ⠋  摘要优先🙂[priority]";
   const priorityLines = renderSubagentWidgetLines({
     runs: [run({
       id: "priority",
@@ -333,16 +323,16 @@ test("pure widget renderer preserves the two-line active tree and queued summary
     theme: vtTheme,
     nowMs: NOW_MS,
   });
-  assert.equal(stripVTControlCharacters(priorityLines[1]), priorityPrefix, "narrow wide-character output keeps the complete identity and abstract prefix before dropping activity");
+  assert.equal(stripVTControlCharacters(priorityLines[1]), priorityPrefix, "narrow wide-character output keeps the complete abstract and identity before dropping stats");
   assert.doesNotMatch(priorityLines.join("\n"), /ACTIVITY-TAIL/);
   assert.ok(priorityLines.every((line) => visibleWidth(line) <= visibleWidth(priorityPrefix)));
 });
 
-test("pure widget renderer caps at 12 lines, keeps active entries atomic, and excludes terminal rows from overflow", () => {
+test("pure widget renderer caps at 12 lines, counts one line per run, and excludes terminal rows from overflow", () => {
   const runs = [];
-  for (let index = 0; index < 5; index += 1) {
+  for (let index = 0; index < 11; index += 1) {
     runs.push(run({
-      id: `active-${index}`,
+      id: `a-${String(index).padStart(2, "0")}`,
       status: index === 0 ? "waiting" : "running",
       model: "openai/gpt-5.6-sol:xhigh",
     }));
@@ -359,15 +349,12 @@ test("pure widget renderer caps at 12 lines, keeps active entries atomic, and ex
     nowMs: NOW_MS,
   });
   assert.equal(lines.length, MAX_SUBAGENT_WIDGET_LINES);
-  assert.equal(lines[0], `**●**  **Subagents (2/9)**${VIEWER_HINT}`, "hidden rows never change the retained counts");
-  assert.match(lines[1], /active-0.*waiting.*implement the widget · supervisor reply required/);
-  assert.match(lines[2], /^│  └─ \(openai\) gpt-5\.6-sol • xhigh · ↻  0/);
-  assert.match(lines[3], /active-1.* · thinking…$/);
-  assert.match(lines[5], /active-2.* · thinking…$/);
-  assert.match(lines[7], /active-3.* · thinking…$/);
-  assert.match(lines[9], /active-4.* · thinking…$/);
-  assert.equal(lines[11], "└─ +2 more (2 queued)");
-  assert.doesNotMatch(lines.join("\n"), /queue-|finished-/);
+  assert.equal(lines[0], `**●**  **Subagents (2/15)**${VIEWER_HINT}`, "hidden rows never change the retained counts");
+  assert.match(lines[1], /implement the widget.*\[a-00\].*↻  0/);
+  assert.match(lines[2], /implement the widget.*\[a-01\].*↻  0/);
+  assert.match(lines[10], /implement the widget.*\[a-09\].*↻  0/);
+  assert.equal(lines[11], "└─ +3 more (1 active, 2 queued)");
+  assert.doesNotMatch(lines.join("\n"), /a-10|queue-|finished-|openai|gpt-5\.6-sol|xhigh|thinking/);
 
   const terminalRuns = Array.from({ length: 9 }, (_, index) => run({
     id: `term-${index}`,
@@ -381,9 +368,9 @@ test("pure widget renderer caps at 12 lines, keeps active entries atomic, and ex
     nowMs: NOW_MS,
   });
   assert.equal(compact[0], `**●**  **Subagents (9/11)**${VIEWER_HINT}`);
-  assert.equal(compact.length, 4, "terminal history never consumes the line budget");
+  assert.equal(compact.length, 3, "terminal history never consumes the line budget");
   assert.match(compact[1], /\[active\]/);
-  assert.match(compact[3], /\[starting\]/);
+  assert.match(compact[2], /\[starting\]/);
   assert.doesNotMatch(compact.join("\n"), /\[term-/);
 });
 
@@ -489,11 +476,9 @@ test("Subagents body permanently keeps starting, running, and waiting rows while
   });
   assert.deepEqual(lines, [
     `**●**  **Subagents (3/6)**${VIEWER_HINT}`,
-    "├─ !  **Subagent [held]** waiting  implement the widget · supervisor reply required",
-    "│  └─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
-    "├─ ⠋  **Subagent [live]**  implement the widget · thinking…",
-    "│  └─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
-    "└─ ◦  Subagent [queue]  implement the widget · ↻  0 · 5.0s queued",
+    "├─ !  **implement the widget**[held] · ↻  0 · 5.0s",
+    "├─ ⠋  **implement the widget**[live] · ↻  0 · 5.0s",
+    "└─ ◦  implement the widget[queue] · ↻  0 · 5.0s",
   ]);
   assert.doesNotMatch(lines.join("\n"), /\[ok\]|\[bad\]|\[stopped\]|ctrl\+o|expand/);
 
@@ -509,7 +494,7 @@ test("Subagents body permanently keeps starting, running, and waiting rows while
     runs: startingOnly, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS,
   }), [
     "**●**  **Subagents (0/1)**",
-    "└─ ◦  Subagent [queue]  implement the widget · ↻  0 · 5.0s queued",
+    "└─ ◦  implement the widget[queue] · ↻  0 · 5.0s",
   ]);
 
   const terminalOnly = runs.filter((value) => !["starting", "running", "waiting"].includes(value.status));
@@ -522,8 +507,7 @@ test("Subagents body permanently keeps starting, running, and waiting rows while
   });
   assert.deepEqual(soloActive, [
     `**●**  **Subagents (1/2)**${VIEWER_HINT}`,
-    "└─ ⠋  **Subagent [live]**  implement the widget · thinking…",
-    "   └─ (openai) gpt-5.6-sol • xhigh · ↻  0 · 5.0s",
+    "└─ ⠋  **implement the widget**[live] · ↻  0 · 5.0s",
   ]);
   assert.deepEqual(runs, originalRuns, "compact rendering leaves retained run data unchanged");
   assert.deepEqual(renderSubagentWidgetLines({ runs: [], spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS }), []);
@@ -570,8 +554,8 @@ test("Subagents Viewer hint stays complete when wide and disappears atomically w
 
 test("compact Subagents overflow keeps queued rows eligible and terminal rows out of more", () => {
   const runs = [
-    ...Array.from({ length: 6 }, (_, index) => run({
-      id: `active-${index}`,
+    ...Array.from({ length: 12 }, (_, index) => run({
+      id: `a-${String(index).padStart(2, "0")}`,
       status: index === 0 ? "waiting" : "running",
       model: "openai/gpt-5.6-sol:xhigh",
     })),
@@ -583,10 +567,10 @@ test("compact Subagents overflow keeps queued rows eligible and terminal rows ou
   });
 
   assert.equal(compact.length, MAX_SUBAGENT_WIDGET_LINES);
-  assert.equal(compact[0], `**●**  **Subagents (4/11)**${VIEWER_HINT}`, "heading counts ignore row filtering and overflow");
-  assert.equal(compact.at(-1), "└─ +2 more (1 active, 1 queued)", "overflow counts both eligible active and queued rows");
-  assert.doesNotMatch(compact.join("\n"), /finished-|queue-0|active-5/);
-  assert.equal(compact.slice(1, -1).length, 10, "the 12-line budget keeps five whole two-line active blocks");
+  assert.equal(compact[0], `**●**  **Subagents (4/17)**${VIEWER_HINT}`, "heading counts ignore row filtering and overflow");
+  assert.equal(compact.at(-1), "└─ +3 more (2 active, 1 queued)", "overflow counts both eligible active and queued rows");
+  assert.doesNotMatch(compact.join("\n"), /finished-|queue-0|a-10|a-11/);
+  assert.equal(compact.slice(1, -1).length, 10, "the 12-line budget keeps ten one-line active entries");
 });
 
 test("SubagentWidget ignores Pi expansion state without re-registering the widget", () => {
@@ -607,7 +591,7 @@ test("SubagentWidget ignores Pi expansion state without re-registering the widge
   widget.update();
   const registrations = widgetCalls.filter((call) => typeof call.content === "function").length;
   const initial = component.render();
-  assert.equal(initial.length, 3);
+  assert.equal(initial.length, 2);
   assert.equal(initial[0], `**●**  **Subagents (1/2)**${VIEWER_HINT}`);
   assert.doesNotMatch(initial.join("\n"), /\[ok\]|ctrl\+o|expand/);
 

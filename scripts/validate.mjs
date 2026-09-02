@@ -73,7 +73,7 @@ check(
   index.indexOf("registerTodoRuntime(pi)") > index.indexOf('process.env.PI_SUBAGENT_CHILD === "1"'),
   "main extension must register Todo after the child-only return",
 );
-check(index.includes('`OMPS Version: ${PACKAGE_VERSION}${mode}`'), "OMPS status must expose the package version and current provider mode");
+check(index.includes('` · OMPS Version: v${PACKAGE_VERSION}${mode}`'), "OMPS status must expose the separated package version and current provider mode");
 check(!index.includes('"oh-my-pi-slim:fast"'), "Fast Mode must share the OMPS status line");
 
 const fastMode = read("extensions/oh-my-pi-slim/fast-mode.ts");

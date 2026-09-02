@@ -665,7 +665,7 @@ interface MonitorUpdateContentInput {
 export const SUBAGENT_TOOL_NAME = "subagent";
 export const SUBAGENT_TOOL_DESCRIPTIONS = {
   tool: markdown(
-    "Create and manage retained subagent runs for independent work.",
+    "Create and manage retained background subagent runs for independent work.",
     "",
     "## When to use",
     "",
@@ -679,9 +679,9 @@ export const SUBAGENT_TOOL_DESCRIPTIONS = {
     "",
     "## Actions",
     "",
-    "- `create` starts a new run and immediately returns its ID and current status.",
+    "- `create` starts a new background run that proceeds asynchronously, then immediately returns its ID and current status.",
     "- `list` returns each retained run's ID, description, status, and source run ID when present.",
-    "- `check` returns one run's ID, description, status, source run ID when present, and terminal output or error when available.",
+    "- `check` returns one run's ID, description, status, source run ID when present, and terminal output or error if completed.",
     "- `steer` sends an instruction to a running run without waiting for completion and returns its ID and current status.",
     "- `interrupt` stops a live run, waits, and returns its ID, final status, output, and error when available.",
     "- `reply` answers a waiting supervisor request, continues the same run, and returns its ID and current status.",
@@ -689,7 +689,7 @@ export const SUBAGENT_TOOL_DESCRIPTIONS = {
     "- `delete` removes one terminal run and returns its ID, deletion confirmation, and any cleanup warnings.",
     "- `clear` removes all retained runs when every run is terminal and returns the number removed and any cleanup warnings.",
     "",
-    "Waiting and terminal notifications arrive automatically. Continue other work while runs proceed. A child can contact the supervisor with `contact_supervisor`.",
+    "Waiting and terminal notifications arrive automatically and can trigger a new supervisor turn. You may end the current turn while waiting, or continue only non-overlapping work. A child can contact the supervisor with `contact_supervisor`.",
     "",
     "Runs use the supervisor model and thinking level.",
   ),

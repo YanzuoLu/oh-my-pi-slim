@@ -5,11 +5,9 @@
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { sortRetainedSubagentRuns, type PersistedRun, type RunStatus } from "./core.js";
-import { formatSubagentModel } from "./model-display.js";
 import type { DetachedRunActivity } from "./run-files.js";
 import { formatSemanticGlyphPrefix } from "../semantic-glyph.js";
 import {
-  describeWidgetActivity,
   formatWidgetMs,
   formatWidgetSessionTokens,
   formatWidgetTurns,
@@ -24,7 +22,7 @@ export { SUBAGENT_WIDGET_GLYPHS, SUBAGENT_WIDGET_SPINNER } from "./widget-glyphs
 
 export type WidgetRun = Pick<
   PersistedRun,
-  "id" | "abstract" | "model" | "status" | "createdAt" | "updatedAt" | "error" | "request"
+  "id" | "abstract" | "status" | "createdAt" | "updatedAt" | "error"
 > & { readonly activity?: DetachedRunActivity };
 
 export const MAX_SUBAGENT_WIDGET_LINES = 12;
@@ -41,7 +39,7 @@ function elapsed(run: WidgetRun, nowMs: number): string {
 }
 
 function runName(run: WidgetRun, theme: WidgetTheme): string {
-  return `Subagent ${theme.fg("dim", `[${run.id.slice(0, 8)}]`)}`;
+  return `${shortAbstract(run.abstract)}${theme.fg("dim", `[${run.id.slice(0, 8)}]`)}`;
 }
 
 function stats(run: WidgetRun, theme: WidgetTheme, nowMs: number): string {
@@ -76,37 +74,30 @@ export function renderFinishedRunLine(run: WidgetRun, theme: WidgetTheme, nowMs 
     const message = run.error ? `: ${shortAbstract(run.error).slice(0, 60)}` : "";
     statusText = theme.fg("error", ` failed${message}`);
   }
-  return `${formatSemanticGlyphPrefix(icon)}${theme.fg("dim", runName(run, theme))}  ${theme.fg("dim", shortAbstract(run.abstract))} ${theme.fg("dim", "·")} ${theme.fg("dim", stats(run, theme, nowMs))}${statusText}`;
+  return `${formatSemanticGlyphPrefix(icon)}${theme.fg("dim", runName(run, theme))} ${theme.fg("dim", "·")} ${theme.fg("dim", stats(run, theme, nowMs))}${statusText}`;
 }
 
-export type ActiveRunLines = [summary: string, stats: string];
+function fitStatsLine(identity: string, statistics: string, theme: WidgetTheme, maxWidth?: number): string {
+  const separator = theme.fg("dim", " · ");
+  const line = `${identity}${separator}${theme.fg("dim", statistics)}`;
+  if (maxWidth === undefined || visibleWidth(line) <= maxWidth) return line;
+  if (visibleWidth(identity) > maxWidth) return truncateToWidth(identity, maxWidth);
+  if (visibleWidth(identity) + visibleWidth(separator) > maxWidth) return identity;
+  return truncateToWidth(line, maxWidth);
+}
 
-export function renderActiveRunLines(
+export function renderActiveRunLine(
   run: WidgetRun,
   spinnerFrame: number,
   theme: WidgetTheme,
   nowMs = Date.now(),
-  maxSummaryWidth?: number,
-): ActiveRunLines {
-  const waiting = run.status === "waiting";
-  const indicator = waiting
+  maxWidth?: number,
+): string {
+  const indicator = run.status === "waiting"
     ? theme.fg("warning", SUBAGENT_WIDGET_GLYPHS.waiting)
     : theme.fg("accent", SUBAGENT_WIDGET_SPINNER[spinnerFrame % SUBAGENT_WIDGET_SPINNER.length]);
-  const state = waiting ? ` ${theme.fg("warning", "waiting")}` : "";
-  const identity = `${formatSemanticGlyphPrefix(indicator)}${theme.bold(runName(run, theme))}${state}  ${theme.fg("muted", shortAbstract(run.abstract))}`;
-  const activityText = waiting
-    ? shortAbstract(run.request?.message ?? "") || "supervisor reply required"
-    : describeWidgetActivity(run.activity?.activeTools ?? {}, run.activity?.responseText);
-  const separator = theme.fg("dim", " · ");
-  const summary = `${identity}${separator}${theme.fg(waiting ? "warning" : "dim", activityText)}`;
-  const summaryLine = (() => {
-    if (maxSummaryWidth === undefined || visibleWidth(summary) <= maxSummaryWidth) return summary;
-    if (visibleWidth(identity) > maxSummaryWidth) return truncateToWidth(identity, maxSummaryWidth);
-    if (visibleWidth(identity) + visibleWidth(separator) > maxSummaryWidth) return identity;
-    return truncateToWidth(summary, maxSummaryWidth);
-  })();
-  const statsLine = theme.fg("dim", `${formatSubagentModel(run.model)} · ${stats(run, theme, nowMs)}`);
-  return [summaryLine, statsLine];
+  const identity = `${formatSemanticGlyphPrefix(indicator)}${theme.bold(shortAbstract(run.abstract))}${theme.fg("dim", `[${run.id.slice(0, 8)}]`)}`;
+  return fitStatsLine(identity, stats(run, theme, nowMs), theme, maxWidth);
 }
 
 /** Counts every retained run directly, so budget, overflow, and sorting never move the heading numbers. */
@@ -158,7 +149,7 @@ function categorizeRuns(runs: readonly WidgetRun[]): Categories {
 }
 
 interface Sections {
-  activeLines: ActiveRunLines[];
+  activeLines: string[];
   queuedLines: string[];
 }
 
@@ -170,38 +161,21 @@ function buildSections(
   nowMs: number,
   terminalWidth: number,
 ): Sections {
-  const activeLines = categories.active.map((run) => {
-    const summaryPrefix = theme.fg("dim", "├─") + " ";
-    const [summary, statsLine] = renderActiveRunLines(
-      run,
-      spinnerFrame,
-      theme,
-      nowMs,
-      Math.max(0, terminalWidth - visibleWidth(summaryPrefix)),
-    );
-    return [
-      truncate(summaryPrefix + summary),
-      truncate(theme.fg("dim", "│  └─") + ` ${statsLine}`),
-    ] as ActiveRunLines;
-  });
-  const queuedLines = categories.queued.map((run) => truncate(
-    theme.fg("dim", "├─") + ` ${formatSemanticGlyphPrefix(theme.fg("muted", SUBAGENT_WIDGET_GLYPHS.queued))}${theme.fg("dim", runName(run, theme))}  ${theme.fg("dim", shortAbstract(run.abstract))} ${theme.fg("dim", "·")} ${theme.fg("dim", stats(run, theme, nowMs))} ${theme.fg("muted", "queued")}`,
+  const prefix = theme.fg("dim", "├─") + " ";
+  const bodyWidth = Math.max(0, terminalWidth - visibleWidth(prefix));
+  const activeLines = categories.active.map((run) => truncate(
+    prefix + renderActiveRunLine(run, spinnerFrame, theme, nowMs, bodyWidth),
   ));
+  const queuedLines = categories.queued.map((run) => {
+    const identity = `${formatSemanticGlyphPrefix(theme.fg("muted", SUBAGENT_WIDGET_GLYPHS.queued))}${theme.fg("dim", runName(run, theme))}`;
+    return truncate(prefix + fitStatsLine(identity, stats(run, theme, nowMs), theme, bodyWidth));
+  });
   return { activeLines, queuedLines };
 }
 
 function assembleWithinBudget(heading: string, sections: Sections): string[] {
-  const lines = [heading];
-  for (const entry of sections.activeLines) lines.push(...entry);
-  lines.push(...sections.queuedLines);
-  if (sections.queuedLines.length > 0) {
-    const last = lines.length - 1;
-    lines[last] = lines[last].replace("├─", "└─");
-  } else if (sections.activeLines.length > 0) {
-    const summaryIndex = lines.length - 2;
-    lines[summaryIndex] = lines[summaryIndex].replace("├─", "└─");
-    lines[summaryIndex + 1] = lines[summaryIndex + 1].replace("│  ", "   ");
-  }
+  const lines = [heading, ...sections.activeLines, ...sections.queuedLines];
+  if (lines.length > 1) lines[lines.length - 1] = lines[lines.length - 1].replace("├─", "└─");
   return lines;
 }
 
@@ -216,10 +190,10 @@ function assembleOverflow(
   let budget = maxBody - 1;
   let hiddenActive = 0;
   let hiddenQueued = 0;
-  for (const entry of sections.activeLines) {
-    if (budget >= 2) {
-      lines.push(...entry);
-      budget -= 2;
+  for (const line of sections.activeLines) {
+    if (budget >= 1) {
+      lines.push(line);
+      budget -= 1;
     } else hiddenActive += 1;
   }
   for (const line of sections.queuedLines) {
@@ -256,7 +230,7 @@ export function renderSubagentWidgetLines(params: {
   );
   const sections = buildSections(categories, spinnerFrame, theme, truncate, nowMs, terminalWidth);
   const maxBody = MAX_SUBAGENT_WIDGET_LINES - 1;
-  const totalBody = sections.activeLines.length * 2 + sections.queuedLines.length;
+  const totalBody = sections.activeLines.length + sections.queuedLines.length;
   return totalBody <= maxBody
     ? assembleWithinBudget(heading, sections)
     : assembleOverflow(heading, sections, maxBody, truncate, theme);

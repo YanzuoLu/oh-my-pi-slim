@@ -92,7 +92,7 @@ Runs work in isolated background child sessions and returns control immediately.
 
 `list` includes `starting`, `running`, `waiting`, `completed`, `failed`, and `interrupted` runs, but never includes terminal `output` or `error`. Use `check` with one retained run ID to inspect the same public fields and recover its terminal result when present. The subagent widget uses the same retained set and ordering for counts and lifecycle, but its foreground body permanently hides terminal rows. Those runs remain retained until `delete` or `clear` removes them and remain reachable in the Subagent viewer.
 
-Each active or waiting widget entry is an atomic two-line block. The first line keeps identity and abstract ahead of trailing activity. The second line carries model, turn, tool, token, context, compaction, and elapsed statistics. The 12-line widget budget never splits an active entry.
+Each starting, active, or waiting widget entry occupies one line. It shows `<abstract>[<id>]` followed by turn, tool, token, context, compaction, and elapsed statistics. Provider, model, thinking level, and live activity text are omitted. The 12-line widget budget counts one row per visible run.
 
 `fork` defaults to `true`. A forked run inherits conversation context through the point before the current tool-call batch. Every `create` in the same batch forks from that same point. With `fork: false`, the run starts an independent session and receives only its `message`.
 
