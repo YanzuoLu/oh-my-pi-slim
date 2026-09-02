@@ -2,7 +2,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 import { registerAskRuntime } from "./ask/runtime.js";
 import { AskTuiDriver } from "./ask/tui.js";
 import {
@@ -32,7 +32,9 @@ import { widgetStackHost } from "./widget-stack-host.js";
 import type { WidgetStackSectionId } from "./widget-stack.js";
 
 const WIDGET_STACK_OWNER = "oh-my-pi-slim:extension";
-const PACKAGE_VERSION = (createRequire(import.meta.url)("../../package.json") as { version: string }).version;
+const PACKAGE_VERSION = (JSON.parse(
+  readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+) as { version: string }).version;
 const OWNED_WIDGET_SECTIONS: readonly WidgetStackSectionId[] = ["goal", "agents", "monitors"];
 
 interface TreeNotificationHold {

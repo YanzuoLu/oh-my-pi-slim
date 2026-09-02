@@ -74,6 +74,8 @@ check(
   "main extension must register Todo after the child-only return",
 );
 check(index.includes('` · OMPS Version: v${PACKAGE_VERSION}${mode}`'), "OMPS status must expose the separated package version and current provider mode");
+check(index.includes('readFileSync(new URL("../../package.json", import.meta.url), "utf8")'), "OMPS reload must read the current package version without the require cache");
+check(!index.includes("createRequire"), "OMPS package version must not remain cached across reloads");
 check(!index.includes('"oh-my-pi-slim:fast"'), "Fast Mode must share the OMPS status line");
 
 const fastMode = read("extensions/oh-my-pi-slim/fast-mode.ts");
