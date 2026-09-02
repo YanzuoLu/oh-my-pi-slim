@@ -39,7 +39,6 @@ const dependencyMap = {
   "./loop-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/loop-transcript-renderer.ts", import.meta.url).href,
   "./loop-widget.js": new URL("../extensions/oh-my-pi-slim/loop-widget.ts", import.meta.url).href,
   "./prompt-context.js": new URL("../extensions/oh-my-pi-slim/prompt-context.ts", import.meta.url).href,
-  "./subagent-checkpoint.js": new URL("../extensions/oh-my-pi-slim/subagent-checkpoint.ts", import.meta.url).href,
   "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
   "./subagent-runtime.js": new URL("../extensions/oh-my-pi-slim/subagent-runtime.ts", import.meta.url).href,
   "./subagent-model-display.js": new URL("../extensions/oh-my-pi-slim/subagent-model-display.ts", import.meta.url).href,
@@ -64,11 +63,6 @@ registerHooks({
   },
 });
 
-const {
-  CHECKPOINT_RESUME_TEXT,
-  completedToolBatch,
-  contextUsageNeedsCheckpoint,
-} = await import("../extensions/oh-my-pi-slim/subagent-checkpoint.ts");
 const {
   SUBAGENT_ACTIONS,
   SUBAGENT_PUBLIC_FIELDS,
@@ -441,72 +435,6 @@ async function inspect(harness, id) {
   };
 }
 
-function completeToolBatchEvent(toolName = "read") {
-  return {
-    message: {
-      role: "assistant",
-      stopReason: "toolUse",
-      content: [
-        { type: "text", text: "working" },
-        { type: "toolCall", id: "tool-1", name: toolName, arguments: {} },
-      ],
-    },
-    toolResults: [{ toolCallId: "tool-1", toolName, content: [], isError: false }],
-  };
-}
-
-async function createChildCheckpointHarness() {
-  const tempDir = mkdtempSync(join(CACHE, "child-checkpoint-"));
-  const projectConfigDir = join(tempDir, ".pi");
-  mkdirSync(projectConfigDir, { recursive: true });
-  writeFileSync(join(projectConfigDir, "settings.json"), JSON.stringify({
-    compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 20 },
-  }));
-  const handlers = new Map();
-  const sent = [];
-  const aborts = [];
-  let pendingMessages = false;
-  let usage = { tokens: 901, contextWindow: 1000, percent: 90.1 };
-  const pi = {
-    registerTool() {},
-    on(event, handler) { handlers.set(event, handler); },
-    getAllTools() { return [{ name: "read" }, { name: "contact_supervisor" }]; },
-    setActiveTools() {},
-    sendUserMessage(text, options) { sent.push({ text, options }); },
-  };
-  const previousChild = process.env.OMPS_SUBAGENT_CHILD;
-  const previousPiChild = process.env.PI_SUBAGENT_CHILD;
-  process.env.OMPS_SUBAGENT_CHILD = "1";
-  process.env.PI_SUBAGENT_CHILD = "1";
-  try {
-    const module = await import(`${new URL("../extensions/oh-my-pi-slim/child-supervisor.ts", import.meta.url).href}?checkpoint=${Date.now()}-${Math.random()}`);
-    module.default(pi);
-  } finally {
-    if (previousChild === undefined) delete process.env.OMPS_SUBAGENT_CHILD;
-    else process.env.OMPS_SUBAGENT_CHILD = previousChild;
-    if (previousPiChild === undefined) delete process.env.PI_SUBAGENT_CHILD;
-    else process.env.PI_SUBAGENT_CHILD = previousPiChild;
-  }
-  const ctx = {
-    cwd: tempDir,
-    getContextUsage: () => usage,
-    hasPendingMessages: () => pendingMessages,
-    isProjectTrusted: () => true,
-    abort() { aborts.push("abort"); },
-  };
-  return {
-    tempDir, handlers, sent, aborts, ctx,
-    setPendingMessages(value) { pendingMessages = value; },
-    setUsage(value) { usage = value; },
-    emit(event, payload = {}) {
-      const handler = handlers.get(event);
-      assert.equal(typeof handler, "function", `missing ${event} handler`);
-      return handler(payload, ctx);
-    },
-    cleanup() { rmSync(tempDir, { recursive: true, force: true }); },
-  };
-}
-
 test("public schema and package-agent boundaries remain minimal", async () => {
   assert.deepEqual(SUBAGENT_ACTIONS, ["create", "list", "status", "interrupt", "steer", "resume", "reply", "delete", "clear"]);
   assert.deepEqual(SUBAGENT_PUBLIC_FIELDS, ["agent", "abstract", "task", "cwd", "action", "id", "message"]);
@@ -534,20 +462,16 @@ test("public schema and package-agent boundaries remain minimal", async () => {
   assert.equal(shouldApproveChildProject(true, ROOT, join(ROOT, "extensions")), true);
 });
 
-test("notification compaction gate defers manual compact release behind a queued user turn", () => {
+test("notification compaction gate queues delivery until deferred release", () => {
   const deferred = [];
   const pauseTransitions = [];
   const notifications = [];
   let pending = false;
-  let userTurnActive = false;
   const gate = new NotificationDeliveryPauseGate((paused) => {
     pauseTransitions.push(paused);
     if (!paused && pending) {
       pending = false;
-      notifications.push({
-        userTurnActive,
-        options: { deliverAs: "steer", triggerTurn: true },
-      });
+      notifications.push("delivered");
     }
   }, (callback) => deferred.push(callback));
 
@@ -556,157 +480,41 @@ test("notification compaction gate defers manual compact release behind a queued
   gate.releaseDeferred(generation);
   assert.deepEqual(notifications, [], "session_compact handlers must not synchronously send notifications");
   assert.equal(deferred.length, 1);
-  userTurnActive = true;
   deferred.shift()();
-  assert.deepEqual(notifications, [{
-    userTurnActive: true,
-    options: { deliverAs: "steer", triggerTurn: true },
-  }]);
+  assert.deepEqual(notifications, ["delivered"]);
   assert.deepEqual(pauseTransitions, [true, false]);
 });
 
-test("notification compaction gate covers abort, next-input, checkpoint, failure, stale generation, and shutdown sequences", () => {
+test("notification compaction gate handles abort, failure, stale release, and shutdown cleanup", () => {
   const deferred = [];
-  const transitions = [];
-  const gate = new NotificationDeliveryPauseGate((paused) => transitions.push(paused), (callback) => deferred.push(callback));
-  const flushOne = () => deferred.shift()?.();
+  const pauseTransitions = [];
+  const gate = new NotificationDeliveryPauseGate(
+    (paused) => pauseTransitions.push(paused),
+    (callback) => deferred.push(callback),
+  );
 
-  const abortGeneration = gate.pause();
-  gate.releaseDeferred(abortGeneration);
-  assert.equal(gate.isPaused(), true);
-  flushOne();
-  assert.equal(gate.isPaused(), false, "manual abort releases only after the deferred callback");
-
-  const errorGeneration = gate.pause();
-  gate.releaseDeferred(errorGeneration);
-  assert.equal(gate.isPaused(), true, "manual error remains held until the next input schedules release");
-  flushOne();
-  assert.equal(gate.isPaused(), false);
-
-  const checkpointGeneration = gate.pause();
-  assert.equal(gate.isPaused(), true, "checkpoint session_compact keeps delivery paused");
-  const continuation = [];
-  continuation.push(CHECKPOINT_RESUME_TEXT);
-  gate.releaseDeferred(checkpointGeneration);
-  assert.equal(gate.isPaused(), true, "checkpoint resume starts before notification release");
-  flushOne();
-  assert.equal(gate.isPaused(), false);
-  assert.deepEqual(continuation, [CHECKPOINT_RESUME_TEXT]);
-
-  const failureGeneration = gate.pause();
-  gate.releaseDeferred(failureGeneration);
-  flushOne();
-  assert.equal(gate.isPaused(), false, "agent_settled failure release clears the gate");
+  for (const reason of ["abort", "failure"]) {
+    const generation = gate.pause();
+    gate.releaseDeferred(generation);
+    assert.equal(gate.isPaused(), true, `${reason} release remains deferred`);
+    deferred.shift()();
+    assert.equal(gate.isPaused(), false, `${reason} release clears the matching generation`);
+  }
 
   const staleGeneration = gate.pause();
   gate.releaseDeferred(staleGeneration);
   const currentGeneration = gate.pause();
-  flushOne();
-  assert.equal(gate.isCurrent(currentGeneration), true, "an older deferred callback cannot unlock a newer compaction");
+  deferred.shift()();
+  assert.equal(gate.isCurrent(currentGeneration), true, "an older release cannot unlock a newer generation");
   gate.releaseDeferred(currentGeneration);
-  flushOne();
+  deferred.shift()();
   assert.equal(gate.isPaused(), false);
 
   gate.pause();
+  const transitionCount = pauseTransitions.length;
   gate.clearWithoutDelivery();
-  assert.equal(gate.isPaused(), false, "shutdown clears pause state without delivering");
-  assert.deepEqual(transitions.filter((paused) => paused === false).length, 5);
-});
-
-test("shared checkpoint helpers validate complete tool batches and strict threshold boundaries", () => {
-  const valid = completeToolBatchEvent();
-  assert.equal(completedToolBatch(valid), true);
-  for (const invalid of [
-    { ...valid, message: { ...valid.message, role: "user" } },
-    { ...valid, message: { ...valid.message, stopReason: "stop" } },
-    { ...valid, message: { ...valid.message, content: [{ type: "text", text: "none" }] }, toolResults: [] },
-    { ...valid, toolResults: [] },
-    { ...valid, message: { ...valid.message, content: [...valid.message.content, { type: "toolCall", id: "tool-1", name: "read", arguments: {} }] } },
-    { ...valid, toolResults: [...valid.toolResults, valid.toolResults[0]] },
-    { ...valid, toolResults: [{ ...valid.toolResults[0], toolName: "write" }] },
-    { ...valid, toolResults: [{ ...valid.toolResults[0], toolCallId: "other" }] },
-  ]) assert.equal(completedToolBatch(invalid), false);
-
-  const settings = { enabled: true, reserveTokens: 100, keepRecentTokens: 20 };
-  assert.equal(contextUsageNeedsCheckpoint({ tokens: 900, contextWindow: 1000 }, settings), false);
-  assert.equal(contextUsageNeedsCheckpoint({ tokens: 901, contextWindow: 1000 }, settings), true);
-  assert.equal(contextUsageNeedsCheckpoint({ tokens: null, contextWindow: 1000 }, settings), false);
-  assert.equal(contextUsageNeedsCheckpoint({ tokens: 901, contextWindow: 1000 }, { ...settings, enabled: false }), false);
-});
-
-test("child checkpoint aborts complete batches and queues exactly one synchronous follow-up per threshold cycle", async () => {
-  const harness = await createChildCheckpointHarness();
-  try {
-    harness.emit("session_start");
-    harness.emit("turn_start");
-    harness.emit("turn_end", completeToolBatchEvent());
-    assert.equal(harness.aborts.length, 1);
-    harness.emit("session_compact", { reason: "threshold", willRetry: false });
-    assert.deepEqual(harness.sent, [{ text: CHECKPOINT_RESUME_TEXT, options: { deliverAs: "followUp" } }]);
-    harness.emit("session_compact", { reason: "threshold", willRetry: false });
-    harness.emit("agent_settled");
-    assert.equal(harness.sent.length, 1);
-
-    harness.emit("turn_start");
-    harness.emit("turn_end", completeToolBatchEvent("grep"));
-    assert.equal(harness.aborts.length, 2);
-    harness.emit("session_compact", { reason: "threshold", willRetry: false });
-    assert.deepEqual(harness.sent.map(({ text }) => text), [CHECKPOINT_RESUME_TEXT, CHECKPOINT_RESUME_TEXT]);
-    harness.emit("agent_settled");
-  } finally { harness.cleanup(); }
-});
-
-test("child checkpoint ignores pending/contact batches and resumes only matching threshold compaction", async () => {
-  const harness = await createChildCheckpointHarness();
-  const warnings = [];
-  const originalError = console.error;
-  console.error = (message) => warnings.push(String(message));
-  try {
-    harness.emit("session_start");
-    for (const unknownUsage of [undefined, null]) {
-      harness.setUsage(unknownUsage);
-      harness.emit("turn_start");
-      harness.emit("turn_end", completeToolBatchEvent());
-      assert.equal(harness.aborts.length, 0);
-    }
-    harness.setUsage({ tokens: 901, contextWindow: 1000, percent: 90.1 });
-    harness.setPendingMessages(true);
-    harness.emit("turn_start");
-    harness.emit("turn_end", completeToolBatchEvent());
-    assert.equal(harness.aborts.length, 0);
-    harness.setPendingMessages(false);
-
-    harness.emit("turn_start");
-    harness.emit("tool_execution_end", { toolName: "contact_supervisor" });
-    harness.emit("turn_end", completeToolBatchEvent("contact_supervisor"));
-    harness.emit("session_compact", { reason: "threshold", willRetry: false });
-    harness.emit("agent_settled");
-    assert.equal(harness.aborts.length, 0);
-    assert.equal(harness.sent.length, 0, "a contact_supervisor batch and its later native compaction never resume");
-
-    harness.emit("turn_start");
-    harness.emit("turn_end", completeToolBatchEvent());
-    assert.equal(harness.aborts.length, 1);
-    harness.emit("session_compact", { reason: "manual", willRetry: false });
-    harness.emit("session_compact", { reason: "threshold", willRetry: true });
-    assert.equal(harness.sent.length, 0);
-    harness.emit("agent_settled");
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /automatic resume was not started/);
-
-    harness.emit("session_compact", { reason: "threshold", willRetry: false });
-    assert.equal(harness.sent.length, 0, "settled cleanup prevents a later unrelated compaction from resuming");
-
-    harness.emit("turn_start");
-    harness.emit("turn_end", completeToolBatchEvent());
-    assert.equal(harness.aborts.length, 2);
-    harness.emit("session_shutdown");
-    harness.emit("session_compact", { reason: "threshold", willRetry: false });
-    assert.equal(harness.sent.length, 0);
-  } finally {
-    console.error = originalError;
-    harness.cleanup();
-  }
+  assert.equal(gate.isPaused(), false, "shutdown clears the paused state");
+  assert.equal(pauseTransitions.length, transitionCount, "shutdown cleanup does not deliver queued notifications");
 });
 
 test("child Cache hook uses a retention snapshot and Short fallback after the child early return", async () => {
@@ -3509,32 +3317,56 @@ test("owner session paths are isolated and RPC mode never registers a widget", a
   } finally { harness.cleanup(); }
 });
 
-test("main and child share the fixed checkpoint helpers while main keeps settled follow-up scheduling", () => {
+test("main lifecycle preserves notification ownership and child hooks stay minimal", () => {
   const source = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/index.ts"), "utf8");
   const childSource = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/child-supervisor.ts"), "utf8");
-  const checkpointSource = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent-checkpoint.ts"), "utf8");
-  const resumeText = "Resume the user's latest intent. Re-read kept recent messages above the summary to confirm the latest request. If it supersedes earlier plans in the summary, follow it. If no work remains, say so briefly; do not invent work.";
-  assert.match(source, /pi\.on\("session_before_tree", async \(event\)[\s\S]*const generation = notificationGate\.pause\(\)[\s\S]*event\.signal\.addEventListener\("abort", abortListener, \{ once: true \}\)[\s\S]*await subagents\.shutdown\(\)[\s\S]*hold\.shutdownComplete = true/);
-  assert.match(source, /pi\.on\("session_tree", async[\s\S]*takeTreeNotificationHold\(\)[\s\S]*await subagents\.restore\(ctx, notificationGate\.isPaused\(\)\)[\s\S]*finally[\s\S]*notificationGate\.releaseDeferred\(hold\.generation\)[\s\S]*subagents\.setModelResolver/);
-  assert.match(source, /pi\.on\("turn_start", \(\) => \{\s*subagents\.onTurnStart\(\)/);
-  assert.doesNotMatch(source, /pi\.on\("tool_execution_start", \(\) => \{\s*subagents\.onTurnStart\(\)/);
-  assert.match(source, /pi\.on\("message_end", \(event, ctx\) => \{[\s\S]*event\.message\.role !== "custom"[\s\S]*event\.message\.customType !== SUBAGENT_NOTIFICATION_TYPE[\s\S]*deliveryEpoch = sessionEpoch[\s\S]*deliverySessionId = ctx\.sessionManager\.getSessionId\(\)[\s\S]*setImmediate\(\(\) => \{[\s\S]*deliveryEpoch !== sessionEpoch[\s\S]*acknowledgeNotificationMessage\(message\)/);
-  assert.match(source, /pi\.on\("agent_settled", \(_event, ctx\) => \{[\s\S]*deliveryEpoch = sessionEpoch[\s\S]*deliverySessionId = ctx\.sessionManager\.getSessionId\(\)[\s\S]*setImmediate\(\(\) => \{[\s\S]*deliveryEpoch !== sessionEpoch[\s\S]*sessionCtx\?\.sessionManager\.getSessionId\(\) !== deliverySessionId[\s\S]*retryQueuedNotificationsAfterAgentSettled\(\)[\s\S]*const checkpoint = pendingCheckpoint[\s\S]*scheduleCheckpointResume/);
-  assert.equal(source.indexOf('pi.on("message_end"') < source.indexOf('pi.on("agent_settled"'), true,
-    "Pi message_end binding is registered before agent_settled retry so its ack immediate is queued first");
-  assert.equal(checkpointSource.includes(`export const CHECKPOINT_RESUME_TEXT = ${JSON.stringify(resumeText)};`), true);
-  for (const helper of ["CHECKPOINT_RESUME_TEXT", "completedToolBatch", "contextUsageNeedsCheckpoint"]) {
-    assert.match(source, new RegExp(helper));
-    assert.match(childSource, new RegExp(helper));
+
+  const beforeTreeStart = source.indexOf('pi.on("session_before_tree"');
+  const sessionTreeStart = source.indexOf('pi.on("session_tree"', beforeTreeStart);
+  const inputStart = source.indexOf('pi.on("input"', sessionTreeStart);
+  const turnStart = source.indexOf('pi.on("turn_start"');
+  const messageEndStart = source.indexOf('pi.on("message_end"', turnStart);
+  const toolExecutionStart = source.indexOf('pi.on("tool_execution_start"', messageEndStart);
+  const settledStart = source.indexOf('pi.on("agent_settled"', toolExecutionStart);
+  const shutdownStart = source.indexOf('pi.on("session_shutdown"', settledStart);
+  assert.ok([beforeTreeStart, sessionTreeStart, inputStart, turnStart, messageEndStart, toolExecutionStart, settledStart, shutdownStart]
+    .every((index) => index >= 0), "main lifecycle hooks remain registered");
+
+  const beforeTreeSource = source.slice(beforeTreeStart, sessionTreeStart);
+  assert.match(beforeTreeSource, /const generation = notificationGate\.pause\(\)/);
+  assert.match(beforeTreeSource, /event\.signal\.addEventListener\("abort", abortListener, \{ once: true \}\)/);
+  assert.match(beforeTreeSource, /await subagents\.shutdown\(\)[\s\S]*hold\.shutdownComplete = true;\s*if \(hold\.abortPending\) releaseTreeNotificationHoldDeferred\(hold\)/);
+  assert.match(beforeTreeSource, /catch \(error\) \{\s*hold\.shutdownComplete = true;\s*releaseTreeNotificationHoldDeferred\(hold\);\s*throw error/);
+
+  const sessionTreeSource = source.slice(sessionTreeStart, inputStart);
+  assert.match(sessionTreeSource, /const hold = takeTreeNotificationHold\(\)/);
+  assert.match(sessionTreeSource, /finally \{\s*if \(hold\) notificationGate\.releaseDeferred\(hold\.generation\)/);
+
+  const turnStartSource = source.slice(turnStart, messageEndStart);
+  assert.match(turnStartSource, /subagents\.onTurnStart\(\)/);
+  assert.doesNotMatch(source.slice(toolExecutionStart, settledStart), /subagents\.onTurnStart\(\)/);
+
+  const messageEndSource = source.slice(messageEndStart, toolExecutionStart);
+  assert.match(messageEndSource, /const deliveryEpoch = sessionEpoch;[\s\S]*const deliverySessionId = ctx\.sessionManager\.getSessionId\(\);[\s\S]*setImmediate\(\(\) => \{[\s\S]*deliveryEpoch !== sessionEpoch \|\| sessionCtx\?\.sessionManager\.getSessionId\(\) !== deliverySessionId[\s\S]*subagents\.acknowledgeNotificationMessage\(message\)/);
+
+  const settledSource = source.slice(settledStart, shutdownStart);
+  assert.match(settledSource, /const deliveryEpoch = sessionEpoch;[\s\S]*const deliverySessionId = ctx\.sessionManager\.getSessionId\(\);[\s\S]*setImmediate\(\(\) => \{[\s\S]*deliveryEpoch !== sessionEpoch \|\| sessionCtx\?\.sessionManager\.getSessionId\(\) !== deliverySessionId[\s\S]*subagents\.retryQueuedNotificationsAfterAgentSettled\(\)/);
+  assert.match(settledSource, /if \(notificationGate\.isPaused\(\)\) releaseCurrentNotificationsDeferred\(\);\s*goal\?\.onAgentSettled\(ctx\)/);
+  assert.equal(messageEndStart < settledStart, true,
+    "message acknowledgement is registered before settled notification retry");
+
+  for (const productionSource of [source, childSource]) {
+    for (const removedName of [
+      "subagent-checkpoint",
+      "pendingCheckpoint",
+      "CHECKPOINT_RESUME_TEXT",
+      "completedToolBatch",
+      "contextUsageNeedsCheckpoint",
+    ]) assert.equal(productionSource.includes(removedName), false, `${removedName} stays removed from production source`);
   }
-  assert.match(source, /setImmediate\(\(\) => \{[\s\S]*pi\.sendUserMessage\(CHECKPOINT_RESUME_TEXT, \{ deliverAs: "followUp" \}\)/);
-  const incompleteWarning = source.indexOf("the Goal scheduler will reevaluate continuation after delivery resumes");
-  const incompleteCheckpoint = source.slice(source.lastIndexOf("pendingCheckpoint = undefined", incompleteWarning), incompleteWarning);
-  assert.ok(incompleteCheckpoint.indexOf("notificationGate.releaseDeferred(checkpoint.notificationGeneration)") >= 0);
-  assert.ok(incompleteCheckpoint.indexOf("notificationGate.releaseDeferred(checkpoint.notificationGeneration)") < incompleteCheckpoint.indexOf("setImmediate(() => goal?.reevaluateAfterHostOperation(ctx))"),
-    "incomplete checkpoint releases the shared gate before deferred Goal reevaluation");
-  assert.match(childSource, /pi\.on\("session_compact"[\s\S]*pi\.sendUserMessage\(CHECKPOINT_RESUME_TEXT, \{ deliverAs: "followUp" \}\)[\s\S]*pendingCheckpoint = undefined/);
-  assert.doesNotMatch(`${source}\n${childSource}`, /checkpoint\.tools|Completed tool calls at the checkpoint|Re-fetch/);
+  for (const childEvent of ["turn_end", "session_compact", "agent_settled"]) {
+    assert.equal(childSource.includes(`pi.on(${JSON.stringify(childEvent)}`), false, `child does not register ${childEvent}`);
+  }
 });
 
 test("resume creates a new run ID and a complete --session invocation", async () => {

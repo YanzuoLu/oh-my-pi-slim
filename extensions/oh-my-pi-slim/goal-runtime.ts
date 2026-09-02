@@ -138,7 +138,6 @@ export interface GoalRuntimeOptions {
   clearTimeout?: (timer: GoalTimerHandle) => void;
   setInterval?: (callback: () => void, milliseconds: number) => unknown;
   clearInterval?: (timer: unknown) => void;
-  hasPendingCheckpoint?: () => boolean;
   isNotificationDeliveryPaused?: () => boolean;
   hasActiveSubagents?: () => boolean;
   hasPendingSubagentNotifications?: () => boolean;
@@ -465,7 +464,6 @@ export class GoalRuntime {
   private readonly defer: (callback: () => void) => void;
   private readonly setTimeoutFn: (callback: () => void, milliseconds: number) => GoalTimerHandle;
   private readonly clearTimeoutFn: (timer: GoalTimerHandle) => void;
-  private readonly hasPendingCheckpoint: () => boolean;
   private readonly isNotificationDeliveryPaused: () => boolean;
   private readonly hasActiveSubagents: () => boolean;
   private readonly hasPendingSubagentNotifications: () => boolean;
@@ -494,7 +492,6 @@ export class GoalRuntime {
   private pendingAutoRunKey?: string;
   private logicalRun?: LogicalRun;
   private finalAssistant?: FinalAssistant;
-  private hostAbortPending = false;
   private queuedStateMessages: Array<{ event: GoalAutomaticEvent; reason: string; goal: PublicGoalState }> = [];
 
   constructor(pi: ExtensionAPI, options: GoalRuntimeOptions = {}) {
@@ -505,7 +502,6 @@ export class GoalRuntime {
     this.defer = options.defer ?? ((callback) => setImmediate(callback));
     this.setTimeoutFn = options.setTimeout ?? ((callback, milliseconds) => setTimeout(callback, milliseconds));
     this.clearTimeoutFn = options.clearTimeout ?? ((timer) => clearTimeout(timer));
-    this.hasPendingCheckpoint = options.hasPendingCheckpoint ?? (() => false);
     this.isNotificationDeliveryPaused = options.isNotificationDeliveryPaused ?? (() => false);
     this.hasActiveSubagents = options.hasActiveSubagents ?? (() => false);
     this.hasPendingSubagentNotifications = options.hasPendingSubagentNotifications ?? (() => false);
@@ -682,7 +678,6 @@ export class GoalRuntime {
     this.pendingAutoRunKey = undefined;
     this.logicalRun = undefined;
     this.finalAssistant = undefined;
-    this.hostAbortPending = false;
   }
 
   setDeliveryPaused(paused: boolean): void {
@@ -736,10 +731,6 @@ export class GoalRuntime {
     if (this.isActive()) this.requestContinuation(ctx);
   }
 
-  markHostAbort(): void {
-    this.hostAbortPending = true;
-  }
-
   onAgentStart(ctx: ExtensionContext): void {
     if (this.logicalRun) return;
     const automatic = Boolean(this.pendingAutoRunKey);
@@ -789,18 +780,16 @@ export class GoalRuntime {
     this.refreshUI();
     const run = this.logicalRun;
     const final = this.finalAssistant;
-    const hostAbort = this.hostAbortPending;
     this.logicalRun = undefined;
     this.finalAssistant = undefined;
-    this.hostAbortPending = false;
 
     if (!this.snapshot) return;
     const status = this.snapshot.goal.status;
-    if ((status === "active" || status === "retry_wait") && final?.stopReason === "error" && !hostAbort) {
+    if ((status === "active" || status === "retry_wait") && final?.stopReason === "error") {
       this.enterRetryWait(final.errorMessage ?? "Provider request failed.");
       return;
     }
-    if (status === "active" && final?.stopReason === "aborted" && !hostAbort && !this.shuttingDown) {
+    if (status === "active" && final?.stopReason === "aborted" && !this.shuttingDown) {
       const safeToPause = run?.deliveryCandidate !== undefined && this.safeToDeliver(run.deliveryCandidate, ctx);
       this.invalidatePendingContinuation();
       if (safeToPause) this.pauseAutomatically("user_abort", "user_abort");
@@ -1218,7 +1207,7 @@ export class GoalRuntime {
   }
 
   private completeIdle(ctx: ExtensionContext): boolean {
-    if (this.hasPendingCheckpoint() || this.deliveryPaused || this.isNotificationDeliveryPaused()) return false;
+    if (this.deliveryPaused || this.isNotificationDeliveryPaused()) return false;
     if (this.hasActiveSubagents() || this.hasPendingSubagentNotifications() || this.hasBlockingMonitors()) return false;
     if (this.askWaitingCount() !== 0 || !ctx.isIdle() || ctx.hasPendingMessages()) return false;
     return true;
@@ -1314,7 +1303,6 @@ export class GoalRuntime {
     this.pendingAutoRunKey = undefined;
     this.logicalRun = undefined;
     this.finalAssistant = undefined;
-    this.hostAbortPending = false;
     this.retryDue = false;
     if (clearMessages) this.queuedStateMessages = [];
   }

@@ -534,6 +534,7 @@ test("Abort closes the overlay exactly once, rejects AbortError, removes listene
 test("AskRuntime reset drops old TUI context, can rebind cleanly, RPC never uses custom overlay, and headless never opens UI", async () => {
   const tools = new Map();
   const pi = {
+    on() {},
     registerTool(tool) { tools.set(tool.name, tool); },
     getActiveTools() { return [...tools.keys()]; },
     setActiveTools() {},

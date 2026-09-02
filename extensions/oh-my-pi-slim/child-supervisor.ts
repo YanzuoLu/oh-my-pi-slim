@@ -1,14 +1,5 @@
-import {
-  getAgentDir,
-  SettingsManager,
-  type ExtensionAPI,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import {
-  CHECKPOINT_RESUME_TEXT,
-  completedToolBatch,
-  contextUsageNeedsCheckpoint,
-} from "./subagent-checkpoint.js";
 import {
   applyCacheRetentionForRequest,
   CACHE_RETENTION_ENV_VAR,
@@ -47,15 +38,6 @@ export default function childSupervisor(pi: ExtensionAPI): void {
     );
   });
 
-  let pendingCheckpoint: { cycle: number } | undefined;
-  let checkpointCycle = 0;
-  let contactedSupervisorThisTurn = false;
-
-  function clearCheckpointState(): void {
-    pendingCheckpoint = undefined;
-    contactedSupervisorThisTurn = false;
-  }
-
   pi.registerTool({
     name: "contact_supervisor",
     label: "Contact Supervisor",
@@ -85,44 +67,6 @@ export default function childSupervisor(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", () => {
-    clearCheckpointState();
     pi.setActiveTools(pi.getAllTools().map((tool) => tool.name));
   });
-
-  pi.on("turn_start", () => {
-    contactedSupervisorThisTurn = false;
-  });
-
-  pi.on("tool_execution_end", (event) => {
-    if (event.toolName === "contact_supervisor") contactedSupervisorThisTurn = true;
-  });
-
-  pi.on("turn_end", (event, ctx) => {
-    if (
-      !completedToolBatch(event) || pendingCheckpoint || ctx.hasPendingMessages() ||
-      contactedSupervisorThisTurn
-    ) return;
-    const usage = ctx.getContextUsage();
-    const settings = SettingsManager.create(ctx.cwd, getAgentDir(), {
-      projectTrusted: ctx.isProjectTrusted(),
-    }).getCompactionSettings();
-    if (!contextUsageNeedsCheckpoint(usage, settings)) return;
-    pendingCheckpoint = { cycle: ++checkpointCycle };
-    ctx.abort();
-  });
-
-  pi.on("session_compact", (event) => {
-    if (!pendingCheckpoint || event.reason !== "threshold" || event.willRetry !== false) return;
-    pi.sendUserMessage(CHECKPOINT_RESUME_TEXT, { deliverAs: "followUp" });
-    pendingCheckpoint = undefined;
-  });
-
-  pi.on("agent_settled", () => {
-    if (!pendingCheckpoint) return;
-    const cycle = pendingCheckpoint.cycle;
-    pendingCheckpoint = undefined;
-    console.error(`[oh-my-pi-slim] Child checkpoint cycle ${cycle} ended before Pi completed threshold compaction; automatic resume was not started.`);
-  });
-
-  pi.on("session_shutdown", clearCheckpointState);
 }

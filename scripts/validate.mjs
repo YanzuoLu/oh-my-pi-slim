@@ -149,10 +149,10 @@ const lock = json("package-lock.json");
 const packageText = read("package.json");
 const lockText = read("package-lock.json");
 
-check(packageJson.version === "1.1.8", "package version must be 1.1.8");
+check(packageJson.version === "1.1.9", "package version must be 1.1.9");
 check(packageJson.description === "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.", "package description must cover all built-in runtime surfaces");
 check(["pi-package", "pi", "orchestration", "subagents", "loops", "monitoring", "ask-user-question", "goals", "todos", "scheduling"].every((keyword) => packageJson.keywords?.includes(keyword)), "package keywords must include Monitor, Ask, Goal, Loop, subagent, and Todo discovery terms");
-check(lock.version === "1.1.8" && lock.packages?.[""]?.version === "1.1.8", "package-lock version must be 1.1.8");
+check(lock.version === "1.1.9" && lock.packages?.[""]?.version === "1.1.9", "package-lock version must be 1.1.9");
 check(JSON.stringify(packageJson.pi?.extensions) === JSON.stringify([
   "./extensions/oh-my-pi-slim/index.ts",
   "./extensions/todo/index.ts",
@@ -164,6 +164,7 @@ check(!lockText.includes('"pi-subagents"'), "package-lock.json must not mention 
 check(lock.packages && Object.keys(lock.packages).length === 1, "package-lock must contain only the root package");
 check(packageJson.scripts?.test === "node --test tests/*.test.mjs", "package must expose the project test suite");
 check(packageJson.scripts?.validate === "node scripts/validate.mjs && npm test", "validate must run static checks and tests");
+check(packageJson.peerDependencies?.["@earendil-works/pi-coding-agent"] === ">=0.84.4", "package must require Pi coding agent >=0.84.4");
 
 const agentFiles = readdirSync(join(ROOT, "agents")).filter((name) => name.endsWith(".md")).sort();
 check(JSON.stringify(agentFiles) === JSON.stringify(AGENTS.map((name) => `${name}.md`).sort()), "agents/ must contain exactly six package specialists");
@@ -191,7 +192,6 @@ const monitorWidget = read("extensions/oh-my-pi-slim/monitor-widget.ts");
 const monitorTranscriptRenderer = read("extensions/oh-my-pi-slim/monitor-transcript-renderer.ts");
 const loopWidget = read("extensions/oh-my-pi-slim/loop-widget.ts");
 const loopTranscriptRenderer = read("extensions/oh-my-pi-slim/loop-transcript-renderer.ts");
-const checkpoint = read("extensions/oh-my-pi-slim/subagent-checkpoint.ts");
 const cacheRetention = read("extensions/oh-my-pi-slim/cache-retention.ts");
 const runtime = read("extensions/oh-my-pi-slim/subagent-runtime.ts");
 const core = read("extensions/oh-my-pi-slim/subagent-core.ts");
@@ -453,13 +453,10 @@ hasAll(extension, [
   'pi.on("session_tree"',
   'pi.on("session_before_compact"',
   'pi.on("session_compact"',
-  'pi.on("turn_end"',
   'pi.on("turn_start"',
   'pi.on("message_end"',
   "setImmediate(() =>",
   "subagents.acknowledgeNotificationMessage(message)",
-  "SettingsManager.create(",
-  "contextUsageNeedsCheckpoint(",
   "NotificationDeliveryPauseGate", "setNotificationDeliveryPaused(paused)", "loops.setDeliveryPaused(paused)",
   "monitors?.setDeliveryPaused(paused)", "notificationGate.releaseDeferred", "notificationGate.clearWithoutDelivery",
   "registerAskRuntime(pi)", "new AskTuiDriver(ctx.ui, { beforeOpen: () => subagentViewer.closeAsync() })",
@@ -613,7 +610,7 @@ hasNone(shutdownStatusHandler, ["setStatus("], "shutdown must not duplicate the 
 const presetStatusBody = extension.slice(extension.indexOf("export function presetStatusContent"), extension.indexOf("function isAnthropicOAuth"));
 hasNone(presetStatusBody, [".bold(", "theme.bold", "glyph", "Glyph", "Requested"], "OMPS status plain accent-only rendering without a Requested label");
 check((json("package.json").version ?? "").trim().length > 0, "package.json must define a non-empty version for the OMPS status line");
-check(json("package.json").version === "1.1.8", "compact JSON successful results and permanently compact foreground widgets remain shipped in v1.1.8");
+check(json("package.json").version === "1.1.9", "Ask cancellation abort semantics and Pi-native tool-result compaction remain shipped in v1.1.9");
 
 const sessionStartHandlerStart = extension.indexOf('pi.on("session_start"');
 const beforeSwitchStart = extension.indexOf('pi.on("session_before_switch"');
@@ -739,15 +736,15 @@ hasNone(messageEndHandler, ["GOAL_REMINDER_MESSAGE_TYPE", "goal-reminder"], "Goa
 check(!/registerMessageRenderer\(GOAL_REMINDER_MESSAGE_TYPE/.test(`${extension}\n${goalRuntime}`), "Goal reminder must not register a renderer");
 hasNone(goalRuntime, ['pi.on("context"', "systemPrompt:", "systemPromptOptions", "before_provider_request"], "Goal dynamic system and context injection boundary");
 hasAll(sessionStartHandler, [
-  "invalidateCheckpoint(false)", "clearTreeNotificationHold()", "asks.reset()", "bindAskDriver(ctx)", "asks.reconcileHostMode(ctx)",
+  "invalidateDeferredSessionState()", "clearTreeNotificationHold()", "asks.reset()", "bindAskDriver(ctx)", "asks.reconcileHostMode(ctx)",
   "loops.reset()", "await monitors?.reset()",
   'monitors?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)', "monitors?.refreshUI()",
   "goal?.restore(ctx", 'goal?.setUICtx(ctx.mode === "tui" ? ctx.ui : undefined)',
 ], "session-start tree abort ownership cleanup and Goal/Monitor UI binding");
-hasAll(beforeSwitchHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "asks.abortAll(", "bindAskDriver()", "loops.shutdown()", "goal?.setUICtx(undefined)", "await monitors?.shutdown()"], "session-switch runtime cleanup");
-hasAll(beforeForkHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "asks.abortAll(", "bindAskDriver()", "loops.shutdown()", "goal?.setUICtx(undefined)", "await monitors?.shutdown()"], "fork runtime cleanup");
+hasAll(beforeSwitchHandler, ["invalidateDeferredSessionState()", "clearTreeNotificationHold()", "asks.abortAll(", "bindAskDriver()", "loops.shutdown()", "goal?.setUICtx(undefined)", "await monitors?.shutdown()"], "session-switch runtime cleanup");
+hasAll(beforeForkHandler, ["invalidateDeferredSessionState()", "clearTreeNotificationHold()", "asks.abortAll(", "bindAskDriver()", "loops.shutdown()", "goal?.setUICtx(undefined)", "await monitors?.shutdown()"], "fork runtime cleanup");
 hasAll(beforeTreeHandler, [
-  "invalidateCheckpoint(false)", "clearTreeNotificationHold()", "asks.abortAll(", "bindAskDriver()", "goal?.setUICtx(undefined)", "const generation = notificationGate.pause()",
+  "invalidateDeferredSessionState()", "clearTreeNotificationHold()", "asks.abortAll(", "bindAskDriver()", "goal?.setUICtx(undefined)", "const generation = notificationGate.pause()",
   'event.signal.addEventListener("abort", abortListener, { once: true })', "event.signal.aborted", "abortPending",
   "await subagents.shutdown()", "hold.shutdownComplete = true", "releaseTreeNotificationHoldDeferred(hold)", "throw error",
 ], "tree shared delivery pause and abort compensation");
@@ -763,8 +760,20 @@ hasAll(sessionTreeHandler, [
 ], "tree deferred matching release and Goal/Monitor UI rebinding");
 hasNone(sessionTreeHandler, ["clearWithoutDelivery", "loops.setDeliveryPaused(false)", "notificationGate.release(generation)"], "tree synchronous release");
 const shutdownHandler = extension.slice(extension.indexOf('pi.on("session_shutdown"'));
-hasAll(shutdownHandler, ["invalidateCheckpoint(false)", "clearTreeNotificationHold()", "asks.abortAll(", "bindAskDriver()", "loops.shutdown()", "goal?.shutdown()", "monitors?.shutdown()"], "session-shutdown runtime cleanup");
+hasAll(shutdownHandler, ["invalidateDeferredSessionState()", "clearTreeNotificationHold()", "asks.abortAll(", "bindAskDriver()", "loops.shutdown()", "goal?.shutdown()", "monitors?.shutdown()"], "session-shutdown runtime cleanup");
 hasAll(extension.slice(inputStart, extension.indexOf('pi.on("session_before_compact"')), ["releaseCurrentNotificationsDeferred()"], "ordinary-input canceled-tree fallback");
+const deferredSessionStateStart = extension.indexOf("function invalidateDeferredSessionState()");
+const deferredSessionStateEnd = extension.indexOf("function resolvePresetModels", deferredSessionStateStart);
+const deferredSessionState = extension.slice(deferredSessionStateStart, deferredSessionStateEnd);
+hasAll(deferredSessionState, [
+  "function invalidateDeferredSessionState(): void", "sessionEpoch += 1", "goal?.invalidateDeferred()", "notificationGate.invalidate()",
+], "generic deferred and session state invalidation");
+const removedCheckpointSymbols = [
+  "pendingCheckpoint", "CHECKPOINT_RESUME_TEXT", "completedToolBatch", "contextUsageNeedsCheckpoint",
+  "hasPendingCheckpoint", "markHostAbort", "invalidateCheckpoint", "scheduleCheckpointResume",
+];
+hasNone(`${extension}\n${goalRuntime}\n${child}`, removedCheckpointSymbols, "production checkpoint compatibility removal");
+hasNone(extension, ['pi.on("turn_end"', "ctx.abort()", 'deliverAs: "followUp"'], "main native auto-compaction boundary");
 hasNone(extension, [...REMOVED_CAPABILITIES, "oh-my-pi-slim:file-nudge", "fileToolSeenThisTurn", "nudgeSentThisUserTurn", "FILE_TOOLS"], "main extension");
 const productionToolNames = [...`${extension}\n${askRuntime}\n${goalRuntime}\n${loopRuntime}\n${monitorRuntime}\n${runtime}\n${child}\n${todoExtension}`.matchAll(/registerTool\(\{[\s\S]*?\bname:\s*(?:ASK_TOOL_NAME|"([^"]+)")/g)]
   .map((match) => match[1] ?? "ask_user_question")
@@ -823,12 +832,12 @@ hasAll(goalAgentStartBlock, [
 ], "Goal agent_start captures the real run delivery candidate while preserving automatic classification");
 const goalAgentSettledBlock = goalRuntime.slice(goalRuntime.indexOf("onAgentSettled(ctx:"), goalRuntime.indexOf("async execute(inputValue:"));
 hasAll(goalAgentSettledBlock, [
-  'final?.stopReason === "error" && !hostAbort',
-  'final?.stopReason === "aborted" && !hostAbort',
+  'final?.stopReason === "error"',
+  'final?.stopReason === "aborted"',
   "run?.deliveryCandidate !== undefined", "this.safeToDeliver(run.deliveryCandidate, ctx)",
   "this.invalidatePendingContinuation();", 'if (safeToPause) this.pauseAutomatically("user_abort", "user_abort")',
   "else if (options.suppressContinuation !== true) this.requestContinuation(ctx);", "return;",
-], "Goal host-abort gates and captured-candidate user-abort semantics");
+], "Goal provider-error and captured-candidate user-abort semantics");
 hasNone(goalAgentSettledBlock, [
   "captureDeliveryCandidate(ctx)", "ctx.sessionManager.getLeafId()", "ctx.sessionManager.getSessionId()",
 ], "Goal user-abort settle must not manufacture a current delivery candidate");
@@ -846,7 +855,7 @@ hasAll(goalCaptureCandidateBlock, [
 hasNone(goalCaptureCandidateBlock, ["ctx,"], "Goal candidate payload must not retain the event context object");
 const goalCompleteIdleBlock = goalRuntime.slice(goalRuntime.indexOf("private completeIdle("), goalRuntime.indexOf("private branchMatchesCandidate("));
 hasAll(goalCompleteIdleBlock, [
-  "this.hasPendingCheckpoint()", "this.deliveryPaused", "this.isNotificationDeliveryPaused()",
+  "this.deliveryPaused", "this.isNotificationDeliveryPaused()",
   "this.hasActiveSubagents()", "this.hasPendingSubagentNotifications()", "this.hasBlockingMonitors()",
   "this.askWaitingCount() !== 0", "!ctx.isIdle()", "ctx.hasPendingMessages()", "return true;",
 ], "Goal complete-idle gate includes every runtime delivery blocker");
@@ -1056,6 +1065,8 @@ const askGuidelineEnd = askRuntime.indexOf("] as const;", askGuidelineStart);
 const askGuidelines = staticStrings(askRuntime.slice(askGuidelineStart, askGuidelineEnd), "Ask promptGuidelines");
 const expectedAskGuidelines = [
   "Use `ask_user_question` when a user decision must direct the next step.",
+  "Call ask_user_question alone in its tool batch.",
+  "Call ask_user_question only when Pi has no pending messages.",
   "Do not call `ask_user_question` while a Goal is active.",
 ];
 check(JSON.stringify(askGuidelines) === JSON.stringify(expectedAskGuidelines), "Ask promptGuidelines must match the reviewed array");
@@ -1086,7 +1097,7 @@ const askDescription = propertyString(askToolMetadata, "description", "Ask tool 
 const askPromptSnippetMatch = /export const ASK_PROMPT_SNIPPET = ("(?:\\.|[^"\\])*")/.exec(askRuntime);
 const askPromptSnippet = askPromptSnippetMatch ? JSON.parse(askPromptSnippetMatch[1]) : "";
 check(Boolean(askPromptSnippetMatch), "Ask tool metadata must define a static promptSnippet");
-check(askDescription === "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. A partial submit keeps every confirmed answer, while cancelling discards all of them. `ask_user_question` is unavailable while a Goal is active.", "Ask description must match the reviewed contract");
+check(askDescription === "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Call `ask_user_question` as the only tool call in its assistant message. Open it only when Pi has no pending messages. RPC prompts received while Ask is waiting or settling are rejected and must be retried after Pi is idle. Direct RPC steer or follow-up messages can bypass this gate. They are aborted with Ask and must be retried after Pi is idle. Complete, partial, and empty-submit results report confirmed answers as compact JSON and allow the agent run to continue. Cancelling discards every answer and terminates the current agent run. Every non-retrying threshold compaction is skipped until the agent settles, leaving Pi idle. `ask_user_question` is unavailable while a Goal is active.", "Ask description must match the reviewed contract");
 check(askPromptSnippet === "Collect structured user decisions.", "Ask promptSnippet must match the reviewed contract");
 checkSteBlock(askDescription, "Ask description");
 checkSteBlock(askPromptSnippet, "Ask promptSnippet");
@@ -1111,8 +1122,49 @@ hasAll(askRuntime, [
   "export function buildAskModelDto", 'outcome: "cancelled"', 'outcome: result.partial ? "partial" : "complete"',
   "answers,", "unanswered,", 'reason: result.cancelReason === "user_cancelled" ? "user_cancelled" : "empty_submit"',
   "return JSON.stringify(buildAskModelDto(result, questionnaire));",
+], "Ask model DTO keeps the complete structural outcome audit");
+const askExecuteStart = askRuntime.indexOf("execute: async (toolCallId");
+const askExecuteEnd = askRuntime.indexOf("renderCall: renderAskCall", askExecuteStart);
+const askExecute = askRuntime.slice(askExecuteStart, askExecuteEnd);
+const askUserCancelledStart = askExecute.indexOf('if (result.cancelReason === "user_cancelled")');
+const askContinuingStart = askExecute.indexOf("text: askResultModelContent(result, questionnaire)", askUserCancelledStart);
+const askUserCancelledBranch = askExecute.slice(askUserCancelledStart, askContinuingStart);
+hasAll(askUserCancelledBranch, [
+  'if (result.cancelReason === "user_cancelled")', "ctx.abort()",
+  'text: "The user declined to answer."', "details: result", "terminate: true",
+], "Ask user-cancelled branch aborts and terminates with the fixed decline result");
+hasAll(askUserCancelledBranch, [
+  'if (ctx.mode === "rpc" && ctx.hasPendingMessages()) this.notifyCancelledAskRpcAbort(ctx)',
+], "Ask user-cancelled execute branch warns about direct queued RPC messages before aborting");
+hasNone(askUserCancelledBranch, ["askResultModelContent(", "this.cancelledAskSettling = true"], "Ask user-cancelled execute branch must not return a continuing DTO or arm settlement after result resolution");
+hasNone(askRuntime, ["suppressCancelledAskThresholdCompaction"], "Ask threshold suppression must be owned only by the settling latch");
+hasAll(askRuntime, [
+  "function assertSoleAskToolCall(toolCallId: string, ctx: ExtensionContext): void",
+  "ctx.sessionManager.getBranch()", 'entry.message.role !== "assistant"', 'content.type === "toolCall"',
+  'toolCall.id === toolCallId', "toolCalls.length !== 1",
+  'throw new Error("`ask_user_question` must be the only tool call in its assistant message. Retry `ask_user_question` alone.")',
+  'executionMode: "sequential"', "assertSoleAskToolCall(toolCallId, ctx)",
+  "if (ctx.hasPendingMessages())", 'throw new Error("`ask_user_question` requires Pi to have no pending messages. Retry `ask_user_question` alone after Pi is idle.")',
+], "Ask rejects mixed tool batches and pending messages before opening its sequential UI while unmatched direct calls remain allowed");
+check(askExecute.indexOf("if (ctx.hasPendingMessages())") < askExecute.indexOf("this.executeValidated(questionnaire, signal, ctx)"), "Ask pending-message guard must run before the UI driver path");
+hasAll(askRuntime, [
+  "private cancelledAskSettling = false", "private cancelledAskRpcAbortNotified = false",
+  'this.pi.on("agent_start"', "if (!this.cancelledAskSettling) return", "this.notifyCancelledAskRpcAbort(ctx)", "ctx.abort()",
+  'private notifyCancelledAskRpcAbort(ctx: Pick<ExtensionContext, "mode" | "ui">): void',
+  'ctx.mode !== "rpc" || this.cancelledAskRpcAbortNotified', "this.cancelledAskRpcAbortNotified = true",
+  'ctx.ui.notify("Queued RPC messages were aborted with Ask. Retry after Pi is idle.", "warning")',
+  'this.pi.on("input"', 'event.source !== "rpc"', "!this.isWaiting() && !this.cancelledAskSettling",
+  'ctx.ui.notify("Ask is blocking new RPC prompts. Retry after Pi is idle.", "warning")', 'return { action: "handled" }',
+  'this.pi.on("session_before_compact"', '!this.cancelledAskSettling || event.reason !== "threshold" || event.willRetry !== false',
+  "return { cancel: true }",
+  'this.pi.on("agent_settled"', "this.cancelledAskSettling = false", "this.cancelledAskRpcAbortNotified = false", "this.emit()", 'this.abortAll("Ask runtime reset.")',
+  "blockingCount: waitingCount > 0 || this.cancelledAskSettling ? 1 : 0",
+  "const result = buildAskResult(invocation.questionnaire, driverResult)", 'if (result.cancelReason === "user_cancelled")',
+  "this.cancelledAskSettling = true", "this.settle(invocation, result)",
+], "Ask cancellation arms settlement before resolve, suppresses all threshold compactions, and aborts direct RPC queues with one warning");
+hasAll(askExecute.slice(askContinuingStart), [
   "text: askResultModelContent(result, questionnaire)", "details: result",
-], "Ask results keep complete details while every outcome uses one compact model DTO");
+], "Ask complete, partial, and empty-submit outcomes keep the continuing compact model DTO path");
 hasNone(askRuntime, [
   "Questionnaire completed.", "Questionnaire partially submitted.", "Questionnaire not completed", "Confirmed answers:",
   "No answers were retained.", "No answers were confirmed.", "Unanswered questions:", "answerDisplay(",
@@ -1153,10 +1205,9 @@ const agentSettled = extension.slice(agentSettledStart, agentSettledEnd);
 hasAll(agentSettled, [
   "deliveryEpoch = sessionEpoch", "deliverySessionId = ctx.sessionManager.getSessionId()", "setImmediate(() =>",
   "deliveryEpoch !== sessionEpoch", "sessionCtx?.sessionManager.getSessionId() !== deliverySessionId",
-  "subagents.retryQueuedNotificationsAfterAgentSettled()", "const checkpoint = pendingCheckpoint",
-  "scheduleCheckpointResume(checkpoint, ctx)",
-], "deferred settled notification retry and checkpoint compatibility");
-hasAll(agentSettled, ["releaseCurrentNotificationsDeferred()"], "agent-settled canceled-tree fallback");
+  "subagents.retryQueuedNotificationsAfterAgentSettled()", "monitors?.retryQueuedNotificationsAfterAgentSettled()",
+  "if (notificationGate.isPaused()) releaseCurrentNotificationsDeferred()", "goal?.onAgentSettled(ctx)",
+], "deferred settled notification retry, failed-operation release fallback, and normal Goal settlement");
 check(notificationMessageEndStart < agentSettledStart, "message_end acknowledgement binding must precede agent_settled retry binding");
 
 hasAll(runtime, [
@@ -1930,20 +1981,13 @@ const beforeCompactEnd = extension.indexOf('pi.on("before_agent_start"', beforeC
 const beforeCompact = extension.slice(beforeCompactStart, beforeCompactEnd);
 hasAll(beforeCompact, [
   "notificationGate.pause()", "event.signal.aborted", 'addEventListener("abort"', "setImmediate(() =>",
-  "notificationGate.isCurrent(generation)", "notificationGate.release(generation)",
-], "compaction notification pause and abort release");
+  "notificationGate.release(generation)", "goal?.reevaluateAfterHostOperation(ctx)",
+], "compaction notification pause and deferred abort release");
 const sessionCompactStart = extension.indexOf('pi.on("session_compact"');
 const sessionCompactEnd = extension.indexOf('pi.on("agent_settled"', sessionCompactStart);
 const sessionCompactHandler = extension.slice(sessionCompactStart, sessionCompactEnd);
-hasAll(sessionCompactHandler, ["pendingCheckpoint.sawThresholdCompaction = true", "releaseCurrentNotificationsDeferred()"], "deferred compaction notification release");
+hasAll(sessionCompactHandler, ["goal?.refreshFromBranch(ctx)", "releaseCurrentNotificationsDeferred()", "goal?.reevaluateAfterHostOperation(ctx)"], "deferred compaction notification release");
 hasNone(sessionCompactHandler, ["setNotificationDeliveryPaused(false)", "sendNotification("], "session_compact synchronous notification release");
-const checkpointResumeStart = extension.indexOf("function scheduleCheckpointResume");
-const checkpointResumeEnd = extension.indexOf("function resolvePresetModels", checkpointResumeStart);
-const checkpointResume = extension.slice(checkpointResumeStart, checkpointResumeEnd);
-check(
-  checkpointResume.indexOf("pi.sendUserMessage(CHECKPOINT_RESUME_TEXT") < checkpointResume.indexOf("notificationGate.releaseDeferred"),
-  "checkpoint continuation must start before deferred notification release",
-);
 const applyStateStart = runtime.indexOf("private applyState(");
 const applyStateEnd = runtime.indexOf("private async failUnhealthyRun", applyStateStart);
 const applyState = runtime.slice(applyStateStart, applyStateEnd);
@@ -2176,10 +2220,6 @@ hasNone(runtime, [
   "delete this.cacheRetentionResolver", "this.cacheRetentionResolver = undefined",
 ], "subagent deactivate and shutdown keep the Cache resolver");
 
-hasAll(checkpoint, [
-  "export const CHECKPOINT_RESUME_TEXT", "export function completedToolBatch",
-  "export function contextUsageNeedsCheckpoint", "shouldCompact(",
-], "shared checkpoint contract");
 hasAll(child, [
   'export const contactSupervisorParameters = Type.Object({', "}, { additionalProperties: false });",
   "parameters: contactSupervisorParameters",
@@ -2193,14 +2233,13 @@ hasAll(child, [
   "terminate: true",
   'pi.on("session_start"',
   "pi.setActiveTools(pi.getAllTools().map((tool) => tool.name))",
+], "child supervisor cache, contact, and tool-activation contract");
+hasNone(child, [
   'pi.on("turn_start"', 'pi.on("tool_execution_end"', 'pi.on("turn_end"',
   'pi.on("session_compact"', 'pi.on("agent_settled"', 'pi.on("session_shutdown"',
-  "completedToolBatch(event)", "contactedSupervisorThisTurn", "ctx.hasPendingMessages()",
-  "SettingsManager.create(ctx.cwd, getAgentDir()", "contextUsageNeedsCheckpoint(usage, settings)",
-  "ctx.abort()", 'event.reason !== "threshold"', "event.willRetry !== false",
-  'pi.sendUserMessage(CHECKPOINT_RESUME_TEXT, { deliverAs: "followUp" })',
-  "pendingCheckpoint = undefined",
-], "child supervisor extension with compact JSON result content");
+  "ctx.abort()", "sendUserMessage", 'deliverAs: "followUp"',
+], "child native auto-compaction boundary");
+check((child.match(/pi\.on\("/g) ?? []).length === 2, "child supervisor must register only the Cache hook and session_start");
 hasNone(child, ["Yielded to supervisor for run"], "contact_supervisor production result must not keep the legacy prose body");
 hasAll(child, [
   'const CACHE_RETENTION = cacheRetentionFromEnv(process.env[CACHE_RETENTION_ENV_VAR]) ?? "short"',
@@ -2371,6 +2410,7 @@ const subagentRuntimeTests = read("tests/subagent-runtime.test.mjs");
 hasAll(subagentRuntimeTests, [
   'env.OMPS_CACHE_RETENTION, "short"', 'env.OMPS_CACHE_RETENTION, "long"',
   "running children do not hot-switch", "children inherit an explicit default-Short Cache snapshot",
+  "notification compaction gate queues delivery until deferred release",
   "child Cache hook uses a retention snapshot and Short fallback after the child early return",
   "a non-child process registers none of the child hooks",
   "API key", "child repeats the model compatibility gate",
@@ -2719,7 +2759,7 @@ for (const metadata of modelMetadataAudit) {
 }
 const mainGuidelineCount = askGuidelines.length + goalGuidelines.length + loopGuidelines.length + monitorGuidelines.length + subagentGuidelines.length + todoGuidelines.length;
 const childGuidelineCount = contactGuidelineValues.length + todoGuidelines.length + todoChildGuidelines.length;
-check(mainGuidelineCount === 30, `main tool metadata must expose exactly 30 prompt guidelines, got ${mainGuidelineCount}`);
+check(mainGuidelineCount === 32, `main tool metadata must expose exactly 32 prompt guidelines, got ${mainGuidelineCount}`);
 check(childGuidelineCount === 10, `child tool metadata must expose exactly 10 prompt guidelines, got ${childGuidelineCount}`);
 hasNone(`${goalSchema}\n${loopSchema}\n${monitorSchema}\n${publicSchema}\n${todoSchemaBlock}`, [
   "confirmed", "force",
@@ -2968,6 +3008,13 @@ hasAll(askRuntimeTests, [
   "every RPC cancel entry discards answers that were already confirmed",
   "the shared result builder discards cancelled driver answers, malformed ones included",
   "model DTO content is exact compact JSON for complete, partial, user-cancelled, and empty-submit outcomes",
+  "registered Ask rejects pre-existing pending messages before opening UI",
+  "waiting Ask handles only new RPC input and releases the gate after ordinary completion",
+  "registered tool aborts and terminates only when the user cancels",
+  "a user cancel suppresses every non-retrying threshold compaction until settled or reset",
+  "RPC cancel warns once when a direct queued message appears before execute abort",
+  "registered Ask rejects sibling tool calls before opening UI and accepts a sole or unmatched direct call",
+  "registered tool keeps complete, partial, and empty-submit outcomes as continuing compact JSON results",
   '"outcome":"complete"', '"outcome":"partial"', '"outcome":"cancelled"',
   '"reason":"user_cancelled"', '"reason":"empty_submit"', "buildAskModelDto(complete, questionnaire)",
   "askResultModelContent(complete, questionnaire).includes(\"\\n\")", "question|header|selected",
@@ -3152,7 +3199,6 @@ hasAll(goalTests, [
   "Goal reminder type and model-facing text", 'GOAL_REMINDER_MESSAGE_TYPE, "oh-my-pi-slim:goal-reminder"',
   'runtime.status().status, "retry_wait"', 'runtime.phaseReminder(), undefined',
   "continuation waits for the full safe gate", "deferred continuation requires the exact captured branch until delivery", "provider failures use unbounded frozen backoff",
-  'test("host abort with provider error preserves active Goal without retry state, events, entries, or timer", async () => {',
   "user abort pauses only when the complete Goal delivery gate is idle",
   "distinct Pi event contexts with stable delivery identity still allow user-abort pause",
   "distinct Pi event contexts allow normal branch descendants",
@@ -3164,7 +3210,7 @@ hasAll(goalTests, [
   "package lifecycle releases naturally reschedule suppressed user aborts",
   "Goal delivery release naturally reschedules a suppressed user abort",
   "suppressed user abort preserves no-progress and invalidates old continuation before lifecycle reevaluation",
-  "host abort does not pause and no-progress counts only automatic continuation runs", "ownership and Goal view stats",
+  "no-progress counts only automatic continuation runs", "ownership and Goal view stats",
   "slash command resends a real user message", "continuationNumber", "refreshUI()",
   "clear is a no-op with no Goal and never appends a tombstone",
   "clear erases a paused, completed, or cancelled Goal through a null tombstone",
@@ -3299,7 +3345,16 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "An `active` or `retry_wait` Goal blocks `clear`", "must ask whether to pause or cancel it",
         "A cleared branch reports no Goal at all",
         "leaving retained subagent runs untouched", "no `confirmed` or `force` field",
-        "Every successful result from `ask_user_question`, `goal`, `loop`, `monitor`, `subagent`, `contact_supervisor`, and `todo`",
+        "Every successful result from `goal`, `loop`, `monitor`, `subagent`, `contact_supervisor`, and `todo`",
+        "Complete, partial, and empty-submit results from `ask_user_question` use the same contract",
+        "A user-cancelled Ask instead returns the natural-language content `The user declined to answer.`",
+        "keeps the empty `AskResult` in `details`", "terminates the current agent run", "skips every non-retrying threshold compaction until the agent settles idle",
+        "Must be the only tool call in its assistant message", "Pi must have no pending messages",
+        "A mixed tool batch or pre-existing pending message is rejected before the questionnaire opens",
+        "ordinary RPC prompts pass through the input hook and are rejected", "Direct RPC `steer` or `follow_up` messages can bypass that hook",
+        "they are discarded with the Ask abort", "Queued RPC messages were aborted with Ask. Retry after Pi is idle.",
+        "The caller must retry after Pi becomes idle", "cancels every non-retrying threshold compaction until the agent settles",
+        "Manual and overflow compaction remain unaffected",
         "one compact single-line JSON value in `content`", "model-facing body", "`details` remains the complete UI and internal contract",
         "normal transcript rendering reads `details` first before falling back to `content`",
         "Errors and proactive custom notifications remain natural language", "Goal continuations", "Loop fires", "Monitor notifications",
@@ -3367,7 +3422,15 @@ for (const file of ["README.md", "README.zh-CN.md"]) {
         "`active` 或 `retry_wait` Goal 会阻止 `clear`", "必须先询问是否暂停或取消",
         "清理后的 branch 报告没有任何 Goal",
         "retained subagent run 保持不变", "没有 `confirmed` 或 `force` 字段",
-        "`ask_user_question`、`goal`、`loop`、`monitor`、`subagent`、`contact_supervisor` 与 `todo` 的每个成功结果",
+        "`goal`、`loop`、`monitor`、`subagent`、`contact_supervisor` 与 `todo` 的每个成功结果",
+        "`ask_user_question` 的 complete、partial 与 empty-submit 结果使用同一契约",
+        "用户取消 Ask 时是唯一例外", "`The user declined to answer.`", "answer 为空的 `AskResult`", "终止当前 agent run", "跳过 agent settle 前的全部非 retry threshold compaction",
+        "必须是所属 assistant message 中唯一的 tool call", "Pi 必须没有 pending message",
+        "混合 tool batch 或预存 pending message 会在问卷打开前被拒绝",
+        "普通 RPC prompt 会经过 input hook", "直接 RPC `steer` 或 `follow_up` message 可以绕过该 hook",
+        "它们会随 Ask abort 被丢弃", "Queued RPC messages were aborted with Ask. Retry after Pi is idle.",
+        "调用方必须等 Pi idle 后重试", "取消 agent settle 前的每次非 retry threshold compaction",
+        "Manual 与 overflow compaction 不受影响",
         "一个紧凑单行 JSON 值", "面向模型的正文", "`details` 仍是完整的 UI 与内部契约",
         "正常 transcript 渲染会优先读取 `details`", "错误与主动 custom notification 仍使用自然语言",
         "Goal continuation", "Loop fire", "Monitor notification", "Subagent waiting 或 terminal notification",
@@ -4153,7 +4216,7 @@ if (packCheck.status === 0) {
     const packed = JSON.parse(packCheck.stdout);
     const files = packed[0]?.files?.map((entry) => entry.path) ?? [];
     check(files.includes("extensions/oh-my-pi-slim/runner/omps-runner.mjs"), "npm pack must include the detached runner");
-    check(files.includes("extensions/oh-my-pi-slim/subagent-checkpoint.ts"), "npm pack must include the shared checkpoint helper");
+    check(!files.includes("extensions/oh-my-pi-slim/subagent-checkpoint.ts"), "npm pack must not include the removed checkpoint helper");
     check(files.includes("extensions/oh-my-pi-slim/runner/rpc-child.mjs"), "npm pack must include the runner RPC child helper");
     check(files.includes("extensions/oh-my-pi-slim/subagent-model-display.ts"), "npm pack must include the shared subagent model formatter");
     check(files.includes("extensions/oh-my-pi-slim/semantic-glyph.ts"), "npm pack must include the shared semantic glyph helper");

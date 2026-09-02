@@ -279,7 +279,7 @@ test("Ask renderer safely falls back for errors and malformed details without mu
 
 test("AskRuntime registers the package-isomorphic call and result renderers", () => {
   const tools = new Map();
-  const pi = { registerTool(tool) { tools.set(tool.name, tool); } };
+  const pi = { on() {}, registerTool(tool) { tools.set(tool.name, tool); } };
   const runtime = new AskRuntime(pi);
   runtime.registerTool();
   const tool = tools.get("ask_user_question");

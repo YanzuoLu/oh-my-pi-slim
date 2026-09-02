@@ -39,7 +39,7 @@ The main session plans, delegates, and verifies. Child sessions do focused work 
 
 ### Requirements
 
-- A Pi version compatible with the 0.84.2 package and RPC APIs.
+- A Pi version compatible with the 0.84.4 package and RPC APIs. Pi 0.84.4 is the compatibility boundary because OMPS depends on its native threshold compaction after tool results.
 - Configured authentication for every provider/model used by the selected preset.
 - An image-capable model for the explicitly configured `observer` role.
 - A supported POSIX system for Monitor; Monitor is unavailable on Windows.
@@ -90,7 +90,7 @@ The package exposes an intentionally small tool surface:
 
 `ask_user_question`, `goal`, `loop`, `monitor`, and `subagent` are main-only. Todo works in both environments. `contact_supervisor` is child-only. RPC sessions receive the supported tools but no package widgets; JSON and print modes cannot use Ask.
 
-Every successful result from `ask_user_question`, `goal`, `loop`, `monitor`, `subagent`, `contact_supervisor`, and `todo` places one compact single-line JSON value in `content`. That JSON is the model-facing body. `details` remains the complete UI and internal contract, and normal transcript rendering reads `details` first before falling back to `content`. Errors and proactive custom notifications remain natural language, including Goal continuations, Loop fires, Monitor notifications, and Subagent waiting or terminal notifications.
+Every successful result from `goal`, `loop`, `monitor`, `subagent`, `contact_supervisor`, and `todo` places one compact single-line JSON value in `content`. Complete, partial, and empty-submit results from `ask_user_question` use the same contract. A user-cancelled Ask instead returns the natural-language content `The user declined to answer.`, keeps the empty `AskResult` in `details`, terminates the current agent run, and skips every non-retrying threshold compaction until the agent settles idle. For JSON results, the JSON is the model-facing body. `details` remains the complete UI and internal contract, and normal transcript rendering reads `details` first before falling back to `content`. Errors and proactive custom notifications remain natural language, including Goal continuations, Loop fires, Monitor notifications, and Subagent waiting or terminal notifications.
 
 ## Main tools
 
@@ -192,13 +192,17 @@ Opens a structured main-session questionnaire with one to four questions.
 | Selection | Supports single-select and multi-select questions |
 | Custom input | Accepts custom responses |
 | Preview | Shows previews for single-select options |
-| Partial results | Submitting returns every confirmed answer, even a partial or empty set |
-| Cancelling | Discards every answer, including ones already confirmed |
+| Tool batch | Must be the only tool call in its assistant message |
+| Pending messages | Opens only when Pi has no pending messages |
+| Partial results | Submitting returns every confirmed answer, even a partial or empty set, and lets the run continue |
+| Cancelling | Discards every answer, terminates the current agent run, skips all non-retrying threshold compaction until settle, and leaves Pi idle |
 | Goal guard | Is unavailable while a Goal is active |
 
-A single question has no separate Submit step: confirming an option, a multi-select `Next` row, or a custom response finishes the questionnaire right there. Two or more questions keep the `Submit` tab, where you can submit a partial or empty set of answers, or cancel.
+A single question has no separate Submit step: confirming an option, a multi-select `Next` row, or a custom response finishes the questionnaire right there. Two or more questions keep the `Submit` tab, where you can submit a partial or empty set of answers, or cancel. The provider must call `ask_user_question` alone as the only tool call in that assistant message, and Pi must have no pending messages. A mixed tool batch or pre-existing pending message is rejected before the questionnaire opens. Retry Ask alone after Pi is idle.
 
-Submit and cancel mean different things. Submitting hands back exactly what you confirmed, so a partial submit is a real answer to some questions and silence on the rest. Cancelling is a full withdrawal: the model receives no answers at all and is told which questions went unanswered. Every cancel entry behaves the same way, in both the TUI questionnaire and the RPC dialog.
+While Ask is waiting for questionnaire input, and after a user cancellation until the agent fully settles, ordinary RPC prompts pass through the input hook and are rejected with `Ask is blocking new RPC prompts. Retry after Pi is idle.` Direct RPC `steer` or `follow_up` messages can bypass that hook. If they do, they are discarded with the Ask abort and receive the one-time warning `Queued RPC messages were aborted with Ask. Retry after Pi is idle.` The caller must retry after Pi becomes idle.
+
+Submit and cancel mean different things. Submitting hands back exactly what you confirmed as compact JSON, so a partial submit is a real answer to some questions and silence on the rest. An empty submit is also an ordinary result and allows the provider loop to continue. Cancelling is a user refusal and a full withdrawal. Every answer is discarded, the tool result records an empty `AskResult` with `user_cancelled`, and the fixed natural-language content says `The user declined to answer.` The current agent run then terminates. Pi cancels every non-retrying threshold compaction until the agent settles, avoiding those summary provider requests, and then becomes idle. Manual and overflow compaction remain unaffected. Every cancel entry behaves the same way in both the TUI questionnaire and the RPC dialog. Historical transcript replay keeps using the existing `details`-first rendering behavior.
 
 Ask is main-only and requires an interactive UI. It is not offered in JSON or print modes.
 

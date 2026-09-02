@@ -48,7 +48,13 @@ function createPi(active = []) {
   const tools = new Map();
   const activeTools = [...active];
   const setCalls = [];
+  const handlers = new Map();
   const pi = {
+    on(event, handler) {
+      const registered = handlers.get(event) ?? [];
+      registered.push(handler);
+      handlers.set(event, registered);
+    },
     registerTool(tool) {
       tools.set(tool.name, tool);
       if (!activeTools.includes(tool.name)) activeTools.push(tool.name);
@@ -60,11 +66,35 @@ function createPi(active = []) {
     },
     getAllTools() { return [...tools.values()]; },
   };
-  return { pi, tools, activeTools, setCalls };
+  async function emit(event, payload = {}, ctx = {}) {
+    const results = [];
+    for (const handler of handlers.get(event) ?? []) results.push(await handler(payload, ctx));
+    return results;
+  }
+  return { pi, tools, activeTools, setCalls, handlers, emit };
 }
 
-function tuiCtx() {
-  return { mode: "tui", hasUI: true, ui: {} };
+function assistantBranch(toolCallIds = ["call"]) {
+  return [{
+    type: "message",
+    id: "assistant",
+    parentId: null,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    message: {
+      role: "assistant",
+      content: toolCallIds.map((id) => ({ type: "toolCall", id, name: id === "call" ? "ask_user_question" : "read", arguments: {} })),
+    },
+  }];
+}
+
+function tuiCtx(toolCallIds = ["call"], hasPendingMessages = false) {
+  return {
+    mode: "tui",
+    hasUI: true,
+    ui: {},
+    sessionManager: { getBranch: () => assistantBranch(toolCallIds) },
+    hasPendingMessages: () => hasPendingMessages,
+  };
 }
 
 function rpcCtx(ui) {
@@ -140,10 +170,12 @@ test("Ask tool metadata and action fields match the frozen contract", () => {
   runtime.registerTool();
   const tool = harness.tools.get("ask_user_question");
   assert.equal(tool.executionMode, "sequential");
-  assert.equal(tool.description, "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. A partial submit keeps every confirmed answer, while cancelling discards all of them. `ask_user_question` is unavailable while a Goal is active.");
+  assert.equal(tool.description, "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Call `ask_user_question` as the only tool call in its assistant message. Open it only when Pi has no pending messages. RPC prompts received while Ask is waiting or settling are rejected and must be retried after Pi is idle. Direct RPC steer or follow-up messages can bypass this gate. They are aborted with Ask and must be retried after Pi is idle. Complete, partial, and empty-submit results report confirmed answers as compact JSON and allow the agent run to continue. Cancelling discards every answer and terminates the current agent run. Every non-retrying threshold compaction is skipped until the agent settles, leaving Pi idle. `ask_user_question` is unavailable while a Goal is active.");
   assert.equal(tool.promptSnippet, "Collect structured user decisions.");
   assert.deepEqual(tool.promptGuidelines, [
     "Use `ask_user_question` when a user decision must direct the next step.",
+    "Call ask_user_question alone in its tool batch.",
+    "Call ask_user_question only when Pi has no pending messages.",
     "Do not call `ask_user_question` while a Goal is active.",
   ]);
   assert.deepEqual(ASK_RESERVED_LABELS, ["Other", "Type something.", "Next"]);
@@ -590,19 +622,226 @@ test("headless reconciliation removes and restores only Ask, while execute keeps
   assert.equal(runtime.waitingCount(), 0);
 });
 
-test("registered tool uses the shared envelope and user cancel remains a normal result", async () => {
+test("registered Ask rejects pre-existing pending messages before opening UI", async () => {
+  const harness = createPi();
+  let driverCalls = 0;
+  const runtime = new AskRuntime(harness.pi, { tuiDriver: { ask: async () => {
+    driverCalls += 1;
+    return { answers: [] };
+  } } });
+  runtime.registerTool();
+  let abortCalls = 0;
+  const ctx = { ...tuiCtx(["call"], true), abort() { abortCalls += 1; } };
+  await assert.rejects(
+    harness.tools.get("ask_user_question").execute("call", baseParams, undefined, undefined, ctx),
+    (error) => error.message === "`ask_user_question` requires Pi to have no pending messages. Retry `ask_user_question` alone after Pi is idle.",
+  );
+  assert.equal(driverCalls, 0);
+  assert.equal(abortCalls, 0);
+});
+
+test("waiting Ask handles only new RPC input and releases the gate after ordinary completion", async () => {
+  const harness = createPi();
+  const deferred = deferredDriver();
+  const runtime = new AskRuntime(harness.pi, { tuiDriver: deferred.driver });
+  runtime.registerTool();
+  const pending = harness.tools.get("ask_user_question").execute("call", baseParams, undefined, undefined, { ...tuiCtx(), abort() {} });
+  await flush();
+  assert.equal(runtime.waitingCount(), 1);
+  assert.equal(runtime.state().blockingCount, 1);
+  const notifications = [];
+  const inputCtx = { ui: { notify(message, level) { notifications.push({ message, level }); } } };
+  assert.deepEqual(await harness.emit("input", { source: "rpc" }, inputCtx), [{ action: "handled" }]);
+  assert.deepEqual(notifications, [{ message: "Ask is blocking new RPC prompts. Retry after Pi is idle.", level: "warning" }]);
+  assert.deepEqual(await harness.emit("input", { source: "extension" }, inputCtx), [undefined]);
+  deferred.calls[0].resolve({ answers: [{ questionIndex: 0, kind: "option", answer: "Safe" }] });
+  await pending;
+  assert.equal(runtime.state().blockingCount, 0);
+  assert.deepEqual(await harness.emit("input", { source: "rpc" }, inputCtx), [undefined]);
+  assert.equal(notifications.length, 1);
+});
+
+test("registered tool aborts and terminates only when the user cancels", async () => {
   const harness = createPi();
   const runtime = new AskRuntime(harness.pi, { tuiDriver: { ask: async () => ({
-    answers: [{ questionIndex: 0, kind: "custom", answer: "partial" }],
+    answers: [{ questionIndex: 0, kind: "custom", answer: "discarded" }],
     cancelled: true,
   }) } });
   runtime.registerTool();
-  const result = await harness.tools.get("ask_user_question").execute("call", baseParams, undefined, undefined, tuiCtx());
-  assert.deepEqual(result.details, { answers: [], cancelled: true, partial: true, cancelReason: "user_cancelled" });
-  assert.equal(
-    result.content[0].text,
-    '{"outcome":"cancelled","answers":[],"unanswered":[0],"reason":"user_cancelled"}',
+  const states = [];
+  runtime.subscribe((state) => states.push(state));
+  let abortCalls = 0;
+  const ctx = { ...tuiCtx(), abort() { abortCalls += 1; } };
+  const result = await harness.tools.get("ask_user_question").execute("call", baseParams, undefined, undefined, ctx);
+  assert.equal(abortCalls, 1);
+  assert.deepEqual(result, {
+    content: [{ type: "text", text: "The user declined to answer." }],
+    details: { answers: [], cancelled: true, partial: true, cancelReason: "user_cancelled" },
+    terminate: true,
+  });
+  assert.equal(runtime.waitingCount(), 0);
+  assert.equal(runtime.state().blockingCount, 1);
+  assert.ok(states.some((state) => state.waitingCount === 0 && state.blockingCount === 1));
+
+  const notifications = [];
+  const inputCtx = { ui: { notify(message, level) { notifications.push({ message, level }); } } };
+  assert.deepEqual(await harness.emit("input", { source: "rpc" }, inputCtx), [{ action: "handled" }]);
+  assert.deepEqual(notifications, [{ message: "Ask is blocking new RPC prompts. Retry after Pi is idle.", level: "warning" }]);
+
+  let agentStartAborts = 0;
+  const rpcAbortNotifications = [];
+  const agentCtx = {
+    mode: "rpc",
+    ui: { notify(message, level) { rpcAbortNotifications.push({ message, level }); } },
+    abort() { agentStartAborts += 1; },
+  };
+  await harness.emit("agent_start", {}, agentCtx);
+  await harness.emit("agent_start", {}, agentCtx);
+  assert.equal(agentStartAborts, 2);
+  assert.deepEqual(rpcAbortNotifications, [{
+    message: "Queued RPC messages were aborted with Ask. Retry after Pi is idle.",
+    level: "warning",
+  }]);
+  let tuiAgentStartAborts = 0;
+  await harness.emit("agent_start", {}, {
+    mode: "tui",
+    ui: { notify() { throw new Error("non-RPC agent_start must not notify"); } },
+    abort() { tuiAgentStartAborts += 1; },
+  });
+  assert.equal(tuiAgentStartAborts, 1);
+  assert.equal(rpcAbortNotifications.length, 1);
+
+  await harness.emit("agent_settled");
+  assert.equal(runtime.state().blockingCount, 0);
+  assert.equal(states.at(-1).blockingCount, 0);
+  await harness.emit("agent_start", {}, agentCtx);
+  assert.equal(agentStartAborts, 2);
+  assert.deepEqual(await harness.emit("input", { source: "rpc" }, inputCtx), [undefined]);
+  assert.equal(notifications.length, 1);
+});
+
+test("RPC cancel warns once when a direct queued message appears before execute abort", async () => {
+  const harness = createPi();
+  const runtime = new AskRuntime(harness.pi);
+  runtime.registerTool();
+  let pendingChecks = 0;
+  let abortCalls = 0;
+  const notifications = [];
+  const ctx = {
+    ...tuiCtx(),
+    mode: "rpc",
+    ui: {
+      async select() { return ASK_RPC_CANCEL_LABEL; },
+      async input() { throw new Error("unexpected input"); },
+      notify(message, level) { notifications.push({ message, level }); },
+    },
+    hasPendingMessages() {
+      pendingChecks += 1;
+      return pendingChecks > 1;
+    },
+    abort() { abortCalls += 1; },
+  };
+  const result = await harness.tools.get("ask_user_question").execute("call", baseParams, undefined, undefined, ctx);
+  assert.equal(result.content[0].text, "The user declined to answer.");
+  assert.equal(result.terminate, true);
+  assert.equal(abortCalls, 1);
+  assert.deepEqual(notifications, [{
+    message: "Queued RPC messages were aborted with Ask. Retry after Pi is idle.",
+    level: "warning",
+  }]);
+  await harness.emit("agent_start", {}, ctx);
+  await harness.emit("agent_start", {}, ctx);
+  assert.equal(abortCalls, 3);
+  assert.equal(notifications.length, 1);
+});
+
+test("a user cancel suppresses every non-retrying threshold compaction until settled or reset", async () => {
+  const harness = createPi();
+  const runtime = new AskRuntime(harness.pi, { tuiDriver: { ask: async () => ({ answers: [], cancelled: true }) } });
+  runtime.registerTool();
+  const tool = harness.tools.get("ask_user_question");
+  const ctx = { ...tuiCtx(), abort() {} };
+
+  await tool.execute("call", baseParams, undefined, undefined, ctx);
+  assert.deepEqual(await harness.emit("session_before_compact", { reason: "manual", willRetry: false }), [undefined]);
+  assert.deepEqual(await harness.emit("session_before_compact", { reason: "overflow", willRetry: true }), [undefined]);
+  assert.deepEqual(await harness.emit("session_before_compact", { reason: "threshold", willRetry: true }), [undefined]);
+  assert.deepEqual(await harness.emit("session_before_compact", { reason: "threshold", willRetry: false }), [{ cancel: true }]);
+  assert.deepEqual(await harness.emit("session_before_compact", { reason: "threshold", willRetry: false }), [{ cancel: true }]);
+  assert.deepEqual(await harness.emit("session_before_compact", { reason: "threshold", willRetry: false }), [{ cancel: true }]);
+
+  await tool.execute("call", baseParams, undefined, undefined, ctx);
+  await harness.emit("agent_settled");
+  assert.deepEqual(await harness.emit("session_before_compact", { reason: "threshold", willRetry: false }), [undefined]);
+
+  await tool.execute("call", baseParams, undefined, undefined, ctx);
+  runtime.reset();
+  assert.deepEqual(await harness.emit("session_before_compact", { reason: "threshold", willRetry: false }), [undefined]);
+});
+
+test("registered Ask rejects sibling tool calls before opening UI and accepts a sole or unmatched direct call", async () => {
+  const harness = createPi();
+  let driverCalls = 0;
+  const runtime = new AskRuntime(harness.pi, { tuiDriver: { ask: async () => {
+    driverCalls += 1;
+    return { answers: [{ questionIndex: 0, kind: "option", answer: "Safe" }] };
+  } } });
+  runtime.registerTool();
+  const tool = harness.tools.get("ask_user_question");
+  let abortCalls = 0;
+  const mixedCtx = { ...tuiCtx(["call", "sibling"]), abort() { abortCalls += 1; } };
+  await assert.rejects(
+    tool.execute("call", baseParams, undefined, undefined, mixedCtx),
+    (error) => error.message === "`ask_user_question` must be the only tool call in its assistant message. Retry `ask_user_question` alone.",
   );
+  assert.equal(driverCalls, 0);
+  assert.equal(abortCalls, 0);
+
+  const sole = await tool.execute("call", baseParams, undefined, undefined, { ...tuiCtx(), abort() { abortCalls += 1; } });
+  assert.equal(sole.terminate, undefined);
+  assert.equal(driverCalls, 1);
+  const unmatched = await tool.execute("call", baseParams, undefined, undefined, { ...tuiCtx(["other"]), abort() { abortCalls += 1; } });
+  assert.equal(unmatched.terminate, undefined);
+  assert.equal(driverCalls, 2);
+  assert.equal(abortCalls, 0);
+});
+
+test("registered tool keeps complete, partial, and empty-submit outcomes as continuing compact JSON results", async () => {
+  const twoQuestions = { questions: [
+    baseParams.questions[0],
+    { question: "Second?", header: "Second", options: [{ label: "No", description: "No." }, { label: "Yes", description: "Yes." }] },
+  ] };
+  const cases = [
+    {
+      params: baseParams,
+      driverResult: { answers: [{ questionIndex: 0, kind: "option", answer: "Safe" }] },
+      content: '{"outcome":"complete","answers":[{"questionIndex":0,"kind":"option","answer":"Safe","preview":"full preview"}],"unanswered":[]}',
+    },
+    {
+      params: twoQuestions,
+      driverResult: { answers: [{ questionIndex: 0, kind: "option", answer: "Safe" }] },
+      content: '{"outcome":"partial","answers":[{"questionIndex":0,"kind":"option","answer":"Safe","preview":"full preview"}],"unanswered":[1]}',
+    },
+    {
+      params: baseParams,
+      driverResult: { answers: [] },
+      content: '{"outcome":"cancelled","answers":[],"unanswered":[0],"reason":"empty_submit"}',
+    },
+  ];
+
+  for (const { params, driverResult, content } of cases) {
+    const harness = createPi();
+    const runtime = new AskRuntime(harness.pi, { tuiDriver: { ask: async () => driverResult } });
+    runtime.registerTool();
+    let abortCalls = 0;
+    const ctx = { ...tuiCtx(), abort() { abortCalls += 1; } };
+    const result = await harness.tools.get("ask_user_question").execute("call", params, undefined, undefined, ctx);
+    assert.equal(abortCalls, 0);
+    assert.equal(result.terminate, undefined);
+    assert.equal(result.content[0].text, content);
+    assert.equal(runtime.state().blockingCount, 0);
+    assert.deepEqual(await harness.emit("session_before_compact", { reason: "threshold", willRetry: false }), [undefined]);
+  }
 });
 
 test("a host, tool, or session abort stays an AbortError and never becomes a user cancellation", async () => {

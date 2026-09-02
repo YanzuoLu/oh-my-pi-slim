@@ -108,7 +108,6 @@ function createHarness(options = {}) {
       return timer;
     },
     clearTimeout(timer) { timer.cleared = true; },
-    hasPendingCheckpoint: () => options.pendingCheckpoint?.() ?? false,
     isNotificationDeliveryPaused: () => options.notificationPaused?.() ?? false,
     hasActiveSubagents: () => options.activeSubagents?.() ?? false,
     hasPendingSubagentNotifications: () => options.pendingSubagentNotifications?.() ?? false,
@@ -536,29 +535,6 @@ test("provider failures use unbounded frozen backoff, timer-safe activation, and
   assert.equal(harness.runtime.status().lastProviderError, null);
 });
 
-test("host abort with provider error preserves active Goal without retry state, events, entries, or timer", async () => {
-  const harness = createHarness();
-  await harness.execute(createInput);
-  const stateEventsBefore = harness.sent.filter((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE).length;
-  const stateEntriesBefore = harness.branch.filter((entry) => entry.customType === GOAL_STATE_ENTRY_TYPE).length;
-  const branchEntriesBefore = harness.branch.length;
-
-  harness.runtime.onAgentStart(harness.ctx);
-  harness.runtime.markHostAbort();
-  harness.runtime.onAgentEnd({
-    messages: [{ role: "assistant", stopReason: "error", errorMessage: "This operation was aborted" }],
-  });
-  harness.runtime.onAgentSettled(harness.ctx, { suppressContinuation: true });
-
-  assert.equal(harness.runtime.status().status, "active");
-  assert.equal(harness.runtime.status().retryAttempt, 0);
-  assert.equal(harness.runtime.status().lastProviderError, null);
-  assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE).length, stateEventsBefore);
-  assert.equal(harness.branch.filter((entry) => entry.customType === GOAL_STATE_ENTRY_TYPE).length, stateEntriesBefore);
-  assert.equal(harness.branch.length, branchEntriesBefore);
-  assert.equal(harness.timers.length, 0);
-});
-
 test("user abort pauses only when the complete Goal delivery gate is idle", async () => {
   const harness = createHarness();
   await harness.execute(createInput);
@@ -681,7 +657,6 @@ test("every Goal delivery blocker suppresses user-abort pause without state, eve
   const cases = [
     { name: "ctx non-idle", prepare: (harness) => harness.setIdle(false) },
     { name: "pending messages", prepare: (harness) => harness.setPending(true) },
-    { name: "pending checkpoint", options: { pendingCheckpoint: () => true } },
     { name: "Goal delivery pause", prepare: (harness) => harness.runtime.setDeliveryPaused(true) },
     { name: "notification delivery pause", options: { notificationPaused: () => true } },
     { name: "active subagent", options: { activeSubagents: () => true } },
@@ -801,15 +776,7 @@ test("suppressed user abort preserves no-progress and invalidates old continuati
   assert.equal(harness.runtime.status().noProgressCount, 1);
 });
 
-test("host abort does not pause and no-progress counts only automatic continuation runs", async () => {
-  const hostAbort = createHarness();
-  await hostAbort.execute(createInput);
-  hostAbort.runtime.onAgentStart(hostAbort.ctx);
-  hostAbort.runtime.markHostAbort();
-  hostAbort.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted" }] });
-  hostAbort.runtime.onAgentSettled(hostAbort.ctx, { suppressContinuation: true });
-  assert.equal(hostAbort.runtime.status().status, "active");
-
+test("no-progress counts only automatic continuation runs", async () => {
   const stalled = createHarness();
   await stalled.execute(createInput);
   for (let round = 0; round < 3; round += 1) {

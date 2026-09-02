@@ -12,6 +12,8 @@ export const ASK_RESERVED_LABELS = ["Other", ASK_CUSTOM_LABEL, ASK_NEXT_LABEL] a
 export const ASK_PROMPT_SNIPPET = "Collect structured user decisions.";
 export const ASK_PROMPT_GUIDELINES = [
   "Use `ask_user_question` when a user decision must direct the next step.",
+  "Call ask_user_question alone in its tool batch.",
+  "Call ask_user_question only when Pi has no pending messages.",
   "Do not call `ask_user_question` while a Goal is active.",
 ] as const;
 
@@ -116,6 +118,7 @@ export interface AskRuntimeState {
   activeInvocationId?: number;
   queuedCount: number;
   waitingCount: number;
+  blockingCount: number;
 }
 
 type AskRuntimeListener = (state: AskRuntimeState) => void;
@@ -325,6 +328,20 @@ export function askResultModelContent(result: AskResult, questionnaire: Validate
   return JSON.stringify(buildAskModelDto(result, questionnaire));
 }
 
+function assertSoleAskToolCall(toolCallId: string, ctx: ExtensionContext): void {
+  const branch = ctx.sessionManager.getBranch();
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    const entry = branch[index];
+    if (entry.type !== "message" || entry.message.role !== "assistant" || !Array.isArray(entry.message.content)) continue;
+    const toolCalls = entry.message.content.filter((content) => content.type === "toolCall");
+    if (!toolCalls.some((toolCall) => toolCall.id === toolCallId)) continue;
+    if (toolCalls.length !== 1) {
+      throw new Error("`ask_user_question` must be the only tool call in its assistant message. Retry `ask_user_question` alone.");
+    }
+    return;
+  }
+}
+
 function boundedText(value: string, maxLength: number): string {
   return value.length <= maxLength ? value : `${value.slice(0, Math.max(0, maxLength - 1))}…`;
 }
@@ -426,6 +443,8 @@ export class AskRuntime {
   private active?: AskInvocation;
   private readonly listeners = new Set<AskRuntimeListener>();
   private removedFromActiveTools = false;
+  private cancelledAskSettling = false;
+  private cancelledAskRpcAbortNotified = false;
 
   constructor(pi: ExtensionAPI, options: AskRuntimeOptions = {}) {
     this.pi = pi;
@@ -434,18 +453,50 @@ export class AskRuntime {
   }
 
   registerTool(): void {
+    this.pi.on("agent_start", (_event, ctx) => {
+      if (!this.cancelledAskSettling) return;
+      this.notifyCancelledAskRpcAbort(ctx);
+      ctx.abort();
+    });
+    this.pi.on("input", (event, ctx) => {
+      if (event.source !== "rpc" || (!this.isWaiting() && !this.cancelledAskSettling)) return;
+      ctx.ui.notify("Ask is blocking new RPC prompts. Retry after Pi is idle.", "warning");
+      return { action: "handled" };
+    });
+    this.pi.on("session_before_compact", (event) => {
+      if (!this.cancelledAskSettling || event.reason !== "threshold" || event.willRetry !== false) return;
+      return { cancel: true };
+    });
+    this.pi.on("agent_settled", () => {
+      this.cancelledAskSettling = false;
+      this.cancelledAskRpcAbortNotified = false;
+      this.emit();
+    });
     this.pi.registerTool({
       name: ASK_TOOL_NAME,
       label: "Ask User Question",
       executionMode: "sequential",
-      description: "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Results report confirmed answers, partial completion, and cancellation as normal outcomes. A partial submit keeps every confirmed answer, while cancelling discards all of them. `ask_user_question` is unavailable while a Goal is active.",
+      description: "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Call `ask_user_question` as the only tool call in its assistant message. Open it only when Pi has no pending messages. RPC prompts received while Ask is waiting or settling are rejected and must be retried after Pi is idle. Direct RPC steer or follow-up messages can bypass this gate. They are aborted with Ask and must be retried after Pi is idle. Complete, partial, and empty-submit results report confirmed answers as compact JSON and allow the agent run to continue. Cancelling discards every answer and terminates the current agent run. Every non-retrying threshold compaction is skipped until the agent settles, leaving Pi idle. `ask_user_question` is unavailable while a Goal is active.",
       promptSnippet: ASK_PROMPT_SNIPPET,
       promptGuidelines: [...ASK_PROMPT_GUIDELINES],
       parameters: askUserQuestionParameters,
-      execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
+      execute: async (toolCallId, params, signal, _onUpdate, ctx) => {
         throwIfAborted(signal);
         const questionnaire = validateQuestionnaire(params);
+        assertSoleAskToolCall(toolCallId, ctx);
+        if (ctx.hasPendingMessages()) {
+          throw new Error("`ask_user_question` requires Pi to have no pending messages. Retry `ask_user_question` alone after Pi is idle.");
+        }
         const result = await this.executeValidated(questionnaire, signal, ctx);
+        if (result.cancelReason === "user_cancelled") {
+          if (ctx.mode === "rpc" && ctx.hasPendingMessages()) this.notifyCancelledAskRpcAbort(ctx);
+          ctx.abort();
+          return {
+            content: [{ type: "text", text: "The user declined to answer." }],
+            details: result,
+            terminate: true,
+          };
+        }
         return {
           content: [{ type: "text", text: askResultModelContent(result, questionnaire) }],
           details: result,
@@ -454,6 +505,12 @@ export class AskRuntime {
       renderCall: renderAskCall,
       renderResult: renderAskResult,
     });
+  }
+
+  private notifyCancelledAskRpcAbort(ctx: Pick<ExtensionContext, "mode" | "ui">): void {
+    if (ctx.mode !== "rpc" || this.cancelledAskRpcAbortNotified) return;
+    this.cancelledAskRpcAbortNotified = true;
+    ctx.ui.notify("Queued RPC messages were aborted with Ask. Retry after Pi is idle.", "warning");
   }
 
   setTuiDriver(driver?: AskTuiDriver): void {
@@ -473,10 +530,12 @@ export class AskRuntime {
   }
 
   state(): AskRuntimeState {
+    const waitingCount = this.waitingCount();
     return {
       ...(this.active ? { activeInvocationId: this.active.id } : {}),
       queuedCount: this.queue.length,
-      waitingCount: this.waitingCount(),
+      waitingCount,
+      blockingCount: waitingCount > 0 || this.cancelledAskSettling ? 1 : 0,
     };
   }
 
@@ -504,6 +563,8 @@ export class AskRuntime {
   }
 
   reset(): void {
+    this.cancelledAskSettling = false;
+    this.cancelledAskRpcAbortNotified = false;
     this.abortAll("Ask runtime reset.");
     this.tuiDriver = undefined;
     this.nextInvocationId = 1;
@@ -608,7 +669,12 @@ export class AskRuntime {
     try {
       const driverResult = await invocation.driver.ask(invocation.questionnaire, invocation.controller.signal);
       throwIfAborted(invocation.controller.signal);
-      this.settle(invocation, buildAskResult(invocation.questionnaire, driverResult));
+      const result = buildAskResult(invocation.questionnaire, driverResult);
+      if (result.cancelReason === "user_cancelled") {
+        this.cancelledAskSettling = true;
+        this.emit();
+      }
+      this.settle(invocation, result);
     } catch (error) {
       this.settle(
         invocation,

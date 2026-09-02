@@ -39,7 +39,7 @@ main session 负责规划、委派和验收；child session 专注执行，并�
 
 ### 要求
 
-- 与 Pi 0.84.2 package 和 RPC API 兼容的 Pi 版本。
+- 与 Pi 0.84.4 package 和 RPC API 兼容的 Pi 版本。Pi 0.84.4 是兼容性边界，因为 OMPS 依赖其原生的 tool result 后阈值压缩能力。
 - 所选 preset 使用的每个 provider/model 都已配置认证。
 - 显式配置的 `observer` model 支持 image input。
 - Monitor 需要受支持的 POSIX 系统；Windows 不提供 Monitor。
@@ -90,7 +90,7 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 
 `ask_user_question`、`goal`、`loop`、`monitor` 和 `subagent` 仅 main 可用；Todo 在 main 与 child 都可用；`contact_supervisor` 仅 child 可用。RPC session 可使用对应工具，但不注册 package widget；JSON 与 print mode 无法使用 Ask。
 
-`ask_user_question`、`goal`、`loop`、`monitor`、`subagent`、`contact_supervisor` 与 `todo` 的每个成功结果都会在 `content` 中放入一个紧凑单行 JSON 值。该 JSON 是面向模型的正文。`details` 仍是完整的 UI 与内部契约，正常 transcript 渲染会优先读取 `details`，仅在无法使用时才回退到 `content`。错误与主动 custom notification 仍使用自然语言，其中包括 Goal continuation、Loop fire、Monitor notification，以及 Subagent waiting 或 terminal notification。
+`goal`、`loop`、`monitor`、`subagent`、`contact_supervisor` 与 `todo` 的每个成功结果都会在 `content` 中放入一个紧凑单行 JSON 值。`ask_user_question` 的 complete、partial 与 empty-submit 结果使用同一契约。用户取消 Ask 时是唯一例外，此时 `content` 为自然语言 `The user declined to answer.`，`details` 保留 answer 为空的 `AskResult`，终止当前 agent run，并跳过 agent settle 前的全部非 retry threshold compaction，然后让 Pi 进入 idle。对于 JSON 结果，该 JSON 是面向模型的正文。`details` 仍是完整的 UI 与内部契约，正常 transcript 渲染会优先读取 `details`，仅在无法使用时才回退到 `content`。错误与主动 custom notification 仍使用自然语言，其中包括 Goal continuation、Loop fire、Monitor notification，以及 Subagent waiting 或 terminal notification。
 
 ## Main 工具
 
@@ -192,13 +192,17 @@ matcher 与 terminal notification 共用同一种形式，每条都说明 monito
 | Selection | 支持 single-select 与 multi-select |
 | Custom input | 支持 custom response |
 | Preview | single-select option 支持 preview |
-| Partial result | submit 会返回已确认的全部 answer，包括 partial 或空集 |
-| Cancel | 丢弃全部 answer，包括已经确认的那些 |
+| Tool batch | 必须是所属 assistant message 中唯一的 tool call |
+| Pending message | 仅在 Pi 没有 pending message 时打开 |
+| Partial result | submit 会返回已确认的全部 answer，包括 partial 或空集，并让 run 继续 |
+| Cancel | 丢弃全部 answer，终止当前 agent run，跳过 settle 前的全部非 retry threshold compaction，并让 Pi 进入 idle |
 | Goal guard | Goal active 时不可用 |
 
-只有一个 question 时没有单独的 Submit 步骤：确认一个 option、multi-select 的 `Next` 行或一段 custom response，问卷就当场完成。两个及以上 question 仍保留 `Submit` tab，可以在那里提交 partial 或空集 answer，也可以 cancel。
+只有一个 question 时没有单独的 Submit 步骤：确认一个 option、multi-select 的 `Next` 行或一段 custom response，问卷就当场完成。两个及以上 question 仍保留 `Submit` tab，可以在那里提交 partial 或空集 answer，也可以 cancel。Provider 必须单独调用 `ask_user_question`，使其成为所属 assistant message 中唯一的 tool call，并且 Pi 必须没有 pending message。混合 tool batch 或预存 pending message 会在问卷打开前被拒绝。Pi idle 后仅用 Ask 重试。
 
-Submit 与 cancel 含义不同。Submit 会原样交回你确认过的内容，所以 partial submit 是对部分 question 的真实回答，对其余 question 保持沉默。Cancel 则是完全撤回：model 拿不到任何 answer，并会被告知哪些 question 未回答。无论在 TUI 问卷还是 RPC dialog，每个 cancel 入口的行为都一致。
+Ask 等待问卷输入期间，以及用户取消后到 agent 完全 settle 之前，普通 RPC prompt 会经过 input hook，并被拒绝且显示 `Ask is blocking new RPC prompts. Retry after Pi is idle.`。直接 RPC `steer` 或 `follow_up` message 可以绕过该 hook。发生这种情况时，它们会随 Ask abort 被丢弃，并收到一次性 warning `Queued RPC messages were aborted with Ask. Retry after Pi is idle.`。调用方必须等 Pi idle 后重试。
+
+Submit 与 cancel 含义不同。Submit 会用紧凑 JSON 原样交回你确认过的内容，所以 partial submit 是对部分 question 的真实回答，对其余 question 保持沉默。Empty submit 也是普通结果，允许 provider loop 继续。Cancel 表示用户拒绝，也是完全撤回。全部 answer 都会被丢弃，tool result 会记录带 `user_cancelled` 且 answer 为空的 `AskResult`，固定自然语言 `content` 为 `The user declined to answer.`。随后当前 agent run 会终止。Pi 会取消 agent settle 前的每次非 retry threshold compaction，避免这些 summary provider request，然后进入 idle。Manual 与 overflow compaction 不受影响。TUI 问卷与 RPC dialog 的每个 cancel 入口行为都一致。历史 transcript 回放继续使用现有的 `details` 优先渲染行为。
 
 Ask 仅 main 可用，并要求交互式 UI。JSON 与 print mode 不提供该工具。
 

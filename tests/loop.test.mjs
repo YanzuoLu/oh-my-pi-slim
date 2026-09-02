@@ -25,7 +25,6 @@ const dependencyMap = {
   "./loop-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/loop-transcript-renderer.ts", import.meta.url).href,
   "./loop-widget.js": new URL("../extensions/oh-my-pi-slim/loop-widget.ts", import.meta.url).href,
   "./prompt-context.js": new URL("../extensions/oh-my-pi-slim/prompt-context.ts", import.meta.url).href,
-  "./subagent-checkpoint.js": new URL("../extensions/oh-my-pi-slim/subagent-checkpoint.ts", import.meta.url).href,
   "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
   "./subagent-runtime.js": new URL("../extensions/oh-my-pi-slim/subagent-runtime.ts", import.meta.url).href,
   "./subagent-model-display.js": new URL("../extensions/oh-my-pi-slim/subagent-model-display.ts", import.meta.url).href,
@@ -1355,7 +1354,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
       "tree navigation never recomputes session-wide Cache Mode from a branch",
     );
 
-    assert.equal(main.handlers.get("agent_start").length, 1);
+    assert.equal(main.handlers.get("agent_start").length, 2, "Ask abort ownership and Goal lifecycle each register one agent_start handler");
     assert.equal(main.handlers.has("message_start"), false);
     assert.equal(main.handlers.has("context"), false);
 
@@ -1416,7 +1415,7 @@ test("main sessions register Ask and runtime tools while child sessions return b
     const beforeFork = source.slice(source.indexOf('pi.on("session_before_fork"'), source.indexOf('pi.on("session_before_tree"'));
     const beforeTree = source.slice(source.indexOf('pi.on("session_before_tree"'), source.indexOf('pi.on("session_tree"'));
     const afterTree = source.slice(source.indexOf('pi.on("session_tree"'), source.indexOf('pi.on("input"'));
-    assert.match(beforeFork, /invalidateCheckpoint\(false\)[\s\S]*loops\.shutdown\(\)[\s\S]*monitors\?\.shutdown\(\)/, "fork preparation must stop loops and monitors before the host operation");
+    assert.match(beforeFork, /invalidateDeferredSessionState\(\)[\s\S]*loops\.shutdown\(\)[\s\S]*monitors\?\.shutdown\(\)/, "fork preparation must stop loops and monitors before the host operation");
     assert.doesNotMatch(beforeTree, /loops\.shutdown|loops\.reset|monitors\?\.shutdown|monitors\?\.reset|clearWithoutDelivery/, "tree preparation must preserve loop and monitor runtime state and records");
     assert.match(beforeTree, /const generation = notificationGate\.pause\(\)/, "tree preparation must pause the shared delivery gate");
     assert.match(beforeTree, /event\.signal\.addEventListener\("abort", abortListener, \{ once: true \}\)/, "tree preparation must bind one abort compensation listener");

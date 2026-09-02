@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url";
 import {
   getAgentDir,
   parseFrontmatter,
-  SettingsManager,
   type ExtensionAPI,
   type ExtensionContext,
   type Theme,
@@ -28,11 +27,6 @@ import {
 import { registerLoopRuntime } from "./loop-runtime.js";
 import { MONITOR_NOTIFICATION_TYPE, registerMonitorRuntime } from "./monitor-runtime.js";
 import { removeMainPiDocumentation, removeMainPiIdentity } from "./prompt-context.js";
-import {
-  CHECKPOINT_RESUME_TEXT,
-  completedToolBatch,
-  contextUsageNeedsCheckpoint,
-} from "./subagent-checkpoint.js";
 import { SPECIALIST_NAMES, type SpecialistName } from "./subagent-core.js";
 import { registerSubagentRuntime } from "./subagent-runtime.js";
 import { SUBAGENT_NOTIFICATION_TYPE } from "./subagent-transcript-renderer.js";
@@ -442,7 +436,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     goal?.setDeliveryPaused(paused);
   });
   goal = registerGoalRuntime(pi, {
-    hasPendingCheckpoint: () => pendingCheckpoint !== undefined,
     isNotificationDeliveryPaused: () => notificationGate.isPaused(),
     hasActiveSubagents: () => subagents.hasActiveRuns(),
     hasPendingSubagentNotifications: () => subagents.hasPendingNotifications(),
@@ -459,12 +452,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   let originalModel: ExtensionContext["model"];
   let originalThinking: ThinkingLevel | undefined;
   let sessionEpoch = 0;
-  let pendingCheckpoint: {
-    epoch: number;
-    sawThresholdCompaction: boolean;
-    resumeScheduled: boolean;
-    notificationGeneration: number;
-  } | undefined;
   let treeNotificationHold: TreeNotificationHold | undefined;
 
   for (const [shortcut, direction] of [["ctrl+shift+left", -1], ["ctrl+shift+right", 1]] as const) {
@@ -547,30 +534,10 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     notificationGate.releaseDeferred(generation);
   }
 
-  function invalidateCheckpoint(releaseNotifications = true): void {
+  function invalidateDeferredSessionState(): void {
     sessionEpoch += 1;
-    pendingCheckpoint = undefined;
     goal?.invalidateDeferred();
-    if (releaseNotifications && notificationGate.isPaused()) {
-      releaseCurrentNotificationsDeferred();
-    } else if (!releaseNotifications) {
-      notificationGate.invalidate();
-    }
-  }
-
-  function scheduleCheckpointResume(checkpoint: NonNullable<typeof pendingCheckpoint>, ctx: ExtensionContext): void {
-    if (pendingCheckpoint !== checkpoint || checkpoint.resumeScheduled) return;
-    checkpoint.resumeScheduled = true;
-    setImmediate(() => {
-      if (pendingCheckpoint !== checkpoint || checkpoint.epoch !== sessionEpoch || !active) return;
-      pendingCheckpoint = undefined;
-      report(ctx, "Pi compaction completed; starting a best-effort extension user turn from the checkpoint.", "warning");
-      try {
-        pi.sendUserMessage(CHECKPOINT_RESUME_TEXT, { deliverAs: "followUp" });
-      } finally {
-        notificationGate.releaseDeferred(checkpoint.notificationGeneration);
-      }
-    });
+    notificationGate.invalidate();
   }
 
   function resolvePresetModels(config: PresetConfig, presetName: string, preset: Preset, ctx: ExtensionContext): void {
@@ -633,7 +600,6 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   }
 
   async function deactivate(ctx: ExtensionContext): Promise<void> {
-    invalidateCheckpoint();
     active = false;
     activePresetName = undefined;
     activePreset = undefined;
@@ -757,7 +723,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", async (event, ctx) => {
-    invalidateCheckpoint(false);
+    invalidateDeferredSessionState();
     clearTreeNotificationHold();
     widgetStackHost().bind(WIDGET_STACK_OWNER, ctx.mode === "tui" ? ctx.ui : undefined);
     asks.reset();
@@ -812,7 +778,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("session_before_switch", async () => {
-    invalidateCheckpoint(false);
+    invalidateDeferredSessionState();
     clearTreeNotificationHold();
     // Ask aborts first: its overlay sits above the viewer, and the viewer refuses to resolve while
     // a foreign overlay is on top, so closing it first would only queue a pending close.
@@ -825,7 +791,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("session_before_fork", async () => {
-    invalidateCheckpoint(false);
+    invalidateDeferredSessionState();
     clearTreeNotificationHold();
     asks.abortAll("Session fork aborted the questionnaire.");
     subagentViewer.close();
@@ -836,7 +802,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   });
 
   pi.on("session_before_tree", async (event) => {
-    invalidateCheckpoint(false);
+    invalidateDeferredSessionState();
     clearTreeNotificationHold();
     asks.abortAll("Session tree navigation aborted the questionnaire.");
     subagentViewer.close();
@@ -895,25 +861,15 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
 
   pi.on("input", (event) => {
     if (event.source !== "extension" && notificationGate.isPaused()) {
-      pendingCheckpoint = undefined;
       releaseCurrentNotificationsDeferred();
     }
     if (event.source !== "extension") goal?.onExternalUserInput();
-    if (!active || event.source === "extension") return;
-    pendingCheckpoint = undefined;
   });
 
   pi.on("session_before_compact", (event, ctx) => {
     const generation = notificationGate.pause();
-    const checkpoint = pendingCheckpoint;
-    if (checkpoint?.epoch === sessionEpoch && event.reason === "threshold" && event.willRetry === false) {
-      checkpoint.notificationGeneration = generation;
-    }
     const releaseAfterAbort = () => {
       setImmediate(() => {
-        if (!notificationGate.isCurrent(generation)) return;
-        const currentCheckpoint = pendingCheckpoint;
-        if (currentCheckpoint?.epoch === sessionEpoch && currentCheckpoint.notificationGeneration === generation) return;
         if (notificationGate.release(generation)) goal?.reevaluateAfterHostOperation(ctx);
       });
     };
@@ -983,36 +939,8 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     goal?.onToolExecutionStart();
   });
 
-  pi.on("turn_end", (event, ctx) => {
-    if (!active) return;
-    const completedBatch = completedToolBatch(event);
-    if (completedBatch && !pendingCheckpoint && !ctx.hasPendingMessages()) {
-      const usage = ctx.getContextUsage();
-      if (usage && usage.tokens !== null && usage.contextWindow !== null) {
-        const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() }).getCompactionSettings();
-        if (contextUsageNeedsCheckpoint(usage, settings)) {
-          const notificationGeneration = notificationGate.pause();
-          pendingCheckpoint = {
-            epoch: sessionEpoch,
-            sawThresholdCompaction: false,
-            resumeScheduled: false,
-            notificationGeneration,
-          };
-          report(ctx, "Context reached Pi's native compaction threshold; checkpointing after the completed tool batch.", "info");
-          goal?.markHostAbort();
-          ctx.abort();
-          return;
-        }
-      }
-    }
-  });
-
-  pi.on("session_compact", (event, ctx) => {
+  pi.on("session_compact", (_event, ctx) => {
     goal?.refreshFromBranch(ctx);
-    if (pendingCheckpoint?.epoch === sessionEpoch && event.reason === "threshold" && event.willRetry === false) {
-      pendingCheckpoint.sawThresholdCompaction = true;
-      return;
-    }
     if (notificationGate.isPaused()) {
       releaseCurrentNotificationsDeferred();
       setImmediate(() => goal?.reevaluateAfterHostOperation(ctx));
@@ -1029,25 +957,12 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       monitors?.retryQueuedNotificationsAfterAgentSettled();
     });
 
-    const checkpoint = pendingCheckpoint;
-    if (!checkpoint || checkpoint.epoch !== sessionEpoch) {
-      if (notificationGate.isPaused()) releaseCurrentNotificationsDeferred();
-      goal?.onAgentSettled(ctx);
-      return;
-    }
-    goal?.onAgentSettled(ctx, { suppressContinuation: true });
-    if (checkpoint.sawThresholdCompaction) {
-      scheduleCheckpointResume(checkpoint, ctx);
-      return;
-    }
-    pendingCheckpoint = undefined;
-    notificationGate.releaseDeferred(checkpoint.notificationGeneration);
-    setImmediate(() => goal?.reevaluateAfterHostOperation(ctx));
-    report(ctx, "OMPS ended the previous low-level run after a complete tool batch, but Pi did not complete threshold compaction; the Goal scheduler will reevaluate continuation after delivery resumes.", "warning");
+    if (notificationGate.isPaused()) releaseCurrentNotificationsDeferred();
+    goal?.onAgentSettled(ctx);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    invalidateCheckpoint(false);
+    invalidateDeferredSessionState();
     clearTreeNotificationHold();
     // Release only this extension's claim on this session's UI; Todo may still own the aggregate.
     widgetStackHost().unbind(WIDGET_STACK_OWNER, ctx.mode === "tui" ? ctx.ui : undefined);
