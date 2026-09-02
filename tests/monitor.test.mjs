@@ -112,6 +112,10 @@ test("monitor exposes only the event-watcher contract", () => {
   assert.deepEqual([...MONITOR_PUBLIC_FIELDS], ["action", "abstract", "command", "cwd", "id"]);
   assert.match(MONITOR_TOOL_CONTRACT.description, /Each stdout line becomes an event notification/);
   assert.match(MONITOR_TOOL_CONTRACT.description, /Each stdout line is an event/);
+  assert.match(MONITOR_TOOL_CONTRACT.description, /## Command constraints/);
+  assert.match(MONITOR_TOOL_CONTRACT.description, /Do not use an unbounded command for one notification/);
+  assert.match(MONITOR_TOOL_CONTRACT.description, /Silence is not success/);
+  assert.match(MONITOR_TOOL_CONTRACT.description, /Only stdout triggers event notifications/);
   for (const removed of ["checkAfter", "notifyOn", "start", "end"]) assert.equal(removed in schema.properties, false);
 
   const windowsTools = [];
