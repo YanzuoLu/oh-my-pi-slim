@@ -8,10 +8,13 @@ const dependencyMap = {
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
-  "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
-  "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
-  "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
-  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "../tool-contracts.js": new URL("../extensions/oh-my-pi-slim/tool-contracts.ts", import.meta.url).href,
+  "./runtime.js": new URL("../extensions/oh-my-pi-slim/goal/runtime.ts", import.meta.url).href,
+  "./transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal/transcript-renderer.ts", import.meta.url).href,
+  "./widget.js": new URL("../extensions/oh-my-pi-slim/goal/widget.ts", import.meta.url).href,
+  "../semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "../widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
+  "../widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
   "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
   "./widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
   "./widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
@@ -28,20 +31,19 @@ const {
   GOAL_CONTINUATION_MESSAGE_TYPE,
   GOAL_STATE_MESSAGE_TYPE,
   GoalRuntime,
-  goalActivationContent,
-  goalContinuationContent,
-} = await import("../extensions/oh-my-pi-slim/goal-runtime.ts");
+} = await import("../extensions/oh-my-pi-slim/goal/runtime.ts");
+const { goalContinuationContent, goalModelResult } = await import("../extensions/oh-my-pi-slim/tool-contracts.ts");
 const {
   renderGoalCall,
   renderGoalContinuation,
   renderGoalResult,
   renderGoalState,
-} = await import("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts");
+} = await import("../extensions/oh-my-pi-slim/goal/transcript-renderer.ts");
 const {
   GoalWidget,
   compactGoalTokens,
   renderGoalWidgetLines,
-} = await import("../extensions/oh-my-pi-slim/goal-widget.ts");
+} = await import("../extensions/oh-my-pi-slim/goal/widget.ts");
 const {
   WIDGET_STACK_KEY,
   resetWidgetStackHost,
@@ -84,15 +86,13 @@ function goal(overrides = {}) {
     lastProviderError: null,
     noProgressCount: 0,
     evidence: null,
-    cancelReason: null,
     ...overrides,
   };
 }
 
-function goalDtoResult(goalValue, changed, message) {
+function goalDtoResult(goalValue, changed, action = "check") {
   const details = { goal: goalValue === null ? null : structuredClone(goalValue), changed };
-  const dto = { ...structuredClone(details), ...(message === undefined ? {} : { message }) };
-  return { content: [{ type: "text", text: JSON.stringify(dto) }], details };
+  return { content: [{ type: "text", text: JSON.stringify(goalModelResult(action, goalValue)) }], details };
 }
 
 function modelResultBody(rendered) {
@@ -132,7 +132,7 @@ function escaped(value) {
   return new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
 }
 
-test("Goal widget renders five statuses, exact two-line order, stats, elapsed, retry, paused reason, width, and empty state", () => {
+test("Goal widget renders four statuses, exact two-line order, stats, elapsed, retry, paused reason, width, and empty state", () => {
   const active = renderGoalWidgetLines(view(), theme, 180, NOW_MS);
   assert.deepEqual(active, [
     "●  Goal · ↻  active · Ship the frozen Goal UI",
@@ -144,10 +144,9 @@ test("Goal widget renders five statuses, exact two-line order, stats, elapsed, r
     ["paused", "Ⅱ  paused", "○"],
     ["retry_wait", "◷  retry_wait", "●"],
     ["completed", "✓  completed", "○"],
-    ["cancelled", "×  cancelled", "○"],
   ];
   for (const [status, statusLabel, prefixGlyph] of cases) {
-    const terminal = status === "completed" || status === "cancelled";
+    const terminal = status === "completed";
     const value = goal({
       status,
       pauseReason: status === "paused" ? "waiting for release approval" : null,
@@ -156,7 +155,6 @@ test("Goal widget renders five statuses, exact two-line order, stats, elapsed, r
       lastProviderError: status === "retry_wait" ? "rate limited" : null,
       endedAt: terminal ? "2026-06-01T00:12:00.000Z" : null,
       evidence: status === "completed" ? ["one", "two"] : null,
-      cancelReason: status === "cancelled" ? "user requested" : null,
     });
     const lines = renderGoalWidgetLines(view(value), theme, 180, NOW_MS);
     assert.equal(lines.length, 2);
@@ -192,23 +190,21 @@ test("Goal widget renders five statuses, exact two-line order, stats, elapsed, r
   assert.deepEqual(renderGoalWidgetLines(view(null, { elapsedMs: null }), theme, 80, NOW_MS), []);
 });
 
-test("Goal prefix marks pursuing versus idle across all five statuses and never joins Ctrl+O expansion", () => {
+test("Goal prefix marks pursuing versus idle across all four statuses and never joins Ctrl+O expansion", () => {
   const prefix = (status) => renderGoalWidgetLines(view(goal({ status })), roleAnsiTheme, 180, NOW_MS)[0].split(" \u001b[2m·")[0];
 
   assert.equal(prefix("active"), "\u001b[35m\u001b[1m●\u001b[22m\u001b[0m  \u001b[35m\u001b[1mGoal\u001b[22m\u001b[0m");
   assert.equal(prefix("retry_wait"), "\u001b[33m\u001b[1m●\u001b[22m\u001b[0m  \u001b[33m\u001b[1mGoal\u001b[22m\u001b[0m");
-  for (const status of ["paused", "completed", "cancelled"]) {
+  for (const status of ["paused", "completed"]) {
     assert.equal(prefix(status), "\u001b[2m○\u001b[0m  \u001b[2mGoal\u001b[0m", `${status} must render a hollow dim prefix`);
     assert.doesNotMatch(prefix(status), /\u001b\[1m/, `${status} must not bold the Goal prefix`);
   }
 
   const completed = renderGoalWidgetLines(view(goal({ status: "completed" })), roleAnsiTheme, 180, NOW_MS)[0];
   assert.match(completed, /\u001b\[32m✓\u001b\[0m  \u001b\[32mcompleted\u001b\[0m/, "the status glyph and text keep their own status colour");
-  const cancelled = renderGoalWidgetLines(view(goal({ status: "cancelled" })), roleAnsiTheme, 180, NOW_MS)[0];
-  assert.match(cancelled, /\u001b\[31m×\u001b\[0m  \u001b\[31mcancelled\u001b\[0m/);
   assert.match(completed, /\u001b\[37mShip the frozen Goal UI\u001b\[0m$/, "the abstract keeps its existing text role");
 
-  for (const status of ["active", "retry_wait", "paused", "completed", "cancelled"]) {
+  for (const status of ["active", "retry_wait", "paused", "completed"]) {
     for (const expanded of [true, false]) {
       assert.doesNotMatch(
         renderGoalWidgetLines(view(goal({ status })), theme, 180, NOW_MS, expanded).join("\n"),
@@ -221,8 +217,8 @@ test("Goal prefix marks pursuing versus idle across all five statuses and never 
 });
 
 test("Collapsed tool output takes back only the completed Goal's detail row and never rewrites the view", () => {
-  for (const status of ["active", "retry_wait", "paused", "completed", "cancelled"]) {
-    const terminal = status === "completed" || status === "cancelled";
+  for (const status of ["active", "retry_wait", "paused", "completed"]) {
+    const terminal = status === "completed";
     const value = view(goal({
       status,
       pauseReason: status === "paused" ? "waiting for release approval" : null,
@@ -230,7 +226,6 @@ test("Collapsed tool output takes back only the completed Goal's detail row and 
       nextRetryAt: status === "retry_wait" ? "2026-06-01T00:12:30.000Z" : null,
       endedAt: terminal ? "2026-06-01T00:12:00.000Z" : null,
       evidence: status === "completed" ? ["one", "two"] : null,
-      cancelReason: status === "cancelled" ? "user requested" : null,
     }));
     const before = structuredClone(value);
     const expanded = renderGoalWidgetLines(value, theme, 180, NOW_MS, true);
@@ -300,7 +295,7 @@ test("The Goal section reads Pi's live expansion state on every aggregate render
 });
 
 test("Goal detail row hangs off the heading with the shared dim last-child branch", () => {
-  for (const status of ["active", "retry_wait", "paused", "completed", "cancelled"]) {
+  for (const status of ["active", "retry_wait", "paused", "completed"]) {
     const lines = renderGoalWidgetLines(view(goal({ status, pauseReason: status === "paused" ? "held" : null })), roleAnsiTheme, 180, NOW_MS);
     assert.equal(lines.length, 2, `${status} still renders exactly two lines`);
     assert.ok(
@@ -318,7 +313,7 @@ test("Goal detail row hangs off the heading with the shared dim last-child branc
   assert.equal(
     visibleWidth(stripVTControlCharacters(plain[1]).slice(0, 3)),
     3,
-    "the branch prefix occupies three display columns, matching the Agents and Loops entries",
+    "the branch prefix occupies three display columns, matching the Subagents and Monitors entries",
   );
 });
 
@@ -501,7 +496,7 @@ test("GoalRuntime registers package-isomorphic renderers, caches branch stats ac
   assert.equal(harness.cleared.length, 2);
 });
 
-test("Goal tool renders all eight calls with uniform collapsed hints, action-specific expansion, and data invariance", () => {
+test("Goal tool renders all seven calls with uniform collapsed hints, action-specific expansion, and data invariance", () => {
   const cases = [
     {
       args: { action: "create", abstract: "Create\u001b[31m goal\u001b[0m", objective: "Full objective\nsecond", criteria: ["One", "Two"] },
@@ -513,16 +508,15 @@ test("Goal tool renders all eight calls with uniform collapsed hints, action-spe
       collapsed: ["Abstract: Modify goal"], hidden: ["Replacement objective", "1. Replacement"],
       expanded: ["Abstract:", "Modify goal", "Objective:", "Replacement objective", "Criteria:", "1. Replacement"],
     },
-    { args: { action: "status" }, collapsed: [], hidden: [], expanded: [] },
-    { args: { action: "pause", reason: "Blocked\nby approval" }, collapsed: ["Reason: Blocked by approval"], hidden: [], expanded: ["Reason:", "Blocked", "by approval"] },
+    { args: { action: "check" }, collapsed: [], hidden: [], expanded: [] },
+    { args: { action: "pause" }, collapsed: [], hidden: [], expanded: [] },
     { args: { action: "resume" }, collapsed: [], hidden: [], expanded: [] },
     { args: { action: "complete", evidence: ["Proof one", "Proof two"] }, collapsed: ["Evidence: 2 items"], hidden: ["Proof one", "Proof two"], expanded: ["Evidence:", "1. Proof one", "2. Proof two"] },
-    { args: { action: "cancel", reason: "No longer needed" }, collapsed: ["Reason: No longer needed"], hidden: [], expanded: ["Reason:", "No longer needed"] },
     { args: { action: "clear" }, collapsed: [], hidden: [], expanded: [] },
   ];
   assert.deepEqual(
     cases.map((value) => value.args.action),
-    ["create", "modify", "status", "pause", "resume", "complete", "cancel", "clear"],
+    ["create", "modify", "check", "pause", "resume", "complete", "clear"],
     "every Goal action has a call rendering, including the branch-emptying clear",
   );
   for (const value of cases) {
@@ -555,41 +549,39 @@ test("Goal tool renders all eight calls with uniform collapsed hints, action-spe
   assert.deepEqual(clearArgs, clearBefore);
 });
 
-test("expanded Goal results rebuild historical model text from compact DTOs without exposing raw JSON", () => {
+test("expanded Goal results show the exact compact model result", () => {
   const active = goal();
   const paused = goal({ status: "paused", pauseReason: "waiting for approval" });
   const completed = goal({ status: "completed", endedAt: "2026-06-01T00:12:00.000Z", evidence: ["Widget test", "Renderer test"] });
-  const cancelled = goal({ status: "cancelled", endedAt: "2026-06-01T00:12:00.000Z", cancelReason: "user stopped it" });
   const cases = [
-    ["create", goalDtoResult(active, true, goalActivationContent("created", active)), goalActivationContent("created", active)],
-    ["modify", goalDtoResult(active, true, goalActivationContent("modified", active)), goalActivationContent("modified", active)],
-    ["status", goalDtoResult(active, false), JSON.stringify(active, null, 2)],
-    ["pause", goalDtoResult(paused, true, "Goal paused."), `Goal paused.\n${JSON.stringify(paused, null, 2)}`],
-    ["resume", goalDtoResult(active, true, goalActivationContent("resumed", active)), goalActivationContent("resumed", active)],
-    ["complete", goalDtoResult(completed, true, "Goal completed."), `Goal completed.\n${JSON.stringify(completed, null, 2)}`],
-    ["cancel", goalDtoResult(cancelled, true, "Goal cancelled."), `Goal cancelled.\n${JSON.stringify(cancelled, null, 2)}`],
-    ["clear", goalDtoResult(null, true, "Goal cleared."), "Goal cleared."],
+    ["create", goalDtoResult(active, true, "create"), JSON.stringify(goalModelResult("create", active))],
+    ["modify", goalDtoResult(active, true, "modify"), JSON.stringify(goalModelResult("modify", active))],
+    ["check", goalDtoResult(active, false, "check"), JSON.stringify(goalModelResult("check", active))],
+    ["pause", goalDtoResult(paused, true, "pause"), JSON.stringify(goalModelResult("pause", paused))],
+    ["resume", goalDtoResult(active, true, "resume"), JSON.stringify(goalModelResult("resume", active))],
+    ["complete", goalDtoResult(completed, true, "complete"), JSON.stringify(goalModelResult("complete", completed))],
+    ["clear", goalDtoResult(null, true, "clear"), JSON.stringify(goalModelResult("clear", null))],
   ];
 
-  assert.deepEqual(cases.map(([action]) => action), ["create", "modify", "status", "pause", "resume", "complete", "cancel", "clear"]);
+  assert.deepEqual(cases.map(([action]) => action), ["create", "modify", "check", "pause", "resume", "complete", "clear"]);
   for (const [action, result, expected] of cases) {
     const before = structuredClone(result);
     const expanded = render(renderGoalResult(result, { expanded: true }, theme, { args: { action } }));
     assert.equal(modelResultBody(expanded), expected, action);
-    assert.doesNotMatch(expanded, escaped(result.content[0].text), `${action} must not expose compact DTO JSON`);
+    assert.match(expanded, escaped(result.content[0].text));
     assert.deepEqual(result, before);
   }
 
   const noOps = [
-    ["pause", goalDtoResult(paused, false, "Goal is already paused. No change."), `Goal is already paused. No change.\n${JSON.stringify(paused, null, 2)}`],
-    ["resume", goalDtoResult(active, false, "Goal is already active. No change."), `Goal is already active. No change.\n${JSON.stringify(active, null, 2)}`],
-    ["status", goalDtoResult(null, false, "No Goal."), "No Goal."],
-    ["clear", goalDtoResult(null, false, "No Goal to clear."), "No Goal to clear."],
+    ["pause", goalDtoResult(paused, false, "pause"), JSON.stringify(goalModelResult("pause", paused))],
+    ["resume", goalDtoResult(active, false, "resume"), JSON.stringify(goalModelResult("resume", active))],
+    ["check", goalDtoResult(null, false, "check"), JSON.stringify(goalModelResult("check", null))],
+    ["clear", goalDtoResult(null, false, "clear"), JSON.stringify(goalModelResult("clear", null))],
   ];
   for (const [action, result, expected] of noOps) {
     const expanded = render(renderGoalResult(result, { expanded: true }, theme, { args: { action } }));
     assert.equal(modelResultBody(expanded), expected, `${action} no-op`);
-    assert.doesNotMatch(expanded, escaped(result.content[0].text));
+    assert.match(expanded, escaped(result.content[0].text));
   }
 });
 
@@ -632,7 +624,7 @@ test("Goal clear receipts separate a real clear from an already empty branch, ke
   for (const changed of [false, true]) {
     const none = { content: [{ type: "text", text: "No Goal." }], details: { goal: null, changed } };
     assert.equal(
-      render(renderGoalResult(none, { expanded: false }, theme, { args: { action: "status" } })),
+      render(renderGoalResult(none, { expanded: false }, theme, { args: { action: "check" } })),
       "○  Goal · none",
       "an ordinary empty status is untouched by the clear receipt",
     );
@@ -640,7 +632,7 @@ test("Goal clear receipts separate a real clear from an already empty branch, ke
 });
 
 test("A refused clear falls back to the tool's own error, stays width safe, and keeps the whole ask-the-user instruction", () => {
-  const message = "clear requires a terminal Goal; the current Goal is active. Ask the user whether to complete or cancel it first.";
+  const message = "Goal clear failed.";
   const refused = { content: [{ type: "text", text: message }], details: { code: "invalid_action" } };
   const before = structuredClone(refused);
   for (const width of [24, 40, 80, 240]) {
@@ -660,22 +652,20 @@ test("A refused clear falls back to the tool's own error, stays width safe, and 
   assert.deepEqual(refused, before);
 });
 
-test("Goal results cover active summaries, status none/goal, pause/resume no-change, evidence, cancel, retry fields, errors, fallback, and frozen model content", () => {
+test("Goal results cover active summaries, check none/goal, pause/resume no-change, evidence, retry fields, errors, fallback, and frozen model content", () => {
   const active = goal();
   const paused = goal({ status: "paused", pauseReason: "waiting for approval" });
   const completed = goal({ status: "completed", endedAt: "2026-06-01T00:12:00.000Z", evidence: ["Widget test", "Renderer test"] });
-  const cancelled = goal({ status: "cancelled", endedAt: "2026-06-01T00:12:00.000Z", cancelReason: "user stopped it" });
   const retry = goal({ status: "retry_wait", retryAttempt: 2, nextRetryAt: "2026-06-01T00:12:30.000Z", lastProviderError: "rate limited" });
   const cases = [
-    ["create", active, true, "↻  Goal · Ship the frozen Goal UI · active", goalActivationContent("created", active)],
-    ["modify", active, true, "↻  Goal · Ship the frozen Goal UI · active", goalActivationContent("modified", active)],
-    ["resume", active, true, "↻  Goal · Ship the frozen Goal UI · active", goalActivationContent("resumed", active)],
-    ["resume", active, false, "○  Goal · Ship the frozen Goal UI · already active · no change", `Goal is already active. No change.\n${JSON.stringify(active, null, 2)}`],
-    ["pause", paused, true, "Ⅱ  Goal · Ship the frozen Goal UI · paused · waiting for approval", `Goal paused.\n${JSON.stringify(paused, null, 2)}`],
-    ["pause", paused, false, "○  Goal · Ship the frozen Goal UI · already paused · no change", `Goal is already paused. No change.\n${JSON.stringify(paused, null, 2)}`],
-    ["complete", completed, true, "✓  Goal · Ship the frozen Goal UI · completed · 2 evidence items", `Goal completed.\n${JSON.stringify(completed, null, 2)}`],
-    ["cancel", cancelled, true, "×  Goal · Ship the frozen Goal UI · cancelled · user stopped it", `Goal cancelled.\n${JSON.stringify(cancelled, null, 2)}`],
-    ["status", retry, false, "◷  Goal · Ship the frozen Goal UI · retry_wait", JSON.stringify(retry, null, 2)],
+    ["create", active, true, "↻  Goal · Ship the frozen Goal UI · active", JSON.stringify(goalModelResult("create", active))],
+    ["modify", active, true, "↻  Goal · Ship the frozen Goal UI · active", JSON.stringify(goalModelResult("modify", active))],
+    ["resume", active, true, "↻  Goal · Ship the frozen Goal UI · active", JSON.stringify(goalModelResult("resume", active))],
+    ["resume", active, false, "○  Goal · Ship the frozen Goal UI · already active · no change", JSON.stringify(goalModelResult("resume", active))],
+    ["pause", paused, true, "Ⅱ  Goal · Ship the frozen Goal UI · paused", JSON.stringify(goalModelResult("pause", paused))],
+    ["pause", paused, false, "○  Goal · Ship the frozen Goal UI · already paused · no change", JSON.stringify(goalModelResult("pause", paused))],
+    ["complete", completed, true, "✓  Goal · Ship the frozen Goal UI · completed · 2 evidence items", JSON.stringify(goalModelResult("complete", completed))],
+    ["check", retry, false, "◷  Goal · Ship the frozen Goal UI · retry_wait", JSON.stringify(goalModelResult("check", retry))],
   ];
   for (const [action, goalValue, changed, summary, modelText] of cases) {
     const result = { content: [{ type: "text", text: modelText }], details: { goal: structuredClone(goalValue), changed } };
@@ -686,7 +676,7 @@ test("Goal results cover active summaries, status none/goal, pause/resume no-cha
     const expandedComponent = renderGoalResult(result, { expanded: true }, theme, { args: { action } });
     assertLeadingBlank(expandedComponent);
     const expanded = render(expandedComponent);
-    for (const expected of [summary, "Status:", "Abstract:", "Objective:", "Criteria:", "Created:", "Updated:", "Ended:", "Pause reason:", "Retry attempt:", "Next retry:", "Last provider error:", "No progress:", "Evidence:", "Cancel reason:", "Model result:"]) {
+    for (const expected of [summary, "Status:", "Abstract:", "Objective:", "Criteria:", "Created:", "Updated:", "Ended:", "Pause reason:", "Retry attempt:", "Next retry:", "Last provider error:", "No progress:", "Evidence:", "Model result:"]) {
       assert.match(expanded, escaped(expected));
     }
     if (action === "complete") {
@@ -700,8 +690,8 @@ test("Goal results cover active summaries, status none/goal, pause/resume no-cha
   }
 
   const none = { content: [{ type: "text", text: "No Goal." }], details: { goal: null, changed: false } };
-  assert.equal(render(renderGoalResult(none, { expanded: false }, theme, { args: { action: "status" } })), "○  Goal · none");
-  assert.match(render(renderGoalResult(none, { expanded: true }, theme, { args: { action: "status" } })), /Model result:\n  No Goal\./);
+  assert.equal(render(renderGoalResult(none, { expanded: false }, theme, { args: { action: "check" } })), "○  Goal · none");
+  assert.match(render(renderGoalResult(none, { expanded: true }, theme, { args: { action: "check" } })), /Model result:\n  No Goal\./);
 
   const fallback = { content: [{ type: "text", text: "Goal error\u001b[31m red\u001b[0m first\nComplete second\u0000 line" }], details: { malformed: true } };
   const fallbackBefore = structuredClone(fallback);
@@ -732,7 +722,7 @@ test("Goal continuation and state notifications preserve exact collapsed concept
   assert.ok(continuationNarrow.every((line) => visibleWidth(line) <= 50));
   assert.match(continuationNarrow.map((line) => stripVTControlCharacters(line)).join("\n").trim(), /continuation 7 \(ctrl\+o to expand\)$/);
   const continuationExpanded = render(renderGoalContinuation(continuation, { expanded: true, outputPad: 1 }, theme));
-  for (const expected of ["↻  Goal · continuation 7", "Status: active", "Objective:", "Criteria:", "Continuation content:", "Continue pursuing the active Goal.", "Call `goal complete`"]) assert.match(continuationExpanded, escaped(expected));
+  for (const expected of ["↻  Goal · continuation 7", "Status: active", "Objective:", "Criteria:", "Continuation content:", "Continue pursuing the active Goal.", "action: \"complete\""]) assert.match(continuationExpanded, escaped(expected));
   assert.doesNotMatch(continuationExpanded, /\(ctrl\+o to expand\)/);
   assert.deepEqual(continuation, continuationBefore);
 

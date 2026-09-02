@@ -4,8 +4,8 @@
 
 The Todo widget registration and foreground-session lifecycle pattern in:
 
-- `extensions/todo/index.ts`
-- `extensions/todo/widget.ts`
+- `extensions/oh-my-pi-slim/todo/runtime.ts`
+- `extensions/oh-my-pi-slim/todo/widget.ts`
 
 is adapted from `@juicesharp/rpiv-todo` version 2.5.2 in:
 
@@ -37,10 +37,10 @@ Licensed under the MIT License:
 
 The subagent widget layout and lifecycle in:
 
-- `extensions/oh-my-pi-slim/subagent-widget.ts`
-- `extensions/oh-my-pi-slim/subagent-widget-renderer.ts`
-- `extensions/oh-my-pi-slim/subagent-widget-display.ts`
-- `extensions/oh-my-pi-slim/subagent-widget-glyphs.ts`
+- `extensions/oh-my-pi-slim/subagent/widget.ts`
+- `extensions/oh-my-pi-slim/subagent/widget-renderer.ts`
+- `extensions/oh-my-pi-slim/subagent/widget-display.ts`
+- `extensions/oh-my-pi-slim/subagent/widget-glyphs.ts`
 
 are adapted from `packages/pi-subagents` in:
 

@@ -1,8 +1,8 @@
 {
   "name": "oh-my-pi-slim",
-  "version": "1.1.9",
+  "version": "1.2.0",
   "private": true,
-  "description": "Preset-driven Pi orchestration with built-in subagents, loops, monitors, structured questions, durable goals, and session todos.",
+  "description": "Pi tools for subagents, monitors, structured questions, durable goals, and session todos.",
   "type": "module",
   "license": "MIT",
   "author": "YanzuoLu",
@@ -19,12 +19,11 @@
     "pi",
     "orchestration",
     "subagents",
-    "loops",
     "monitoring",
     "ask-user-question",
+    "fast-mode",
     "goals",
-    "todos",
-    "scheduling"
+    "todos"
   ],
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -34,11 +33,7 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/oh-my-pi-slim/index.ts",
-      "./extensions/todo/index.ts"
-    ],
-    "skills": [
-      "./extensions/oh-my-pi-slim/skills"
+      "./extensions/oh-my-pi-slim/index.ts"
     ]
   },
   "scripts": {

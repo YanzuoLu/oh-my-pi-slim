@@ -1,34 +1,20 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { registerHooks } from "node:module";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test, { beforeEach } from "node:test";
 import { piRoot } from "./fixtures/pi-install.mjs";
 const dependencyMap = {
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
-  "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
-  "./loop-widget.js": new URL("../extensions/oh-my-pi-slim/loop-widget.ts", import.meta.url).href,
-  "./monitor-widget.js": new URL("../extensions/oh-my-pi-slim/monitor-widget.ts", import.meta.url).href,
-  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
-  "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
-  "./subagent-model-display.js": new URL("../extensions/oh-my-pi-slim/subagent-model-display.ts", import.meta.url).href,
-  "./subagent-widget.js": new URL("../extensions/oh-my-pi-slim/subagent-widget.ts", import.meta.url).href,
-  "./subagent-widget-display.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-display.ts", import.meta.url).href,
-  "./subagent-widget-glyphs.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-glyphs.ts", import.meta.url).href,
-  "./subagent-widget-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-renderer.ts", import.meta.url).href,
-  "./subagent-run-files.js": new URL("../extensions/oh-my-pi-slim/subagent-run-files.ts", import.meta.url).href,
-  "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
-  "./widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
-  "./widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
-  "../oh-my-pi-slim/semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
-  "../oh-my-pi-slim/widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
-  "../oh-my-pi-slim/widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
-  "../oh-my-pi-slim/widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
-  "./core.js": new URL("../extensions/todo/core.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (specifier.startsWith(".") && specifier.endsWith(".js") && context.parentURL) {
+      const candidate = new URL(`${specifier.slice(0, -3)}.ts`, context.parentURL);
+      if (existsSync(fileURLToPath(candidate))) return { url: candidate.href, shortCircuit: true };
+    }
     const url = dependencyMap[specifier];
     return url ? { url, shortCircuit: true } : nextResolve(specifier, context);
   },
@@ -47,11 +33,10 @@ const {
   renderWidgetStack,
 } = await import("../extensions/oh-my-pi-slim/widget-stack.ts");
 const { visibleWidth } = await import("@earendil-works/pi-tui");
-const { GoalWidget } = await import("../extensions/oh-my-pi-slim/goal-widget.ts");
-const { TodoWidget } = await import("../extensions/todo/widget.ts");
-const { SubagentWidget } = await import("../extensions/oh-my-pi-slim/subagent-widget.ts");
-const { MonitorWidget } = await import("../extensions/oh-my-pi-slim/monitor-widget.ts");
-const { LoopWidget } = await import("../extensions/oh-my-pi-slim/loop-widget.ts");
+const { GoalWidget } = await import("../extensions/oh-my-pi-slim/goal/widget.ts");
+const { TodoWidget } = await import("../extensions/oh-my-pi-slim/todo/widget.ts");
+const { SubagentWidget } = await import("../extensions/oh-my-pi-slim/subagent/widget.ts");
+const { MonitorWidget } = await import("../extensions/oh-my-pi-slim/monitor/widget.ts");
 
 // A second, independent copy of the same source files stands in for Pi's per-extension Jiti graphs.
 const secondGraph = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts?graph=todo");
@@ -66,7 +51,7 @@ const theme = {
 };
 
 const NOW_MS = Date.parse("2026-06-01T00:12:00.000Z");
-const SECTION_ORDER = ["goal", "todos", "agents", "monitors", "loops"];
+const SECTION_ORDER = ["goal", "todos", "agents", "monitors"];
 
 function goalView(status) {
   return {
@@ -123,32 +108,13 @@ function monitorItem(status) {
   };
 }
 
-function loopItem(status) {
-  return {
-    id: "0000000a",
-    abstract: `loop-${status}`,
-    prompt: "prompt",
-    interval: "10s",
-    status,
-    createdAt: "2026-06-01T00:00:00.000Z",
-    updatedAt: "2026-06-01T00:00:00.000Z",
-    nextFireAt: "2026-06-01T00:00:10.000Z",
-    fireCount: 0,
-    failureCount: 0,
-    lastFiredAt: null,
-    lastFailedAt: null,
-    lastError: null,
-  };
-}
-
-/** Builds one real instance of all five widgets over mutable data, plus a UI double. */
+/** Builds one real instance of all four widgets over mutable data, plus a UI double. */
 function stack({ getToolsExpanded } = {}) {
   const state = {
     goal: goalView("active"),
     todos: [todoTask("pending")],
     agents: [subagentRun("running")],
     monitors: [monitorItem("running")],
-    loops: [loopItem("active")],
   };
   const calls = [];
   const timers = [];
@@ -182,24 +148,21 @@ function stack({ getToolsExpanded } = {}) {
   const todos = new TodoWidget();
   const agents = new SubagentWidget(() => state.agents, clock);
   const monitors = new MonitorWidget(() => state.monitors, clock);
-  const loops = new LoopWidget(() => state.loops, { nowMs: () => NOW_MS, ...clock });
 
   const bindAll = () => {
     goal.setContext(ui);
     todos.setContext(ui);
     agents.setUICtx(ui);
     monitors.setContext(ui);
-    loops.setContext(ui);
   };
   const publishAll = () => {
     goal.update();
     todos.update(state.todos);
     agents.update();
     monitors.update();
-    loops.update();
   };
   return {
-    state, calls, timers, ui, tui, goal, todos, agents, monitors, loops, bindAll, publishAll,
+    state, calls, timers, ui, tui, goal, todos, agents, monitors, bindAll, publishAll,
     get renders() { return renders; },
     get component() { return component; },
     registrations: () => calls.filter((call) => typeof call.content === "function").length,
@@ -240,8 +203,8 @@ function recordingUi({ runs = true, columns = 100 } = {}) {
 }
 
 test("the stack sorts every active combination with active sections above idle ones in fixed product order", () => {
-  const labels = { goal: "Goal", todos: "Todos", agents: "Agents", monitors: "Monitors", loops: "Loops" };
-  for (let mask = 0; mask < 32; mask += 1) {
+  const labels = { goal: "Goal", todos: "Todos", agents: "Subagents", monitors: "Monitors" };
+  for (let mask = 0; mask < 16; mask += 1) {
     const flags = Object.fromEntries(SECTION_ORDER.map((id, index) => [id, (mask & (1 << index)) !== 0]));
     // Feed the sections in reverse product order so the result can only come from the sort.
     const sections = [...SECTION_ORDER].reverse().map((id) => fakeSection(id, flags[id], [labels[id]]));
@@ -252,7 +215,7 @@ test("the stack sorts every active combination with active sections above idle o
     assert.deepEqual(
       orderWidgetStackSections(sections).map((section) => section.id),
       expected,
-      `mask ${mask} must keep active sections on top and Goal → Todos → Agents → Monitors → Loops inside each group`,
+      `mask ${mask} must keep active sections on top and Goal → Todos → Subagents → Monitors inside each group`,
     );
     assert.deepEqual(
       renderWidgetStack(sections, { width: 80, theme, expanded: true }),
@@ -264,11 +227,11 @@ test("the stack sorts every active combination with active sections above idle o
 
 test("the stack concatenates section bodies with no separator, no blank line, and no global cap", () => {
   const sections = [
-    fakeSection("loops", false, ["loop-head", "loop-row"]),
+    fakeSection("monitors", false, ["monitor-head", "monitor-row"]),
     fakeSection("goal", true, ["goal-head", "goal-row"]),
   ];
   const lines = renderWidgetStack(sections, { width: 80, theme, expanded: true });
-  assert.deepEqual(lines, ["goal-head", "goal-row", "loop-head", "loop-row"]);
+  assert.deepEqual(lines, ["goal-head", "goal-row", "monitor-head", "monitor-row"]);
   assert.ok(lines.every((line) => line !== ""), "the stack never inserts a blank line between sections");
 
   const tall = [
@@ -294,7 +257,6 @@ test("every section's active flag comes from the same source as its own heading 
     ["agents", { agents: [subagentRun("waiting")] }, { agents: [subagentRun("interrupted")] }],
     ["monitors", { monitors: [monitorItem("running")] }, { monitors: [monitorItem("completed")] }],
     ["monitors", { monitors: [monitorItem("running")] }, { monitors: [monitorItem("killed")] }],
-    ["loops", { loops: [loopItem("active")] }, { loops: [loopItem("paused")] }],
   ];
   for (const [id, activeState, idleState] of cases) {
     for (const [patch, expectedActive] of [[activeState, true], [idleState, false]]) {
@@ -304,7 +266,7 @@ test("every section's active flag comes from the same source as its own heading 
       harness.publishAll();
       const section = harness.component.render(200);
       const heading = section.find((line) => line.startsWith(expectedActive ? "● " : "○ ")
-        && new RegExp(`^[●○] {2}${{ goal: "Goal", todos: "Todos", agents: "Agents", monitors: "Monitors", loops: "Loops" }[id]}`).test(line));
+        && new RegExp(`^[●○] {2}${{ goal: "Goal", todos: "Todos", agents: "Subagents", monitors: "Monitors" }[id]}`).test(line));
       assert.ok(heading, `${id} must render a ${expectedActive ? "filled" : "hollow"} heading for this state`);
       const ordered = harness.component.render(200);
       const rank = ordered.findIndex((line) => line === heading);
@@ -323,22 +285,21 @@ test("every section's active flag comes from the same source as its own heading 
   }
 });
 
-test("five real widgets register one aggregate key once and reorder on every active flip without touching setWidget", () => {
+test("four real widgets register one aggregate key once and reorder on every active flip without touching setWidget", () => {
   const harness = stack();
   harness.bindAll();
   harness.publishAll();
-  assert.equal(harness.calls.length, 1, "five widgets produce exactly one setWidget call");
-  assert.equal(harness.registrations(), 1, "five sections share exactly one registration");
+  assert.equal(harness.calls.length, 1, "four widgets produce exactly one setWidget call");
+  assert.equal(harness.registrations(), 1, "four sections share exactly one registration");
   assert.equal(harness.calls[0].key, WIDGET_STACK_KEY);
   assert.deepEqual(harness.calls[0].options, { placement: "aboveEditor" });
-  assert.deepEqual(harness.headings(), ["●  Goal · ↻  active · goal-active", "●  Todos (0/1)", "●  Agents (0/1)", "●  Monitors (0/1)", "●  Loops"]);
+  assert.deepEqual(harness.headings(), ["●  Goal · ↻  active · goal-active", "●  Todos (0/1)", "●  Subagents (0/1)", "●  Monitors (0/1)"]);
 
   const flips = [
     ["goal", () => { harness.state.goal = goalView("paused"); harness.goal.update(); }],
     ["todos", () => { harness.state.todos = [todoTask("completed")]; harness.todos.update(harness.state.todos); }],
     ["agents", () => { harness.state.agents = [subagentRun("completed")]; harness.agents.update(); }],
     ["monitors", () => { harness.state.monitors = [monitorItem("completed")]; harness.monitors.update(); }],
-    ["loops", () => { harness.state.loops = [loopItem("paused")]; harness.loops.update(); }],
   ];
   for (const [id, flip] of flips) {
     const rendersBefore = harness.renders;
@@ -347,7 +308,7 @@ test("five real widgets register one aggregate key once and reorder on every act
     assert.equal(harness.calls.length, callsBefore, `${id} going idle must not call setWidget again`);
     assert.ok(harness.renders > rendersBefore, `${id} going idle must request an aggregate render`);
   }
-  assert.deepEqual(harness.headings(), ["○  Goal · Ⅱ  paused · goal-paused", "○  Todos (1/1)", "○  Agents (1/1) · ctrl+shift+←/→ viewer", "○  Monitors (1/1)", "○  Loops"]);
+  assert.deepEqual(harness.headings(), ["○  Goal · Ⅱ  paused · goal-paused", "○  Todos (1/1)", "○  Subagents (1/1) · ctrl+shift+←/→ viewer", "○  Monitors (1/1)"]);
 
   harness.state.monitors = [monitorItem("running")];
   harness.monitors.update();
@@ -359,16 +320,14 @@ test("an empty section contributes no lines and the aggregate key is revoked onl
   const harness = stack();
   harness.bindAll();
   harness.publishAll();
-  assert.equal(harness.headings().length, 5);
-
-  harness.state.loops = [];
-  harness.loops.update();
-  assert.equal(harness.clears(), 0, "one empty section never revokes the shared key");
   assert.equal(harness.headings().length, 4);
-  assert.doesNotMatch(harness.lines().join("\n"), /Loops/, "an empty section contributes no lines at all");
 
   harness.state.goal = { goal: null, elapsedMs: null, continuationCount: 0, ownedChildRunCount: 0, main: { tokens: 0, tools: 0, turns: 0, compactions: 0 }, children: { runCount: 0, tokens: 0, tools: 0, turns: 0, compactions: 0 } };
   harness.goal.update();
+  assert.equal(harness.clears(), 0, "one empty section never revokes the shared key");
+  assert.equal(harness.headings().length, 3);
+  assert.doesNotMatch(harness.lines().join("\n"), /Goal/, "an empty section contributes no lines at all");
+
   harness.state.todos = [];
   harness.todos.update(harness.state.todos);
   harness.state.agents = [];
@@ -483,15 +442,15 @@ test("reload clears the previous providers before a new widget instance publishe
     },
   };
   host.bind("owner", ui);
-  host.publish("loops", fakeSection("loops", true, ["stale loops"]));
-  assert.deepEqual(component.render(100), ["stale loops"]);
+  host.publish("monitors", fakeSection("monitors", true, ["stale monitors"]));
+  assert.deepEqual(component.render(100), ["stale monitors"]);
 
-  for (const id of ["goal", "agents", "monitors", "loops"]) host.publish(id, undefined);
+  for (const id of ["goal", "agents", "monitors"]) host.publish(id, undefined);
   assert.equal(calls.at(-1).content, undefined, "clearing the last stale section revokes the key");
   assert.deepEqual(host.publishedSectionIds(), []);
 
-  host.publish("loops", fakeSection("loops", true, ["fresh loops"]));
-  assert.deepEqual(component.render(100), ["fresh loops"], "the new instance owns the section id outright");
+  host.publish("monitors", fakeSection("monitors", true, ["fresh monitors"]));
+  assert.deepEqual(component.render(100), ["fresh monitors"], "the new instance owns the section id outright");
 });
 
 test("dispose retracts only its own section and a late timer tick never resurrects it", () => {
@@ -499,10 +458,9 @@ test("dispose retracts only its own section and a late timer tick never resurrec
   harness.bindAll();
   harness.publishAll();
   const ticks = harness.timers.filter((timer) => timer.milliseconds === 1_000 || timer.milliseconds === 80);
-  assert.ok(ticks.length >= 3, "Goal, Loops, and Agents each keep their own tick");
+  assert.ok(ticks.length >= 2, "Goal and Subagents each keep their own tick");
 
   harness.goal.dispose();
-  harness.loops.dispose();
   harness.agents.dispose();
   assert.equal(harness.clears(), 0, "the remaining sections keep the aggregate registered");
   assert.deepEqual(harness.headings(), ["●  Todos (0/1)", "●  Monitors (0/1)"]);
@@ -524,13 +482,13 @@ test("a tree cycle drops the old sections and republishes them on the new UI wit
   const harness = stack();
   harness.bindAll();
   harness.publishAll();
-  assert.equal(harness.headings().length, 5);
+  assert.equal(harness.headings().length, 4);
 
-  // before_tree: Goal and Agents release the UI while Monitors, Loops, and Todos survive.
+  // before_tree: Goal and Subagents release the UI while Monitors and Todos survive.
   harness.goal.setContext(undefined);
   harness.agents.dispose();
-  assert.deepEqual(harness.headings(), ["●  Todos (0/1)", "●  Monitors (0/1)", "●  Loops"]);
-  assert.doesNotMatch(harness.lines().join("\n"), /Goal|Agents/, "the pre-tree branch leaves no orphan rows behind");
+  assert.deepEqual(harness.headings(), ["●  Todos (0/1)", "●  Monitors (0/1)"]);
+  assert.doesNotMatch(harness.lines().join("\n"), /Goal|Subagents/, "the pre-tree branch leaves no orphan rows behind");
 
   // session_tree: the same UI object comes back and every section returns.
   harness.state.goal = goalView("active");
@@ -538,7 +496,7 @@ test("a tree cycle drops the old sections and republishes them on the new UI wit
   harness.bindAll();
   harness.publishAll();
   assert.equal(harness.registrations(), 1, "a tree cycle reuses the single registration");
-  assert.deepEqual(harness.headings(), ["●  Goal · ↻  active · goal-active", "●  Todos (0/1)", "●  Agents (0/1)", "●  Monitors (0/1)", "●  Loops"]);
+  assert.deepEqual(harness.headings(), ["●  Goal · ↻  active · goal-active", "●  Todos (0/1)", "●  Subagents (0/1)", "●  Monitors (0/1)"]);
 });
 
 test("Ctrl+O only changes Goal while compact widgets stay unchanged and the aggregate stays registered once", () => {
@@ -548,7 +506,6 @@ test("Ctrl+O only changes Goal while compact widgets stay unchanged and the aggr
   harness.state.todos = [todoTask("pending"), todoTask("completed")];
   harness.state.agents = [subagentRun("running"), subagentRun("completed")];
   harness.state.monitors = [monitorItem("running"), monitorItem("completed")];
-  harness.state.loops = [];
   harness.bindAll();
   harness.publishAll();
 
@@ -558,13 +515,13 @@ test("Ctrl+O only changes Goal while compact widgets stay unchanged and the aggr
     const next = lines.findIndex((line, index) => index > start && /^[●○]  /.test(line));
     return lines.slice(start, next === -1 ? undefined : next);
   };
-  const compactLabels = ["Todos", "Agents", "Monitors"];
+  const compactLabels = ["Todos", "Subagents", "Monitors"];
   const before = harness.lines();
   const compactBefore = Object.fromEntries(compactLabels.map((label) => [label, sectionLines(before, label)]));
   const goalBefore = sectionLines(before, "Goal");
   assert.equal(goalBefore.length, 2, "an expanded completed Goal includes its detail row");
   assert.match(compactBefore.Todos[0], /Todos \(1\/2\)/, "the Todo fixture includes a completed item");
-  assert.match(compactBefore.Agents[0], /Agents \(1\/2\)/, "the Agent fixture includes a completed run");
+  assert.match(compactBefore.Subagents[0], /Subagents \(1\/2\)/, "the Subagent fixture includes a completed run");
   assert.match(compactBefore.Monitors[0], /Monitors \(1\/2\)/, "the Monitor fixture includes a completed process");
   assert.ok(compactLabels.every((label) => !compactBefore[label].join("\n").includes("to expand")));
   const registrations = harness.registrations();
@@ -597,7 +554,6 @@ test("a session without a TUI UI publishes freely and still calls setWidget zero
   harness.goal.setContext(undefined);
   harness.agents.setUICtx(undefined);
   harness.monitors.setContext(undefined);
-  harness.loops.setContext(undefined);
   harness.publishAll();
   assert.deepEqual(harness.calls, [], "an RPC or print session never registers the aggregate");
   assert.equal(widgetStackHost().boundUI(), undefined);
@@ -613,13 +569,13 @@ test("a host that ignores component factories, as RPC does, never locks the aggr
   assert.equal(host.isRegistered(), false, "a factory the host never ran is not a live registration");
 
   host.requestRender();
-  host.publish("loops", fakeSection("loops", true, ["loops"]));
+  host.publish("agents", fakeSection("agents", true, ["agents"]));
   assert.ok(ignoring.registrations() > 1, "later updates retry the factory instead of being dropped");
   assert.equal(host.isRegistered(), false);
 
   // The key stays claimed, so removing the last section still clears it exactly once.
   host.publish("monitors", undefined);
-  host.publish("loops", undefined);
+  host.publish("agents", undefined);
   assert.equal(ignoring.calls.at(-1).content, undefined, "an ignored factory still leaves a clearable key");
   assert.equal(ignoring.calls.filter((call) => call.content === undefined).length, 1);
 
@@ -718,6 +674,6 @@ test("binding no UI releases exactly this owner's recorded claim and nothing els
 
 test("section ids are fixed, exhaustive, and unknown ids sort last instead of throwing", () => {
   assert.deepEqual([...WIDGET_STACK_SECTION_IDS], SECTION_ORDER);
-  const sections = [fakeSection("mystery", true, ["mystery"]), fakeSection("loops", true, ["loops"])];
-  assert.deepEqual(orderWidgetStackSections(sections).map((section) => section.id), ["loops", "mystery"]);
+  const sections = [fakeSection("mystery", true, ["mystery"]), fakeSection("monitors", true, ["monitors"])];
+  assert.deepEqual(orderWidgetStackSections(sections).map((section) => section.id), ["monitors", "mystery"]);
 });

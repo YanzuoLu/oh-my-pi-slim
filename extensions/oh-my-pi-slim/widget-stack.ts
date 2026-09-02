@@ -5,12 +5,12 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
  *
  * Every persistent package widget contributes one section. Sections that are working stay
  * on top, parked and finished sections sink below them, and inside each group the product
- * order Goal → Todos → Agents → Monitors → Loops never changes. Nothing here owns UI state,
+ * order Goal → Todos → Subagents → Monitors never changes. Nothing here owns UI state,
  * registers a widget, or rewrites a section's own lines: the section renderers stay the sole
  * authority for their body, line budget, and glyphs.
  */
 
-export const WIDGET_STACK_SECTION_IDS = ["goal", "todos", "agents", "monitors", "loops"] as const;
+export const WIDGET_STACK_SECTION_IDS = ["goal", "todos", "agents", "monitors"] as const;
 
 export type WidgetStackSectionId = typeof WIDGET_STACK_SECTION_IDS[number];
 

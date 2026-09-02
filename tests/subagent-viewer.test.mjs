@@ -19,14 +19,17 @@ import { piRoot } from "./fixtures/pi-install.mjs";
 const dependencyMap = {
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
-  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
-  "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
-  "./subagent-model-display.js": new URL("../extensions/oh-my-pi-slim/subagent-model-display.ts", import.meta.url).href,
-  "./subagent-viewer-data.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer-data.ts", import.meta.url).href,
-  "./subagent-viewer-transcript.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer-transcript.ts", import.meta.url).href,
-  "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
-  "./subagent-widget-display.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-display.ts", import.meta.url).href,
-  "./subagent-widget-glyphs.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-glyphs.ts", import.meta.url).href,
+  typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
+  "../tool-contracts.js": new URL("../extensions/oh-my-pi-slim/tool-contracts.ts", import.meta.url).href,
+  "../semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "./core.js": new URL("../extensions/oh-my-pi-slim/subagent/core.ts", import.meta.url).href,
+  "./legacy-abstract.js": new URL("../extensions/oh-my-pi-slim/subagent/legacy-abstract.ts", import.meta.url).href,
+  "./model-display.js": new URL("../extensions/oh-my-pi-slim/subagent/model-display.ts", import.meta.url).href,
+  "./viewer-data.js": new URL("../extensions/oh-my-pi-slim/subagent/viewer-data.ts", import.meta.url).href,
+  "./viewer-transcript.js": new URL("../extensions/oh-my-pi-slim/subagent/viewer-transcript.ts", import.meta.url).href,
+  "../widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
+  "./widget-display.js": new URL("../extensions/oh-my-pi-slim/subagent/widget-display.ts", import.meta.url).href,
+  "./widget-glyphs.js": new URL("../extensions/oh-my-pi-slim/subagent/widget-glyphs.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -66,7 +69,7 @@ const {
   sanitizeViewerInline,
   sanitizeViewerText,
   wrapViewerText,
-} = await import("../extensions/oh-my-pi-slim/subagent-viewer-data.ts");
+} = await import("../extensions/oh-my-pi-slim/subagent/viewer-data.ts");
 const { getAgentDir, initTheme } = await import("@earendil-works/pi-coding-agent");
 // Pi initializes its theme singleton during interactive startup, before any extension loads. The
 // suite does the same once, so the Main components under test render with real colors.
@@ -76,7 +79,7 @@ const {
   buildViewerTranscriptBody,
   readViewerTranscriptSettings,
   viewerSettingsKey,
-} = await import("../extensions/oh-my-pi-slim/subagent-viewer-transcript.ts");
+} = await import("../extensions/oh-my-pi-slim/subagent/viewer-transcript.ts");
 const {
   SubagentViewer,
   VIEWER_EMPTY_MESSAGE,
@@ -91,7 +94,7 @@ const {
   isViewerTerminalStatus,
   isViewerMouseSequence,
   parseViewerWheel,
-} = await import("../extensions/oh-my-pi-slim/subagent-viewer.ts");
+} = await import("../extensions/oh-my-pi-slim/subagent/viewer.ts");
 const { createOverlayHost } = await import("./fixtures/overlay-host.mjs");
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -994,7 +997,7 @@ test("the overlay renders a complete screen with the transcript on top and the s
   // Row 0 belongs to the transcript body: no header, no title, no border above it.
   assert.equal(/Subagent 1\/1/.test(lines[0]), false);
   assert.ok(lines[0].startsWith("stub-empty") || lines[0].trim() === "");
-  const statusIndex = lines.findIndex((line) => /^Subagent 1\/1 · fixer \[run-a\] · running · fix the parser/.test(line));
+  const statusIndex = lines.findIndex((line) => /^Subagent 1\/1 · \[run-a\] · running · fix the parser/.test(line));
   const readOnlyIndex = lines.findIndex((line) => line.trim() === VIEWER_READ_ONLY_LABEL);
   assert.ok(statusIndex > 0, "the status title must live at the bottom");
   assert.ok(readOnlyIndex > 0 && readOnlyIndex < statusIndex, "Read-Only sits above the status rows");
@@ -1755,7 +1758,7 @@ test("transcript settings read the real host files without a settings manager", 
 });
 
 test("the transcript module holds no settings manager and no write API", () => {
-  const source = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent-viewer-transcript.ts"), "utf-8");
+  const source = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent/viewer-transcript.ts"), "utf-8");
   for (const forbidden of [
     "SettingsManager",
     "writeFileSync",
@@ -2239,8 +2242,8 @@ test("the viewer sources use no writing or session-control API", () => {
     "setFooter",
     "tui.children",
   ];
-  for (const file of ["subagent-viewer.ts", "subagent-viewer-data.ts", "subagent-viewer-transcript.ts"]) {
-    const source = readFileSync(join(ROOT, "extensions/oh-my-pi-slim", file), "utf8");
+  for (const file of ["viewer.ts", "viewer-data.ts", "viewer-transcript.ts"]) {
+    const source = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent", file), "utf8");
     for (const term of forbidden) {
       assert.equal(source.includes(term), false, `${file} must not use ${term}`);
     }
@@ -2248,7 +2251,7 @@ test("the viewer sources use no writing or session-control API", () => {
 });
 
 test("only the viewer writes to the terminal, and only the wheel mode", () => {
-  const viewer = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent-viewer.ts"), "utf8");
+  const viewer = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent/viewer.ts"), "utf8");
   const writes = [...viewer.matchAll(/terminal\.write\(([^)]*)\)/g)].map((match) => match[1]);
   assert.deepEqual(writes, ["VIEWER_MOUSE_ENABLE", "VIEWER_MOUSE_DISABLE"]);
   assert.match(viewer, /VIEWER_MOUSE_ENABLE = "\\x1b\[\?1000h\\x1b\[\?1006h"/);
@@ -2259,12 +2262,12 @@ test("only the viewer writes to the terminal, and only the wheel mode", () => {
   // Enabling happens on the mount path only, never in a constructor.
   const constructorBody = viewer.slice(viewer.indexOf("constructor(options: SubagentViewerOptions)"), viewer.indexOf("isOpen(): boolean"));
   assert.equal(constructorBody.includes("enableMouse"), false);
-  const transcript = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent-viewer-transcript.ts"), "utf8");
+  const transcript = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent/viewer-transcript.ts"), "utf8");
   assert.equal(transcript.includes("terminal.write"), false);
 });
 
 test("the transcript module reuses Pi's root component exports and no deep import", () => {
-  const source = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent-viewer-transcript.ts"), "utf8");
+  const source = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent/viewer-transcript.ts"), "utf8");
   for (const component of [
     "UserMessageComponent",
     "AssistantMessageComponent",
@@ -2300,8 +2303,8 @@ test("the main extension registers exactly the two viewer shortcuts and no viewe
 test("no production source keeps a super arrow key or a Terminal ESC mapping", () => {
   const files = [
     "extensions/oh-my-pi-slim/index.ts",
-    "extensions/oh-my-pi-slim/subagent-viewer.ts",
-    "extensions/oh-my-pi-slim/subagent-viewer-data.ts",
+    "extensions/oh-my-pi-slim/subagent/viewer.ts",
+    "extensions/oh-my-pi-slim/subagent/viewer-data.ts",
     "README.md",
     "README.zh-CN.md",
   ];
@@ -2315,7 +2318,7 @@ test("no production source keeps a super arrow key or a Terminal ESC mapping", (
 });
 
 test("the viewer overlay matches ctrl+shift arrows and no super arrow", () => {
-  const source = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent-viewer.ts"), "utf8");
+  const source = readFileSync(join(ROOT, "extensions/oh-my-pi-slim/subagent/viewer.ts"), "utf8");
   assert.ok(source.includes('matchesKey(data, Key.ctrlShift("right")) || matchesKey(data, Key.right)'));
   assert.ok(source.includes('matchesKey(data, Key.ctrlShift("left")) || matchesKey(data, Key.left)'));
   assert.ok(source.includes('"←/→ or Ctrl+Shift+←/→ run"'));
@@ -3157,7 +3160,7 @@ test("every retained status stays in the cycle and i/N counts the whole retained
   }
   assert.deepEqual(seen, runs.map((run) => run.id), "the cycle visits every retained run in order");
   const statusRow = () => harness.lines(200).find((line) => line.includes("Subagent ")) ?? "";
-  assert.match(statusRow(), /Subagent 6\/6 · fixer \[run-5\] · interrupted/);
+  assert.match(statusRow(), /Subagent 6\/6 · \[run-5\] · interrupted/);
   harness.key(KEY.right);
   await opened;
   assert.equal(harness.viewer.isOpen(), false, "one more step past the last run returns to Main");
@@ -3290,7 +3293,7 @@ test("a terminal run without a readable session file falls back to its retained 
   for (const [status, field, text] of [
     ["completed", "output", "the final answer"],
     ["failed", "error", "provider exploded"],
-    ["interrupted", "error", "Interrupted by the parent session."],
+    ["interrupted", "error", "Interrupted by the supervisor session."],
   ]) {
     const harness = createHarness({
       realBody: true,

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { registerHooks } from "node:module";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test, { beforeEach } from "node:test";
 import { piRoot } from "./fixtures/pi-install.mjs";
 const moduleUrls = {
@@ -9,64 +10,54 @@ const moduleUrls = {
   piTui: pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
 };
-const localMap = {
-  "./ask-runtime.js": new URL("../extensions/oh-my-pi-slim/ask-runtime.ts", import.meta.url).href,
-  "./ask-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts", import.meta.url).href,
-  "./ask-tui.js": new URL("../extensions/oh-my-pi-slim/ask-tui.ts", import.meta.url).href,
-  "./bootstrap.js": new URL("../extensions/oh-my-pi-slim/bootstrap.ts", import.meta.url).href,
-  "./cache-retention.js": new URL("../extensions/oh-my-pi-slim/cache-retention.ts", import.meta.url).href,
-  "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
-  "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
-  "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
-  "./loop-runtime.js": new URL("../extensions/oh-my-pi-slim/loop-runtime.ts", import.meta.url).href,
-  "./monitor-runtime.js": new URL("../extensions/oh-my-pi-slim/monitor-runtime.ts", import.meta.url).href,
-  "./monitor-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/monitor-transcript-renderer.ts", import.meta.url).href,
-  "./monitor-widget.js": new URL("../extensions/oh-my-pi-slim/monitor-widget.ts", import.meta.url).href,
-  "./loop-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/loop-transcript-renderer.ts", import.meta.url).href,
-  "./loop-widget.js": new URL("../extensions/oh-my-pi-slim/loop-widget.ts", import.meta.url).href,
-  "./prompt-context.js": new URL("../extensions/oh-my-pi-slim/prompt-context.ts", import.meta.url).href,
-  "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
-  "./subagent-model-display.js": new URL("../extensions/oh-my-pi-slim/subagent-model-display.ts", import.meta.url).href,
-  "./subagent-run-files.js": new URL("../extensions/oh-my-pi-slim/subagent-run-files.ts", import.meta.url).href,
-  "./subagent-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-transcript-renderer.ts", import.meta.url).href,
-  "./subagent-viewer-data.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer-data.ts", import.meta.url).href,
-  "./subagent-viewer-transcript.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer-transcript.ts", import.meta.url).href,
-  "./subagent-widget.js": new URL("../extensions/oh-my-pi-slim/subagent-widget.ts", import.meta.url).href,
-  "./subagent-widget-renderer.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-renderer.ts", import.meta.url).href,
-  "./subagent-widget-display.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-display.ts", import.meta.url).href,
-  "./subagent-widget-glyphs.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-glyphs.ts", import.meta.url).href,
-  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
-  "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
-  "./widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
-  "./widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
-  "../oh-my-pi-slim/semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
-  "../oh-my-pi-slim/widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
-  "../oh-my-pi-slim/widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
-  "../oh-my-pi-slim/widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
-  "./widget.js": new URL("../extensions/todo/widget.ts", import.meta.url).href,
-};
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === "@earendil-works/pi-coding-agent") return { url: moduleUrls.codingAgent, shortCircuit: true };
     if (specifier === "@earendil-works/pi-ai") return { url: moduleUrls.piAi, shortCircuit: true };
     if (specifier === "@earendil-works/pi-tui") return { url: moduleUrls.piTui, shortCircuit: true };
     if (specifier === "typebox") return { url: moduleUrls.typebox, shortCircuit: true };
-    if (specifier === "./core.js" && context.parentURL?.includes("/extensions/todo/")) {
-      return { url: new URL("../extensions/todo/core.ts", import.meta.url).href, shortCircuit: true };
+    if (specifier.startsWith(".") && specifier.endsWith(".js") && context.parentURL) {
+      const candidate = new URL(`${specifier.slice(0, -3)}.ts`, context.parentURL);
+      if (existsSync(fileURLToPath(candidate))) return { url: candidate.href, shortCircuit: true };
     }
-    const url = localMap[specifier];
-    return url ? { url, shortCircuit: true } : nextResolve(specifier, context);
+    return nextResolve(specifier, context);
   },
 });
 
-const { askUserQuestionParameters } = await import("../extensions/oh-my-pi-slim/ask-runtime.ts");
-const { GOAL_ACTIONS, GOAL_PUBLIC_FIELDS, goalParameters } = await import("../extensions/oh-my-pi-slim/goal-runtime.ts");
-const { LOOP_ACTIONS, LOOP_PUBLIC_FIELDS, loopParameters } = await import("../extensions/oh-my-pi-slim/loop-runtime.ts");
-const { MONITOR_ACTIONS, MONITOR_PUBLIC_FIELDS, monitorParameters } = await import("../extensions/oh-my-pi-slim/monitor-runtime.ts");
-const { subagentParameters } = await import("../extensions/oh-my-pi-slim/subagent-runtime.ts");
-const { SUBAGENT_ACTIONS, SUBAGENT_PUBLIC_FIELDS } = await import("../extensions/oh-my-pi-slim/subagent-core.ts");
-const { contactSupervisorParameters } = await import("../extensions/oh-my-pi-slim/child-supervisor.ts");
-const { todoParameters } = await import("../extensions/todo/index.ts");
+const {
+  ASK_TOOL_CONTRACT,
+  ASK_TOOL_DESCRIPTIONS,
+  askResultSchema,
+  CONTACT_SUPERVISOR_TOOL_CONTRACT,
+  CONTACT_SUPERVISOR_TOOL_DESCRIPTIONS,
+  contactSupervisorResultSchema,
+  GOAL_ACTIONS,
+  GOAL_PUBLIC_FIELDS,
+  GOAL_TOOL_CONTRACT,
+  GOAL_TOOL_DESCRIPTIONS,
+  goalResultSchema,
+  MONITOR_ACTIONS,
+  MONITOR_PUBLIC_FIELDS,
+  MONITOR_TOOL_CONTRACT,
+  MONITOR_TOOL_DESCRIPTIONS,
+  monitorResultSchema,
+  SUBAGENT_ACTIONS,
+  SUBAGENT_PUBLIC_FIELDS,
+  SUBAGENT_TOOL_CONTRACT,
+  SUBAGENT_TOOL_DESCRIPTIONS,
+  subagentResultSchema,
+  TODO_TOOL_CONTRACT,
+  TODO_TOOL_DESCRIPTIONS,
+  todoResultSchema,
+  TODO_ACTIONS,
+  TODO_PUBLIC_FIELDS,
+  askUserQuestionParameters,
+  contactSupervisorParameters,
+  goalParameters,
+  monitorParameters,
+  subagentParameters,
+  todoParameters,
+} = await import("../extensions/oh-my-pi-slim/tool-contracts.ts");
 const { resetWidgetStackHost } = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
 
 // The aggregate widget host is a process-wide singleton, so every test starts from an empty one.
@@ -91,11 +82,10 @@ test("all production model-tool schemas survive the Kimi strict-provider portabi
     goal: providerJson(goalParameters),
     subagent: providerJson(subagentParameters),
     contact_supervisor: providerJson(contactSupervisorParameters),
-    loop: providerJson(loopParameters),
     monitor: providerJson(monitorParameters),
     todo: providerJson(todoParameters),
   };
-  assert.deepEqual(Object.keys(schemas).sort(), ["ask_user_question", "contact_supervisor", "goal", "loop", "monitor", "subagent", "todo"]);
+  assert.deepEqual(Object.keys(schemas).sort(), ["ask_user_question", "contact_supervisor", "goal", "monitor", "subagent", "todo"]);
   for (const [name, schema] of Object.entries(schemas)) assertPortableObjectRoot(name, schema);
 
   const operationBranches = schemas.todo.properties.operations.items.anyOf;
@@ -112,19 +102,19 @@ test("all production model-tool schemas survive the Kimi strict-provider portabi
   assert.deepEqual(remove.required.slice().sort(), ["op", "target"]);
   assert.equal(remove.anyOf, undefined, "delete branch must not use a nested union");
   assert.equal(remove.oneOf, undefined, "delete branch must not use a nested union");
-  assert.equal(remove.properties.target.description, "Exact subject to delete.");
+  assert.equal(remove.properties.target.description, TODO_TOOL_DESCRIPTIONS.input.operations.items.delete.target);
   const clear = operationBranches.find((branch) => branch.properties.op.const === "clear");
-  assert.equal(clear.description, "Use clear at most once.");
+  assert.equal(clear.description, TODO_TOOL_DESCRIPTIONS.input.operations.items.clear.description);
   assert.deepEqual(Object.fromEntries(operationBranches.map((branch) => [
     branch.properties.op.const, branch.properties.op.description,
   ])), {
-    append: "append requires subject and abstract, with optional blockedBy.",
-    modify: "modify requires target and at least one changed field.",
-    delete: "delete requires target.",
-    clear: "clear accepts no other fields.",
+    append: TODO_TOOL_DESCRIPTIONS.input.operations.items.append.op,
+    modify: TODO_TOOL_DESCRIPTIONS.input.operations.items.modify.op,
+    delete: TODO_TOOL_DESCRIPTIONS.input.operations.items.delete.op,
+    clear: TODO_TOOL_DESCRIPTIONS.input.operations.items.clear.op,
   });
-  assert.equal(schemas.todo.properties.action.description, "Choose list or update. list accepts no operations. update requires one or more ordered operations.");
-  assert.equal(schemas.todo.properties.operations.description, "Ordered append, modify, delete, or clear operations for update. Omit for list.");
+  assert.equal(schemas.todo.properties.action.description, TODO_TOOL_DESCRIPTIONS.input.action);
+  assert.equal(schemas.todo.properties.operations.description, TODO_TOOL_DESCRIPTIONS.input.operations.description);
   assert.deepEqual(schemas.todo.required, ["action"]);
   assert.equal("confirmed" in schemas.todo.properties, false);
   assert.equal("force" in schemas.todo.properties, false);
@@ -140,45 +130,42 @@ test("all production model-tool schemas survive the Kimi strict-provider portabi
     preview: ask.items.properties.options.items.properties.preview.description,
     multiSelect: ask.items.properties.multiSelect.description,
   }, {
-    questions: "One to four questions in display order.",
-    question: "Decision question shown to the user.",
-    header: "Short header up to 16 characters.",
-    options: "Two to four authored options in display order.",
-    label: "Unique option label up to 60 characters. Place the recommended option first and append (Recommended). Reserved labels are Other, Type something., and Next.",
-    optionDescription: "Explain the outcome of choosing this option.",
-    preview: "Optional preview for single-select only.",
-    multiSelect: "True enables multiple authored selections. Omit or use false for single-select. Multi-select options cannot include previews.",
+    questions: ASK_TOOL_DESCRIPTIONS.input.questions.description,
+    question: ASK_TOOL_DESCRIPTIONS.input.questions.items.question,
+    header: ASK_TOOL_DESCRIPTIONS.input.questions.items.header,
+    options: ASK_TOOL_DESCRIPTIONS.input.questions.items.options.description,
+    label: ASK_TOOL_DESCRIPTIONS.input.questions.items.options.items.label,
+    optionDescription: ASK_TOOL_DESCRIPTIONS.input.questions.items.options.items.description,
+    preview: ASK_TOOL_DESCRIPTIONS.input.questions.items.options.items.preview,
+    multiSelect: ASK_TOOL_DESCRIPTIONS.input.questions.items.multiSelect,
   });
 
   const actionContracts = [
     ["goal", GOAL_ACTIONS, GOAL_PUBLIC_FIELDS],
-    ["loop", LOOP_ACTIONS, LOOP_PUBLIC_FIELDS],
     ["monitor", MONITOR_ACTIONS, MONITOR_PUBLIC_FIELDS],
     ["subagent", SUBAGENT_ACTIONS, SUBAGENT_PUBLIC_FIELDS],
+    ["todo", TODO_ACTIONS, TODO_PUBLIC_FIELDS],
   ];
   for (const [name, actions, fields] of actionContracts) {
     assert.deepEqual(schemas[name].properties.action.anyOf.map(({ const: action }) => action), [...actions]);
     assert.deepEqual(Object.keys(schemas[name].properties).sort(), [...fields].sort());
     assert.deepEqual(schemas[name].required, ["action"], `${name} root requires only action, so clear never requires id`);
+    assert.match(schemas[name].properties.action.description, /^Action to perform\./);
     assert.equal("confirmed" in schemas[name].properties, false);
     assert.equal("force" in schemas[name].properties, false);
+    assert.equal(Object.keys(schemas[name].properties)[0], "action", `${name} must put action first`);
   }
 
-  assert.equal(schemas.goal.properties.action.description, "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status, resume, and clear accept no other fields.");
-  assert.equal(schemas.loop.properties.action.description, "Choose an action. create requires interval, abstract, and prompt. modify requires id and at least one changed field. delete, pause, and resume require id. clear and list accept no other fields.");
-  assert.equal(schemas.loop.properties.interval.description, "Fixed delay for create or modify, from 10s through 7d. Format: one positive integer plus s, m, h, or d.");
-  assert.equal(schemas.monitor.properties.action.description, "Choose an action. create requires abstract, command, and checkAfter, with optional cwd and notifyOn. stop, delete, and status require id. clear and list accept no other fields. status optionally accepts start and end.");
-  assert.equal(schemas.monitor.properties.command.description, "Foreground Bash command for create. Do not use nohup, setsid, disown, trailing &, or another detach escape.");
-  assert.equal(schemas.monitor.properties.checkAfter.description, "Required silence threshold for create, from 10s through 7d. A reminder arrives whenever the command stays silent that long. Format: one positive integer plus s, m, h, or d.");
-  assert.equal(schemas.monitor.properties.checkAfter.type, "string");
-  assert.equal(schemas.monitor.required?.includes("checkAfter") ?? false, false, "checkAfter stays optional in the shared action schema and is enforced by the Monitor runtime");
-  assert.equal(schemas.monitor.properties.end.description, "Reverse log offset ending the status window. Defaults to 100 and must exceed start by at most 2000.");
-  assert.equal(schemas.subagent.properties.action.description, "Choose create, list, status, interrupt, steer, resume, reply, delete, or clear. create requires agent, abstract, and task, with optional cwd. status, interrupt, and delete require id. steer and reply require id and message. resume requires id, abstract, and message, with optional cwd. list and clear accept no other fields.");
-  assert.equal(schemas.subagent.properties.cwd.description, "Working directory for create or resume. Relative paths resolve against the parent working directory. Create defaults to the parent working directory. Resume defaults to the source run's working directory.");
+  assert.equal(schemas.goal.properties.action.description, GOAL_TOOL_DESCRIPTIONS.input.action);
+  assert.equal(schemas.monitor.properties.action.description, MONITOR_TOOL_DESCRIPTIONS.input.action);
+  assert.equal(schemas.monitor.properties.command.description, MONITOR_TOOL_DESCRIPTIONS.input.command);
+  assert.equal(schemas.monitor.properties.id.description, MONITOR_TOOL_DESCRIPTIONS.input.id);
+  assert.equal(schemas.subagent.properties.action.description, SUBAGENT_TOOL_DESCRIPTIONS.input.action);
+  assert.equal(schemas.subagent.properties.cwd.description, SUBAGENT_TOOL_DESCRIPTIONS.input.cwd);
   assert.equal(schemas.subagent.properties.cwd.type, "string");
   assert.equal(schemas.subagent.required.includes("cwd"), false, "cwd stays optional for create and resume");
-  assert.equal(schemas.subagent.properties.id.description, "Retained run ID for status, steer, interrupt, resume, reply, or delete.");
-  assert.equal(schemas.subagent.properties.message.description, "New instruction for steer. Complete continuation objective for resume. Complete answer to the waiting request for reply.");
+  assert.equal(schemas.subagent.properties.id.description, SUBAGENT_TOOL_DESCRIPTIONS.input.id);
+  assert.equal(schemas.subagent.properties.message.description, SUBAGENT_TOOL_DESCRIPTIONS.input.message);
 
   const contact = schemas.contact_supervisor.properties;
   assert.deepEqual({
@@ -191,13 +178,50 @@ test("all production model-tool schemas survive the Kimi strict-provider portabi
     prompt: contact.interview.properties.questions.items.properties.prompt.description,
     options: contact.interview.properties.questions.items.properties.options.description,
   }, {
-    reason: "Request type: need_decision, interview_request, or progress_update.",
-    message: "Complete context the orchestrator needs to respond. Defaults to the selected reason when omitted or blank.",
-    interview: "Structured interview details for interview_request.",
-    questions: "Authored interview questions in display order.",
-    title: "Optional short interview title.",
-    id: "Optional short identifier for matching a question.",
-    prompt: "Question the orchestrator should answer.",
-    options: "Optional authored answer choices.",
+    reason: CONTACT_SUPERVISOR_TOOL_DESCRIPTIONS.input.reason,
+    message: CONTACT_SUPERVISOR_TOOL_DESCRIPTIONS.input.message,
+    interview: CONTACT_SUPERVISOR_TOOL_DESCRIPTIONS.input.interview.description,
+    questions: CONTACT_SUPERVISOR_TOOL_DESCRIPTIONS.input.interview.questions.description,
+    title: CONTACT_SUPERVISOR_TOOL_DESCRIPTIONS.input.interview.title,
+    id: CONTACT_SUPERVISOR_TOOL_DESCRIPTIONS.input.interview.questions.items.id,
+    prompt: CONTACT_SUPERVISOR_TOOL_DESCRIPTIONS.input.interview.questions.items.prompt,
+    options: CONTACT_SUPERVISOR_TOOL_DESCRIPTIONS.input.interview.questions.items.options,
   });
+});
+
+test("all model-visible tool contracts and result shapes are defined centrally", () => {
+  const contracts = [
+    ASK_TOOL_CONTRACT,
+    GOAL_TOOL_CONTRACT,
+    MONITOR_TOOL_CONTRACT,
+    SUBAGENT_TOOL_CONTRACT,
+    CONTACT_SUPERVISOR_TOOL_CONTRACT,
+    TODO_TOOL_CONTRACT,
+  ];
+  assert.deepEqual(contracts.map(({ name }) => name).sort(), [
+    "ask_user_question",
+    "contact_supervisor",
+    "goal",
+    "monitor",
+    "subagent",
+    "todo",
+  ]);
+  for (const contract of contracts) {
+    assert.equal(contract.parameters.type, "object");
+    assert.equal(typeof contract.description, "string");
+    assert.ok(contract.description.length > 0);
+  }
+  for (const schema of [
+    askResultSchema,
+    goalResultSchema,
+    monitorResultSchema,
+    subagentResultSchema,
+    contactSupervisorResultSchema,
+    todoResultSchema,
+  ]) assert.ok(schema);
+  assert.match(ASK_TOOL_CONTRACT.description, /\n\n## Rules\n\n/);
+  for (const contract of [GOAL_TOOL_CONTRACT, MONITOR_TOOL_CONTRACT, SUBAGENT_TOOL_CONTRACT, TODO_TOOL_CONTRACT]) {
+    assert.match(contract.description, /\n\n## Actions\n\n/);
+  }
+  assert.doesNotMatch(CONTACT_SUPERVISOR_TOOL_CONTRACT.description, /## Actions/);
 });

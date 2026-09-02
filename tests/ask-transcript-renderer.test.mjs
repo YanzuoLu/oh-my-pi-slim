@@ -8,9 +8,10 @@ const dependencyMap = {
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
-  "./ask-runtime.js": new URL("../extensions/oh-my-pi-slim/ask-runtime.ts", import.meta.url).href,
-  "./ask-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts", import.meta.url).href,
-  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "../tool-contracts.js": new URL("../extensions/oh-my-pi-slim/tool-contracts.ts", import.meta.url).href,
+  "./runtime.js": new URL("../extensions/oh-my-pi-slim/ask/runtime.ts", import.meta.url).href,
+  "./transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask/transcript-renderer.ts", import.meta.url).href,
+  "../semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -22,8 +23,8 @@ registerHooks({
 const { initTheme } = await import("@earendil-works/pi-coding-agent");
 const { visibleWidth } = await import("@earendil-works/pi-tui");
 initTheme(undefined, false);
-const { AskRuntime, askResultModelContent, buildAskResult, validateQuestionnaire } = await import("../extensions/oh-my-pi-slim/ask-runtime.ts");
-const { renderAskCall, renderAskResult } = await import("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts");
+const { AskRuntime, askResultModelContent, buildAskResult, validateQuestionnaire } = await import("../extensions/oh-my-pi-slim/ask/runtime.ts");
+const { renderAskCall, renderAskResult } = await import("../extensions/oh-my-pi-slim/ask/transcript-renderer.ts");
 
 const theme = {
   fg: (_color, text) => text,

@@ -1,47 +1,27 @@
 # oh-my-pi-slim
 
-> A preset-driven orchestration package for Pi, with background specialists, session todos, runtime loops, process monitors, structured questions, and durable Goals.
+> A focused Pi tool package with background subagents, session todos, process monitors, structured questions, and durable Goals.
 
 **English** | [中文](./README.zh-CN.md)
 
-Run Pi with the configured orchestrator preset:
-
-```bash
-pi --omps
-```
-
 ## Highlights
 
-- Dispatch six focused specialists as isolated background runs.
+- Dispatch isolated background subagent runs.
 - Keep session work organized with a dependency-aware Todo list.
-- Schedule fixed-delay prompts with `/loop`.
-- Supervise long-running foreground Bash commands with Monitor.
+- Run long Bash commands in the background with Monitor.
 - Ask structured questions when a decision needs user input.
 - Pursue branch-local durable Goals with explicit completion evidence.
-- Choose provider, model, and thinking level per role through presets.
+- Toggle priority service for matching OpenAI requests with `/fast`.
+- Keep the main and child sessions on Pi's native system prompt.
+- Inherit the main session's current model and thinking level when each child launches.
 
-The main session plans, delegates, and verifies. Child sessions do focused work and can pause to contact the main orchestrator.
-
-## Six specialists
-
-| Specialist | Best for |
-| --- | --- |
-| `explorer` | Finding relevant code, tests, and execution paths |
-| `librarian` | Official documentation, APIs, and public source examples |
-| `oracle` | Architecture, debugging strategy, risk, simplification, and review |
-| `designer` | UI/UX implementation, visual review, and polish |
-| `fixer` | Bounded implementation and assigned verification |
-| `observer` | Images, screenshots, PDFs, and diagrams |
-
-`orchestrator` is the main-session role. Each preset configures it plus all six specialists.
+Child sessions do focused work, use Pi's native system prompt, and can pause to contact the main session.
 
 ## Requirements and package management
 
 ### Requirements
 
 - A Pi version compatible with the 0.84.4 package and RPC APIs. Pi 0.84.4 is the compatibility boundary because OMPS depends on its native threshold compaction after tool results.
-- Configured authentication for every provider/model used by the selected preset.
-- An image-capable model for the explicitly configured `observer` role.
 - A supported POSIX system for Monitor; Monitor is unavailable on Windows.
 
 Pi packages run with the current user's permissions. Review the source and treat installed extensions as trusted code.
@@ -61,7 +41,7 @@ pi remove npm:@juicesharp/rpiv-ask-user-question
 pi remove npm:@aliou/pi-processes
 ```
 
-Also remove `ask_user_question` from user specialist deny lists. This package never automatically uninstalls external packages, runs `pi remove`, edits package settings, or rewrites deny lists.
+This package never automatically uninstalls external packages or runs `pi remove`.
 
 ### Update
 
@@ -71,13 +51,11 @@ pi update --extension git:github.com/YanzuoLu/oh-my-pi-slim
 
 ### Remove
 
-In Pi, run `/omps uninstall`, then exit Pi and run:
+Exit Pi, then run:
 
 ```bash
 pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 ```
-
-The user preset file is preserved.
 
 ## Tool availability
 
@@ -85,40 +63,44 @@ The package exposes an intentionally small tool surface:
 
 | Environment | Package tools |
 | --- | --- |
-| Main | Exactly `subagent`, `todo`, `loop`, `monitor`, `ask_user_question`, and `goal` |
-| Child | Exactly `contact_supervisor` and `todo` |
+| Main | Exactly `subagent`, `todo`, `monitor`, `ask_user_question`, and `goal` |
+| Child | Exactly `contact_supervisor` |
 
-`ask_user_question`, `goal`, `loop`, `monitor`, and `subagent` are main-only. Todo works in both environments. `contact_supervisor` is child-only. RPC sessions receive the supported tools but no package widgets; JSON and print modes cannot use Ask.
+`ask_user_question`, `goal`, `monitor`, `subagent`, and `todo` are main-only. `contact_supervisor` is child-only. RPC sessions receive the supported tools but no package widgets; JSON and print modes cannot use Ask.
 
-Every successful result from `goal`, `loop`, `monitor`, `subagent`, `contact_supervisor`, and `todo` places one compact single-line JSON value in `content`. Complete, partial, and empty-submit results from `ask_user_question` use the same contract. A user-cancelled Ask instead returns the natural-language content `The user declined to answer.`, keeps the empty `AskResult` in `details`, terminates the current agent run, and skips every non-retrying threshold compaction until the agent settles idle. For JSON results, the JSON is the model-facing body. `details` remains the complete UI and internal contract, and normal transcript rendering reads `details` first before falling back to `content`. Errors and proactive custom notifications remain natural language, including Goal continuations, Loop fires, Monitor notifications, and Subagent waiting or terminal notifications.
+Every successful result from `goal`, `monitor`, `subagent`, `contact_supervisor`, and `todo` places one compact single-line JSON value in `content`. Complete, partial, and empty-submit results from `ask_user_question` use the same contract. A user-cancelled Ask instead returns the natural-language content `The user declined to answer.`, keeps the empty `AskResult` in `details`, terminates the current agent run, and skips every non-retrying threshold compaction until the agent settles idle. For JSON results, the JSON is the model-facing body. `details` remains the complete UI and internal contract, and normal transcript rendering reads `details` first before falling back to `content`. Errors and proactive custom notifications remain natural language, including Goal continuations, Monitor notifications, and Subagent waiting or terminal notifications.
 
 ## Main tools
 
-The five lifecycle surfaces below expose no `confirmed` or `force` field. When protected work blocks deletion, the main model first inspects status when useful and asks the user. After agreement, it uses `pause`, `stop`, `interrupt`, Todo `modify`, or Goal `cancel` as appropriate, then retries the rejected action.
+The four lifecycle surfaces below expose no `confirmed` or `force` field. When protected work blocks deletion, the main model first inspects status when useful and asks the user. After agreement, it uses `pause`, `stop`, `interrupt`, Todo `modify`, or Goal `cancel` as appropriate, then retries the rejected action.
 
 ### `subagent`
 
-Runs specialists in isolated background child sessions and returns control immediately.
+Runs work in isolated background child sessions and returns control immediately.
 
 | Action | Effect |
 | --- | --- |
-| `create` | Start a new specialist run with an agent, short abstract, task, and optional cwd |
+| `create` | Start a run with a short abstract, message, optional cwd, and optional `fork` |
 | `list` | Return compact public state for every retained run in retained-run order |
-| `status` | Return one retained run's public state and its terminal result when available |
-| `interrupt` | Stop a non-terminal run without rolling back file changes and return its final result |
+| `check` | Return one retained run's public state and its terminal result when available |
 | `steer` | Send guidance to a running run |
-| `resume` | Continue a terminal run's saved child session as a new run with a new ID and optionally override its cwd. Omitted cwd inherits the source run's working directory |
+| `interrupt` | Stop a non-terminal run without rolling back file changes and return its final result |
 | `reply` | Answer a waiting child and continue that same run |
+| `resume` | Continue a terminal run's saved child session as a new run with a new ID and optionally override its cwd. Omitted cwd inherits the source run's working directory |
 | `delete` | Remove one retained terminal run |
 | `clear` | Remove all retained history when every run is terminal |
 
-`list` includes `starting`, `running`, `waiting`, `completed`, `failed`, and `interrupted` runs, but never includes terminal `output` or `error`. Use `status` with one retained run ID to inspect the same public fields and recover its terminal result when present. The subagent widget uses the same retained set and ordering for counts and lifecycle, but its foreground body permanently hides terminal rows. Those runs remain retained until `delete` or `clear` removes them and remain reachable in the Subagent viewer.
+`list` includes `starting`, `running`, `waiting`, `completed`, `failed`, and `interrupted` runs, but never includes terminal `output` or `error`. Use `check` with one retained run ID to inspect the same public fields and recover its terminal result when present. The subagent widget uses the same retained set and ordering for counts and lifecycle, but its foreground body permanently hides terminal rows. Those runs remain retained until `delete` or `clear` removes them and remain reachable in the Subagent viewer.
 
 Each active or waiting widget entry is an atomic two-line block. The first line keeps identity and abstract ahead of trailing activity. The second line carries model, turn, tool, token, context, compaction, and elapsed statistics. The 12-line widget budget never splits an active entry.
 
+`fork` defaults to `true`. A forked run inherits conversation context through the point before the current tool-call batch. Every `create` in the same batch forks from that same point. With `fork: false`, the run starts an independent session and receives only its `message`.
+
 `interrupt` is synchronous. It waits for the targeted run to reach a terminal status and returns that complete final result, including any stored `output` or `error`. When an explicit `interrupt` call takes over delivery for a live run, that terminal event is not sent separately and is not replayed after reload. Interruptions caused by shutdown, reload, tree navigation, or session replacement still arrive as ordinary terminal notifications. A run that already reached a terminal status before the call keeps its own terminal notification, receives no interrupt control, and returns only a compact status line. When the detached runner cannot be verified as stopped, the result says so explicitly and the run directory is retained.
 
-`resume` always runs on the model your current preset resolves for that agent, not on the model the source run used. When that crosses a provider or a model ID, the reused child session is compacted once before the resumed run is prompted, so a new model never inherits raw context written for another one. A change of thinking level alone reuses the session unchanged. The run stays `starting` for the whole preflight, an already compacted or too small session simply continues, and any other compaction failure fails the run instead of prompting it.
+Every `create` or `resume` launch inherits the main session's current model and thinking level. When `resume` crosses a provider or model ID, the reused child session is compacted once before the resumed run is prompted. A change of thinking level alone reuses the session unchanged. The run stays `starting` for the whole preflight, an already compacted or too small session simply continues, and any other compaction failure fails the run instead of prompting it.
+
+Main and child sessions use Pi's native system prompt.
 
 `delete` is refused for a `starting`, `running`, or `waiting` run, and `clear` is refused while any such run remains. The main model must ask before calling `interrupt`, then retry only after the run becomes terminal. A successful single delete or full clear persists across reload and restoration. Neither operation changes Goal statistics.
 
@@ -126,7 +108,7 @@ A child uses `contact_supervisor` with `need_decision`, `interview_request`, or 
 
 ### `todo`
 
-Tracks session tasks, dependencies, and progress in main and child sessions.
+Tracks main-session tasks, dependencies, and progress.
 
 | Action | Effect |
 | --- | --- |
@@ -142,46 +124,21 @@ Tracks session tasks, dependencies, and progress in main and child sessions.
 
 Subjects are case-sensitive and matched exactly. Multiple items may be `in_progress`. Dependencies must form an acyclic graph. `delete` is refused for the target's draft-relative `in_progress` status and when another task still names it in `blockedBy`. `clear` checks the draft produced by earlier operations in the same batch and rejects if any item there is `in_progress`. The model asks whether to change protected items to `pending` or `completed` with `modify`, then retries only after agreement. Every `update` batch is atomic.
 
-### `loop`
-
-Schedules self-contained prompts on a runtime-only fixed-delay timer.
-
-| Action | Effect |
-| --- | --- |
-| `create` | Create a loop with interval, abstract, and prompt |
-| `delete` | Remove one paused loop |
-| `clear` | Remove all loops when every loop is paused |
-| `modify` | Change interval, abstract, or prompt |
-| `list` | List loops and their current state |
-| `pause` | Pause a loop |
-| `resume` | Resume after one full interval |
-
-Intervals are inclusive from `10s` through `7d`. Creation and resume wait one full interval. Each later delay begins after the previous tick finishes, so slow work does not build an overlapping schedule.
-
-An active loop cannot be deleted, and any active loop blocks `clear`. The main model asks before pausing the affected loops and retries only after agreement.
-
-Loops survive compaction and tree navigation, but not reload, new session, session resume, fork, or quit. Those transitions clear every loop.
-
 ### `monitor`
 
-Runs and observes long-running foreground Bash commands on POSIX systems.
+Runs long-running Bash commands on POSIX systems while the agent continues other work.
 
 | Action | Effect |
 | --- | --- |
-| `create` | Start a command with an abstract, a required `checkAfter` silence threshold, optional cwd, and optional `notifyOn` literals |
-| `stop` | Synchronously stop one running monitor and return a termination receipt |
-| `delete` | Remove one terminal monitor and its retained record |
-| `clear` | Remove all terminal monitor records when none is running |
+| `create` | Start a command with an abstract and optional cwd |
 | `list` | List compact monitor states |
-| `status` | Return one record's diagnostic state and combined logs |
+| `check` | Return status, bounded recent stdout and stderr, and terminal diagnostics |
+| `stop` | Stop one running command and return its final state |
+| `clear` | Remove all terminal monitor records when none is running |
 
-`notifyOn` uses case-sensitive literal matching. Commands must remain in the foreground: do not use `nohup`, `setsid`, `disown`, trailing `&`, or another detach escape.
+Each stdout line is an event. Lines produced within 200 ms may be delivered together. Stderr remains available through `check` and failed terminal diagnostics. Exit ends the monitor and produces one final status notification. Commands can filter and line-buffer their output when each line should represent a distinct event.
 
-`checkAfter` is required on `create` and is inclusive from `10s` through `7d`, written as one positive integer plus `s`, `m`, `h`, or `d`. Silence is measured from a successful `create` and restarts at the last raw stdout or stderr chunk, so partial lines and output without a newline both count as activity. Whenever a running command stays silent that long, a silence reminder asks you to call `monitor status` for that ID. Only one reminder per monitor is queued at a time: later intervals update the same reminder with the accumulated silent time instead of stacking new ones. `status` reports the canonical `checkAfter` and `lastOutputAt`, which stays `null` until the command writes its first output.
-
-Matcher and terminal notifications share one shape, and each states the monitor's current status. A matcher notification carries only the new lines that matched a `notifyOn` literal, one entry per line even when several literals hit it, while the delivered position still advances past every ordinary line so nothing unmatched is repeated later. A terminal notification always reports the final status, exit code, signal, and error. A completed command adds only the matched lines no earlier notification delivered, so a clean exit with ordinary output alone carries no lines. A failed or killed command adds a bounded diagnostic tail of the last twenty new lines, merged with any still undelivered matches by sequence number and deduplicated. Every payload stays within the same byte bounds, and `omitted` reports what was left behind. `monitor status` returns one record's diagnostic state and combined logs. Complete operational details remain available only in `details` for TUI and internal use.
-
-`stop` preserves the terminal record and retained log. Its tool result returns a compact termination receipt with the ID, status, outcome, exit code, signal, error, and an optional warning. Use `status` to retrieve that diagnostic state and combined logs. The tool result owns terminal delivery, so the same stop does not send another terminal notification. A running monitor blocks `delete` and `clear`; the main model must ask before stopping it and retry only afterward. Terminal records and output remain available until `delete` or `clear`.
+`stop` preserves the terminal record and retained log. The tool result owns terminal delivery, so the same stop does not send another terminal notification. A running monitor blocks `clear`. The main model must ask before stopping it and retry only afterward. Terminal records and output remain available until `clear`.
 
 ### `ask_user_question`
 
@@ -202,7 +159,7 @@ A single question has no separate Submit step: confirming an option, a multi-sel
 
 While Ask is waiting for questionnaire input, and after a user cancellation until the agent fully settles, ordinary RPC prompts pass through the input hook and are rejected with `Ask is blocking new RPC prompts. Retry after Pi is idle.` Direct RPC `steer` or `follow_up` messages can bypass that hook. If they do, they are discarded with the Ask abort and receive the one-time warning `Queued RPC messages were aborted with Ask. Retry after Pi is idle.` The caller must retry after Pi becomes idle.
 
-Submit and cancel mean different things. Submitting hands back exactly what you confirmed as compact JSON, so a partial submit is a real answer to some questions and silence on the rest. An empty submit is also an ordinary result and allows the provider loop to continue. Cancelling is a user refusal and a full withdrawal. Every answer is discarded, the tool result records an empty `AskResult` with `user_cancelled`, and the fixed natural-language content says `The user declined to answer.` The current agent run then terminates. Pi cancels every non-retrying threshold compaction until the agent settles, avoiding those summary provider requests, and then becomes idle. Manual and overflow compaction remain unaffected. Every cancel entry behaves the same way in both the TUI questionnaire and the RPC dialog. Historical transcript replay keeps using the existing `details`-first rendering behavior.
+Submit and cancel mean different things. Submitting hands back exactly what you confirmed as compact JSON, so a partial submit is a real answer to some questions and silence on the rest. An empty submit is also an ordinary result and allows the provider run to continue. Cancelling is a user refusal and a full withdrawal. Every answer is discarded, the tool result records an empty `AskResult` with `user_cancelled`, and the fixed natural-language content says `The user declined to answer.` The current agent run then terminates. Pi cancels every non-retrying threshold compaction until the agent settles, avoiding those summary provider requests, and then becomes idle. Manual and overflow compaction remain unaffected. Every cancel entry behaves the same way in both the TUI questionnaire and the RPC dialog. Historical transcript replay keeps using the existing `details`-first rendering behavior.
 
 Ask is main-only and requires an interactive UI. It is not offered in JSON or print modes.
 
@@ -213,74 +170,42 @@ Manages one branch-local durable Goal with explicit criteria and evidence.
 | Action | Effect |
 | --- | --- |
 | `create` | Create and activate a Goal |
+| `check` | Read the current Goal |
 | `modify` | Replace the nonterminal Goal contract and activate it |
-| `status` | Read the current Goal |
 | `pause` | Pause with a reason |
 | `resume` | Explicitly reactivate a paused Goal |
 | `complete` | Complete with evidence aligned to the criteria |
-| `cancel` | Cancel with a reason |
-| `clear` | Remove a paused, completed, or cancelled Goal from the branch |
+| `clear` | Remove the current Goal from the branch |
 
 A Goal is durable on its branch. Reload, session resume, fork, and tree restoration restore unfinished work as paused; it never silently resumes. Provider failures retry automatically, and repeated no-progress runs pause the Goal. A user abort pauses only when Goal continuation is immediately safe to deliver. If any continuation gate is blocked, the Goal remains active for later scheduler reevaluation. Completion requires exactly one non-empty evidence item for each criterion.
 
-Autonomous continuation waits until blocking work is gone, including active or waiting subagents, Monitor work and pending terminal delivery, and a waiting Ask dialog. Use `status`, `pause`, `resume`, or `cancel` to stay in control.
-
-Two independent hidden reminders are available and both default to disabled. When enabled, the phase reminder comes first and is injected while either an OMPS preset or an `active` Goal exists. The Goal reminder follows only while the Goal is `active`. `retry_wait`, `paused`, `completed`, and `cancelled` Goals receive no Goal reminder. A Goal created during a prompt first becomes eligible on the next agent prompt.
+Autonomous continuation waits until blocking work is gone, including active or waiting subagents, Monitor work and pending terminal delivery, and a waiting Ask dialog. Use `check`, `pause`, `resume`, or `clear` to stay in control.
 
 A completed Goal's detail row joins the shared Ctrl+O collapse. With tool output collapsed the widget keeps only the Goal heading, and every other status keeps both rows in either state.
 
-`goal clear` removes a paused, completed, or cancelled Goal from the branch. An `active` or `retry_wait` Goal blocks `clear`; the main model must ask whether to pause or cancel it and retry only after agreement. A cleared branch reports no Goal at all, and clearing takes that Goal's own statistics with it while leaving retained subagent runs untouched.
+`goal clear` removes the current Goal from the branch. A cleared branch reports no Goal and drops that Goal's statistics while leaving retained subagent runs untouched.
 
-## `/loop` and `/goal`
-
-`/loop <interval> <prompt>` asks the model to create or manage runtime loops. A bare `/loop` lists current loops and explains the command.
-
-Examples: `/loop 30m review the latest test failures` or `/loop pause the dependency audit loop`.
+## `/goal`
 
 `/goal <objective>` asks the model to create or manage the durable Goal on the current branch. A bare `/goal` reports the current Goal and explains the command.
 
 Examples: `/goal finish the parser migration with passing validation` or `/goal pause because the required credentials are unavailable`.
 
-Both commands forward natural language to the model; they are not rigid command parsers.
+The command forwards natural language to the model. It is not a rigid command parser.
 
-## Presets and configuration
+## OpenAI Fast Mode
 
-The runtime preset file is `~/.pi/agent/oh-my-pi-slim.json`. On first use, the package seeds it from `config/oh-my-pi-slim.example.json`; existing presets are not overwritten or removed.
+OpenAI Fast Mode belongs to the current Pi session and defaults to `off` for a new session. Bare `/fast` accepts no arguments and toggles between `on` and `off`. The latest state persists in session history across branches, reloads, process restarts, and session resume. A fork inherits the last state copied to its target path.
 
-The reminder portion of the top-level structure is:
+When enabled, matching ordinary requests whose provider is exactly `openai` or `openai-codex` receive `service_tier: "priority"`. Requests for every other provider remain unchanged.
 
-```json
-{
-  "reminders": {
-    "phase": false,
-    "goal": false
-  }
-}
-```
+Only future child `create` and `resume` launches inherit the current Fast Mode snapshot. Running children do not hot-switch. The OMPS footer shows `OpenAI Fast Mode: on` or `OpenAI Fast Mode: off` only while an OpenAI model is selected.
 
-- `defaultPreset`: preset selected by default.
-- `reminders.phase`: inject the phase reminder when an active preset or active Goal exists.
-- `reminders.goal`: inject the Goal reminder only when an active Goal exists.
-- `presets.<name>`: configuration for `orchestrator` and all six specialists.
-- Each role: `provider`, `model`, and `thinking`.
-- `deny.<specialist>`: exact tool names excluded for that specialist.
-
-Both reminder switches are independent and default to `false`, including when `reminders` or either field is absent from an older user file. Changes take effect at session start or reload. Disabling the phase reminder does not disable the active preset's orchestrator system prompt.
-
-Provider, model, and thinking level are independently configurable per role. Authentication and model availability are checked when a preset is activated. The `observer` model must support image input.
-
-| Command | Effect |
-| --- | --- |
-| `/omps on [preset]` | Enable orchestration, optionally with a preset |
-| `/omps off` | Disable orchestration and restore the previous main model/thinking |
-| `/omps status` | Show activation state |
-| `/omps presets` | List presets |
-| `/preset [name]` | Switch preset; omit the name to list presets |
-| `/cache` | Toggle Cache Mode between Long and Short for the current Pi session; arguments are not accepted |
-
-### Cache Mode
+## Cache Mode
 
 Cache Mode belongs to the current Pi session and defaults to Short for a new session. Bare `/cache` toggles between Long and Short. The latest toggle applies across every branch. Reload, process restart, and session resume recover it from session history. A fork inherits the last Cache Mode state on the target path copied into the fork. With `--no-session`, the state lasts only for the current process and cannot survive a restart.
+
+The OMPS footer shows `Anthropic Cache Mode: short` or `Anthropic Cache Mode: long` only while an eligible Anthropic OAuth model is selected.
 
 Cache Mode handles only ordinary Claude requests where the provider is exactly `anthropic`, the API is exactly `anthropic-messages`, the payload model matches the active Pi model, the model does not explicitly disable long cache retention, and Pi reports Anthropic OAuth authentication. API-key requests, compatible endpoints, OpenAI, and `openai-codex` payloads are unchanged.
 
@@ -288,21 +213,19 @@ Long upgrades only existing legal `{ type: "ephemeral" }` cache breakpoints by c
 
 `PI_CACHE_RETENTION` controls Pi's upstream marker policy. OMPS does not set it or mutate `process.env`. With `PI_CACHE_RETENTION=long`, Cache Short removes `ttl` from Pi's existing markers and restores five-minute retention. With `PI_CACHE_RETENTION=none`, Pi supplies no markers, so Cache Long creates nothing and is a silent no-op. Provider payload hooks are ordered, so a writer after the OMPS hook wins.
 
-Only future child `create` and `resume` launches inherit the current Long or Short OMPS-internal snapshot. The launch snapshot does not rewrite `PI_CACHE_RETENTION` or mutate the running parent process's `process.env`. Running children do not hot-switch. Each child applies the complete Anthropic OAuth gate again. Compaction and branch-summary model calls remain unchanged under Pi's current implementation. OMPS does not prewarm caches and does not copy context-cache headers, OAuth handling, or transport behavior. Longer retention can increase Anthropic cache-write cost, and current pricing depends on the model and account.
-
-When OMPS is active and any role in the active preset uses provider exactly `anthropic`, the footer appends `Anthropic Cache Mode: long` or `Anthropic Cache Mode: short`. This eligibility is preset-wide and does not depend on the current Main model or authentication. Cache status is only the requested session policy. It does not prove that OAuth is active, that the server accepted the retention request, or that a cache hit occurred. The footer intentionally does not add the word Requested.
+Only future child `create` and `resume` launches inherit the current Long or Short OMPS-internal snapshot. The launch snapshot does not rewrite `PI_CACHE_RETENTION` or mutate the running supervisor process's `process.env`. Running children do not hot-switch. Each child applies the complete Anthropic OAuth gate again. Compaction and branch-summary model calls remain unchanged under Pi's current implementation. OMPS does not prewarm caches and does not copy context-cache headers, OAuth handling, or transport behavior. Longer retention can increase Anthropic cache-write cost, and current pricing depends on the model and account.
 
 ## Runtime, UI, and persistence
 
 - Package notifications are safely queued during compaction and tree operations, then delivered without losing the user-visible result.
 - Transcript tool calls, tool results, and notifications use Ctrl+O for collapsed and expanded views. Expansion changes presentation only, never tool data or persisted state.
-- Monitor notifications are incremental. Each Monitor has one delivery lane that keeps at most one immutable notification handed to Pi and one mutable aggregate behind it. Matching output, rate-limited counts, and the latest silence state coalesce per Monitor until Pi confirms the prior copy, while `monitor status` returns one record's diagnostic state and combined logs. Complete operational details stay in `details` for TUI and internal use.
-- Deleting or clearing a Monitor drops its queued aggregate and delivery tracking immediately. A copy already handed to Pi may still appear once, but OMPS will not retry it and a late confirmation is ignored.
-- Foreground TUI sessions show compact widgets for retained subagents, Todos, Loops, Monitors, and the active Goal. RPC sessions do not register these widgets.
+- Monitor notifications are incremental. Each Monitor keeps at most one notification already handed to Pi and one pending aggregate. New stdout events coalesce until Pi confirms the prior notification. `monitor check` returns bounded recent stdout and stderr.
+- Clearing Monitors drops queued notifications immediately. A copy already handed to Pi may still appear once, but OMPS will not retry it and a late confirmation is ignored.
+- Foreground TUI sessions show compact widgets for retained subagents, Todos, Monitors, and the active Goal. RPC sessions do not register these widgets.
 - The Todo, Agents, and Monitor foreground widgets are permanently compact and never show a Ctrl+O expand hint. Todo always hides completed rows. Agents and Monitor always hide terminal rows. Their headings still count the full retained set.
-- The Goal widget still reads Pi's shared tool-output expansion state. A collapsed completed Goal hides its detail row, while every other Goal status keeps both rows. The Loop widget always shows its full body.
+- The Goal widget still reads Pi's shared tool-output expansion state. A collapsed completed Goal hides its detail row, while every other Goal status keeps both rows.
 - Subagent, Todo, and Goal state restore on their documented session or branch scope. In particular, a successful subagent `clear` remains clear after reload.
-- Loop and Monitor are runtime services rather than durable schedules. Session transitions shut them down; Loop follows the explicit clearing rules above.
+- Monitor is a runtime service rather than a durable process manager. Session transitions shut it down.
 - Child processes are isolated Pi RPC sessions. On session shutdown, active runs are interrupted rather than adopted silently by a later session; retained terminal sessions can be continued with `resume`, which creates a new run.
 
 ### Subagent viewer
@@ -318,7 +241,7 @@ When OMPS is active and any role in the active preset uses provider exactly `ant
 - `Up`/`Down` scroll one line, `PageUp`/`PageDown` scroll one page, `Home` jumps to the top, `End` jumps to the bottom and turns follow on, `f` toggles follow, and `r` re-reads the transcript immediately.
 - Follow is bottom-aware: scrolling up leaves it, and scrolling, paging, or wheeling back to the last line turns it on again. Turning follow off with `f` while already at the end suppresses that: from then on new output, a resize, and even another `Down`, `PageDown`, or wheel notch at the last line all leave follow off, until you turn it back on with `f` or ask for the end explicitly with `End`. Deliberately scrolling up and away from the end lifts the suppression, so a later trip back down follows again.
 - The mouse wheel scrolls the transcript one row per notch. While the viewer is open it turns on minimal wheel reporting and turns it off again on every exit, so the Main scrollback and the terminal's own selection behave normally the moment you leave. Hold `Shift` while dragging to use the terminal's native selection (Ghostty, iTerm2, and most emulators) while the viewer is open. The shortcut and the wheel both work over SSH, because both are ordinary terminal byte sequences.
-- `Ctrl+O` (or whatever you bound `app.tools.expand` to) toggles collapsed and expanded tool output. Main and every subagent transcript share this state, and the Goal foreground widget reads it too. A toggle inside the viewer is already applied when you return to Main, and the reverse is true as well. Collapsed hides tool result bodies and long arguments. Expanded shows the full, bounded content. The bottom hint always names your real key and the current state. Todo, Agents, and Monitor remain permanently compact, while Loop remains permanently full.
+- `Ctrl+O` (or whatever you bound `app.tools.expand` to) toggles collapsed and expanded tool output. Main and every subagent transcript share this state, and the Goal foreground widget reads it too. A toggle inside the viewer is already applied when you return to Main, and the reverse is true as well. Collapsed hides tool result bodies and long arguments. Expanded shows the full, bounded content. The bottom hint always names your real key and the current state. Todo, Agents, and Monitor remain permanently compact.
 - The viewer refreshes about four times a second. Activity counters update at that rate, the elapsed clock repaints on the first refresh where the value it shows actually changes, and neither ever rebuilds the transcript.
 - Presentation settings (thinking blocks, output padding, and Markdown code-block indent) are read straight from your global settings file and, for a trusted project, the project one. The viewer reads them; it never creates, locks, or writes a settings file.
 - Every run keeps its own scroll position, follow state, and suppression.
@@ -334,13 +257,10 @@ When OMPS is active and any role in the active preset uses provider exactly `ant
 - Known limitation: an inline terminal image the host already drew is a raw escape sequence the host composites, so it can still show through an overlay row. Nothing the viewer itself renders can do that.
 - The shortcut is an ordinary modified arrow key, so an SSH session forwards it unchanged. It works wherever the terminal emulator itself reports the combined Ctrl and Shift modifiers on an arrow key. A terminal that drops or rebinds that combination will not reach Pi, so this is not a claim about every terminal. The package registers only `ctrl+shift+left` and `ctrl+shift+right`, with no fallback shortcut and no slash command.
 
-## Deliberate scope
+## Runtime behavior
 
-- No nested child orchestration: specialists cannot create subagents.
-- No workflow DSL, missions, fleets, authored agent profiles, worktree manager, or aggregate chain/parallel API.
 - Parallelism comes from multiple independent `subagent create` calls.
-- Specialist deny lists reduce model-visible tools; they are not an operating-system sandbox.
-- Monitor supervises foreground commands; it is not a daemon manager or interactive terminal.
+- Monitor runs foreground commands in its own process group and keeps their terminal state until it is cleared.
 - Ask is intentionally unavailable during an active Goal so autonomous work does not stop for new user questions.
 
 ## Development

@@ -9,16 +9,18 @@ const dependencyMap = {
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
-  "./ask-runtime.js": new URL("../extensions/oh-my-pi-slim/ask-runtime.ts", import.meta.url).href,
-  "./ask-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts", import.meta.url).href,
-  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
-  "./subagent-core.js": new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
-  "./subagent-model-display.js": new URL("../extensions/oh-my-pi-slim/subagent-model-display.ts", import.meta.url).href,
-  "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
-  "./subagent-viewer-data.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer-data.ts", import.meta.url).href,
-  "./subagent-viewer-transcript.js": new URL("../extensions/oh-my-pi-slim/subagent-viewer-transcript.ts", import.meta.url).href,
-  "./subagent-widget-display.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-display.ts", import.meta.url).href,
-  "./subagent-widget-glyphs.js": new URL("../extensions/oh-my-pi-slim/subagent-widget-glyphs.ts", import.meta.url).href,
+  "../tool-contracts.js": new URL("../extensions/oh-my-pi-slim/tool-contracts.ts", import.meta.url).href,
+  "./runtime.js": new URL("../extensions/oh-my-pi-slim/ask/runtime.ts", import.meta.url).href,
+  "./transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask/transcript-renderer.ts", import.meta.url).href,
+  "../semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "./core.js": new URL("../extensions/oh-my-pi-slim/subagent/core.ts", import.meta.url).href,
+  "./legacy-abstract.js": new URL("../extensions/oh-my-pi-slim/subagent/legacy-abstract.ts", import.meta.url).href,
+  "./model-display.js": new URL("../extensions/oh-my-pi-slim/subagent/model-display.ts", import.meta.url).href,
+  "../widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
+  "./viewer-data.js": new URL("../extensions/oh-my-pi-slim/subagent/viewer-data.ts", import.meta.url).href,
+  "./viewer-transcript.js": new URL("../extensions/oh-my-pi-slim/subagent/viewer-transcript.ts", import.meta.url).href,
+  "./widget-display.js": new URL("../extensions/oh-my-pi-slim/subagent/widget-display.ts", import.meta.url).href,
+  "./widget-glyphs.js": new URL("../extensions/oh-my-pi-slim/subagent/widget-glyphs.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -30,10 +32,10 @@ registerHooks({
 const { CURSOR_MARKER, visibleWidth } = await import("@earendil-works/pi-tui");
 const { initTheme } = await import("@earendil-works/pi-coding-agent");
 initTheme(undefined, false);
-const { AskTuiDriver } = await import("../extensions/oh-my-pi-slim/ask-tui.ts");
-const { createSubagentViewer } = await import("../extensions/oh-my-pi-slim/subagent-viewer.ts");
+const { AskTuiDriver } = await import("../extensions/oh-my-pi-slim/ask/tui.ts");
+const { createSubagentViewer } = await import("../extensions/oh-my-pi-slim/subagent/viewer.ts");
 const { createOverlayHost } = await import("./fixtures/overlay-host.mjs");
-const { AskRuntime, buildAskResult, createRpcAskDriver, validateQuestionnaire } = await import("../extensions/oh-my-pi-slim/ask-runtime.ts");
+const { AskRuntime, buildAskResult, createRpcAskDriver, validateQuestionnaire } = await import("../extensions/oh-my-pi-slim/ask/runtime.ts");
 
 const KEY = {
   tab: "\t",
@@ -561,7 +563,7 @@ test("AskRuntime reset drops old TUI context, can rebind cleanly, RPC never uses
   assert.equal(rpc.answers[0].answer, "Safe");
   assert.equal(customCalls, 0);
   assert.equal(newCalls, 1);
-  await assert.rejects(runtime.execute({ questions: [question()] }, undefined, { mode: "print", hasUI: false, ui: rpcUi }), /UI is unavailable in print mode/);
+  await assert.rejects(runtime.execute({ questions: [question()] }, undefined, { mode: "print", hasUI: false, ui: rpcUi }), /`ask_user_question` is unavailable in print mode/);
   assert.equal(customCalls, 0);
 
   const rpcDriver = createRpcAskDriver(rpcUi);

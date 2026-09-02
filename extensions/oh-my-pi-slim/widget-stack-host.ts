@@ -5,7 +5,7 @@ import { renderWidgetStack, type WidgetStackSection, type WidgetStackSectionId }
 /**
  * The one and only `setWidget` owner in this package.
  *
- * Pi's extension host loads `extensions/oh-my-pi-slim/index.ts` and `extensions/todo/index.ts`
+ * Pi's extension host loads `extensions/oh-my-pi-slim/index.ts`, which registers every section.
  * through separate module graphs, so this file is evaluated more than once and a module-level
  * singleton would silently split into two hosts with two competing widget keys. The live host is
  * therefore anchored on `globalThis` under a protocol-versioned key and used purely by shape, never

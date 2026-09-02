@@ -10,14 +10,16 @@ const dependencyMap = {
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
-  "./core.js": new URL("../extensions/todo/core.ts", import.meta.url).href,
-  "./widget.js": new URL("../extensions/todo/widget.ts", import.meta.url).href,
-  "../oh-my-pi-slim/semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
-  "../oh-my-pi-slim/widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
-  "../oh-my-pi-slim/widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
-  "../oh-my-pi-slim/widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
+  "../tool-contracts.js": new URL("../extensions/oh-my-pi-slim/tool-contracts.ts", import.meta.url).href,
+  "./core.js": new URL("../extensions/oh-my-pi-slim/todo/core.ts", import.meta.url).href,
+  "./widget.js": new URL("../extensions/oh-my-pi-slim/todo/widget.ts", import.meta.url).href,
+  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "../semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "../widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
+  "../widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
   "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
   "./widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
+  "./widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -27,8 +29,9 @@ registerHooks({
 });
 
 const { visibleWidth } = await import("@earendil-works/pi-tui");
-const core = await import("../extensions/todo/core.ts");
-const todoModule = await import("../extensions/todo/index.ts");
+const core = await import("../extensions/oh-my-pi-slim/todo/core.ts");
+const todoModule = await import("../extensions/oh-my-pi-slim/todo/runtime.ts");
+const { TODO_TOOL_CONTRACT, TODO_TOOL_DESCRIPTIONS, TODO_TOOL_ERRORS, todoParameters } = await import("../extensions/oh-my-pi-slim/tool-contracts.ts");
 const {
   WIDGET_STACK_KEY,
   resetWidgetStackHost,
@@ -36,17 +39,13 @@ const {
 } = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
 
 beforeEach(() => resetWidgetStackHost());
-const widgetModule = await import("../extensions/todo/widget.ts");
+const widgetModule = await import("../extensions/oh-my-pi-slim/todo/widget.ts");
 const {
   applyTodoUpdate,
   makeTodoSnapshot,
   parseTodoSnapshot,
   replayTodoBranch,
 } = core;
-const {
-  TODO_PROMPT_GUIDELINES,
-  todoParameters,
-} = todoModule;
 const {
   MAX_TODO_WIDGET_LINES,
   isTodoTaskBlocked,
@@ -129,7 +128,7 @@ function createHarness({
       getBranch: () => branch,
     },
   };
-  todoModule.default(pi);
+  todoModule.registerTodoRuntime(pi);
   const emit = (name, event = {}) => {
     for (const handler of handlers.get(name) ?? []) handler(event, ctx);
   };
@@ -197,10 +196,10 @@ test("registers exactly one todo tool with exact actions and strict schemas", ()
   assert.deepEqual(todoParameters.required, ["action"]);
   assert.deepEqual(Object.keys(todoParameters.properties).sort(), ["action", "operations"]);
   assert.deepEqual(schemaObjects(todoParameters.properties.action).map((schema) => schema.const).sort(), ["list", "update"]);
-  assert.equal(todoParameters.properties.action.description, "Choose list or update. list accepts no operations. update requires one or more ordered operations.");
+  assert.equal(todoParameters.properties.action.description, TODO_TOOL_DESCRIPTIONS.input.action);
   assert.equal(todoParameters.properties.operations.minItems, 1);
   assert.equal(todoParameters.properties.operations.maxItems, undefined);
-  assert.equal(todoParameters.properties.operations.description, "Ordered append, modify, delete, or clear operations for update. Omit for list.");
+  assert.equal(todoParameters.properties.operations.description, TODO_TOOL_DESCRIPTIONS.input.operations.description);
   const operations = schemaObjects(todoParameters.properties.operations.items);
   assert.deepEqual(operations.map((schema) => schema.properties.op.const).sort(), ["append", "clear", "delete", "modify"]);
   assert.ok(operations.every((schema) => schema.additionalProperties === false));
@@ -208,12 +207,12 @@ test("registers exactly one todo tool with exact actions and strict schemas", ()
   const modify = operations.find((schema) => schema.properties.op.const === "modify");
   const remove = operations.find((schema) => schema.properties.op.const === "delete");
   const clear = operations.find((schema) => schema.properties.op.const === "clear");
-  assert.equal(clear.description, "Use clear at most once.");
+  assert.equal(clear.description, TODO_TOOL_DESCRIPTIONS.input.operations.items.clear.description);
   assert.deepEqual(Object.fromEntries(operations.map((schema) => [schema.properties.op.const, schema.properties.op.description])), {
-    append: "append requires subject and abstract, with optional blockedBy.",
-    modify: "modify requires target and at least one changed field.",
-    delete: "delete requires target.",
-    clear: "clear accepts no other fields.",
+    append: TODO_TOOL_DESCRIPTIONS.input.operations.items.append.op,
+    modify: TODO_TOOL_DESCRIPTIONS.input.operations.items.modify.op,
+    delete: TODO_TOOL_DESCRIPTIONS.input.operations.items.delete.op,
+    clear: TODO_TOOL_DESCRIPTIONS.input.operations.items.clear.op,
   });
   assert.equal(modify.minProperties, undefined);
   assert.equal(remove.type, "object");
@@ -221,24 +220,21 @@ test("registers exactly one todo tool with exact actions and strict schemas", ()
   assert.equal(remove.oneOf, undefined);
   assert.deepEqual(Object.keys(remove.properties).sort(), ["op", "target"]);
   assert.deepEqual(remove.required.slice().sort(), ["op", "target"]);
-  assert.equal(remove.properties.target.description, "Exact subject to delete.");
+  assert.equal(remove.properties.target.description, TODO_TOOL_DESCRIPTIONS.input.operations.items.delete.target);
   assert.equal("confirmed" in remove.properties, false);
   assert.equal("confirmed" in clear.properties, false);
   const dependencyDescriptions = [
     append.properties.blockedBy.description,
-    modify.properties.addBlockedBy.description,
-    modify.properties.removeBlockedBy.description,
+    modify.properties.blockedBy.description,
   ];
   assert.deepEqual(dependencyDescriptions, [
-    "Initial dependencies for the appended item.",
-    "Dependencies to add to the target item.",
-    "Dependencies to remove from the target item.",
+    TODO_TOOL_DESCRIPTIONS.input.operations.items.append.blockedBy.description,
+    TODO_TOOL_DESCRIPTIONS.input.operations.items.modify.blockedBy.description,
   ]);
-  assert.equal(new Set(dependencyDescriptions).size, 3);
-  for (const schema of [append.properties.blockedBy, modify.properties.addBlockedBy, modify.properties.removeBlockedBy]) {
-    assert.equal(schema.items.description, "Exact subject of an existing item.");
-  }
-  assert.equal(modify.properties.status.description, "Replacement status: pending, in_progress, or completed.");
+  assert.equal(new Set(dependencyDescriptions).size, 2);
+  assert.equal(append.properties.blockedBy.items.description, TODO_TOOL_DESCRIPTIONS.input.operations.items.append.blockedBy.items);
+  assert.equal(modify.properties.blockedBy.items.description, TODO_TOOL_DESCRIPTIONS.input.operations.items.modify.blockedBy.items);
+  assert.equal(modify.properties.status.description, TODO_TOOL_DESCRIPTIONS.input.operations.items.modify.status);
   assert.throws(() => applyTodoUpdate([], [{ op: "append", subject: "A", abstract: "a", unknown: true }]), /unknown fields/);
   assert.throws(() => applyTodoUpdate([task("A")], [{ op: "delete", target: "A", unknown: true }]), /delete contains unknown fields/);
   assert.throws(() => applyTodoUpdate([task("A")], [{ op: "delete", target: "A", status: "completed" }]), /delete contains unknown fields/);
@@ -264,7 +260,7 @@ test("Todo execute enforces action-specific operations boundaries", () => {
   );
   assert.throws(
     () => harness.tool.execute("call", { action: "unknown" }, undefined, undefined, harness.ctx),
-    /Unknown todo action/,
+    /Unsupported action "unknown" for todo/,
   );
   assert.throws(() => applyTodoUpdate([], [{ op: "modify", target: "missing" }]), /requires at least one mutable field/);
 });
@@ -286,13 +282,13 @@ test("failed updates roll back for operation, uniqueness, dependency, graph, and
     [{ op: "modify", target: "missing", status: "completed" }],
     [{ op: "append", subject: "A", abstract: "duplicate" }],
     [{ op: "append", subject: "C", abstract: "c", blockedBy: ["later"] }],
-    [{ op: "modify", target: "A", addBlockedBy: ["A"] }],
-    [{ op: "modify", target: "A", addBlockedBy: ["B"] }, { op: "modify", target: "B", addBlockedBy: ["A"] }],
+    [{ op: "modify", target: "A", blockedBy: ["A"] }],
+    [{ op: "modify", target: "A", blockedBy: ["B"] }, { op: "modify", target: "B", blockedBy: ["A"] }],
     [{ op: "modify", target: "A", status: "in_progress" }, { op: "clear" }],
   ];
   for (const operations of cases) {
     const snapshot = structuredClone(initial);
-    assert.throws(() => applyTodoUpdate(initial, operations), /todo update failed at operation \d+:/);
+    assert.throws(() => applyTodoUpdate(initial, operations), /Todo update failed at operation \d+\..*The entire transaction was rolled back\./);
     assert.deepEqual(initial, snapshot);
   }
 });
@@ -309,18 +305,18 @@ test("subjects stay case-sensitive and rename rewrites every dependency atomical
   assert.throws(() => applyTodoUpdate(result.tasks, [{ op: "modify", target: "core", status: "completed" }]), /target "core"/);
 });
 
-test("blockedBy rejects forward, missing, self, and cycles while remove runs before add", () => {
+test("blockedBy replacement rejects forward, missing, self, and cycles", () => {
   assert.throws(() => applyTodoUpdate([], [
     { op: "append", subject: "A", abstract: "a", blockedBy: ["B"] },
     { op: "append", subject: "B", abstract: "b" },
   ]), /does not exist yet/);
   const base = [task("A"), task("B"), task("C", "pending", ["A"] )];
   const changed = applyTodoUpdate(base, [{
-    op: "modify", target: "C", removeBlockedBy: ["missing", "A"], addBlockedBy: ["A", "B", "B"],
+    op: "modify", target: "C", blockedBy: ["A", "B", "B"],
   }]);
   assert.deepEqual(changed.tasks[2].blockedBy, ["A", "B"]);
-  assert.throws(() => applyTodoUpdate(base, [{ op: "modify", target: "C", addBlockedBy: ["missing"] }]), /does not exist yet/);
-  assert.throws(() => applyTodoUpdate(base, [{ op: "modify", target: "C", addBlockedBy: ["C"] }]), /depend on itself/);
+  assert.throws(() => applyTodoUpdate(base, [{ op: "modify", target: "C", blockedBy: ["missing"] }]), /does not exist yet/);
+  assert.throws(() => applyTodoUpdate(base, [{ op: "modify", target: "C", blockedBy: ["C"] }]), /depend on itself/);
 });
 
 test("final dependency gate permits arbitrary status transitions and enforces completed dependencies", () => {
@@ -381,18 +377,17 @@ test("delete removes a pending or completed item by exact subject and reports a 
   const snapshot = makeTodoSnapshot(result.tasks, result.operations, result.receipts);
   assert.deepEqual(parseTodoSnapshot(snapshot)?.state.tasks, result.tasks);
 
-  assert.throws(() => applyTodoUpdate(base, [{ op: "delete", target: "missing" }]), /todo update failed at operation 1: target "missing" does not exist\./);
+  assert.throws(() => applyTodoUpdate(base, [{ op: "delete", target: "missing" }]), /Todo update failed at operation 1\. target "missing" does not exist\. The entire transaction was rolled back\./);
   assert.throws(() => applyTodoUpdate(base, [{ op: "delete", target: "b" }]), /target "b" does not exist\./);
   assert.throws(() => applyTodoUpdate([], [{ op: "delete", target: "A" }]), /target "A" does not exist\./);
 });
 
 test("delete gates in_progress status before referrers against the current draft", () => {
-  const ask = "Ask the user whether to set it back to pending or mark it completed, then retry delete only if they agree.";
   const referenced = [task("Active", "in_progress"), task("Follower", "pending", ["Active"])];
   assert.throws(
     () => applyTodoUpdate(referenced, [{ op: "delete", target: "Active" }]),
     (error) => {
-      assert.equal(error.message, `todo update failed at operation 1: cannot delete "Active" while its current status is in_progress. ${ask}`);
+      assert.equal(error.message, TODO_TOOL_ERRORS.updateFailed(1, TODO_TOOL_ERRORS.deleteActive("Active")));
       assert.doesNotMatch(error.message, /depend on it/);
       return true;
     },
@@ -412,7 +407,7 @@ test("delete gates in_progress status before referrers against the current draft
       { op: "delete", target: "Draft" },
     ]),
     (error) => {
-      assert.equal(error.message, `todo update failed at operation 2: cannot delete "Draft" while its current status is in_progress. ${ask}`);
+      assert.equal(error.message, TODO_TOOL_ERRORS.updateFailed(2, TODO_TOOL_ERRORS.deleteActive("Draft")));
       return true;
     },
   );
@@ -420,7 +415,6 @@ test("delete gates in_progress status before referrers against the current draft
 });
 
 test("clear gates every draft in_progress item in draft order and rolls back atomically", () => {
-  const ask = "Ask the user whether to set them back to pending or mark them completed, then retry clear only if they agree.";
   const active = [
     task("First", "in_progress"),
     task("Pending"),
@@ -428,7 +422,7 @@ test("clear gates every draft in_progress item in draft order and rolls back ato
     task("Done", "completed"),
   ];
   assert.throws(() => applyTodoUpdate(active, [{ op: "clear" }]), (error) => {
-    assert.equal(error.message, `todo update failed at operation 1: clear cannot remove in_progress items: "First", "Second". ${ask}`);
+    assert.equal(error.message, TODO_TOOL_ERRORS.updateFailed(1, TODO_TOOL_ERRORS.clearActive('"First", "Second"')));
     return true;
   });
 
@@ -445,7 +439,7 @@ test("clear gates every draft in_progress item in draft order and rolls back ato
     { op: "modify", target: "Pending", status: "in_progress" },
     { op: "clear" },
   ]), (error) => {
-    assert.equal(error.message, `todo update failed at operation 2: clear cannot remove in_progress items: "Pending". ${ask}`);
+    assert.equal(error.message, TODO_TOOL_ERRORS.updateFailed(2, TODO_TOOL_ERRORS.clearActive('"Pending"')));
     return true;
   });
   assert.deepEqual(original, before);
@@ -456,25 +450,25 @@ test("delete refuses to break the dependency graph and names every referrer", ()
   const snapshot = structuredClone(base);
   assert.throws(
     () => applyTodoUpdate(base, [{ op: "delete", target: "Core" }]),
-    /todo update failed at operation 1: cannot delete "Core" because "Left", "Right" depend on it\./,
+    /Todo update failed at operation 1\. Action "delete" cannot remove "Core" because "Left", "Right" depend on it\. The entire transaction was rolled back\./,
   );
   assert.deepEqual(base, snapshot);
   assert.throws(
     () => applyTodoUpdate(base, [{ op: "append", subject: "New", abstract: "new" }, { op: "delete", target: "Core" }]),
-    /todo update failed at operation 2: cannot delete "Core" because "Left", "Right" depend on it\./,
+    /Todo update failed at operation 2\. Action "delete" cannot remove "Core" because "Left", "Right" depend on it\. The entire transaction was rolled back\./,
   );
   assert.deepEqual(base, snapshot);
-  const removedOne = applyTodoUpdate(base, [{ op: "modify", target: "Left", removeBlockedBy: ["Core"] }]);
+  const removedOne = applyTodoUpdate(base, [{ op: "modify", target: "Left", blockedBy: [] }]);
   assert.throws(
     () => applyTodoUpdate(removedOne.tasks, [{ op: "delete", target: "Core" }]),
-    /cannot delete "Core" because "Right" depend on it\./,
+    /Action "delete" cannot remove "Core" because "Right" depend on it\./,
   );
 });
 
 test("delete mixes with modify, append, and clear in one ordered atomic batch", () => {
   const base = [task("Core", "completed"), task("Leaf", "pending", ["Core"])];
   const freed = applyTodoUpdate(base, [
-    { op: "modify", target: "Leaf", removeBlockedBy: ["Core"] },
+    { op: "modify", target: "Leaf", blockedBy: [] },
     { op: "delete", target: "Core" },
     { op: "append", subject: "Next", abstract: "next", blockedBy: [] },
   ]);
@@ -484,7 +478,7 @@ test("delete mixes with modify, append, and clear in one ordered atomic batch", 
 
   const renamed = applyTodoUpdate(base, [
     { op: "modify", target: "Core", newSubject: "Root" },
-    { op: "modify", target: "Leaf", removeBlockedBy: ["Root"] },
+    { op: "modify", target: "Leaf", blockedBy: [] },
     { op: "delete", target: "Root" },
   ]);
   assert.deepEqual(renamed.tasks, [task("Leaf")]);
@@ -505,10 +499,10 @@ test("delete mixes with modify, append, and clear in one ordered atomic batch", 
 
   const before = structuredClone(base);
   assert.throws(() => applyTodoUpdate(base, [
-    { op: "modify", target: "Leaf", removeBlockedBy: ["Core"] },
+    { op: "modify", target: "Leaf", blockedBy: [] },
     { op: "delete", target: "Core" },
     { op: "delete", target: "missing" },
-  ]), /todo update failed at operation 3: target "missing" does not exist\./);
+  ]), /Todo update failed at operation 3\. target "missing" does not exist\. The entire transaction was rolled back\./);
   assert.deepEqual(base, before);
 
   const clearBase = [task("Old", "completed"), task("Draft"), task("Keep", "in_progress")];
@@ -516,7 +510,7 @@ test("delete mixes with modify, append, and clear in one ordered atomic batch", 
   assert.throws(() => applyTodoUpdate(clearBase, [
     { op: "delete", target: "Draft" },
     { op: "clear" },
-  ]), /todo update failed at operation 2: clear cannot remove in_progress items: "Keep"\./);
+  ]), /Todo update failed at operation 2\. Action "clear" cannot remove in_progress items: "Keep"\. Ask the user whether to return them to pending or complete them before retrying\. The entire transaction was rolled back\./);
   assert.deepEqual(clearBase, clearBefore);
 });
 
@@ -526,7 +520,7 @@ test("modify receipts identify the current target and same-value updates keep sn
   assert.equal(status.receipts[0].text, 'Modified "A": status pending to completed.');
   const abstract = applyTodoUpdate(base, [{ op: "modify", target: "A", abstract: "Updated" }]);
   assert.equal(abstract.receipts[0].text, 'Modified "A": abstract.');
-  const dependency = applyTodoUpdate(base, [{ op: "modify", target: "A", addBlockedBy: ["Dependency"] }]);
+  const dependency = applyTodoUpdate(base, [{ op: "modify", target: "A", blockedBy: ["Dependency"] }]);
   assert.equal(dependency.receipts[0].text, 'Modified "A": blockedBy.');
   const noChange = applyTodoUpdate(base, [{ op: "modify", target: "A", abstract: "A summary" }]);
   assert.equal(noChange.receipts[0].kind, "no-change");
@@ -541,7 +535,7 @@ test("modify receipts identify the current target and same-value updates keep sn
   assert.deepEqual(successfulNoOp.details.state.tasks, [task("A")]);
 });
 
-test("update content is compact JSON with complete receipts and minimal unfinished tasks without changing details or UI", () => {
+test("successful update content is the compact unfinished task list without changing details or UI", () => {
   const harness = createHarness({ mode: "rpc" });
   harness.emit("session_start", { reason: "startup" });
   const result = runUpdate(harness.tool, harness.ctx, [
@@ -560,20 +554,11 @@ test("update content is compact JSON with complete receipts and minimal unfinish
     { operation: 5, kind: "status", text: 'Modified "Active": status pending to in_progress.' },
   ];
   assert.equal(result.content[0].text, JSON.stringify(content));
-  assert.deepEqual(Object.keys(content), ["receipts", "unfinished"]);
-  assert.deepEqual(content.receipts, receipts);
-  assert.deepEqual(content.receipts.map((receipt) => Object.keys(receipt)), [
-    ["operation", "kind", "text"],
-    ["operation", "kind", "text"],
-    ["operation", "kind", "text"],
-    ["operation", "kind", "text"],
-    ["operation", "kind", "text"],
-  ]);
-  assert.deepEqual(content.unfinished, [
+  assert.deepEqual(content, [
     { subject: "Pending", status: "pending", blockedBy: ["Done"] },
     { subject: "Active", status: "in_progress", blockedBy: ["Done"] },
   ]);
-  assert.deepEqual(content.unfinished.map((item) => Object.keys(item)), [
+  assert.deepEqual(content.map((item) => Object.keys(item)), [
     ["subject", "status", "blockedBy"],
     ["subject", "status", "blockedBy"],
   ]);
@@ -595,17 +580,13 @@ test("update content is compact JSON with complete receipts and minimal unfinish
   );
 });
 
-test("update content explicitly returns an empty unfinished array with complete receipts", () => {
+test("successful update content returns an empty array when no tasks remain unfinished", () => {
   const harness = createHarness({ mode: "rpc" });
   harness.emit("session_start", { reason: "startup" });
   const result = runUpdate(harness.tool, harness.ctx, [{ op: "clear" }]);
   const content = JSON.parse(result.content[0].text);
   assert.equal(result.content[0].text, JSON.stringify(content));
-  assert.deepEqual(Object.keys(content), ["receipts", "unfinished"]);
-  assert.deepEqual(content, {
-    receipts: [{ operation: 1, kind: "no-change", text: "No change." }],
-    unfinished: [],
-  });
+  assert.deepEqual(content, []);
 });
 
 test("list returns every exact field in append order and never returns a snapshot", () => {
@@ -685,24 +666,11 @@ test("startup reload, tree, and compact restore the branch while sessions remain
   assert.deepEqual(JSON.parse(runList(harness.tool, secondCtx).content[0].text), []);
 });
 
-test("main and child both register Todo while RPC sessions never register widgets", () => {
-  const priorChild = process.env.PI_SUBAGENT_CHILD;
-  const priorOmpsChild = process.env.OMPS_SUBAGENT_CHILD;
-  try {
-    delete process.env.PI_SUBAGENT_CHILD;
-    delete process.env.OMPS_SUBAGENT_CHILD;
-    assert.deepEqual(createHarness({ mode: "rpc" }).tools.map((tool) => tool.name), ["todo"]);
-    process.env.PI_SUBAGENT_CHILD = "1";
-    process.env.OMPS_SUBAGENT_CHILD = "1";
-    const child = createHarness({ id: "child", mode: "rpc" });
-    child.emit("session_start", { reason: "startup" });
-    runUpdate(child.tool, child.ctx, [{ op: "append", subject: "Child", abstract: "child" }]);
-    assert.deepEqual(child.tools.map((tool) => tool.name), ["todo"]);
-    assert.deepEqual(child.widgetCalls, []);
-  } finally {
-    if (priorChild === undefined) delete process.env.PI_SUBAGENT_CHILD; else process.env.PI_SUBAGENT_CHILD = priorChild;
-    if (priorOmpsChild === undefined) delete process.env.OMPS_SUBAGENT_CHILD; else process.env.OMPS_SUBAGENT_CHILD = priorOmpsChild;
-  }
+test("Todo runtime registers one tool while RPC sessions never register widgets", () => {
+  const rpc = createHarness({ mode: "rpc" });
+  assert.deepEqual(rpc.tools.map((tool) => tool.name), ["todo"]);
+  rpc.emit("session_start", { reason: "startup" });
+  assert.deepEqual(rpc.widgetCalls, []);
 });
 
 test("session shutdown always disposes the Todo section while RPC and no-UI sessions still never register", () => {
@@ -1055,7 +1023,7 @@ test("Ctrl+O expands Todo list and update calls without changing call data", () 
     {
       op: "modify", target: "A\nB", newSubject: "C\tD", status: "in_progress",
       abstract: "Modify abstract line one\nModify abstract line two",
-      addBlockedBy: ["Added One", "Added Two"], removeBlockedBy: ["Removed One"],
+      blockedBy: ["Added One", "Added Two"],
     },
     { op: "delete", target: "Stale\tItem" },
     { op: "clear" },
@@ -1073,8 +1041,8 @@ test("Ctrl+O expands Todo list and update calls without changing call data", () 
     "todo · update", "Operations: 4", "1. Append", "Subject: A B",
     "Append abstract line one", "Append abstract line two", "Blocked by:", "Dependency One", "Dependency Two",
     "2. Modify", "Target: A B", "New subject: C D", "Status: in_progress",
-    "Modify abstract line one", "Modify abstract line two", "Add blocked by:", "Added One", "Added Two",
-    "Remove blocked by:", "Removed One", "3. Delete", "Target: Stale Item", "4. Clear",
+    "Modify abstract line one", "Modify abstract line two", "Blocked by:", "Added One", "Added Two",
+    "3. Delete", "Target: Stale Item", "4. Clear",
   ]) assert.match(expanded, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   for (const line of [
     "1. Append",
@@ -1092,11 +1060,9 @@ test("Ctrl+O expands Todo list and update calls without changing call data", () 
     "  Abstract:",
     "    Modify abstract line one",
     "    Modify abstract line two",
-    "  Add blocked by:",
+    "  Blocked by:",
     "    - Added One",
     "    - Added Two",
-    "  Remove blocked by:",
-    "    - Removed One",
     "3. Delete",
     "  Target: Stale Item",
     "4. Clear",
@@ -1114,14 +1080,7 @@ test("Ctrl+O expands Todo update and list results without changing model data", 
     { op: "modify", target: "A", status: "completed" },
   ]);
   const updateBefore = structuredClone(updateResult);
-  assert.deepEqual(JSON.parse(updateResult.content[0].text), {
-    receipts: [
-      { operation: 1, kind: "append", text: 'Appended "A".' },
-      { operation: 2, kind: "status", text: 'Modified "A": status pending to completed.' },
-      { operation: 3, kind: "no-change", text: 'No change for "A".' },
-    ],
-    unfinished: [],
-  });
+  assert.deepEqual(JSON.parse(updateResult.content[0].text), []);
   assert.equal(updateResult.content[0].text, JSON.stringify(JSON.parse(updateResult.content[0].text)));
   assert.doesNotMatch(updateResult.content[0].text, /"state"|"tasks"/);
   const updateCollapsedComponent = harness.tool.renderResult(updateResult, { expanded: false }, theme, {});
@@ -1204,7 +1163,7 @@ test("Ctrl+O expands Todo update and list results without changing model data", 
 
 test("Todo fallback safely shows the JSON first line and expands full text", () => {
   const harness = createHarness({ mode: "rpc" });
-  const jsonLine = '{"receipts":[],"unfinished":[]}';
+  const jsonLine = '[]';
   const result = { content: [{ type: "text", text: `${jsonLine}\nFallback\u0000 second\nFallback third` }] };
   const before = structuredClone(result);
   const collapsedComponent = harness.tool.renderResult(result, { expanded: false }, theme, {});
@@ -1215,28 +1174,17 @@ test("Todo fallback safely shows the JSON first line and expands full text", () 
   const expandedComponent = harness.tool.renderResult(result, { expanded: true }, theme, {});
   assertBlankResultSeparator(expandedComponent);
   const expanded = renderComponent(expandedComponent);
-  assert.match(expanded, /\{"receipts":\[\],"unfinished":\[\]\}\nFallback  second\nFallback third/);
+  assert.match(expanded, /\[\]\nFallback  second\nFallback third/);
   assert.doesNotMatch(expanded, /\u0000/);
   assert.deepEqual(result, before);
 });
 
 test("Todo model metadata matches the exact standalone operational contract", () => {
   const harness = createHarness({ mode: "rpc" });
-  for (const block of [harness.tool.description, harness.tool.promptSnippet, ...harness.tool.promptGuidelines]) {
-    assertSteBlock(block);
-  }
-  assert.equal(harness.tool.description, "Read or atomically update a session-local task ledger. `todo list` returns every item in original order. `todo update` applies ordered append, modify, delete, or clear operations as one batch. Multiple items may be in progress. Dependencies must form an acyclic graph and reference exact existing subjects. Deleting an in_progress item is rejected before dependency checks. Deleting a referenced item is rejected. Clear rejects every current in_progress item. It removes all pending and completed items. Any invalid operation or final graph rolls back the entire batch.");
-  assert.equal(harness.tool.promptSnippet, "Track session tasks and dependencies.");
-  const expectedGuidelines = [
-    "Append newly added user work with `todo update` instead of replacing existing items.",
-    "Preserve existing `todo` items unless the user or current work requires a change.",
-    "Finish current in-progress `todo` work before appended work unless blocked or explicitly reordered.",
-    "Complete each `todo` dependency before starting or completing its dependent item.",
-    "Remove all `todo` dependency references before deleting a pending or completed target.",
-    "Ask whether to set each in_progress `todo` item pending or completed before deleting or clearing it.",
-  ];
-  assert.deepEqual(TODO_PROMPT_GUIDELINES, expectedGuidelines);
-  assert.doesNotMatch(TODO_PROMPT_GUIDELINES.join("\n"), /\b(?:snapshot|replay|store|version|widget|ID)\b/i);
+  assertSteBlock(harness.tool.description);
+  assert.equal(harness.tool.description, TODO_TOOL_CONTRACT.description);
+  assert.equal(harness.tool.promptSnippet, undefined);
+  assert.equal(harness.tool.promptGuidelines, undefined);
 });
 
 test("Todo factory never enumerates tools during initialization", () => {
@@ -1263,7 +1211,7 @@ test("real Pi loads only Todo in an isolated RPC smoke without registering a wid
       "--no-themes",
       "--no-context-files",
       "--no-builtin-tools",
-      "--extension", join(root, "extensions/todo/index.ts"),
+      "--extension", join(root, "extensions/oh-my-pi-slim/index.ts"),
       "--extension", join(root, "tests/fixtures/todo-load-probe.ts"),
     ], {
       cwd: root,

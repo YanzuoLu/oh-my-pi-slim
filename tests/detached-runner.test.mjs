@@ -15,9 +15,9 @@ import test from "node:test";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier === "./subagent-core.js") {
+    if (specifier === "./legacy-abstract.js") {
       return {
-        url: new URL("../extensions/oh-my-pi-slim/subagent-core.ts", import.meta.url).href,
+        url: new URL("../extensions/oh-my-pi-slim/subagent/legacy-abstract.ts", import.meta.url).href,
         shortCircuit: true,
       };
     }
@@ -36,11 +36,11 @@ const {
   readControlInbox,
   safeReadJson,
   writeControl,
-} = await import("../extensions/oh-my-pi-slim/subagent-run-files.ts");
+} = await import("../extensions/oh-my-pi-slim/subagent/run-files.ts");
 
 const ROOT = resolve(import.meta.dirname, "..");
 const CACHE = join(ROOT, ".cache");
-const RUNNER = join(ROOT, "extensions/oh-my-pi-slim/runner/omps-runner.mjs");
+const RUNNER = join(ROOT, "extensions/oh-my-pi-slim/subagent/runner/omps-runner.mjs");
 const STUB = join(ROOT, "tests/fixtures/stub-pi-rpc.mjs");
 const processes = new Set();
 let sequence = 0;
@@ -63,13 +63,10 @@ function makeRun(scenario, { start = true, extraEnv = {}, legacyMissingAbstract 
     runId,
     token,
     ownerSessionId: "owner-session",
-    agent: "fixer",
     abstract: `summary-${scenario}`,
     task: `task-${scenario}`,
     cwd: ROOT,
     model: "stub/model:high",
-    deniedTools: ["ask_user_question"],
-    systemPrompt: "stub system prompt",
     approve: false,
     childSessionDir: join(tempDir, "child-sessions"),
     piInvocation: { command: process.execPath, args: [STUB, "--mode", "rpc"] },
@@ -281,11 +278,11 @@ test("control filenames preserve write order within one process and millisecond"
 test("detached launcher survives its short-lived owner process", async () => {
   const run = makeRun("normal", { start: false });
   try {
-    const helperUrl = pathToFileURL(join(ROOT, "extensions/oh-my-pi-slim/subagent-run-files.ts")).href;
-    const coreUrl = pathToFileURL(join(ROOT, "extensions/oh-my-pi-slim/subagent-core.ts")).href;
+    const helperUrl = pathToFileURL(join(ROOT, "extensions/oh-my-pi-slim/subagent/run-files.ts")).href;
+    const legacyAbstractUrl = pathToFileURL(join(ROOT, "extensions/oh-my-pi-slim/subagent/legacy-abstract.ts")).href;
     const launcher = spawnSync(process.execPath, ["--input-type=module", "--eval", [
       'import { registerHooks } from "node:module";',
-      `registerHooks({ resolve(specifier, context, nextResolve) { return specifier === "./subagent-core.js" ? { url: ${JSON.stringify(coreUrl)}, shortCircuit: true } : nextResolve(specifier, context); } });`,
+      `registerHooks({ resolve(specifier, context, nextResolve) { return specifier === "./legacy-abstract.js" ? { url: ${JSON.stringify(legacyAbstractUrl)}, shortCircuit: true } : nextResolve(specifier, context); } });`,
       `const { launchDetachedRunner } = await import(${JSON.stringify(helperUrl)});`,
       `const launched = await launchDetachedRunner(${JSON.stringify(run.paths.configFile)}, ${JSON.stringify(RUNNER)}, { cwd: ${JSON.stringify(ROOT)} });`,
       "process.stdout.write(String(launched.pid));",

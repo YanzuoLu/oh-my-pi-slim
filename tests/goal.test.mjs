@@ -7,10 +7,13 @@ const dependencyMap = {
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
-  "./goal-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal-transcript-renderer.ts", import.meta.url).href,
-  "./goal-widget.js": new URL("../extensions/oh-my-pi-slim/goal-widget.ts", import.meta.url).href,
-  "./goal-runtime.js": new URL("../extensions/oh-my-pi-slim/goal-runtime.ts", import.meta.url).href,
-  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "../tool-contracts.js": new URL("../extensions/oh-my-pi-slim/tool-contracts.ts", import.meta.url).href,
+  "./transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/goal/transcript-renderer.ts", import.meta.url).href,
+  "./widget.js": new URL("../extensions/oh-my-pi-slim/goal/widget.ts", import.meta.url).href,
+  "./runtime.js": new URL("../extensions/oh-my-pi-slim/goal/runtime.ts", import.meta.url).href,
+  "../semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "../widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
+  "../widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
   "./widget-expansion.js": new URL("../extensions/oh-my-pi-slim/widget-expansion.ts", import.meta.url).href,
   "./widget-stack.js": new URL("../extensions/oh-my-pi-slim/widget-stack.ts", import.meta.url).href,
   "./widget-stack-host.js": new URL("../extensions/oh-my-pi-slim/widget-stack-host.ts", import.meta.url).href,
@@ -23,25 +26,27 @@ registerHooks({
 });
 
 const {
-  GOAL_ACTIONS,
   GOAL_CONTINUATION_MESSAGE_TYPE,
-  GOAL_PUBLIC_FIELDS,
-  GOAL_REMINDER_MESSAGE_TYPE,
   GOAL_RETRY_BACKOFF_MS,
   GOAL_STATE_ENTRY_TYPE,
   GOAL_STATE_MESSAGE_TYPE,
   GoalRuntime,
   deriveMainGoalStats,
-  goalActivationContent,
-  goalContinuationContent,
-  goalParameters,
-  goalPhaseReminder,
   isGoalTombstoneData,
   parseGoalContinuationMessageDetails,
   parseGoalSnapshot,
   replayGoalBranch,
   retryDelayMs,
-} = await import("../extensions/oh-my-pi-slim/goal-runtime.ts");
+} = await import("../extensions/oh-my-pi-slim/goal/runtime.ts");
+const {
+  GOAL_ACTIONS,
+  GOAL_PUBLIC_FIELDS,
+  GOAL_TOOL_CONTRACT,
+  GOAL_TOOL_ERRORS,
+  goalContinuationContent,
+  goalModelResult,
+  goalParameters,
+} = await import("../extensions/oh-my-pi-slim/tool-contracts.ts");
 const { resetWidgetStackHost } = await import("../extensions/oh-my-pi-slim/widget-stack-host.ts");
 
 // The aggregate widget host is a process-wide singleton, so every test starts from an empty one.
@@ -170,15 +175,12 @@ function publicKeys(goal) {
 function resultDto(result) {
   const text = result.content[0].text;
   assert.equal(text.includes("\n"), false, "Goal success content must be compact single-line JSON");
-  const dto = JSON.parse(text);
-  assert.deepEqual({ goal: dto.goal, changed: dto.changed }, result.details);
-  assert.deepEqual(Object.keys(dto), dto.message === undefined ? ["goal", "changed"] : ["goal", "changed", "message"]);
-  return dto;
+  return JSON.parse(text);
 }
 
 const PUBLIC_STATUS_KEYS = [
   "status", "abstract", "objective", "criteria", "createdAt", "updatedAt", "endedAt", "pauseReason",
-  "retryAttempt", "nextRetryAt", "lastProviderError", "noProgressCount", "evidence", "cancelReason",
+  "retryAttempt", "nextRetryAt", "lastProviderError", "noProgressCount", "evidence",
 ].sort();
 
 test("Goal schema is a strict portable object with isolated public actions", async () => {
@@ -195,23 +197,15 @@ test("Goal schema is a strict portable object with isolated public actions", asy
   const harness = createHarness();
   const tool = harness.tools.get("goal");
   assert.equal(tool.executionMode, "sequential");
-  assert.equal(tool.description, "Manage one durable Goal on the current branch. `goal create` activates an explicit objective with one to eight completion criteria. Active Goals continue autonomously while blockers, pending interactions, or other managed work can delay continuation. Provider failures retry automatically. Repeated no-progress runs pause the Goal. User aborts pause the Goal only when Goal continuation is immediately safe to deliver. Otherwise, blockers keep the Goal active for later reevaluation. `goal pause` stops autonomous continuation until `goal resume` explicitly reactivates the Goal. Restored unfinished Goals remain paused until explicitly resumed. `goal modify` replaces the nonterminal contract and activates it. Cancellation means the user abandons the Goal. Completion requires one concrete evidence item per criterion. `goal clear` removes a paused, completed, or cancelled Goal. It rejects active and retry_wait Goals until the user agrees to pause or cancel. Actions return the current Goal state and whether it changed.");
-  assert.equal(tool.promptSnippet, "Manage the branch-local Goal.");
-  assert.deepEqual(tool.promptGuidelines, [
-    "Call `goal create` only for a user message beginning with `/goal`.",
-    "For bare `/goal`, call `goal status` and explain `/goal <objective>`.",
-    "Use Goal for one durable outcome, not as a `todo` checklist.",
-    "`goal modify` replaces the entire nonterminal contract, not individual fields.",
-    "Ask before pausing or cancelling a Goal when `goal clear` rejects its current status.",
-    "Call `goal complete` only with concrete evidence for every criterion.",
-  ]);
-  assert.equal(schema.properties.action.description, "Choose an action. create and modify require abstract, objective, and criteria. pause and cancel require reason. complete requires evidence. status, resume, and clear accept no other fields.");
-  assert.deepEqual([...GOAL_ACTIONS], ["create", "modify", "status", "pause", "resume", "complete", "cancel", "clear"]);
+  assert.equal(tool.description, GOAL_TOOL_CONTRACT.description);
+  assert.equal(tool.promptSnippet, undefined);
+  assert.equal(tool.promptGuidelines, undefined);
+  assert.equal(schema.properties.action.description, GOAL_TOOL_CONTRACT.parameters.properties.action.description);
+  assert.deepEqual([...GOAL_ACTIONS], ["create", "check", "modify", "pause", "resume", "complete", "clear"]);
   assert.equal("confirmed" in schema.properties, false);
   for (const invalid of [
     { ...createInput, reason: "extra" },
-    { action: "status", evidence: [] },
-    { action: "pause" },
+    { action: "check", evidence: [] },
     { action: "complete" },
     { action: "resume", reason: "extra" },
     { action: "clear", reason: "extra" },
@@ -225,45 +219,23 @@ test("Goal schema is a strict portable object with isolated public actions", asy
 
 test("create, modify, terminal replacement, evidence, and no-op receipts preserve the frozen business contract", async () => {
   const harness = createHarness();
-  const none = await harness.execute({ action: "status" });
+  const none = await harness.execute({ action: "check" });
   assert.deepEqual(none.details, { goal: null, changed: false });
-  assert.deepEqual(resultDto(none), { goal: null, changed: false, message: "No Goal." });
+  assert.deepEqual(resultDto(none), { status: "none" });
 
   const created = await harness.execute(createInput);
   assert.equal(created.details.goal.status, "active");
   assert.deepEqual(publicKeys(created.details.goal), PUBLIC_STATUS_KEYS);
-  assert.equal(resultDto(created).message, goalActivationContent("created", created.details.goal));
-  const exactActivation = [
-    "Goal created and active.",
-    "",
-    "Abstract: Ship the Goal core",
-    "",
-    "Objective:",
-    "Implement the frozen nonvisual Goal behavior.",
-    "",
-    "Completion criteria:",
-    "1. Schema is strict",
-    "2. Continuation is gated",
-    "",
-    "Pursue this Goal now.",
-    "Do not ask the user questions while this Goal is active.",
-    "Continue until every criterion has concrete evidence.",
-    "Use Todo, Monitor, and Subagents when useful.",
-    "If safe progress is blocked, call `goal pause` with a concrete reason.",
-    "Call `goal complete` only with one evidence entry for every criterion.",
-  ].join("\n");
-  assert.equal(resultDto(created).message, exactActivation);
-  assert.equal(goalActivationContent("modified", created.details.goal), exactActivation.replace("Goal created and active.", "Goal modified and active."));
-  assert.equal(goalActivationContent("resumed", created.details.goal), exactActivation.replace("Goal created and active.", "Goal resumed and active."));
-  await assert.rejects(harness.execute(createInput), /no Goal or a terminal Goal/);
+  assert.deepEqual(resultDto(created), { status: "active" });
+  await assert.rejects(harness.execute(createInput), /no Goal or a completed Goal/);
   harness.runtime.ownRun("owned-before-modify");
 
-  const paused = await harness.execute({ action: "pause", reason: "blocked" });
+  const paused = await harness.execute({ action: "pause" });
   assert.equal(paused.details.goal.status, "paused");
-  assert.equal(paused.details.goal.pauseReason, "blocked");
-  const pausedAgain = await harness.execute({ action: "pause", reason: "ignored" });
+  assert.equal(paused.details.goal.pauseReason, null);
+  const pausedAgain = await harness.execute({ action: "pause" });
   assert.equal(pausedAgain.details.changed, false);
-  assert.equal(resultDto(pausedAgain).message, "Goal is already paused. No change.");
+  assert.deepEqual(resultDto(pausedAgain), { status: "paused" });
 
   const modified = await harness.execute({
     action: "modify", abstract: "Updated", objective: "Updated objective", criteria: ["One"],
@@ -272,7 +244,7 @@ test("create, modify, terminal replacement, evidence, and no-op receipts preserv
   assert.equal(modified.details.goal.createdAt, created.details.goal.createdAt);
   assert.equal(harness.runtime.goalView().ownedChildRunCount, 1);
   assert.equal(modified.details.goal.pauseReason, null);
-  assert.equal(resultDto(modified).message, goalActivationContent("modified", modified.details.goal));
+  assert.deepEqual(resultDto(modified), { status: "active" });
 
   await assert.rejects(harness.execute({ action: "complete", evidence: ["one", "two"] }), /exactly 1 items/);
   const completed = await harness.execute({ action: "complete", evidence: ["proof"] });
@@ -280,7 +252,6 @@ test("create, modify, terminal replacement, evidence, and no-op receipts preserv
   assert.deepEqual(completed.details.goal.evidence, ["proof"]);
   assert.ok(completed.details.goal.endedAt);
   await assert.rejects(harness.execute({ action: "resume" }), /terminal/);
-  await assert.rejects(harness.execute({ action: "cancel", reason: "late" }), /terminal/);
 
   const replacement = await harness.execute({ ...createInput, abstract: "Replacement" });
   assert.equal(replacement.details.goal.status, "active");
@@ -288,54 +259,48 @@ test("create, modify, terminal replacement, evidence, and no-op receipts preserv
   assert.equal(harness.runtime.goalView().ownedChildRunCount, 0);
 });
 
-test("all eight Goal actions return the unified compact DTO for changes, no-ops, and empty state", async () => {
+test("Goal actions return compact receipts while check returns the reviewable state", async () => {
   const harness = createHarness();
 
-  assert.deepEqual(resultDto(await harness.execute({ action: "status" })), {
-    goal: null, changed: false, message: "No Goal.",
-  });
-  assert.deepEqual(resultDto(await harness.execute({ action: "clear" })), {
-    goal: null, changed: false, message: "No Goal to clear.",
-  });
+  assert.deepEqual(resultDto(await harness.execute({ action: "check" })), { status: "none" });
+  assert.deepEqual(resultDto(await harness.execute({ action: "clear" })), { status: "none" });
 
   const created = await harness.execute(createInput);
-  assert.equal(resultDto(created).message, goalActivationContent("created", created.details.goal));
-  const status = await harness.execute({ action: "status" });
-  assert.deepEqual(resultDto(status), { goal: status.details.goal, changed: false });
-  assert.equal(resultDto(await harness.execute({ action: "resume" })).message, "Goal is already active. No change.");
+  assert.deepEqual(resultDto(created), { status: "active" });
+  const status = await harness.execute({ action: "check" });
+  assert.deepEqual(resultDto(status), goalModelResult("check", status.details.goal));
+  assert.deepEqual(resultDto(await harness.execute({ action: "resume" })), { status: "active" });
 
-  const paused = await harness.execute({ action: "pause", reason: "blocked" });
-  assert.equal(resultDto(paused).message, "Goal paused.");
-  assert.equal(resultDto(await harness.execute({ action: "pause", reason: "ignored" })).message, "Goal is already paused. No change.");
+  const paused = await harness.execute({ action: "pause" });
+  assert.deepEqual(resultDto(paused), { status: "paused" });
+  assert.deepEqual(resultDto(await harness.execute({ action: "pause" })), { status: "paused" });
   const resumed = await harness.execute({ action: "resume" });
-  assert.equal(resultDto(resumed).message, goalActivationContent("resumed", resumed.details.goal));
+  assert.deepEqual(resultDto(resumed), { status: "active" });
 
   const modified = await harness.execute({
     action: "modify", abstract: "Updated", objective: "Updated objective", criteria: ["One"],
   });
-  assert.equal(resultDto(modified).message, goalActivationContent("modified", modified.details.goal));
-  assert.equal(resultDto(await harness.execute({ action: "complete", evidence: ["proof"] })).message, "Goal completed.");
-  assert.equal(resultDto(await harness.execute({ action: "clear" })).message, "Goal cleared.");
+  assert.deepEqual(resultDto(modified), { status: "active" });
+  assert.deepEqual(resultDto(await harness.execute({ action: "complete", evidence: ["proof"] })), { status: "completed" });
+  assert.deepEqual(resultDto(await harness.execute({ action: "clear" })), { status: "none" });
 
-  await harness.execute(createInput);
-  assert.equal(resultDto(await harness.execute({ action: "cancel", reason: "superseded" })).message, "Goal cancelled.");
 });
 
-test("status and repeated pause or resume no-ops do not append snapshots or mutate state", async () => {
+test("check and repeated pause or resume no-ops do not append snapshots or mutate state", async () => {
   const harness = createHarness();
   await harness.execute(createInput);
   const afterCreate = harness.branch.length;
   const activeBefore = structuredClone(harness.runtime.status());
-  await harness.execute({ action: "status" });
+  await harness.execute({ action: "check" });
   await harness.execute({ action: "resume" });
   assert.equal(harness.branch.length, afterCreate);
   assert.deepEqual(harness.runtime.status(), activeBefore);
 
-  await harness.execute({ action: "pause", reason: "blocked" });
+  await harness.execute({ action: "pause" });
   const afterPause = harness.branch.length;
   const pausedBefore = structuredClone(harness.runtime.status());
-  await harness.execute({ action: "status" });
-  await harness.execute({ action: "pause", reason: "different ignored reason" });
+  await harness.execute({ action: "check" });
+  await harness.execute({ action: "pause" });
   assert.equal(harness.branch.length, afterPause);
   assert.deepEqual(harness.runtime.status(), pausedBefore);
 });
@@ -375,14 +340,10 @@ test("snapshot replay is strict, latest-valid, branch-local, and restoration pau
   assert.equal(restored.sent.at(-1).message.details.event, "session_restored");
 });
 
-test("Goal reminder type and model-facing text use exact independent blocks", async () => {
-  assert.equal(GOAL_REMINDER_MESSAGE_TYPE, "oh-my-pi-slim:goal-reminder");
+test("Goal continuation content describes the active contract", async () => {
   const harness = createHarness();
-  assert.equal(harness.runtime.phaseReminder(), undefined);
   const created = await harness.execute(createInput);
   const goal = created.details.goal;
-  assert.equal(goalPhaseReminder(goal.abstract), `<system-reminder>\n!IMPORTANT! You are pursuing the active Goal: Ship the Goal core. Keep this run aligned with it and continue making concrete progress. !END!\n</system-reminder>`);
-  assert.equal(harness.runtime.phaseReminder(), goalPhaseReminder(goal.abstract));
   assert.equal(goalContinuationContent(goal), [
     "Continue pursuing the active Goal.",
     "",
@@ -397,31 +358,11 @@ test("Goal reminder type and model-facing text use exact independent blocks", as
     "",
     "Do not ask the user questions while this Goal is active.",
     "Continue making concrete progress toward every criterion.",
-    "Use Todo, Monitor, and Subagents when useful.",
-    "If safe progress is blocked, call `goal pause` with a concrete reason.",
-    "Call `goal complete` only with one evidence entry for every criterion.",
+    "Use `todo`, `monitor`, and `subagent` when useful.",
+    "If safe progress is blocked, call `goal` with `action: \"pause\"`.",
+    "Call `goal` with `action: \"complete\"` only with one evidence entry for every criterion.",
   ].join("\n"));
 
-  await harness.execute({ action: "pause", reason: "blocker" });
-  assert.equal(harness.runtime.phaseReminder(), undefined);
-
-  const retrying = createHarness();
-  await retrying.execute(createInput);
-  retrying.runtime.onAgentStart(retrying.ctx);
-  retrying.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "error", errorMessage: "rate limited" }] });
-  retrying.runtime.onAgentSettled(retrying.ctx);
-  assert.equal(retrying.runtime.status().status, "retry_wait");
-  assert.equal(retrying.runtime.phaseReminder(), undefined);
-
-  const completed = createHarness();
-  await completed.execute(createInput);
-  await completed.execute({ action: "complete", evidence: ["proof one", "proof two"] });
-  assert.equal(completed.runtime.phaseReminder(), undefined);
-
-  const cancelled = createHarness();
-  await cancelled.execute(createInput);
-  await cancelled.execute({ action: "cancel", reason: "superseded" });
-  assert.equal(cancelled.runtime.phaseReminder(), undefined);
 });
 
 test("continuation waits for the full safe gate, uses steer with acknowledgement, and external input invalidates deferred work", async () => {
@@ -848,7 +789,7 @@ test("clear is a no-op with no Goal and never appends a tombstone", async () => 
   const harness = createHarness();
   const entries = harness.branch.length;
   const cleared = await harness.execute({ action: "clear" });
-  assert.deepEqual(resultDto(cleared), { goal: null, changed: false, message: "No Goal to clear." });
+  assert.deepEqual(resultDto(cleared), { status: "none" });
   assert.deepEqual(cleared.details, { goal: null, changed: false });
   assert.equal(harness.branch.length, entries);
   assert.equal(harness.runtime.status(), null);
@@ -858,20 +799,22 @@ test("clear is a no-op with no Goal and never appends a tombstone", async () => 
   assert.equal(harness.branch.length, entries);
 });
 
-test("clear erases a paused, completed, or cancelled Goal through a null tombstone", async () => {
+test("clear erases an active, paused, or completed Goal through a null tombstone", async () => {
   for (const stopped of [
-    { action: "pause", reason: "blocked", status: "paused" },
+    { action: undefined, status: "active" },
+    { action: "pause", status: "paused" },
     { action: "complete", evidence: ["proof one", "proof two"], status: "completed" },
-    { action: "cancel", reason: "user abandoned it", status: "cancelled" },
   ]) {
     const harness = createHarness();
     await harness.execute(createInput);
-    const ended = await harness.execute({ action: stopped.action, ...(stopped.evidence ? { evidence: stopped.evidence } : {}), ...(stopped.reason ? { reason: stopped.reason } : {}) });
-    assert.equal(ended.details.goal.status, stopped.status);
+    if (stopped.action) {
+      const ended = await harness.execute({ action: stopped.action, ...(stopped.evidence ? { evidence: stopped.evidence } : {}) });
+      assert.equal(ended.details.goal.status, stopped.status);
+    }
     const before = goalStateEntries(harness.branch).length;
 
     const cleared = await harness.execute({ action: "clear" });
-    assert.deepEqual(resultDto(cleared), { goal: null, changed: true, message: "Goal cleared." });
+    assert.deepEqual(resultDto(cleared), { status: "none" });
     assert.deepEqual(cleared.details, { goal: null, changed: true });
     const stateEntries = goalStateEntries(harness.branch);
     assert.equal(stateEntries.length, before + 1);
@@ -880,7 +823,6 @@ test("clear erases a paused, completed, or cancelled Goal through a null tombsto
     assert.equal(last.data, null);
     assert.equal(harness.runtime.status(), null);
     assert.equal(harness.runtime.isActive(), false);
-    assert.equal(harness.runtime.phaseReminder(), undefined);
     const view = harness.runtime.goalView();
     assert.equal(view.goal, null);
     assert.equal(view.elapsedMs, null);
@@ -895,21 +837,7 @@ test("clear erases a paused, completed, or cancelled Goal through a null tombsto
   }
 });
 
-test("clear rejects active and retry_wait Goals without state changes or timer cancellation", async () => {
-  const expectAsk = "Ask the user whether to pause or cancel this Goal, then retry clear only if they agree.";
-
-  const active = createHarness();
-  await active.execute(createInput);
-  const activeBefore = structuredClone(active.runtime.status());
-  const activeEntries = active.branch.length;
-  await assert.rejects(active.execute({ action: "clear" }), (error) => {
-    assert.equal(error.message, `clear is invalid for current Goal status active. ${expectAsk}`);
-    return true;
-  });
-  assert.equal(active.branch.length, activeEntries);
-  assert.deepEqual(active.runtime.status(), activeBefore);
-  assert.equal(goalStateEntries(active.branch).some((entry) => entry.data === null), false);
-
+test("clear erases a retry_wait Goal and clears its timer", async () => {
   const retrying = createHarness();
   await retrying.execute(createInput);
   retrying.runtime.onAgentStart(retrying.ctx);
@@ -917,17 +845,14 @@ test("clear rejects active and retry_wait Goals without state changes or timer c
   retrying.setIdle(false);
   retrying.runtime.onAgentSettled(retrying.ctx);
   assert.equal(retrying.runtime.status().status, "retry_wait");
-  const retryBefore = structuredClone(retrying.runtime.status());
   const retryEntries = retrying.branch.length;
   const retryTimer = retrying.timers.at(-1);
-  await assert.rejects(retrying.execute({ action: "clear" }), (error) => {
-    assert.equal(error.message, `clear is invalid for current Goal status retry_wait. ${expectAsk}`);
-    return true;
-  });
-  assert.equal(retrying.branch.length, retryEntries);
-  assert.deepEqual(retrying.runtime.status(), retryBefore);
-  assert.equal(retryTimer.cleared, false);
-  assert.equal(goalStateEntries(retrying.branch).some((entry) => entry.data === null), false);
+  const cleared = await retrying.execute({ action: "clear" });
+  assert.deepEqual(resultDto(cleared), { status: "none" });
+  assert.equal(retrying.branch.length, retryEntries + 1);
+  assert.equal(retrying.runtime.status(), null);
+  assert.equal(retryTimer.cleared, true);
+  assert.equal(goalStateEntries(retrying.branch).at(-1).data, null);
 });
 
 test("replay and stats treat only an exact null payload as an erasure", async () => {
@@ -1008,9 +933,6 @@ test("clear notifies subscribers and the widget with a null Goal without an auto
 
   await harness.execute(createInput);
   assert.equal(observed.at(-1), "active");
-  await harness.execute({ action: "cancel", reason: "user abandoned it" });
-  assert.equal(observed.at(-1), "cancelled");
-
   const stateMessages = harness.sent.filter((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE).length;
   await harness.execute({ action: "clear" });
   assert.equal(observed.at(-1), null);
@@ -1029,7 +951,7 @@ test("clearing a paused Goal drops deferred continuation work", async () => {
   harness.runtime.onAgentSettled(harness.ctx);
   assert.equal(harness.deferred.length, 1);
 
-  await harness.execute({ action: "pause", reason: "blocked" });
+  await harness.execute({ action: "pause" });
   await harness.execute({ action: "clear" });
 
   // The deferred continuation captured before the pause must expire instead of steering a dead Goal.

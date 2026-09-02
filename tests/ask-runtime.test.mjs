@@ -7,8 +7,9 @@ const dependencyMap = {
   "@earendil-works/pi-coding-agent": pathToFileURL(`${piRoot}/dist/index.js`).href,
   "@earendil-works/pi-tui": pathToFileURL(`${piRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href,
   typebox: pathToFileURL(`${piRoot}/node_modules/typebox/build/index.mjs`).href,
-  "./ask-transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask-transcript-renderer.ts", import.meta.url).href,
-  "./semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
+  "../tool-contracts.js": new URL("../extensions/oh-my-pi-slim/tool-contracts.ts", import.meta.url).href,
+  "./transcript-renderer.js": new URL("../extensions/oh-my-pi-slim/ask/transcript-renderer.ts", import.meta.url).href,
+  "../semantic-glyph.js": new URL("../extensions/oh-my-pi-slim/semantic-glyph.ts", import.meta.url).href,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -19,19 +20,18 @@ registerHooks({
 
 const {
   ASK_CUSTOM_LABEL,
-  ASK_PROMPT_GUIDELINES,
   ASK_RESERVED_LABELS,
   ASK_RPC_CANCEL_LABEL,
   ASK_RPC_DONE_LABEL,
   ASK_RPC_SUBMIT_LABEL,
   AskRuntime,
   askResultModelContent,
-  askUserQuestionParameters,
   buildAskModelDto,
   buildAskResult,
   createRpcAskDriver,
   validateQuestionnaire,
-} = await import("../extensions/oh-my-pi-slim/ask-runtime.ts");
+} = await import("../extensions/oh-my-pi-slim/ask/runtime.ts");
+const { ASK_TOOL_CONTRACT, ASK_TOOL_DESCRIPTIONS, askUserQuestionParameters } = await import("../extensions/oh-my-pi-slim/tool-contracts.ts");
 
 const baseParams = {
   questions: [{
@@ -153,14 +153,14 @@ test("Ask schema is strict, provider-portable, and preserves RPIV field bounds",
     multiSelect: question.properties.multiSelect.description,
     questions: schema.properties.questions.description,
   }, {
-    label: "Unique option label up to 60 characters. Place the recommended option first and append (Recommended). Reserved labels are Other, Type something., and Next.",
-    description: "Explain the outcome of choosing this option.",
-    preview: "Optional preview for single-select only.",
-    question: "Decision question shown to the user.",
-    header: "Short header up to 16 characters.",
-    options: "Two to four authored options in display order.",
-    multiSelect: "True enables multiple authored selections. Omit or use false for single-select. Multi-select options cannot include previews.",
-    questions: "One to four questions in display order.",
+    label: ASK_TOOL_DESCRIPTIONS.input.questions.items.options.items.label,
+    description: ASK_TOOL_DESCRIPTIONS.input.questions.items.options.items.description,
+    preview: ASK_TOOL_DESCRIPTIONS.input.questions.items.options.items.preview,
+    question: ASK_TOOL_DESCRIPTIONS.input.questions.items.question,
+    header: ASK_TOOL_DESCRIPTIONS.input.questions.items.header,
+    options: ASK_TOOL_DESCRIPTIONS.input.questions.items.options.description,
+    multiSelect: ASK_TOOL_DESCRIPTIONS.input.questions.items.multiSelect,
+    questions: ASK_TOOL_DESCRIPTIONS.input.questions.description,
   });
 });
 
@@ -170,14 +170,9 @@ test("Ask tool metadata and action fields match the frozen contract", () => {
   runtime.registerTool();
   const tool = harness.tools.get("ask_user_question");
   assert.equal(tool.executionMode, "sequential");
-  assert.equal(tool.description, "Ask the user one to four structured questions with single-select, multi-select, custom responses, and optional single-select previews. Each question accepts two to four authored options. Call `ask_user_question` as the only tool call in its assistant message. Open it only when Pi has no pending messages. RPC prompts received while Ask is waiting or settling are rejected and must be retried after Pi is idle. Direct RPC steer or follow-up messages can bypass this gate. They are aborted with Ask and must be retried after Pi is idle. Complete, partial, and empty-submit results report confirmed answers as compact JSON and allow the agent run to continue. Cancelling discards every answer and terminates the current agent run. Every non-retrying threshold compaction is skipped until the agent settles, leaving Pi idle. `ask_user_question` is unavailable while a Goal is active.");
-  assert.equal(tool.promptSnippet, "Collect structured user decisions.");
-  assert.deepEqual(tool.promptGuidelines, [
-    "Use `ask_user_question` when a user decision must direct the next step.",
-    "Call ask_user_question alone in its tool batch.",
-    "Call ask_user_question only when Pi has no pending messages.",
-    "Do not call `ask_user_question` while a Goal is active.",
-  ]);
+  assert.equal(tool.description, ASK_TOOL_CONTRACT.description);
+  assert.equal(tool.promptSnippet, undefined);
+  assert.equal(tool.promptGuidelines, undefined);
   assert.deepEqual(ASK_RESERVED_LABELS, ["Other", "Type something.", "Next"]);
   assert.equal(tool.parameters.properties.action, undefined);
   assert.equal(typeof tool.renderCall, "function");
@@ -242,7 +237,7 @@ test("shared result builder normalizes answers, partial submit, empty submit, an
   });
 });
 
-test("model DTO content is exact compact JSON for complete, partial, user-cancelled, and empty-submit outcomes", () => {
+test("model result is a fixed-order answer list with null for unanswered questions", () => {
   const questionnaire = validateQuestionnaire({ questions: [
     baseParams.questions[0],
     {
@@ -271,31 +266,23 @@ test("model DTO content is exact compact JSON for complete, partial, user-cancel
 
   assert.equal(
     askResultModelContent(complete, questionnaire),
-    '{"outcome":"complete","answers":[{"questionIndex":0,"kind":"option","answer":"Safe","preview":"full preview"},{"questionIndex":1,"kind":"multi","answer":[]},{"questionIndex":2,"kind":"custom","answer":null}],"unanswered":[]}',
+    '["Safe",[],null]',
   );
   assert.equal(
     askResultModelContent(partial, questionnaire),
-    '{"outcome":"partial","answers":[{"questionIndex":2,"kind":"custom","answer":"note"}],"unanswered":[0,1]}',
+    '[null,null,"note"]',
   );
   assert.equal(
     askResultModelContent(userCancelled, questionnaire),
-    '{"outcome":"cancelled","answers":[],"unanswered":[0,1,2],"reason":"user_cancelled"}',
+    '[null,null,null]',
   );
   assert.equal(
     askResultModelContent(emptySubmit, questionnaire),
-    '{"outcome":"cancelled","answers":[],"unanswered":[0,1,2],"reason":"empty_submit"}',
+    '[null,null,null]',
   );
-  assert.deepEqual(buildAskModelDto(complete, questionnaire), {
-    outcome: "complete",
-    answers: [
-      { questionIndex: 0, kind: "option", answer: "Safe", preview: "full preview" },
-      { questionIndex: 1, kind: "multi", answer: [] },
-      { questionIndex: 2, kind: "custom", answer: null },
-    ],
-    unanswered: [],
-  });
+  assert.deepEqual(buildAskModelDto(complete, questionnaire), ["Safe", [], null]);
   assert.equal(askResultModelContent(complete, questionnaire).includes("\n"), false);
-  assert.doesNotMatch(askResultModelContent(complete, questionnaire), /"(?:question|header|selected)"/);
+  assert.doesNotMatch(askResultModelContent(complete, questionnaire), /(?:outcome|unanswered|reason|questionIndex|kind|preview)/);
 });
 
 test("the shared result builder discards cancelled driver answers, malformed ones included", () => {
@@ -324,7 +311,7 @@ test("the shared result builder discards cancelled driver answers, malformed one
   assert.throws(() => buildAskResult(questionnaire, { cancelled: true }), /must return an answers array/);
 
   const content = askResultModelContent(canonical, questionnaire);
-  assert.equal(content, '{"outcome":"cancelled","answers":[],"unanswered":[0,1],"reason":"user_cancelled"}');
+  assert.equal(content, '[null,null]');
   assert.doesNotMatch(content, /Safe|Yes|Which path|Any extra|Path|Extra/);
 });
 
@@ -393,7 +380,7 @@ test("Goal guard runs after validation and before UI or waiting", async () => {
     tuiDriver: { async ask() { calls += 1; return { answers: [] }; } },
     goalActiveResolver: () => true,
   });
-  await assert.rejects(runtime.execute(baseParams, undefined, tuiCtx()), /ask_user_question is unavailable while an active Goal is being pursued\./);
+  await assert.rejects(runtime.execute(baseParams, undefined, tuiCtx()), /`ask_user_question` is unavailable while a Goal is active\./);
   assert.equal(calls, 0);
   assert.equal(runtime.waitingCount(), 0);
   await assert.rejects(runtime.execute({ questions: [] }, undefined, tuiCtx()), /questions must contain/);
@@ -596,15 +583,6 @@ test("RPC authored prefixes keep Submit, Cancel, and Done label collisions unamb
   assert.deepEqual(multiResult.answers[0].answer, [ASK_RPC_DONE_LABEL, ASK_RPC_SUBMIT_LABEL, ASK_RPC_CANCEL_LABEL]);
 });
 
-test("Ask prompt guidelines keep short tool-owned metadata sentences", () => {
-  for (const guideline of ASK_PROMPT_GUIDELINES) {
-    const words = guideline.match(/[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*/g) ?? [];
-    assert.ok(words.length <= 20, guideline);
-    assert.equal(guideline.includes(";"), false, guideline);
-    assert.match(guideline, /\bask_user_question\b/);
-  }
-});
-
 test("headless reconciliation removes and restores only Ask, while execute keeps a no-UI backstop", async () => {
   const harness = createPi(["read"]);
   const runtime = new AskRuntime(harness.pi, { tuiDriver: { ask: async () => ({ answers: [] }) } });
@@ -618,7 +596,7 @@ test("headless reconciliation removes and restores only Ask, while execute keeps
   assert.deepEqual(harness.activeTools, ["read", "ask_user_question"]);
   runtime.reconcileHostMode({ mode: "tui" });
   assert.equal(harness.setCalls.length, 2, "UI reconciliation must restore Ask only once");
-  await assert.rejects(runtime.execute(baseParams, undefined, { mode: "json", hasUI: false, ui: {} }), /UI is unavailable in json mode/);
+  await assert.rejects(runtime.execute(baseParams, undefined, { mode: "json", hasUI: false, ui: {} }), /`ask_user_question` is unavailable in json mode/);
   assert.equal(runtime.waitingCount(), 0);
 });
 
@@ -806,7 +784,7 @@ test("registered Ask rejects sibling tool calls before opening UI and accepts a 
   assert.equal(abortCalls, 0);
 });
 
-test("registered tool keeps complete, partial, and empty-submit outcomes as continuing compact JSON results", async () => {
+test("registered tool returns fixed-order answer lists and continues after normal submission", async () => {
   const twoQuestions = { questions: [
     baseParams.questions[0],
     { question: "Second?", header: "Second", options: [{ label: "No", description: "No." }, { label: "Yes", description: "Yes." }] },
@@ -815,17 +793,17 @@ test("registered tool keeps complete, partial, and empty-submit outcomes as cont
     {
       params: baseParams,
       driverResult: { answers: [{ questionIndex: 0, kind: "option", answer: "Safe" }] },
-      content: '{"outcome":"complete","answers":[{"questionIndex":0,"kind":"option","answer":"Safe","preview":"full preview"}],"unanswered":[]}',
+      content: '["Safe"]',
     },
     {
       params: twoQuestions,
       driverResult: { answers: [{ questionIndex: 0, kind: "option", answer: "Safe" }] },
-      content: '{"outcome":"partial","answers":[{"questionIndex":0,"kind":"option","answer":"Safe","preview":"full preview"}],"unanswered":[1]}',
+      content: '["Safe",null]',
     },
     {
       params: baseParams,
       driverResult: { answers: [] },
-      content: '{"outcome":"cancelled","answers":[],"unanswered":[0],"reason":"empty_submit"}',
+      content: '[null]',
     },
   ];
 

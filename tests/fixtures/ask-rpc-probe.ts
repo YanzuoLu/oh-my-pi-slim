@@ -3,7 +3,7 @@ import {
   buildAskResult,
   createRpcAskDriver,
   validateQuestionnaire,
-} from "../../extensions/oh-my-pi-slim/ask-runtime.js";
+} from "../../extensions/oh-my-pi-slim/ask/runtime.js";
 
 export default function askRpcProbe(pi: ExtensionAPI): void {
   pi.registerCommand("ask-rpc-probe", {
