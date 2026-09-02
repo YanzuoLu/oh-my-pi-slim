@@ -689,9 +689,9 @@ export const SUBAGENT_TOOL_DESCRIPTIONS = {
     "- `delete` removes one terminal run and returns its ID, deletion confirmation, and any cleanup warnings.",
     "- `clear` removes all retained runs when every run is terminal and returns the number removed and any cleanup warnings.",
     "",
-    "Waiting and terminal notifications arrive automatically and can trigger a new supervisor turn. You may end the current turn while waiting, or continue only non-overlapping work. A child can contact the supervisor with `contact_supervisor`.",
+    "A subagent can contact the supervisor with `contact_supervisor`, entering `waiting` until the supervisor replies. The subagent cannot continue without a reply and remains waiting. You must answer its question, direct its next work, or ask it to summarize and stop.",
     "",
-    "Runs use the supervisor model and thinking level.",
+    "Spawned subagents run asynchronously in the background. Continue only on non-overlapping work after dispatching runs. Otherwise briefly report what was launched and stop. Do not wait or poll for background completion.",
   ),
   input: {
     action: "Action to perform. `create` and `resume` require `abstract` and `message`. `check`, `interrupt`, and `delete` require `id`. `steer` and `reply` require `id` and `message`.",

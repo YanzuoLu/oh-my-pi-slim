@@ -207,7 +207,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
         : "";
     ctx.ui.setStatus(
       "oh-my-pi-slim",
-      ctx.ui.theme.fg("accent", ` · OMPS Version: v${PACKAGE_VERSION}${mode}`),
+      ctx.ui.theme.fg("accent", `· OMPS Version: v${PACKAGE_VERSION}${mode}`),
     );
   }
 
