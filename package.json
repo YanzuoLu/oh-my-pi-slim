@@ -1,6 +1,6 @@
 {
   "name": "oh-my-pi-slim",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "private": true,
   "description": "Pi tools for subagents, monitors, structured questions, durable goals, and session todos.",
   "type": "module",

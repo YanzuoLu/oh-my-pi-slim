@@ -12,7 +12,7 @@
 - 需要用户决策时发起结构化提问。
 - 以明确 criteria 和 evidence 推进 branch-local durable Goal。
 - 用 `/fast` 为匹配的 OpenAI request 切换 priority service。
-- main 与 child session 都使用 Pi 原生 system prompt。
+- main session 在 Pi system prompt 后追加精简的主控指令，child session 保持使用 Pi 原生 system prompt。
 - 每个 child launch 时继承 main session 当前的 model 与 thinking level。
 
 child session 专注执行，使用 Pi 原生 system prompt，并可暂停工作联系 main session。
@@ -100,7 +100,7 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 
 每次 `create` 或 `resume` launch 都继承 main session 当前的 model 与 thinking level。当 `resume` 跨越 provider 或 model ID 时，被复用的 child session 会在 resumed run 收到第一个 prompt 之前先被 compact 一次。仅 thinking level 变化时，session 会被原样复用。整个 preflight 期间 run 保持 `starting`，已经 compact 过或过小的 session 会直接继续，其他任何 compaction 失败都会让该 run 失败，而不会再发出 prompt。
 
-main 与 child session 都使用 Pi 原生 system prompt。
+main session 会在 Pi system prompt 后追加套件内置的主控指令。child session 使用 Pi 原生 system prompt。
 
 `starting`、`running` 或 `waiting` run 不能被 `delete`，存在任何此类 run 时也不能 `clear`。main model 必须先询问是否执行 `interrupt`，等 run 进入 terminal 后再重试。单删或全清都会跨 reload 与 restore 保持结果，且都不改变 Goal statistics。
 

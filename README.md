@@ -12,7 +12,7 @@
 - Ask structured questions when a decision needs user input.
 - Pursue branch-local durable Goals with explicit completion evidence.
 - Toggle priority service for matching OpenAI requests with `/fast`.
-- Keep the main and child sessions on Pi's native system prompt.
+- Append focused orchestration instructions to the main session while keeping child sessions on Pi's native system prompt.
 - Inherit the main session's current model and thinking level when each child launches.
 
 Child sessions do focused work, use Pi's native system prompt, and can pause to contact the main session.
@@ -100,7 +100,7 @@ Each starting, active, or waiting widget entry occupies one line. It shows `<abs
 
 Every `create` or `resume` launch inherits the main session's current model and thinking level. When `resume` crosses a provider or model ID, the reused child session is compacted once before the resumed run is prompted. A change of thinking level alone reuses the session unchanged. The run stays `starting` for the whole preflight, an already compacted or too small session simply continues, and any other compaction failure fails the run instead of prompting it.
 
-Main and child sessions use Pi's native system prompt.
+The main session appends the bundled orchestrator instructions to Pi's system prompt. Child sessions use Pi's native system prompt.
 
 `delete` is refused for a `starting`, `running`, or `waiting` run, and `clear` is refused while any such run remains. The main model must ask before calling `interrupt`, then retry only after the run becomes terminal. A successful single delete or full clear persists across reload and restoration. Neither operation changes Goal statistics.
 

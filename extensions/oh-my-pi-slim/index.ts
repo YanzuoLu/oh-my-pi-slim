@@ -1,4 +1,5 @@
 import {
+  parseFrontmatter,
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -32,6 +33,9 @@ import { widgetStackHost } from "./widget-stack-host.js";
 import type { WidgetStackSectionId } from "./widget-stack.js";
 
 const WIDGET_STACK_OWNER = "oh-my-pi-slim:extension";
+const ORCHESTRATOR_PROMPT = parseFrontmatter(
+  readFileSync(new URL("./orchestrator.md", import.meta.url), "utf8"),
+).body.trim();
 const PACKAGE_VERSION = (JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
 ) as { version: string }).version;
@@ -117,6 +121,9 @@ function assertNoLegacyBackend(pi: ExtensionAPI): void {
 
 export default function ohMyPiSlim(pi: ExtensionAPI): void {
   if (process.env.PI_SUBAGENT_CHILD === "1" || process.env.OMPS_SUBAGENT_CHILD === "1") return;
+  pi.on("before_agent_start", (event) => ({
+    systemPrompt: `${event.systemPrompt}\n\n${ORCHESTRATOR_PROMPT}`,
+  }));
   registerTodoRuntime(pi);
 
   // A reload evaluates this module again: drop the previous instance's sections before the new

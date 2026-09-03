@@ -32,12 +32,12 @@ for (const path of [
   "extensions/oh-my-pi-slim/loop-runtime.ts",
   "extensions/oh-my-pi-slim/loop-transcript-renderer.ts",
   "extensions/oh-my-pi-slim/loop-widget.ts",
-  "extensions/oh-my-pi-slim/orchestrator.md",
   "extensions/oh-my-pi-slim/prompt-context.ts",
   "extensions/oh-my-pi-slim/skills/pi-documentation/SKILL.md",
 ]) check(!existsSync(join(ROOT, path)), `${path} must not exist`);
 
 for (const path of [
+  "extensions/oh-my-pi-slim/orchestrator.md",
   "extensions/oh-my-pi-slim/todo/core.ts",
   "extensions/oh-my-pi-slim/todo/runtime.ts",
   "extensions/oh-my-pi-slim/todo/widget.ts",
@@ -57,7 +57,6 @@ check(JSON.stringify(productionFiles.filter((path) => !path.includes("/")).sort(
 ]), "OMPS root modules must stay limited to shared infrastructure");
 const production = productionFiles.map((path) => read(`extensions/oh-my-pi-slim/${path}`)).join("\n");
 for (const forbidden of [
-  "before_agent_start",
   "promptSnippet",
   "promptGuidelines",
   "--system-prompt",
@@ -69,6 +68,9 @@ for (const forbidden of [
 
 const index = read("extensions/oh-my-pi-slim/index.ts");
 check(index.includes('import { registerTodoRuntime } from "./todo/runtime.js"'), "main extension must import Todo");
+check(index.includes('readFileSync(new URL("./orchestrator.md", import.meta.url), "utf8")'), "main extension must load the orchestrator prompt");
+check(index.includes('pi.on("before_agent_start", (event) => ({'), "main extension must append the orchestrator prompt before each agent run");
+check(index.includes('systemPrompt: `${event.systemPrompt}\\n\\n${ORCHESTRATOR_PROMPT}`'), "main extension must preserve and extend the chained system prompt");
 check(
   index.indexOf("registerTodoRuntime(pi)") > index.indexOf('process.env.PI_SUBAGENT_CHILD === "1"'),
   "main extension must register Todo after the child-only return",
