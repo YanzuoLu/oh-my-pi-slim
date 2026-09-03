@@ -104,7 +104,7 @@ The main session appends the bundled orchestrator instructions to Pi's system pr
 
 `delete` is refused for a `starting`, `running`, or `waiting` run, and `clear` is refused while any such run remains. The main model must ask before calling `interrupt`, then retry only after the run becomes terminal. A successful single delete or full clear persists across reload and restoration. Neither operation changes Goal statistics.
 
-A child uses `contact_supervisor` with `need_decision`, `interview_request`, or `progress_update`. Every request moves the child to `waiting`; the main session uses `reply` to continue the same run.
+A child uses `progress_update` only when the supervisor explicitly requested intermediate reporting, and uses `need_decision` or `interview_request` only when genuinely blocked after exhausting reasonable independent paths. Every `contact_supervisor` request moves the child to `waiting`; the main session uses `reply` to continue the same run.
 
 ### `todo`
 

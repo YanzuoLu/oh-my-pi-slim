@@ -104,7 +104,7 @@ main session 会在 Pi system prompt 后追加套件内置的主控指令。chil
 
 `starting`、`running` 或 `waiting` run 不能被 `delete`，存在任何此类 run 时也不能 `clear`。main model 必须先询问是否执行 `interrupt`，等 run 进入 terminal 后再重试。单删或全清都会跨 reload 与 restore 保持结果，且都不改变 Goal statistics。
 
-child 可用 `contact_supervisor` 发送 `need_decision`、`interview_request` 或 `progress_update`。每次请求都会让 child 进入 `waiting`；main 用 `reply` 继续同一个 run。
+child 仅在 supervisor 明确要求汇报中间进度时使用 `progress_update`，并且仅在穷尽合理的自主推进方式后仍确实受阻时使用 `need_decision` 或 `interview_request`。每次 `contact_supervisor` 请求都会让 child 进入 `waiting`；main 用 `reply` 继续同一个 run。
 
 ### `todo`
 

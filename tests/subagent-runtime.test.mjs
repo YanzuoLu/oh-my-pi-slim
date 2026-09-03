@@ -979,6 +979,9 @@ test("contact_supervisor returns minimal waiting content while retaining request
     sessionStart();
     assert.deepEqual(activeTools, allTools);
     assert.equal(definition.description, CONTACT_SUPERVISOR_TOOL_CONTRACT.description);
+    assert.match(definition.description, /only when explicitly asked to report intermediate progress/);
+    assert.match(definition.description, /genuinely blocked after exhausting reasonable ways to continue independently/);
+    assert.match(definition.description, /Do not send unsolicited progress, routine status, reassurance, or confirmation requests/);
     assert.equal(definition.promptSnippet, undefined);
     assert.equal(definition.promptGuidelines, undefined);
     assert.equal(definition.parameters.type, "object");
@@ -1007,6 +1010,8 @@ test("contact_supervisor returns minimal waiting content while retaining request
       options: CONTACT_SUPERVISOR_TOOL_DESCRIPTIONS.input.interview.questions.items.options,
     });
     for (const description of Object.values(contactDescriptions)) assertSteBlock(description);
+    assert.match(contactDescriptions.reason, /progress_update.*only for explicitly requested intermediate reporting/);
+    assert.match(contactDescriptions.reason, /genuine blocker that prevents further progress/);
     assert.doesNotMatch(definition.description, /request ID|UUID|waitingSeq|deliveryKey|legacy|saved child/i);
     for (const params of [
       { reason: "need_decision" },

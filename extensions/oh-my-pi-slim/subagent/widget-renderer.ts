@@ -39,7 +39,7 @@ function elapsed(run: WidgetRun, nowMs: number): string {
 }
 
 function runName(run: WidgetRun, theme: WidgetTheme): string {
-  return `${shortAbstract(run.abstract)}${theme.fg("dim", `[${run.id.slice(0, 8)}]`)}`;
+  return `${shortAbstract(run.abstract)} ${theme.fg("dim", `[${run.id.slice(0, 8)}]`)}`;
 }
 
 function stats(run: WidgetRun, theme: WidgetTheme, nowMs: number): string {
@@ -96,7 +96,7 @@ export function renderActiveRunLine(
   const indicator = run.status === "waiting"
     ? theme.fg("warning", SUBAGENT_WIDGET_GLYPHS.waiting)
     : theme.fg("accent", SUBAGENT_WIDGET_SPINNER[spinnerFrame % SUBAGENT_WIDGET_SPINNER.length]);
-  const identity = `${formatSemanticGlyphPrefix(indicator)}${theme.bold(shortAbstract(run.abstract))}${theme.fg("dim", `[${run.id.slice(0, 8)}]`)}`;
+  const identity = `${formatSemanticGlyphPrefix(indicator)}${theme.bold(shortAbstract(run.abstract))} ${theme.fg("dim", `[${run.id.slice(0, 8)}]`)}`;
   return fitStatsLine(identity, stats(run, theme, nowMs), theme, maxWidth);
 }
 

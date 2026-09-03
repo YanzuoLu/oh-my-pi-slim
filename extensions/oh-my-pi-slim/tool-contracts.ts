@@ -916,15 +916,17 @@ export const SUBAGENT_TOOL_CONTRACT = {
 export const CONTACT_SUPERVISOR_TOOL_NAME = "contact_supervisor";
 export const CONTACT_SUPERVISOR_TOOL_DESCRIPTIONS = {
   tool: markdown(
-    "Send a decision request, structured interview, or progress update to the supervisor session.",
+    "Contact the supervisor only when explicitly asked to report intermediate progress or when blocked and unable to continue without supervisor input.",
     "",
-    "Use this when the supervisor needs a progress update or when the child cannot continue without a decision. Include all context the supervisor needs in `message` because it receives the request outside the child transcript.",
+    "Use `progress_update` only when the supervisor explicitly requested an intermediate update. Use `need_decision` or `interview_request` only when the child is genuinely blocked after exhausting reasonable ways to continue independently.",
+    "",
+    "Do not send unsolicited progress, routine status, reassurance, or confirmation requests. Include all context the supervisor needs in `message` because it receives the request outside the child transcript.",
     "",
     "Every call ends the current child turn and moves the run to `waiting`, including `progress_update`. The same run continues after the supervisor replies.",
     "A successful call returns status `waiting` and the selected reason.",
   ),
   input: {
-    reason: "Reason for contacting the supervisor. Use `need_decision`, `interview_request`, or `progress_update`.",
+    reason: "Reason for contacting the supervisor. Use `progress_update` only for explicitly requested intermediate reporting. Use `need_decision` or `interview_request` only for a genuine blocker that prevents further progress.",
     message: "Complete self-contained context for the supervisor. Defaults to `reason` when omitted or blank.",
     interview: {
       description: "Structured questions for an `interview_request`.",

@@ -188,7 +188,7 @@ test("pure active renderer uses one abstract-first stats line and terminal rende
     theme,
     NOW_MS,
   );
-  assert.equal(running, "⠋  **implement the widget**[run-1] · ↻  0 · 5.0s");
+  assert.equal(running, "⠋  **implement the widget** [run-1] · ↻  0 · 5.0s");
   assert.doesNotMatch(running, /Subagent|openai|gpt-5\.6-sol|xhigh|thinking/);
 
   const waiting = renderActiveRunLine(run({
@@ -196,7 +196,7 @@ test("pure active renderer uses one abstract-first stats line and terminal rende
     model: "openai/gpt-5.6-sol:xhigh",
     request: { runId: "run-1", reason: "need_decision", message: "Choose A or B", createdAt: "now" },
   }), 3, theme, NOW_MS);
-  assert.equal(waiting, "!  **implement the widget**[run-1] · ↻  0 · 5.0s");
+  assert.equal(waiting, "!  **implement the widget** [run-1] · ↻  0 · 5.0s");
   assert.doesNotMatch(`${running}\n${waiting}`, /Choose A or B|[⠋!↻] [^ ]|[⠋!↻] {3}/);
 
   const styledRunning = renderActiveRunLine(run({ status: "running" }), 0, roleAnsiTheme, NOW_MS);
@@ -259,7 +259,7 @@ test("single-line formatting keeps the abstract before turns, tools, tokens, con
       compactionCount: 2,
     },
   }), 0, theme, NOW_MS);
-  assert.equal(toolLine, "⠋  **implement the widget**[run-1] · ↻  3 · 2 tool uses · 12.3k token (72% · ⇊  2) · 5.0s");
+  assert.equal(toolLine, "⠋  **implement the widget** [run-1] · ↻  3 · 2 tool uses · 12.3k token (72% · ⇊  2) · 5.0s");
   assert.doesNotMatch(toolLine, /openai|gpt-5\.6-sol|minimal|reading|searching|ignored/);
 
   const responseLine = renderActiveRunLine(run({
@@ -270,7 +270,7 @@ test("single-line formatting keeps the abstract before turns, tools, tokens, con
       tokens: 0, compactionCount: 0,
     },
   }), 0, theme, NOW_MS);
-  assert.equal(responseLine, "⠋  **implement the widget**[run-1] · ↻  1 · 5.0s");
+  assert.equal(responseLine, "⠋  **implement the widget** [run-1] · ↻  1 · 5.0s");
   assert.doesNotMatch(responseLine, /provider|model|high|concise response/);
 });
 
@@ -288,8 +288,8 @@ test("pure widget renderer gives every active and queued run one abstract-first 
   });
   assert.deepEqual(lines, [
     `**●**  **Subagents (1/3)**${VIEWER_HINT}`,
-    "├─ ⠋  **implement the widget**[live] · ↻  0 · 5.0s",
-    "└─ ◦  implement the widget[queue] · ↻  0 · 5.0s",
+    "├─ ⠋  **implement the widget** [live] · ↻  0 · 5.0s",
+    "└─ ◦  implement the widget [queue] · ↻  0 · 5.0s",
   ]);
   assert.doesNotMatch(lines.join("\n"), /\[done\]/);
   assert.doesNotMatch(lines.join("\n").replaceAll("**", ""), /[●⠋↻◦✓] [^ ]|[●⠋↻◦✓] {3}/);
@@ -307,7 +307,7 @@ test("pure widget renderer gives every active and queued run one abstract-first 
     if (terminalWidth === 80) assert.match(ansiLines.map((line) => stripVTControlCharacters(line)).join("\n"), /↻  0 · 5\.0s/);
   }
 
-  const priorityPrefix = "└─ ⠋  摘要优先🙂[priority]";
+  const priorityPrefix = "└─ ⠋  摘要优先🙂 [priority]";
   const priorityLines = renderSubagentWidgetLines({
     runs: [run({
       id: "priority",
@@ -476,9 +476,9 @@ test("Subagents body permanently keeps starting, running, and waiting rows while
   });
   assert.deepEqual(lines, [
     `**●**  **Subagents (3/6)**${VIEWER_HINT}`,
-    "├─ !  **implement the widget**[held] · ↻  0 · 5.0s",
-    "├─ ⠋  **implement the widget**[live] · ↻  0 · 5.0s",
-    "└─ ◦  implement the widget[queue] · ↻  0 · 5.0s",
+    "├─ !  **implement the widget** [held] · ↻  0 · 5.0s",
+    "├─ ⠋  **implement the widget** [live] · ↻  0 · 5.0s",
+    "└─ ◦  implement the widget [queue] · ↻  0 · 5.0s",
   ]);
   assert.doesNotMatch(lines.join("\n"), /\[ok\]|\[bad\]|\[stopped\]|ctrl\+o|expand/);
 
@@ -494,7 +494,7 @@ test("Subagents body permanently keeps starting, running, and waiting rows while
     runs: startingOnly, spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS,
   }), [
     "**●**  **Subagents (0/1)**",
-    "└─ ◦  implement the widget[queue] · ↻  0 · 5.0s",
+    "└─ ◦  implement the widget [queue] · ↻  0 · 5.0s",
   ]);
 
   const terminalOnly = runs.filter((value) => !["starting", "running", "waiting"].includes(value.status));
@@ -507,7 +507,7 @@ test("Subagents body permanently keeps starting, running, and waiting rows while
   });
   assert.deepEqual(soloActive, [
     `**●**  **Subagents (1/2)**${VIEWER_HINT}`,
-    "└─ ⠋  **implement the widget**[live] · ↻  0 · 5.0s",
+    "└─ ⠋  **implement the widget** [live] · ↻  0 · 5.0s",
   ]);
   assert.deepEqual(runs, originalRuns, "compact rendering leaves retained run data unchanged");
   assert.deepEqual(renderSubagentWidgetLines({ runs: [], spinnerFrame: 0, terminalWidth: 200, theme, nowMs: NOW_MS }), []);
