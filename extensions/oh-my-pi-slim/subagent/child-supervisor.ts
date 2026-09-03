@@ -18,8 +18,22 @@ import {
 const CACHE_RETENTION = cacheRetentionFromEnv(process.env[CACHE_RETENTION_ENV_VAR]) ?? "short";
 const FAST_ENABLED = fastEnabledFromEnv(process.env[FAST_ENV_VAR]);
 
+export const CHILD_SYSTEM_PROMPT = [
+  "You are a child agent working for a supervisor.",
+  "Inherited conversation history is supervisor-provided background, not direct user dialogue.",
+  "The latest supervisor instruction is your current objective.",
+  "Work independently within its delegated scope.",
+  "Do not ask the user directly or supervise other runs.",
+  "Contact the supervisor only for an explicitly requested progress update or after exhausting reasonable paths when genuinely blocked.",
+  "Return concise, verifiable results with relevant paths and validation performed or skipped.",
+].join(" ");
+
 export default function childSupervisor(pi: ExtensionAPI): void {
   if (process.env.OMPS_SUBAGENT_CHILD !== "1" || process.env.PI_SUBAGENT_CHILD !== "1") return;
+
+  pi.on("before_agent_start", (event) => ({
+    systemPrompt: `${event.systemPrompt}\n\n${CHILD_SYSTEM_PROMPT}`,
+  }));
 
   pi.on("before_provider_request", (event, ctx) => {
     const model = ctx.model;

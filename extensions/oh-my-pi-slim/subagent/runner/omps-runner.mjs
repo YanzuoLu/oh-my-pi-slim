@@ -45,6 +45,10 @@ function nonBlank(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function supervisorMessage(type, message) {
+  return `<supervisor_message type="${type}">\n${message}\n</supervisor_message>`;
+}
+
 // Execution-boundary mirror; keep this exactly aligned with core.ts legacyRunAbstract().
 function legacyAbstract(task) {
   return `${Array.from(task).slice(0, 100).join("")}...`;
@@ -457,7 +461,7 @@ async function submitSteer(record, message) {
   if (ending) return;
   record.status = "submitting";
   try {
-    await client.steer(message);
+    await client.steer(supervisorMessage("steer", message));
     record.status = "acknowledged";
   } catch (error) {
     record.status = error?.code === "RPC_TIMEOUT" ? "unconfirmed" : "failed";
@@ -603,7 +607,7 @@ async function applyControl(control) {
     ) {
       transition("running", { request: undefined });
       void withTimeout(
-        client.prompt(control.message),
+        client.prompt(supervisorMessage("reply", control.message)),
         REPLY_PROMPT_TIMEOUT_MS,
         "supervisor reply prompt",
       ).catch((error) => finish("failed", { error: errorText(error) }));
@@ -715,7 +719,7 @@ try {
   transition("running", {
     sessionFile: isRecord(childState) && typeof childState.sessionFile === "string" ? childState.sessionFile : undefined,
   });
-  await client.prompt(config.task);
+  await client.prompt(supervisorMessage("task", config.task));
   await processControls();
 } catch (error) {
   await finish("failed", { error: errorText(error) });

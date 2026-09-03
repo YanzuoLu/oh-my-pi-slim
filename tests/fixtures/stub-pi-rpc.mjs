@@ -45,6 +45,11 @@ function recordPrompt(message) {
   appendFileSync(process.env.OMPS_STUB_PROMPT_LOG, `${JSON.stringify(message)}\n`);
 }
 
+function supervisorMessageBody(message) {
+  const match = /^<supervisor_message type="(?:task|steer|reply)">\n([\s\S]*)\n<\/supervisor_message>$/.exec(message);
+  return match?.[1] ?? message;
+}
+
 function metadataResponse(command, data) {
   if (scenario === "steer-metadata" && settled && promptCount === 1) {
     setTimeout(() => respond(command, data), 900);
@@ -175,7 +180,7 @@ function handlePrompt(command) {
   if (scenario === "steer-slow-ack" && command.streamingBehavior === "steer") {
     setTimeout(() => {
       respond(command, {});
-      setTimeout(() => complete(`slow steer: ${command.message}`), 30);
+      setTimeout(() => complete(`slow steer: ${supervisorMessageBody(command.message)}`), 30);
     }, 1500);
     return;
   }
@@ -366,7 +371,7 @@ function handlePrompt(command) {
         pendingMessageCount = Math.max(0, pendingMessageCount - 1);
         send({ type: "turn_start", turnIndex: 2, timestamp: Date.now() });
         setTimeout(() => {
-          assistant(`steered after metadata: ${command.message}`);
+          assistant(`steered after metadata: ${supervisorMessageBody(command.message)}`);
           settled = true;
           send({ type: "agent_settled" });
         }, 1200);
@@ -397,7 +402,7 @@ function handlePrompt(command) {
         setTimeout(() => {
           pendingMessageCount = Math.max(0, pendingMessageCount - 1);
           send({ type: "turn_start", turnIndex: currentPrompt, timestamp: Date.now() });
-          assistant(`steer ${steerIndex}: ${command.message}`);
+          assistant(`steer ${steerIndex}: ${supervisorMessageBody(command.message)}`);
           settled = true;
           send({ type: "agent_settled" });
         }, steerIndex * 50);
@@ -451,11 +456,11 @@ function handlePrompt(command) {
       process.stderr.write("reply crash\n");
       process.exit(23);
     } else if (scenario.startsWith("contact")) complete(
-      scenario === "contact-stream-steer" ? `steered after contact: ${command.message}` : "completed after reply",
+      scenario === "contact-stream-steer" ? `steered after contact: ${supervisorMessageBody(command.message)}` : "completed after reply",
     );
     else if (scenario === "steer") {
       if (promptCount === 1) send({ type: "turn_start", turnIndex: 1, timestamp: Date.now() });
-      else if (command.streamingBehavior === "steer") complete(`steered: ${command.message}`);
+      else if (command.streamingBehavior === "steer") complete(`steered: ${supervisorMessageBody(command.message)}`);
     } else if (scenario === "crash") {
       process.stderr.write("stub crash\n");
       process.exit(17);

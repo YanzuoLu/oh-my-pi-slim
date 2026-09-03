@@ -107,22 +107,39 @@ function promptLog(path) {
   try { return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)); } catch { return []; }
 }
 
+function supervisorMessage(type, message) {
+  return `<supervisor_message type="${type}">\n${message}\n</supervisor_message>`;
+}
+
 let migrationSequence = 0;
 let promptLogSequence = 0;
 let observedRunSequence = 0;
 
 /** A cross-model resume run: a reused session file plus the internal preflight marker the runtime writes. */
 function makeMigrationRun(scenario, { resumeCompactFrom = "legacy/other-model:low", model } = {}) {
-  const logFile = join(CACHE, `stub-commands-${++migrationSequence}-${Date.now()}.log`);
+  const suffix = `${++migrationSequence}-${Date.now()}`;
+  const commandLogFile = join(CACHE, `stub-commands-${suffix}.log`);
+  const promptLogFile = join(CACHE, `stub-prompts-${suffix}.jsonl`);
   const run = makeRun(scenario, {
-    extraEnv: { OMPS_STUB_COMMAND_LOG: logFile },
+    extraEnv: {
+      OMPS_STUB_COMMAND_LOG: commandLogFile,
+      OMPS_STUB_PROMPT_LOG: promptLogFile,
+    },
     configPatch: {
       resumeSessionFile: join(ROOT, `tests/fixtures/stub-${scenario}-session.jsonl`),
       ...(resumeCompactFrom === null ? {} : { resumeCompactFrom }),
       ...(model === undefined ? {} : { model }),
     },
   });
-  return { ...run, logFile, commands: () => commandLog(logFile), cleanupLog: () => rmSync(logFile, { force: true }) };
+  return {
+    ...run,
+    commands: () => commandLog(commandLogFile),
+    prompts: () => promptLog(promptLogFile),
+    cleanupLog: () => {
+      rmSync(commandLogFile, { force: true });
+      rmSync(promptLogFile, { force: true });
+    },
+  };
 }
 
 function makePromptLoggedRun(scenario) {
@@ -531,6 +548,8 @@ test("cross-model resume compacts the reused session before its first prompt and
     const commands = run.commands();
     assert.deepEqual(commands.filter((type) => type === "compact" || type === "prompt"), ["compact", "prompt"],
       "the migration compaction completes before the first prompt");
+    assert.deepEqual(run.prompts(), [supervisorMessage("task", run.config.task)],
+      "a resumed session receives its continuation task as a supervisor task message");
     assert.equal(completed.output, "resume-compact completion");
     assert.equal(completed.compactionCount, 1, "one preflight compaction is counted exactly once");
     assert.equal(completed.turnCount, 1, "a phantom preflight turn_start never counts as a turn");
@@ -692,7 +711,10 @@ test("steer after a streaming contact boundary starts a new turn and completes",
     assert.equal(completed.output, "steered after contact: take the next path");
     assert.equal(completed.turnCount, 2);
     assert.equal(completed.waitingSeq, undefined);
-    assert.deepEqual(run.prompts(), [run.config.task, "take the next path"]);
+    assert.deepEqual(run.prompts(), [
+      supervisorMessage("task", run.config.task),
+      supervisorMessage("steer", "take the next path"),
+    ]);
     assert.equal(await waitForExit(run), 0);
   } finally {
     run.cleanupLog();
@@ -723,11 +745,13 @@ test("waiting request persists, legacy controls are rejected, and matching seque
     assert.equal(completed.output, "completed after reply");
     assert.equal(completed.request, undefined);
     const prompts = run.prompts();
-    assert.deepEqual(prompts, [run.config.task, reply]);
-    assert.equal(prompts[1], reply, "the matching reply is the exact second prompt");
+    assert.deepEqual(prompts, [
+      supervisorMessage("task", run.config.task),
+      supervisorMessage("reply", reply),
+    ]);
+    assert.equal(prompts[1], supervisorMessage("reply", reply), "the matching reply is the exact second prompt");
     assert.doesNotMatch(prompts[1], /Supervisor reply for run/);
     assert.equal(prompts[1].includes(run.config.runId), false);
-    assert.equal(prompts[1].includes("\n"), false);
     assert.equal(await waitForExit(run), 0);
   } finally {
     run.cleanupLog();
@@ -755,7 +779,11 @@ test("sequence-one reply cannot wake sequence two and consecutive waiting cycles
     sendControl(run, { token: run.config.token, type: "reply", waitingSeq: 2, message: "second answer" });
     const completed = await waitForStatus(run, "completed");
     assert.equal(completed.output, "completed after reply");
-    assert.deepEqual(run.prompts(), [run.config.task, "first answer", "second answer"]);
+    assert.deepEqual(run.prompts(), [
+      supervisorMessage("task", run.config.task),
+      supervisorMessage("reply", "first answer"),
+      supervisorMessage("reply", "second answer"),
+    ]);
     assert.equal(await waitForExit(run), 0);
   } finally {
     run.cleanupLog();
@@ -817,7 +845,7 @@ test("runner ignores a legacy slash steer without damaging the run", async () =>
     sendControl(run, { token: run.config.token, type: "steer", message: "  /compact now" });
     await waitFor(() => run.output().stderr.includes("Ignoring unsupported slash steer"));
     assert.equal(readState(run).status, "running");
-    assert.deepEqual(run.prompts(), [run.config.task]);
+    assert.deepEqual(run.prompts(), [supervisorMessage("task", run.config.task)]);
 
     sendControl(run, { token: run.config.token, type: "interrupt" });
     await waitForStatus(run, "interrupted");
@@ -842,7 +870,10 @@ test("steer submitted during settled metadata collection is not lost", async () 
     const completed = await waitForStatus(run, "completed");
     assert.equal(completed.output, "steered after metadata: survive metadata");
     assert.equal(completed.turnCount, 2);
-    assert.deepEqual(run.prompts(), [run.config.task, "survive metadata"]);
+    assert.deepEqual(run.prompts(), [
+      supervisorMessage("task", run.config.task),
+      supervisorMessage("steer", "survive metadata"),
+    ]);
     assert.equal(await waitForExit(run), 0);
   } finally {
     run.cleanupLogs();
@@ -902,7 +933,10 @@ test("steer timeout during child compaction stays running until the real turn co
     sendControl(run, { token: run.config.token, type: "steer", message: "compact before turn" });
     await waitFor(() => run.output().stderr.includes("Steer delivery unconfirmed"));
     assert.equal(readState(run).status, "running");
-    assert.deepEqual(run.prompts(), [run.config.task, "compact before turn"]);
+    assert.deepEqual(run.prompts(), [
+      supervisorMessage("task", run.config.task),
+      supervisorMessage("steer", "compact before turn"),
+    ]);
 
     const completed = await waitForStatus(run, "completed", 4000);
     assert.equal(completed.output, "compacting steer complete");
@@ -928,12 +962,18 @@ test("one atomic steer prompt may span multiple turns and stale settled stays ru
         ? state
         : undefined;
     });
-    assert.deepEqual(run.prompts(), [run.config.task, "continue through queue"]);
+    assert.deepEqual(run.prompts(), [
+      supervisorMessage("task", run.config.task),
+      supervisorMessage("steer", "continue through queue"),
+    ]);
 
     const completed = await waitForStatus(run, "completed", 4000);
     assert.equal(completed.output, "streaming queue complete");
     assert.equal(completed.turnCount, 3);
-    assert.deepEqual(run.prompts(), [run.config.task, "continue through queue"]);
+    assert.deepEqual(run.prompts(), [
+      supervisorMessage("task", run.config.task),
+      supervisorMessage("steer", "continue through queue"),
+    ]);
     assert.equal(await waitForExit(run), 0);
   } finally {
     run.cleanupLogs();
@@ -973,7 +1013,11 @@ test("consecutive steer controls are submitted serially and both turns finish be
     const completed = await waitForStatus(run, "completed", 4000);
     assert.equal(completed.output, "steer 2: second direction");
     assert.equal(completed.turnCount, 3);
-    assert.deepEqual(run.prompts(), [run.config.task, "first direction", "second direction"]);
+    assert.deepEqual(run.prompts(), [
+      supervisorMessage("task", run.config.task),
+      supervisorMessage("steer", "first direction"),
+      supervisorMessage("steer", "second direction"),
+    ]);
     assert.equal(await waitForExit(run), 0);
   } finally {
     run.cleanupLogs();

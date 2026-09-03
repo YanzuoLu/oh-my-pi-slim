@@ -60,6 +60,7 @@ function createHarness(options = {}) {
   let pendingMessages = false;
   let leaf = null;
   let entrySequence = 0;
+  let toolCallSequence = 0;
   const branch = [];
   const tools = new Map();
   const commands = new Map();
@@ -122,9 +123,25 @@ function createHarness(options = {}) {
   });
   runtime.register();
   runtime.restore(ctx, false);
+  function appendMessage(message) {
+    const entry = { type: "message", id: `e${++entrySequence}`, parentId: leaf, message };
+    branch.push(entry);
+    leaf = entry.id;
+  }
   return {
     runtime, tools, commands, sent, deferred, timers, branch, ctx,
-    execute(params) { return tools.get("goal").execute("call", params); },
+    execute(params, userContent = "/goal") {
+      const toolCallId = `goal-call-${++toolCallSequence}`;
+      if (params?.action === "create") {
+        appendMessage({ role: "user", content: userContent });
+        appendMessage({
+          role: "assistant",
+          content: [{ type: "toolCall", id: toolCallId, name: "goal", arguments: structuredClone(params) }],
+          stopReason: "toolUse",
+        });
+      }
+      return tools.get("goal").execute(toolCallId, params, undefined, undefined, ctx);
+    },
     setIdle(value) { idle = value; },
     setPending(value) { pendingMessages = value; },
     advance(milliseconds) { now += milliseconds; },
@@ -133,11 +150,7 @@ function createHarness(options = {}) {
       assert.equal(typeof callback, "function", "expected deferred Goal work");
       callback();
     },
-    appendMessage(message) {
-      const entry = { type: "message", id: `e${++entrySequence}`, parentId: leaf, message };
-      branch.push(entry);
-      leaf = entry.id;
-    },
+    appendMessage,
     appendContinuation(message) {
       const entry = {
         type: "custom_message", id: `e${++entrySequence}`, parentId: leaf,
@@ -215,6 +228,50 @@ test("Goal schema is a strict portable object with isolated public actions", asy
   await assert.rejects(harness.execute({ action: "clear", reason: "extra" }), /clear does not accept field\(s\): reason\./);
   await assert.rejects(harness.execute({ ...createInput, criteria: [] }), /from 1 through 8/);
   await assert.rejects(harness.execute({ ...createInput, criteria: ["ok", "   "] }), /non-empty/);
+  assert.match(GOAL_TOOL_CONTRACT.description, /current user turn[\s\S]*literal `\/goal`/);
+  assert.match(GOAL_TOOL_CONTRACT.parameters.properties.action.description, /current user turn[\s\S]*literal `\/goal`/);
+});
+
+test("create requires literal /goal in the user content for its exact current tool-call turn", async () => {
+  const allowed = createHarness();
+  const created = await allowed.execute(createInput, [
+    { type: "text", text: "Please start /goal for this objective." },
+    { type: "image", data: "ignored", mimeType: "image/png" },
+  ]);
+  assert.equal(created.details.goal.status, "active");
+
+  const absent = createHarness();
+  await assert.rejects(
+    absent.execute(createInput, "Please keep working autonomously."),
+    (error) => error.message === GOAL_TOOL_ERRORS.createTurn,
+  );
+  assert.equal(absent.runtime.status(), null);
+
+  const historical = createHarness();
+  historical.appendMessage({ role: "user", content: "/goal old objective" });
+  historical.appendMessage({ role: "assistant", content: [{ type: "text", text: "Done." }], stopReason: "stop" });
+  await assert.rejects(
+    historical.execute(createInput, "Create another durable objective."),
+    (error) => error.message === GOAL_TOOL_ERRORS.createTurn,
+  );
+  assert.equal(historical.runtime.status(), null);
+
+  const wrongIdentity = createHarness();
+  wrongIdentity.appendMessage({ role: "user", content: "/goal exact identity" });
+  wrongIdentity.appendMessage({
+    role: "assistant",
+    content: [{ type: "toolCall", id: "different-call", name: "goal", arguments: createInput }],
+    stopReason: "toolUse",
+  });
+  await assert.rejects(
+    wrongIdentity.tools.get("goal").execute("missing-call", createInput, undefined, undefined, wrongIdentity.ctx),
+    (error) => error.message === GOAL_TOOL_ERRORS.createTurn,
+  );
+  assert.equal(wrongIdentity.runtime.status(), null);
+
+  const unaffected = createHarness();
+  const checked = await unaffected.tools.get("goal").execute("no-branch-call", { action: "check" }, undefined, undefined, unaffected.ctx);
+  assert.deepEqual(resultDto(checked), { status: "none" });
 });
 
 test("create, modify, terminal replacement, evidence, and no-op receipts preserve the frozen business contract", async () => {
@@ -582,6 +639,20 @@ test("agent-start identity becomes stale when Goal generation changes before an 
   assert.equal(goalStateEntries(harness.branch).length, entries);
   assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE), false);
   assert.equal(harness.timers.length, 0);
+});
+
+test("a Goal created after agent start pauses on explicit user abort when no background work remains", async () => {
+  const harness = createHarness();
+  harness.runtime.onAgentStart(harness.ctx);
+  await harness.execute(createInput);
+  harness.runtime.onAgentEnd({ messages: [{ role: "assistant", stopReason: "aborted", errorMessage: "Operation aborted" }] });
+  harness.runtime.onAgentSettled(harness.ctx);
+
+  assert.equal(harness.runtime.status().status, "paused");
+  assert.equal(harness.runtime.status().pauseReason, "user_abort");
+  assert.equal(harness.sent.filter((item) => item.message?.customType === GOAL_STATE_MESSAGE_TYPE).length, 1);
+  assert.equal(harness.deferred.length, 0);
+  assert.equal(harness.sent.some((item) => item.message?.customType === GOAL_CONTINUATION_MESSAGE_TYPE), false);
 });
 
 test("aborted settle without an agent-start delivery candidate does not pause", async () => {

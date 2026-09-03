@@ -12,10 +12,10 @@
 - 需要用户决策时发起结构化提问。
 - 以明确 criteria 和 evidence 推进 branch-local durable Goal。
 - 用 `/fast` 为匹配的 OpenAI request 切换 priority service。
-- main session 在 Pi system prompt 后追加精简的主控指令，child session 保持使用 Pi 原生 system prompt。
+- 在保留 Pi 原生 system prompt 的同时，为 main session 追加精简的主控指令，并为 child session 追加极短的中立 supervisor 契约。
 - 每个 child launch 时继承 main session 当前的 model 与 thinking level。
 
-child session 专注执行，使用 Pi 原生 system prompt，并可暂停工作联系 main session。
+child session 专注执行，保留 Pi 原生 system prompt 并追加极短的中立 supervisor 契约，也可暂停工作联系 main session。
 
 ## 要求与包管理
 
@@ -92,7 +92,7 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 
 `list` 包含 `starting`、`running`、`waiting`、`completed`、`failed` 与 `interrupted` run，但绝不包含 terminal `output` 或 `error`。使用单个 retained run ID 调用 `check`，可查看相同公开字段，并在结果存在时取回 terminal 结果。subagent widget 使用相同的 retained 集合与排序来计数并管理 lifecycle，但 foreground body 永久隐藏 terminal 行。这些 run 会一直保留到 `delete` 或 `clear` 将其移除，并且始终可通过 Subagent viewer 查看。
 
-每个 starting、active 或 waiting widget entry 占一行。每行显示 `<abstract>[<id>]`，随后显示 turn、tool、token、context、compaction 与 elapsed statistics。foreground widget 不显示 provider、model、thinking level 或实时 activity 文本。12 行 widget 预算按每个可见 run 一行计算。
+每个 starting、active 或 waiting widget entry 占一行。每行显示 `<abstract> [<id>]`，随后显示 turn、tool、token、context、compaction 与 elapsed statistics。foreground widget 不显示 provider、model、thinking level 或实时 activity 文本。12 行 widget 预算按每个可见 run 一行计算。
 
 `fork` 默认为 `true`。forked run 会继承当前 tool-call batch 之前的 conversation context。同一 batch 中的每个 `create` 都从同一个点派生。使用 `fork: false` 时，run 会启动独立 session，并且只接收自己的 `message`。
 
@@ -100,7 +100,7 @@ pi remove git:github.com/YanzuoLu/oh-my-pi-slim
 
 每次 `create` 或 `resume` launch 都继承 main session 当前的 model 与 thinking level。当 `resume` 跨越 provider 或 model ID 时，被复用的 child session 会在 resumed run 收到第一个 prompt 之前先被 compact 一次。仅 thinking level 变化时，session 会被原样复用。整个 preflight 期间 run 保持 `starting`，已经 compact 过或过小的 session 会直接继续，其他任何 compaction 失败都会让该 run 失败，而不会再发出 prompt。
 
-main session 会在 Pi system prompt 后追加套件内置的主控指令。child session 使用 Pi 原生 system prompt。
+main session 会在 Pi system prompt 后追加套件内置的主控指令。child session 保留 Pi 原生 system prompt，并追加极短的中立契约，将继承的历史以及收到的 task、steer 和 reply message 标记为 supervisor 提供的 context。
 
 `starting`、`running` 或 `waiting` run 不能被 `delete`，存在任何此类 run 时也不能 `clear`。main model 必须先询问是否执行 `interrupt`，等 run 进入 terminal 后再重试。单删或全清都会跨 reload 与 restore 保持结果，且都不改变 Goal statistics。
 
@@ -169,7 +169,7 @@ Ask 仅 main 可用，并要求交互式 UI。JSON 与 print mode 不提供该�
 
 | Action | 作用 |
 | --- | --- |
-| `create` | 创建并激活 Goal |
+| `create` | 仅从当前含有 `/goal` 的 user turn 创建并激活 Goal |
 | `check` | 读取当前 Goal |
 | `modify` | 替换 nonterminal Goal 合同并激活 |
 | `pause` | 带 reason 暂停 |
@@ -177,7 +177,7 @@ Ask 仅 main 可用，并要求交互式 UI。JSON 与 print mode 不提供该�
 | `complete` | 提交与 criteria 对应的 evidence 并完成 |
 | `clear` | 从 branch 上移除当前 Goal |
 
-Goal 在当前 branch 上持久化。reload、session resume、fork 与 tree restore 会把未完成 Goal 恢复为 paused，绝不会静默继续。provider failure 会自动重试，重复无进展会暂停 Goal。只有 Goal continuation 此刻可以安全交付时，用户 abort 才会暂停 Goal。任一 continuation gate 被阻塞时，Goal 会保持 active，等待 scheduler 后续重新评估。完成时，每条 criterion 必须精确对应一条非空 evidence。
+Goal 在当前 branch 上持久化。仅当包含该 tool call 的当前 user turn 含有字面量 `/goal` 时，`create` 才会成功。更早轮次中的 `/goal` 不会授权之后的 create。reload、session resume、fork 与 tree restore 会把未完成 Goal 恢复为 paused，绝不会静默继续。provider failure 会自动重试，重复无进展会暂停 Goal。只有 Goal continuation 此刻可以安全交付时，用户 abort 才会暂停 Goal。任一 continuation gate 被阻塞时，Goal 会保持 active，等待 scheduler 后续重新评估。完成时，每条 criterion 必须精确对应一条非空 evidence。
 
 自主 continuation 会等待阻塞工作消失，包括 active 或 waiting subagent、Monitor 工作与 pending terminal delivery，以及 waiting Ask dialog。你可以随时用 `check`、`pause`、`resume` 或 `clear` 控制推进。
 

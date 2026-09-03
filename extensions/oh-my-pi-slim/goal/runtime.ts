@@ -224,6 +224,41 @@ function cloneSnapshot(snapshot: GoalSnapshot): GoalSnapshot {
   };
 }
 
+function userMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part): part is { type: "text"; text: string } =>
+      Boolean(part) && typeof part === "object" && (part as Record<string, unknown>).type === "text" &&
+      typeof (part as Record<string, unknown>).text === "string")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+function assertCreateRequestedInCurrentTurn(toolCallId: string, ctx: ExtensionContext): void {
+  const branch = ctx.sessionManager.getBranch();
+  let toolCallIndex = -1;
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    const entry = branch[index];
+    if (entry.type !== "message" || entry.message.role !== "assistant" || !Array.isArray(entry.message.content)) continue;
+    const ownsCall = entry.message.content.some((part) =>
+      part.type === "toolCall" && part.id === toolCallId && part.name === GOAL_TOOL_CONTRACT.name);
+    if (!ownsCall) continue;
+    toolCallIndex = index;
+    break;
+  }
+  if (toolCallIndex >= 0) {
+    for (let index = toolCallIndex - 1; index >= 0; index -= 1) {
+      const entry = branch[index];
+      if (entry.type === "custom_message") break;
+      if (entry.type !== "message" || entry.message.role !== "user") continue;
+      if (userMessageText(entry.message.content).includes("/goal")) return;
+      break;
+    }
+  }
+  throw new Error(GOAL_TOOL_ERRORS.createTurn);
+}
+
 const PUBLIC_GOAL_KEYS = [
   "status", "abstract", "objective", "criteria", "createdAt", "updatedAt", "endedAt", "pauseReason",
   "retryAttempt", "nextRetryAt", "lastProviderError", "noProgressCount", "evidence",
@@ -439,7 +474,8 @@ export class GoalRuntime {
       executionMode: "sequential",
       description: GOAL_TOOL_CONTRACT.description,
       parameters: GOAL_TOOL_CONTRACT.parameters,
-      execute: async (_toolCallId, params) => this.execute(params as GoalInput),
+      execute: async (toolCallId, params, _signal, _onUpdate, ctx) =>
+        this.execute(params as GoalInput, toolCallId, ctx),
       renderCall: renderGoalCall,
       renderResult: renderGoalResult,
     });
@@ -717,7 +753,11 @@ export class GoalRuntime {
     this.requestContinuation(ctx);
   }
 
-  async execute(inputValue: GoalInput): Promise<ReturnType<typeof modelJsonResult>> {
+  async execute(
+    inputValue: GoalInput,
+    toolCallId: string,
+    ctx: ExtensionContext,
+  ): Promise<ReturnType<typeof modelJsonResult>> {
     const input = record(inputValue, "goal input");
     const action = trimmedString(input.action, "action") as GoalAction;
     if (!GOAL_ACTIONS.includes(action)) throw new Error(GOAL_TOOL_ERRORS.unsupportedAction(action));
@@ -728,7 +768,7 @@ export class GoalRuntime {
       return goalResult(action, this.snapshot.goal, false);
     }
     if (action === "clear" && !this.snapshot) return goalResult(action, null, false);
-    if (action === "create") return this.create(input);
+    if (action === "create") return this.create(input, toolCallId, ctx);
     if (!this.snapshot) throw new Error(GOAL_TOOL_ERRORS.missing);
     if (action === "modify") return this.modify(input);
     if (action === "pause") return this.pause();
@@ -747,7 +787,12 @@ export class GoalRuntime {
     for (const field of required) if (input[field] === undefined) throw new Error(GOAL_TOOL_ERRORS.required(action, field));
   }
 
-  private create(input: Record<string, unknown>): ReturnType<typeof modelJsonResult> {
+  private create(
+    input: Record<string, unknown>,
+    toolCallId: string,
+    ctx: ExtensionContext,
+  ): ReturnType<typeof modelJsonResult> {
+    assertCreateRequestedInCurrentTurn(toolCallId, ctx);
     if (this.snapshot && this.snapshot.goal.status !== "completed") {
       throw new Error(GOAL_TOOL_ERRORS.createStatus(this.snapshot.goal.status));
     }
@@ -775,6 +820,9 @@ export class GoalRuntime {
     };
     this.clearRetryTimer();
     this.store(snapshot);
+    if (this.logicalRun && !this.logicalRun.deliveryCandidate) {
+      this.logicalRun.deliveryCandidate = this.captureDeliveryCandidate(ctx, "descendant");
+    }
     return goalResult("create", snapshot.goal, true);
   }
 

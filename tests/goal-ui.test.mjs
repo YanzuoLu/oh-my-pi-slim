@@ -436,8 +436,23 @@ function runtimeHarness(mode = "tui") {
   runtime.register();
   runtime.restore(ctx, false);
   runtime.setUICtx(mode === "tui" ? ui : undefined);
+  function createGoal(params) {
+    const toolCallId = `goal-call-${++sequence}`;
+    const user = { type: "message", id: `e${++sequence}`, parentId: leaf, message: { role: "user", content: "/goal" } };
+    branch.push(user);
+    leaf = user.id;
+    const assistant = {
+      type: "message",
+      id: `e${++sequence}`,
+      parentId: leaf,
+      message: { role: "assistant", content: [{ type: "toolCall", id: toolCallId, name: "goal", arguments: params }], stopReason: "toolUse" },
+    };
+    branch.push(assistant);
+    leaf = assistant.id;
+    return tools.get("goal").execute(toolCallId, params, undefined, undefined, ctx);
+  }
   return {
-    runtime, ctx, tools, renderers, widgetCalls, intervals, cleared,
+    runtime, ctx, tools, renderers, widgetCalls, intervals, cleared, createGoal,
     get component() { return component; },
     get branchReads() { return branchReads; },
     get renderRequests() { return renderRequests; },
@@ -448,7 +463,7 @@ function runtimeHarness(mode = "tui") {
 test("GoalRuntime registers package-isomorphic renderers, caches branch stats across timer ticks, refreshes lifecycle stats, rebinds, disposes, and never creates an RPC or print widget", async () => {
   for (const mode of ["rpc", "print"]) {
     const headless = runtimeHarness(mode);
-    await headless.tools.get("goal").execute("call", {
+    await headless.createGoal({
       action: "create", abstract: `${mode} goal`, objective: "Stay headless", criteria: ["No widget"],
     });
     assert.equal(headless.widgetCalls.length, 0, `${mode === "rpc" ? "RPC" : "print"} no widget`);
@@ -461,7 +476,7 @@ test("GoalRuntime registers package-isomorphic renderers, caches branch stats ac
   assert.equal(tool.renderResult, renderGoalResult);
   assert.equal(harness.renderers.get(GOAL_CONTINUATION_MESSAGE_TYPE), renderGoalContinuation);
   assert.equal(harness.renderers.get(GOAL_STATE_MESSAGE_TYPE), renderGoalState);
-  await tool.execute("call", {
+  await harness.createGoal({
     action: "create", abstract: "Cached Goal", objective: "Avoid timer scans", criteria: ["Cache stats"],
   });
   assert.equal(harness.widgetCalls.length, 1);

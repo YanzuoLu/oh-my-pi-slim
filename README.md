@@ -12,10 +12,10 @@
 - Ask structured questions when a decision needs user input.
 - Pursue branch-local durable Goals with explicit completion evidence.
 - Toggle priority service for matching OpenAI requests with `/fast`.
-- Append focused orchestration instructions to the main session while keeping child sessions on Pi's native system prompt.
+- Append focused orchestration instructions to the main session and a short neutral supervisor contract to child sessions while preserving Pi's native system prompt.
 - Inherit the main session's current model and thinking level when each child launches.
 
-Child sessions do focused work, use Pi's native system prompt, and can pause to contact the main session.
+Child sessions do focused work, preserve Pi's native system prompt with a short neutral supervisor contract, and can pause to contact the main session.
 
 ## Requirements and package management
 
@@ -92,7 +92,7 @@ Runs work in isolated background child sessions and returns control immediately.
 
 `list` includes `starting`, `running`, `waiting`, `completed`, `failed`, and `interrupted` runs, but never includes terminal `output` or `error`. Use `check` with one retained run ID to inspect the same public fields and recover its terminal result when present. The subagent widget uses the same retained set and ordering for counts and lifecycle, but its foreground body permanently hides terminal rows. Those runs remain retained until `delete` or `clear` removes them and remain reachable in the Subagent viewer.
 
-Each starting, active, or waiting widget entry occupies one line. It shows `<abstract>[<id>]` followed by turn, tool, token, context, compaction, and elapsed statistics. Provider, model, thinking level, and live activity text are omitted. The 12-line widget budget counts one row per visible run.
+Each starting, active, or waiting widget entry occupies one line. It shows `<abstract> [<id>]` followed by turn, tool, token, context, compaction, and elapsed statistics. Provider, model, thinking level, and live activity text are omitted. The 12-line widget budget counts one row per visible run.
 
 `fork` defaults to `true`. A forked run inherits conversation context through the point before the current tool-call batch. Every `create` in the same batch forks from that same point. With `fork: false`, the run starts an independent session and receives only its `message`.
 
@@ -100,7 +100,7 @@ Each starting, active, or waiting widget entry occupies one line. It shows `<abs
 
 Every `create` or `resume` launch inherits the main session's current model and thinking level. When `resume` crosses a provider or model ID, the reused child session is compacted once before the resumed run is prompted. A change of thinking level alone reuses the session unchanged. The run stays `starting` for the whole preflight, an already compacted or too small session simply continues, and any other compaction failure fails the run instead of prompting it.
 
-The main session appends the bundled orchestrator instructions to Pi's system prompt. Child sessions use Pi's native system prompt.
+The main session appends the bundled orchestrator instructions to Pi's system prompt. Child sessions preserve Pi's native system prompt and append a short neutral contract that identifies inherited history and incoming task, steer, and reply messages as supervisor-provided context.
 
 `delete` is refused for a `starting`, `running`, or `waiting` run, and `clear` is refused while any such run remains. The main model must ask before calling `interrupt`, then retry only after the run becomes terminal. A successful single delete or full clear persists across reload and restoration. Neither operation changes Goal statistics.
 
@@ -169,7 +169,7 @@ Manages one branch-local durable Goal with explicit criteria and evidence.
 
 | Action | Effect |
 | --- | --- |
-| `create` | Create and activate a Goal |
+| `create` | Create and activate a Goal only from a current user turn containing `/goal` |
 | `check` | Read the current Goal |
 | `modify` | Replace the nonterminal Goal contract and activate it |
 | `pause` | Pause with a reason |
@@ -177,7 +177,7 @@ Manages one branch-local durable Goal with explicit criteria and evidence.
 | `complete` | Complete with evidence aligned to the criteria |
 | `clear` | Remove the current Goal from the branch |
 
-A Goal is durable on its branch. Reload, session resume, fork, and tree restoration restore unfinished work as paused; it never silently resumes. Provider failures retry automatically, and repeated no-progress runs pause the Goal. A user abort pauses only when Goal continuation is immediately safe to deliver. If any continuation gate is blocked, the Goal remains active for later scheduler reevaluation. Completion requires exactly one non-empty evidence item for each criterion.
+A Goal is durable on its branch. `create` succeeds only when the exact current user turn containing that tool call includes the literal `/goal`. An earlier `/goal` does not authorize a later create. Reload, session resume, fork, and tree restoration restore unfinished work as paused; it never silently resumes. Provider failures retry automatically, and repeated no-progress runs pause the Goal. A user abort pauses only when Goal continuation is immediately safe to deliver. If any continuation gate is blocked, the Goal remains active for later scheduler reevaluation. Completion requires exactly one non-empty evidence item for each criterion.
 
 Autonomous continuation waits until blocking work is gone, including active or waiting subagents, Monitor work and pending terminal delivery, and a waiting Ask dialog. Use `check`, `pause`, `resume`, or `clear` to stay in control.
 

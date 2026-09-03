@@ -965,16 +965,33 @@ test("contact_supervisor returns minimal waiting content while retaining request
   process.env.OMPS_PARENT_RUN_ID = "child-run";
   try {
     let definition;
+    let beforeAgentStart;
     let sessionStart;
     let activeTools;
     const allTools = ["read", "bash", "grep", "find", "ls", "project_extension_tool", "contact_supervisor"];
     const module = await import(`${new URL("../extensions/oh-my-pi-slim/subagent/child-supervisor.ts", import.meta.url).href}?metadata=1`);
     module.default({
       registerTool(tool) { definition = tool; },
-      on(event, handler) { if (event === "session_start") sessionStart = handler; },
+      on(event, handler) {
+        if (event === "before_agent_start") beforeAgentStart = handler;
+        if (event === "session_start") sessionStart = handler;
+      },
       getAllTools() { return allTools.map((name) => ({ name })); },
       setActiveTools(names) { activeTools = names; },
     });
+    assert.equal(typeof beforeAgentStart, "function");
+    const nativeSystemPrompt = "Pi native system prompt";
+    assert.deepEqual(beforeAgentStart({ systemPrompt: nativeSystemPrompt }), {
+      systemPrompt: `${nativeSystemPrompt}\n\n${module.CHILD_SYSTEM_PROMPT}`,
+    });
+    assert.match(module.CHILD_SYSTEM_PROMPT, /child agent working for a supervisor/);
+    assert.match(module.CHILD_SYSTEM_PROMPT, /history is supervisor-provided background, not direct user dialogue/);
+    assert.match(module.CHILD_SYSTEM_PROMPT, /latest supervisor instruction is your current objective/);
+    assert.match(module.CHILD_SYSTEM_PROMPT, /independently within its delegated scope/);
+    assert.match(module.CHILD_SYSTEM_PROMPT, /Do not ask the user directly or supervise other runs/);
+    assert.match(module.CHILD_SYSTEM_PROMPT, /explicitly requested progress update/);
+    assert.match(module.CHILD_SYSTEM_PROMPT, /after exhausting reasonable paths when genuinely blocked/);
+    assert.match(module.CHILD_SYSTEM_PROMPT, /concise, verifiable results with relevant paths and validation performed or skipped/);
     assert.equal(typeof sessionStart, "function");
     sessionStart();
     assert.deepEqual(activeTools, allTools);

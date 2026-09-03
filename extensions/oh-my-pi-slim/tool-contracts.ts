@@ -198,7 +198,7 @@ export const GOAL_TOOL_DESCRIPTIONS = {
     "",
     "## Actions",
     "",
-    "- `create` starts a Goal with one to eight completion criteria and returns its status.",
+    "- `create` starts a Goal with one to eight completion criteria and returns its status. It succeeds only when the current user turn containing this call includes the literal `/goal`. A `/goal` in an earlier turn does not authorize creation.",
     "- `check` returns the current status, objective, and criteria without changing the Goal. It returns status `none` when no Goal exists.",
     "- `modify` replaces the active or paused objective and criteria, resumes work, and returns the resulting status.",
     "- `pause` stops autonomous continuation and returns the resulting status. Use it when safe progress is blocked.",
@@ -209,7 +209,7 @@ export const GOAL_TOOL_DESCRIPTIONS = {
     "Do not ask the user questions while a Goal is active. Provider failures retry automatically. Repeated turns without progress pause the Goal.",
   ),
   input: {
-    action: "Action to perform. `create` and `modify` require `abstract`, `objective`, and `criteria`. `complete` requires `evidence`.",
+    action: "Action to perform. `create` requires the current user turn to include the literal `/goal`, plus `abstract`, `objective`, and `criteria`. `modify` requires `abstract`, `objective`, and `criteria`. `complete` requires `evidence`.",
     abstract: "Short human-readable Goal label. Required for `create` and `modify`.",
     objective: "Outcome the Goal must achieve. Required for `create` and `modify`.",
     criteria: {
@@ -244,6 +244,7 @@ export const GOAL_TOOL_DESCRIPTIONS = {
     required: COMMON_TOOL_ERRORS.required,
     unsupportedAction: (action: string) => COMMON_TOOL_ERRORS.unsupportedAction("goal", action),
     missing: "No Goal exists on the current branch.",
+    createTurn: "create requires its current user turn to contain `/goal`. A `/goal` in an earlier turn does not authorize creation.",
     createStatus: (status: string) => `create requires no Goal or a completed Goal; the current Goal is ${status}.`,
     terminalAction: (action: string, status: string) => `${action} is invalid for terminal Goal status ${status}.`,
     completeStatus: (status: string) => `complete requires an active Goal; the current Goal is ${status}.`,
