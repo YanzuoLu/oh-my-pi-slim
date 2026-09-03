@@ -442,13 +442,13 @@ export function renderSubagentNotification(
   const event = asString(details?.event) ?? asString(details?.status) ?? asString(run.status) ?? "update";
   const box = new Box(options.outputPad ?? 1, 1, (text) => theme.bg("customMessageBg", text));
   if (options.expanded !== true) {
-    const parts = compactRunHeaderParts(run, theme, event);
+    const parts = compactRunHeaderParts(run, theme, event, true);
     box.addChild(new ExpandableNotificationLine(parts.head, parts.tail, theme));
     return box;
   }
 
   const container = new Container();
-  container.addChild(compactRunHeader(run, theme, event));
+  container.addChild(compactRunHeader(run, theme, event, true));
   if (options.expanded === true) {
     if (TERMINAL_STATUSES.has(event)) {
       addFinalOutput(container, theme, run);

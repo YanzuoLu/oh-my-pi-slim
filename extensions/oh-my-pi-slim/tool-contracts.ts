@@ -786,11 +786,12 @@ export const SUBAGENT_TOOL_DESCRIPTIONS = {
     runRemoval: (id: string, reason: string) => `Retained run directory for ${id}: ${reason}`,
   },
   notifications: {
-    lifecycle: (id: string, event: string, request: unknown, output?: string, error?: string) => {
+    lifecycle: (id: string, event: string, abstract: string | undefined, request: unknown, output?: string, error?: string) => {
+      const abstractText = abstract === undefined || abstract === "" ? "" : `\n\nTask: ${abstract}`;
       const requestText = request === undefined ? "" : `\n\nRequest:\n${JSON.stringify(request, null, 2)}`;
       const outputText = output === undefined ? "" : `\n\nOutput: ${output}`;
       const errorText = error === undefined ? "" : `\n\nError: ${error}`;
-      return `Subagent ${id} is ${event}.${requestText}${outputText}${errorText}`;
+      return `Subagent ${id} is ${event}.${abstractText}${requestText}${outputText}${errorText}`;
     },
   },
 } as const;
