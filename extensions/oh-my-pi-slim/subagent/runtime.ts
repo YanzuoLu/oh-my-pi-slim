@@ -868,7 +868,7 @@ export class OmpsSubagentRuntime {
     this.sendMessage(
       {
         customType: SUBAGENT_NOTIFICATION_TYPE,
-        content: subagentNotificationContent(run.id, delivery.event, run.request, run.output, run.error),
+        content: subagentNotificationContent(run.id, delivery.event, run.abstract, run.request, run.output, run.error),
         display: true,
         details: {
           run: this.formatRun(run),

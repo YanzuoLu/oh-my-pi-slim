@@ -1488,7 +1488,7 @@ test("waiting notification and subagent reply use run ID and waiting sequence", 
     assert.equal(waitingNotification.details.request.message, "choose");
     assert.equal(
       waitingNotification.content,
-      `Subagent ${id} is waiting.\n\nRequest:\n${JSON.stringify(waitingNotification.details.request, null, 2)}`,
+      `Subagent ${id} is waiting.\n\nTask: detached summary\n\nRequest:\n${JSON.stringify(waitingNotification.details.request, null, 2)}`,
       "waiting notification ownership and model-facing body remain unchanged",
     );
     assert.match(waitingNotification.content, new RegExp(`"runId": "${id}"`));
@@ -2445,7 +2445,7 @@ test("terminal notification stays pending until matching delivered message ackno
     assert.equal(sent.message.details.run.error, "complete error\nsecond error line");
     assert.equal(
       sent.message.content,
-      `Subagent ${id} is completed.\n\nOutput: complete output\nsecond output line\n\nError: complete error\nsecond error line`,
+      `Subagent ${id} is completed.\n\nTask: detached summary\n\nOutput: complete output\nsecond output line\n\nError: complete error\nsecond error line`,
     );
     assert.doesNotMatch(sent.message.content, /deliveryKey|TASK_DETAILS_SENTINEL|openai\/gpt-main/,
       "custom-message details remain outside model-facing content");

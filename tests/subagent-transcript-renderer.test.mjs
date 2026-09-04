@@ -672,7 +672,7 @@ test("Ctrl+O collapses waiting notification details without changing model conte
   };
   const before = structuredClone(message);
   const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
-  assert.equal(collapsed, " !  Subagent [run-1] · waiting (ctrl+o to expand)");
+  assert.equal(collapsed, " !  Subagent [run-1] · waiting · Concise run abstract (ctrl+o to expand)");
   assert.doesNotMatch(collapsed, /Request|need_decision|request payload|Choose|A or B|Created|Model-facing/);
 
   const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
@@ -699,7 +699,7 @@ test("Ctrl+O expands completed, failed, and interrupted notification output or e
     };
     const before = structuredClone(message);
     const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
-    assert.equal(collapsed, ` ${value.glyph}  Subagent [run-1] · ${value.status} (ctrl+o to expand)`);
+    assert.equal(collapsed, ` ${value.glyph}  Subagent [run-1] · ${value.status} · Concise run abstract (ctrl+o to expand)`);
     assert.doesNotMatch(collapsed, /COMPLETED_OUTPUT|FAILED_ERROR|INTERRUPTED_OUTPUT|INTERRUPTED_ERROR|Model-facing/);
 
     const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
@@ -718,10 +718,10 @@ test("Ctrl+O collapses active activity and expands complete live details", () =>
   };
   const before = structuredClone(message);
   const collapsed = render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme));
-  assert.equal(collapsed, " ●  Subagent [run-1] · running (ctrl+o to expand)");
+  assert.equal(collapsed, " ●  Subagent [run-1] · running · Concise run abstract (ctrl+o to expand)");
   const narrow = renderLines(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme), 52);
   assert.ok(narrow.every((line) => visibleWidth(line) <= 52));
-  assert.match(render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme), 52).trim(), /· running \(ctrl\+o to expand\)$/);
+  assert.match(render(renderSubagentNotification(message, { expanded: false, outputPad: 1 }, theme), 52).trim(), /· running … \(ctrl\+o to expand\)$/);
   assert.doesNotMatch(collapsed, /Live response|activity payload|toolA|Model-facing/);
 
   const expanded = render(renderSubagentNotification(message, { expanded: true, outputPad: 1 }, theme));
