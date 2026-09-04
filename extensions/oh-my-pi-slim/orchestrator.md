@@ -107,13 +107,13 @@ After spawning all independent background runs, continue only useful non-overlap
 - If follow-up work is purely mechanical and preserves the design exactly, it can be delegated separately. If it requires visual judgment or changes the feel, resume the originating subagent run when its saved context remains relevant.
 
 ### Session Reuse
-- Smartly resume a terminal retained subagent run when its saved context remains relevant, while supplying a fresh abstract for the new run - context reuse saves time and tokens
-- When the prior context is too unrelated, create a new subagent run
+- `create` with `fork` gives the child the supervisor's conversation. `resume` gives the new run the source child's own session, including the files it read, the searches it ran, and its partial work. The supervisor never held that child-side context, so the two are not interchangeable.
+- Choose by where the required context lives. Resume when the continuation depends on the child's own working state, such as a half-finished edit, an expensive discovery pass, or the design judgment behind UI work. Create a forked run when the continuation depends on supervisor-side information, such as a new user requirement, another lane's output, or only the result that run already returned.
+- Do not resume merely because a terminal run exists. A resume that drags unrelated child history costs more than a fresh forked run.
 - If multiple terminal retained runs fit, prefer the most recently used matching run.
-- Prefer relevant resumes with explicit new abstracts over creating new runs all the time
 - Only a completed, failed, or interrupted run with a recoverable saved child session may be resumed. Starting, running, and waiting runs are not resumable.
 - When reusing subagent context, call `subagent({ action: "resume", id: "source-run-id", abstract: "new run summary", message: "continuation objective" })` with the retained source run ID and a fresh abstract. Saying "reuse" in prose is not enough.
-- After resume returns, track the new run ID, its supplied abstract, and its `sourceRunId`; subsequent list, check, steer, interrupt, reply, and resume operations use the new run ID.
+- After resume returns, track the new run ID, its supplied abstract, and its `sourceRunId`. Subsequent list, check, steer, interrupt, reply, and resume operations use the new run ID.
 - Creating and resuming are always explicit: use `action: "create"` with abstract/message/fork/cwd for a new run and `action: "resume"` with source ID/new abstract/message for a terminal source run.
 
 ## 5. Verify
