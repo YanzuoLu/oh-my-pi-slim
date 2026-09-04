@@ -9,6 +9,7 @@ const {
   applyCacheRetentionForRequest,
   cacheRetentionEnvValue,
   cacheRetentionFromEnv,
+  isAnthropicSubscriptionToken,
   makeCacheState,
   parseCacheState,
   replayCacheState,
@@ -265,6 +266,36 @@ test("ordinary Claude Anthropic OAuth gate requires every exact model and accoun
   assert.equal(apply(oauthModel(), true, []).result, undefined);
   assert.doesNotThrow(() => applyCacheRetentionForRequest(payload, oauthModel(), "long", () => { throw new Error("OAuth registry failure"); }));
   assert.equal(applyCacheRetentionForRequest(payload, oauthModel(), "long", () => { throw new Error("OAuth registry failure"); }), undefined);
+});
+
+test("subscription detection reads the access-token marker Pi's Anthropic transport switches on", () => {
+  for (const token of [
+    "sk-ant-oat01-real-subscription-token",
+    "sk-ant-oat",
+    "Bearer sk-ant-oat01-wrapped",
+  ]) assert.equal(isAnthropicSubscriptionToken(token), true, `${token} is a subscription token`);
+
+  for (const token of [
+    "sk-ant-api03-plain-api-key",
+    "sk-ant-oa",
+    "SK-ANT-OAT01-UPPERCASE",
+    "",
+    undefined, null, 7, true, {}, ["sk-ant-oat01-nested"],
+  ]) assert.equal(isAnthropicSubscriptionToken(token), false, `${String(token)} is not a subscription token`);
+});
+
+test("request gate follows the resolved credential, so an extension-supplied subscription token still qualifies", () => {
+  const payload = realPiOAuthPayload();
+  const gate = (token) =>
+    applyCacheRetentionForRequest(payload, oauthModel(), "long", () => isAnthropicSubscriptionToken(token));
+
+  const supplied = gate("sk-ant-oat01-registered-by-an-extension");
+  assert.deepEqual(realPiMarkers(supplied).map((marker) => marker.ttl), ["1h", "1h", "1h", "1h"]);
+  assert.equal(countRealPiMarkers(payload), 4, "the source payload stays untouched");
+
+  for (const token of ["sk-ant-api03-plain-api-key", undefined]) {
+    assert.equal(gate(token), undefined, `${String(token)} must not reach the 1h transformation`);
+  }
 });
 
 test("request gate supports Short while preserving payloads for every ineligible provider path", () => {

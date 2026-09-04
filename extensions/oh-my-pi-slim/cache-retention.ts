@@ -167,8 +167,25 @@ export function applyCacheRetention(payload: unknown, retention: CacheRetention)
   }
 }
 
+/** Anthropic subscription access tokens carry this marker. */
+const ANTHROPIC_SUBSCRIPTION_TOKEN_MARKER = "sk-ant-oat";
+
 /**
- * Apply retention only to an exact ordinary Claude Anthropic OAuth request.
+ * Report whether a resolved Anthropic credential is a subscription access token.
+ *
+ * Pi's Anthropic transport selects the Claude Code OAuth client by this same token marker rather
+ * than by the stored credential type, so this matches what the request actually becomes.
+ */
+export function isAnthropicSubscriptionToken(token: unknown): boolean {
+  return typeof token === "string" && token.includes(ANTHROPIC_SUBSCRIPTION_TOKEN_MARKER);
+}
+
+/**
+ * Apply retention only to an exact ordinary Claude Anthropic subscription request.
+ *
+ * `isSubscription` reports whether the resolved credential is a subscription access token. A token
+ * supplied by a provider-registering extension therefore qualifies even when Pi stores no OAuth
+ * credential of its own, which matches how Pi's transport shapes the request.
  *
  * Pi currently keeps compaction and branch-summary calls outside the agent loop onPayload path and
  * upstream forces cacheRetention to "none" for those calls. This boundary depends on Pi's implementation.
@@ -177,14 +194,14 @@ export function applyCacheRetentionForRequest(
   payload: unknown,
   model: CacheRetentionModel | undefined,
   retention: CacheRetention,
-  isUsingOAuth: () => boolean,
+  isSubscription: () => boolean,
 ): Record<string, unknown> | undefined {
   try {
     if (!isPlainObject(payload) || !model || !isCacheRetention(retention)) return;
     if (model.provider !== "anthropic" || model.api !== "anthropic-messages") return;
     if (typeof model.id !== "string" || payload.model !== model.id) return;
     if (model.compat?.supportsLongCacheRetention === false) return;
-    if (isUsingOAuth() !== true) return;
+    if (isSubscription() !== true) return;
     return applyCacheRetention(payload, retention);
   } catch {
     return;

@@ -1215,7 +1215,12 @@ test("real Pi loads only Todo in an isolated RPC smoke without registering a wid
       "--extension", join(root, "tests/fixtures/todo-load-probe.ts"),
     ], {
       cwd: root,
-      env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+      // Running this suite inside a subagent would otherwise inherit the child markers that make
+      // the extension skip registration, so the probe always spawns Pi as a top-level session.
+      env: (({ PI_SUBAGENT_CHILD: _pi, OMPS_SUBAGENT_CHILD: _omps, ...env }) => env)({
+        ...process.env,
+        PI_CODING_AGENT_DIR: agentDir,
+      }),
       input: `${JSON.stringify({ id: "probe", type: "prompt", message: "/todo-load-probe" })}\n`,
       encoding: "utf8",
       timeout: 20_000,

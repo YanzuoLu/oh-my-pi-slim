@@ -9,6 +9,7 @@ import { AskTuiDriver } from "./ask/tui.js";
 import {
   applyCacheRetentionForRequest,
   CACHE_STATE_ENTRY_TYPE,
+  isAnthropicSubscriptionToken,
   makeCacheState,
   replayCacheState,
   type CacheRetention,
@@ -137,6 +138,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
   const subagents = registerSubagentRuntime(pi);
   let fastEnabled = false;
   let cacheRetention: CacheRetention = "short";
+  let anthropicSubscription = false;
   subagents.setFastModeResolver(() => fastEnabled);
   subagents.setCacheRetentionResolver(() => cacheRetention);
   pi.on("before_provider_request", (event, ctx) => {
@@ -146,7 +148,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
       fastPayload ?? event.payload,
       model,
       cacheRetention,
-      () => model !== undefined && ctx.modelRegistry.isUsingOAuth(model),
+      () => anthropicSubscription,
     );
     return cachePayload ?? fastPayload;
   });
@@ -209,13 +211,30 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     const mode = model?.provider === "openai" || model?.provider === "openai-codex"
       ? ` · OpenAI Fast Mode: ${fastEnabled ? "on" : "off"}`
       : model?.provider === "anthropic" && model.api === "anthropic-messages" &&
-          model.compat?.supportsLongCacheRetention !== false && ctx.modelRegistry.isUsingOAuth(model)
+          model.compat?.supportsLongCacheRetention !== false && anthropicSubscription
         ? ` · Anthropic Cache Mode: ${cacheRetention}`
         : "";
     ctx.ui.setStatus(
       "oh-my-pi-slim",
       ctx.ui.theme.fg("accent", `· OMPS Version: v${PACKAGE_VERSION}${mode}`),
     );
+  }
+
+  /**
+   * Pi resolves the Anthropic credential asynchronously while the status line renders synchronously,
+   * so the verdict is cached here and refreshed whenever the session or the selected model changes.
+   * Callers render first with the previous verdict, and only a change repaints the status line.
+   *
+   * Resolving a stored OAuth credential can refresh and persist it, so an unrelated selected model
+   * skips the read. Both the status line and the request gate check the provider themselves, which
+   * keeps a verdict left over from an earlier Anthropic model from reaching either one.
+   */
+  async function refreshAnthropicSubscription(ctx: ExtensionContext, model = ctx.model): Promise<void> {
+    if (model?.provider !== "anthropic" || model.api !== "anthropic-messages") return;
+    const next = isAnthropicSubscriptionToken(await ctx.modelRegistry.getApiKeyForProvider("anthropic"));
+    if (next === anthropicSubscription) return;
+    anthropicSubscription = next;
+    updateStatus(ctx, model);
   }
 
   function takeTreeNotificationHold(): TreeNotificationHold | undefined {
@@ -320,6 +339,7 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     } catch (error) {
       report(ctx, error instanceof Error ? error.message : String(error), "error");
     }
+    await refreshAnthropicSubscription(ctx);
   });
 
   pi.on("session_before_switch", async () => {
@@ -406,8 +426,9 @@ export default function ohMyPiSlim(pi: ExtensionAPI): void {
     if (event.source !== "extension") goal?.onExternalUserInput();
   });
 
-  pi.on("model_select", (event, ctx) => {
+  pi.on("model_select", async (event, ctx) => {
     updateStatus(ctx, event.model);
+    await refreshAnthropicSubscription(ctx, event.model);
   });
 
   pi.on("session_before_compact", (event, ctx) => {
